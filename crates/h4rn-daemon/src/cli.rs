@@ -116,7 +116,8 @@ pub enum Command {
         /// Restore the binary saved as h4rnd.previous by the last update.
         #[arg(long)]
         rollback: bool,
-        /// Update even while a turn is active or a running daemon cannot report its turns.
+        /// Update even while a turn is active or a running daemon cannot be
+        /// reached or report its turns. Also applies to --rollback.
         #[arg(long)]
         force: bool,
     },

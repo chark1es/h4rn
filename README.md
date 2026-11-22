@@ -98,9 +98,13 @@ h4rnd update               # signed update; restarts the service
 The service runs as your user, not root, because the agents it supervises need
 your credentials. On Linux, `service status` says when lingering is off and
 prints the `loginctl enable-linger` command to keep the daemon running after
-logout. Development builds have no updater key, so `h4rnd update` refuses to
-self-update and prints the manual steps; release builds verify the archive
-against `SHA256SUMS` and its minisign signature before replacing the binary.
+logout. On Windows the task is named per account (`h4rn-<user>`), `status`
+reports `enabled: unknown`, and `logs` prints guidance because the task has no
+console. Development builds have no updater key, so `h4rnd update` refuses to
+self-update and prints the manual steps; release builds require a minisign
+signature over `SHA256SUMS` before replacing the binary, hold a per-installation
+lock while they do it, and refuse while a turn is running (or while a daemon
+cannot be checked) unless you pass `--force`.
 
 ## Protocol bindings
 

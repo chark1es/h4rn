@@ -144,19 +144,45 @@ h4rnd update --rollback       # restore h4rnd.previous
 ```
 
 The update downloads the archive for the build's target triple (macOS uses the
-universal archive), checks its SHA-256 against `SHA256SUMS`, and verifies the
-minisign signature over `SHA256SUMS` (or over the archive) against the compiled
-key. It then writes the new binary beside the running one, fsyncs it, renames it
-into place, and keeps the old binary as `h4rnd.previous`. On Windows the running
-binary is renamed to `h4rnd.old` first; an interrupted rename is completed on
-the next start.
+universal archive) and `SHA256SUMS` with its `SHA256SUMS.sig`, verifies the
+signature over the checksum file against the compiled key, and then checks the
+archive's SHA-256. The signature is required: a release that only signs the
+archive does not bind the version or the target, so it is refused.
 
-If the service is installed the update restarts it; otherwise the command asks
-you to restart `h4rnd`. A running daemon that reports an active turn stops the
-update with an explanation unless `--force` is passed. A build with no
-`H4RN_UPDATER_PUBKEY` refuses to replace the binary and prints the manual
-download, verify and restart steps instead. A release needs the signed
-`SHA256SUMS` for its daemon to update itself.
+Replacement is serialized per installation by a lock file beside the binary. A
+second `h4rnd update` exits with an explanation instead of racing, and staging
+files are created exclusively under unique names.
+On Unix the new binary is written beside the old one, fsynced, and renamed over
+the install path in one step, with the old binary hard-linked to
+`h4rnd.previous` first; `--rollback` is also a single rename. A crash therefore
+leaves a runnable binary at the install path.
+
+On Windows a running executable cannot be replaced in place. The update keeps a
+copy at `h4rnd.previous.exe`, renames the running `h4rnd.exe` to
+`h4rnd.old.exe`, and moves the new binary in; if that is interrupted, the next
+start restores `h4rnd.old.exe` (or `h4rnd.previous.exe`) before doing anything
+else. Recovery derives the install path from the moved-aside name, so it works
+even though `h4rnd.exe` is missing. The scheduled task installed by
+`h4rnd service install` runs a small inline recovery step (passed to PowerShell
+with `-Command`, so there is no writable script file) that performs the same
+restore at logon, so a machine whose update was cut off still comes back up.
+Without a service, run the moved-aside binary (for example
+`h4rnd.old.exe --version`) and it repairs the install path.
+
+The update restarts the service only when the registered unit, plist or task
+runs the binary that was replaced. If it launches a different installation, the
+update says which path that is and leaves it alone; if the restart fails, the
+binary is still installed and the command warns with `h4rnd service restart` as
+the next step.
+
+A running daemon that reports an active turn stops the update with an
+explanation unless `--force` is passed. The guard fails closed and is checked
+again immediately before the binary is replaced: a daemon that is running but
+does not answer its health check, or one whose health response omits
+`active_turns`, also blocks the update unless `--force` is passed. `--rollback`
+uses the same guard. A build with no `H4RN_UPDATER_PUBKEY` refuses to replace
+the binary and prints the manual download, verify and restart steps instead. A
+release needs the signed `SHA256SUMS` for its daemon to update itself.
 
 ## 4. Repository secrets and variables
 

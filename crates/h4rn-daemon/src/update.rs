@@ -6,11 +6,27 @@
 //! the desktop updater uses. An unsigned build refuses to self-update: a
 //! downloaded binary without a verified signature is never installed.
 //!
-//! The archive is selected for this build's target triple, checked against
-//! `SHA256SUMS`, and the checksum file (or the archive) must carry a minisign
-//! signature. The new binary is written beside the current one, fsynced, and
-//! renamed into place; the old binary is kept as `h4rnd.previous` for
-//! `h4rnd update --rollback`.
+//! The archive is selected for this build's target triple and checked against
+//! `SHA256SUMS`; that checksum file must itself carry a minisign signature, so
+//! one signature binds the version, the target and the binary. An archive
+//! signature alone is not accepted.
+//!
+//! One invocation updates one installation at a time. The whole operation —
+//! download, verify, replace, rollback, restart — holds an advisory lock in a
+//! file beside the binary, and staging files are created exclusively with a
+//! unique name. A second invocation refuses to start instead of racing.
+//!
+//! On Unix the binary is replaced and rolled back with a single `rename` over
+//! the target, after hard-linking the old binary to `h4rnd.previous`, so an
+//! interrupted update always leaves a runnable binary at the install path. On
+//! Windows a running executable cannot be replaced in place: the old binary is
+//! moved to `h4rnd.old.exe` and the new one moved in. Startup recovery (in
+//! `main`, before argument parsing) takes the same lock and restores the old
+//! binary if the install path is missing, deriving the install path from the
+//! moved-aside name so it works even when `h4rnd.exe` does not exist. The
+//! scheduled task installed by `h4rnd service install` runs a small inline
+//! recovery step before the daemon, so a machine whose update was cut off still
+//! comes back up without a reinstall.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
@@ -36,6 +52,15 @@ const REPOSITORY_OVERRIDE: Option<&str> = option_env!("H4RN_REPOSITORY");
 const UPDATER_PUBKEY: Option<&str> = option_env!("H4RN_UPDATER_PUBKEY");
 const PLACEHOLDER_PUBKEY: &str = "__H4RN_UPDATER_PUBKEY__";
 const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+/// How long the health probe may take before the daemon counts as unreachable.
+const HEALTH_TIMEOUT: Duration = Duration::from_millis(1000);
+/// How long a TCP connect may take before deciding nothing is listening.
+const PORT_TIMEOUT: Duration = Duration::from_millis(400);
+/// Tags appended to the install path for the rollback backup and interrupted
+/// Windows/rollback steps.
+const PREVIOUS_TAG: &str = "previous";
+const OLD_TAG: &str = "old";
+const FAILED_TAG: &str = "failed";
 
 /// Options for one `h4rnd update` invocation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -372,35 +397,33 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// Checks the archive hash against `SHA256SUMS` and the signature over the
-/// checksum file (preferred) or the archive.
+/// Checks the archive hash against a signed `SHA256SUMS`.
+///
+/// The signature over the checksum file is required. A signature over the
+/// archive alone does not bind the release version or the target triple, so it
+/// is never enough to install an update.
 pub fn verify_download(
     asset_name: &str,
     archive: &[u8],
     sums: &str,
-    sums_signature: Option<&str>,
-    archive_signature: Option<&str>,
+    sums_signature: &str,
     public_key: &str,
 ) -> Result<()> {
+    if sums_signature.trim().is_empty() {
+        bail!(
+            "release has no SHA256SUMS.sig; refusing to install a release whose checksums \
+             are not signed"
+        );
+    }
+    verify_signature(sums.as_bytes(), sums_signature, public_key)
+        .with_context(|| format!("verify SHA256SUMS for {asset_name}"))?;
     let expected = checksum_for(sums, asset_name)
         .with_context(|| format!("SHA256SUMS has no entry for {asset_name}"))?;
     let actual = sha256_hex(archive);
     if actual != expected {
         bail!("{asset_name} does not match SHA256SUMS (expected {expected}, got {actual})");
     }
-    match sums_signature.filter(|value| !value.trim().is_empty()) {
-        Some(signature) => {
-            verify_signature(sums.as_bytes(), signature, public_key).context("verify SHA256SUMS")
-        }
-        None => match archive_signature.filter(|value| !value.trim().is_empty()) {
-            Some(signature) => verify_signature(archive, signature, public_key)
-                .with_context(|| format!("verify {asset_name}")),
-            None => bail!(
-                "release has no minisign signature for SHA256SUMS or {asset_name}; \
-                 refusing to install an unsigned archive"
-            ),
-        },
-    }
+    Ok(())
 }
 
 /// Extracts the `h4rnd` binary from a release archive.
@@ -485,21 +508,214 @@ fn extract_zip(archive: &[u8], binary_name: &str) -> Result<Vec<u8>> {
     bail!("the daemon archive does not contain {binary_name}")
 }
 
-/// The sidecar path that keeps the previous binary.
-pub fn previous_binary_path(current: &Path) -> PathBuf {
-    current.with_extension("previous")
+/// Appends a sidecar tag to the install path, keeping a `.exe` extension on
+/// Windows: `h4rnd` → `h4rnd.previous`, `h4rnd.exe` → `h4rnd.previous.exe`.
+fn sidecar_path(current: &Path, tag: &str) -> PathBuf {
+    let Some(name) = current.file_name().and_then(|name| name.to_str()) else {
+        return current.with_extension(tag);
+    };
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    let file = match extension {
+        Some(extension) => format!("{stem}.{tag}.{extension}"),
+        None => format!("{stem}.{tag}"),
+    };
+    current.with_file_name(file)
 }
 
-fn temporary_binary_path(current: &Path) -> PathBuf {
-    current.with_extension("next")
+/// Removes one sidecar tag, returning the install file name it belongs to.
+fn strip_sidecar_tag(name: &str, tag: &str) -> Option<String> {
+    let marker = format!(".{tag}");
+    if let Some(stem) = name.strip_suffix(&marker) {
+        return Some(stem.to_owned());
+    }
+    let (stem, extension) = name.rsplit_once('.')?;
+    let stem = stem.strip_suffix(&marker)?;
+    Some(format!("{stem}.{extension}"))
+}
+
+/// The sidecar path that keeps the previous binary.
+pub fn previous_binary_path(current: &Path) -> PathBuf {
+    sidecar_path(current, PREVIOUS_TAG)
 }
 
 fn old_binary_path(current: &Path) -> PathBuf {
-    current.with_extension("old")
+    sidecar_path(current, OLD_TAG)
 }
 
 fn failed_binary_path(current: &Path) -> PathBuf {
-    current.with_extension("failed")
+    sidecar_path(current, FAILED_TAG)
+}
+
+/// The lock file that serializes updates for one installation.
+pub fn update_lock_path(current: &Path) -> PathBuf {
+    let Some(name) = current.file_name().and_then(|name| name.to_str()) else {
+        return current.with_extension("update.lock");
+    };
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    let file = match extension {
+        Some(extension) => format!("{stem}.update.{extension}.lock"),
+        None => format!("{stem}.update.lock"),
+    };
+    current.with_file_name(file)
+}
+
+/// The exclusive per-installation update lock.
+///
+/// The lock is advisory and lives in a file beside the binary. Unix uses
+/// `flock`; Windows opens the lock file with an empty share mode, so a second
+/// process cannot open it at all. Either way the lock is released when the
+/// guard is dropped or the process dies, so a crash cannot leave a stale lock.
+#[derive(Debug)]
+pub struct UpdateLock {
+    // Holding the open file is what holds the lock.
+    _file: std::fs::File,
+}
+
+impl UpdateLock {
+    /// Takes the lock, or returns `None` when another run holds it.
+    pub fn try_acquire(current: &Path) -> Result<Option<Self>> {
+        let path = update_lock_path(current);
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(windows)]
+        {
+            // No sharing: the second open fails with a sharing violation.
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            #[cfg(windows)]
+            Err(error) if error.raw_os_error() == Some(32) => {
+                // ERROR_SHARING_VIOLATION: another run holds the lock.
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("create {}", path.display()));
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if status != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
+                return Err(error).with_context(|| format!("lock {}", path.display()));
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(Some(Self { _file: file }))
+    }
+
+    /// Takes the lock or explains which installation is already being updated.
+    pub fn acquire(current: &Path) -> Result<Self> {
+        match Self::try_acquire(current)? {
+            Some(lock) => Ok(lock),
+            None => bail!(
+                "another `h4rnd update` is already running for {}; wait for it to finish \
+                 (lock: {})",
+                current.display(),
+                update_lock_path(current).display()
+            ),
+        }
+    }
+}
+
+/// A staged file name prefix used to recognise this installation's leftovers.
+fn staging_prefix(current: &Path) -> String {
+    let name = current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("h4rnd");
+    format!("{name}.update-")
+}
+
+fn staging_name(current: &Path, attempt: u32) -> String {
+    format!(
+        "{}{}-{attempt}-{:08x}",
+        staging_prefix(current),
+        std::process::id(),
+        rand::random::<u32>()
+    )
+}
+
+/// Writes `bytes` to a new, uniquely named staging file beside the binary.
+///
+/// `create_new` means a name collision (including another run's staging file)
+/// can never truncate it; a fresh name is chosen instead.
+fn stage_binary(current: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let parent = current
+        .parent()
+        .context("the current executable has no parent directory")?;
+    let mut last_error = None;
+    for attempt in 0..16u32 {
+        let path = parent.join(staging_name(current, attempt));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create staging file {}", path.display()));
+            }
+        };
+        let written = file
+            .write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("write staging file {}", path.display()));
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(current)
+                .map(|metadata| metadata.permissions().mode())
+                .unwrap_or(0o755);
+            if let Err(error) =
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o111))
+            {
+                let _ = std::fs::remove_file(&path);
+                return Err(error).with_context(|| format!("make {} executable", path.display()));
+            }
+        }
+        drop(file);
+        return Ok(path);
+    }
+    Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "could not create a staging file next to {}",
+            current.display()
+        )
+    }))
+}
+
+fn copy_file(from: &Path, to: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(to);
+    std::fs::copy(from, to)
+        .with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
+    if let Ok(file) = std::fs::File::open(to) {
+        let _ = file.sync_all();
+    }
+    Ok(())
 }
 
 /// Replaces `current` with `bytes`, keeping the old binary as `h4rnd.previous`.
@@ -507,75 +723,61 @@ pub fn replace_binary(current: &Path, bytes: &[u8]) -> Result<()> {
     let parent = current
         .parent()
         .context("the current executable has no parent directory")?;
-    let temporary = temporary_binary_path(current);
-    let previous = previous_binary_path(current);
-    write_staged_binary(&temporary, bytes, current)?;
-
-    if cfg!(windows) {
-        replace_binary_windows(current, &temporary, &previous)?;
+    let staged = stage_binary(current, bytes)?;
+    let result = if cfg!(windows) {
+        replace_binary_windows(current, &staged)
     } else {
-        // A hard link keeps the old binary alive under `.previous` while the
-        // staged file replaces the executable's path atomically.
-        let _ = std::fs::remove_file(&previous);
-        if std::fs::hard_link(current, &previous).is_err() {
-            std::fs::copy(current, &previous)
-                .with_context(|| format!("copy {}", previous.display()))?;
-        }
-        if let Err(error) = std::fs::rename(&temporary, current) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error).with_context(|| format!("replace {}", current.display()));
-        }
+        replace_binary_unix(current, &staged)
+    };
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
     }
+    result?;
     fsync_dir(parent);
     Ok(())
 }
 
+#[cfg(not(windows))]
+fn replace_binary_unix(current: &Path, staged: &Path) -> Result<()> {
+    let previous = previous_binary_path(current);
+    // A hard link keeps the old binary alive under `.previous` while the
+    // staged file replaces the executable's path with one rename. If linking
+    // is not supported on this filesystem, a copy has the same guarantee.
+    let _ = std::fs::remove_file(&previous);
+    if std::fs::hard_link(current, &previous).is_err() {
+        copy_file(current, &previous)?;
+    }
+    std::fs::rename(staged, current)
+        .with_context(|| format!("replace {} with the staged binary", current.display()))
+}
+
 #[cfg(windows)]
-fn replace_binary_windows(current: &Path, temporary: &Path, previous: &Path) -> Result<()> {
+fn replace_binary_windows(current: &Path, staged: &Path) -> Result<()> {
     let old = old_binary_path(current);
-    let _ = std::fs::remove_file(previous);
+    let previous = previous_binary_path(current);
+    // Back up the running binary before touching it. Copying a running image is
+    // allowed on Windows; if the backup fails, the installation is untouched.
+    copy_file(current, &previous)?;
     let _ = std::fs::remove_file(&old);
     std::fs::rename(current, &old)
         .with_context(|| format!("move the running binary to {}", old.display()))?;
-    if let Err(error) = std::fs::rename(temporary, current) {
+    if let Err(error) = std::fs::rename(staged, current) {
+        // Put the old binary back; the install path must never stay empty.
         let _ = std::fs::rename(&old, current);
-        let _ = std::fs::remove_file(temporary);
         return Err(error).with_context(|| format!("replace {}", current.display()));
     }
-    if let Err(error) = std::fs::rename(&old, previous) {
-        // The new binary is in place; a leftover `.old` is cleaned next start.
-        tracing::warn!(%error, "could not keep the previous binary for rollback");
-    }
+    // `.previous` is already the backup, so the moved-aside copy is redundant.
+    // If removing it fails it is cleaned on the next start.
+    let _ = std::fs::remove_file(&old);
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn replace_binary_windows(_current: &Path, _temporary: &Path, _previous: &Path) -> Result<()> {
+fn replace_binary_windows(_current: &Path, _staged: &Path) -> Result<()> {
     unreachable!("the Windows replace path is only compiled on Windows")
 }
 
-fn write_staged_binary(temporary: &Path, bytes: &[u8], current: &Path) -> Result<()> {
-    let _ = std::fs::remove_file(temporary);
-    let mut file = std::fs::File::create(temporary)
-        .with_context(|| format!("create {}", temporary.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("write {}", temporary.display()))?;
-    file.sync_all()
-        .with_context(|| format!("flush {}", temporary.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(current)
-            .map(|metadata| metadata.permissions().mode())
-            .unwrap_or(0o755);
-        std::fs::set_permissions(temporary, std::fs::Permissions::from_mode(mode | 0o111))
-            .with_context(|| format!("make {} executable", temporary.display()))?;
-    }
-    drop(file);
-    Ok(())
-}
-
-/// Swaps `h4rnd.previous` back in, keeping the failed binary beside it.
+/// Swaps `h4rnd.previous` back in.
 pub fn rollback_binary(current: &Path) -> Result<()> {
     let previous = previous_binary_path(current);
     if !previous.exists() {
@@ -584,49 +786,176 @@ pub fn rollback_binary(current: &Path) -> Result<()> {
             previous.display()
         );
     }
-    let failed = failed_binary_path(current);
-    let _ = std::fs::remove_file(&failed);
-    std::fs::rename(current, &failed)
-        .with_context(|| format!("move the current binary to {}", failed.display()))?;
-    if let Err(error) = std::fs::rename(&previous, current) {
-        let _ = std::fs::rename(&failed, current);
-        return Err(error).with_context(|| format!("restore {}", current.display()));
+    let parent = current.parent();
+    if cfg!(windows) {
+        rollback_binary_windows(current, &previous)?;
+    } else {
+        // One rename over the target: an interruption cannot leave the install
+        // path empty.
+        std::fs::rename(&previous, current)
+            .with_context(|| format!("restore {}", current.display()))?;
     }
-    let _ = std::fs::remove_file(&failed);
-    if let Some(parent) = current.parent() {
+    if let Some(parent) = parent {
         fsync_dir(parent);
     }
     Ok(())
 }
 
-/// Removes staged files left by an interrupted update. On Windows, restores a
-/// `.old` binary if the current path disappeared between the two renames; the
-/// same recovery puts back `.failed` when a rollback was interrupted after it
-/// moved the current binary aside.
-pub fn cleanup_stale_update_files(current: &Path) {
-    let old = old_binary_path(current);
-    if old.exists() {
-        if current.exists() {
-            let _ = std::fs::remove_file(&old);
-        } else {
-            let _ = std::fs::rename(&old, current);
+#[cfg(not(windows))]
+fn rollback_binary_windows(_current: &Path, _previous: &Path) -> Result<()> {
+    unreachable!("the Windows rollback path is only compiled on Windows")
+}
+
+#[cfg(windows)]
+fn rollback_binary_windows(current: &Path, previous: &Path) -> Result<()> {
+    let failed = failed_binary_path(current);
+    let _ = std::fs::remove_file(&failed);
+    std::fs::rename(current, &failed)
+        .with_context(|| format!("move the current binary to {}", failed.display()))?;
+    if let Err(error) = std::fs::rename(previous, current) {
+        // A failed rollback must leave the binary that was running in place.
+        let _ = std::fs::rename(&failed, current);
+        return Err(error).with_context(|| format!("restore {}", current.display()));
+    }
+    let _ = std::fs::remove_file(&failed);
+    Ok(())
+}
+
+/// What startup recovery did to one installation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    /// Whether a moved-aside binary was put back at the install path.
+    pub restored: bool,
+    /// How many staging files left by dead runs were removed.
+    pub removed_staging: usize,
+    /// Whether another run held the lock, so recovery was skipped.
+    pub skipped_locked: bool,
+}
+
+/// The install path a running image belongs to.
+///
+/// A binary started from a moved-aside name (`h4rnd.old.exe`,
+/// `h4rnd.previous`, `h4rnd.failed.exe`) recovers the install path it belongs
+/// to, so recovery works even when the install path itself does not exist.
+fn install_path_for(executable: &Path) -> PathBuf {
+    let Some(name) = executable.file_name().and_then(|name| name.to_str()) else {
+        return executable.to_path_buf();
+    };
+    for tag in [OLD_TAG, FAILED_TAG, PREVIOUS_TAG] {
+        if let Some(target) = strip_sidecar_tag(name, tag)
+            && !target.is_empty()
+        {
+            return executable.with_file_name(target);
         }
     }
-    let failed = failed_binary_path(current);
-    if !current.exists() && failed.exists() {
-        let _ = std::fs::rename(&failed, current);
-    }
-    if current.exists() {
-        let _ = std::fs::remove_file(&failed);
-        let _ = std::fs::remove_file(temporary_binary_path(current));
+    executable.to_path_buf()
+}
+
+/// Startup recovery for this process's installation.
+///
+/// `main` calls this before parsing arguments: it finishes or undoes an
+/// interrupted replace/rollback, and removes this installation's orphaned
+/// staging files when no update is running.
+pub fn startup_recovery() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let executable = crate::service::strip_verbatim_prefix(executable);
+    let report = startup_recovery_for(&executable);
+    if report.restored {
+        eprintln!(
+            "Recovered {} from an interrupted update.",
+            install_path_for(&executable).display()
+        );
     }
 }
 
-/// Cleans staged files beside this executable.
-pub fn cleanup_stale_files() {
-    if let Ok(executable) = std::env::current_exe() {
-        cleanup_stale_update_files(&executable);
+/// Startup recovery for one executable's installation.
+///
+/// This is the body of [`startup_recovery`], exposed so a test can simulate a
+/// process started from a moved-aside image. It takes the installation lock,
+/// restores a missing binary from `h4rnd.old`/`h4rnd.failed`, and removes
+/// orphaned staging files. When another run holds the lock it touches nothing.
+pub fn startup_recovery_for(executable: &Path) -> RecoveryReport {
+    let current = install_path_for(executable);
+    let mut report = RecoveryReport::default();
+    let lock = match UpdateLock::try_acquire(&current) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            // An update is in progress. Its staging file and moved-aside
+            // binary belong to that run: never touch them.
+            report.skipped_locked = true;
+            return report;
+        }
+        Err(_) => return report,
+    };
+    recover(&current, &mut report);
+    drop(lock);
+    report
+}
+
+fn recover(current: &Path, report: &mut RecoveryReport) {
+    if !current.exists() {
+        let old = old_binary_path(current);
+        if old.exists() && std::fs::rename(&old, current).is_ok() {
+            report.restored = true;
+        } else {
+            let failed = failed_binary_path(current);
+            if failed.exists() && std::fs::rename(&failed, current).is_ok() {
+                report.restored = true;
+            }
+        }
     }
+    if !current.exists() {
+        // Nothing can be restored (for example, the staged binary and backup
+        // were both lost). Leave every file for a person to inspect.
+        return;
+    }
+    let _ = std::fs::remove_file(old_binary_path(current));
+    let _ = std::fs::remove_file(failed_binary_path(current));
+    report.removed_staging = remove_staging_files(current);
+}
+
+/// Whether a file name is one of this installation's staging files.
+fn is_staging_name(current: &Path, name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(&staging_prefix(current)) else {
+        return false;
+    };
+    // `<pid>-<attempt>-<8 hex digits>`, exactly.
+    let mut parts = rest.split('-');
+    let (Some(pid), Some(attempt), Some(nonce), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    pid.parse::<u32>().is_ok()
+        && attempt.parse::<u32>().is_ok()
+        && nonce.len() == 8
+        && nonce.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+/// Removes staging files this installation's dead runs left behind.
+///
+/// The caller holds the installation lock, so no other update can be writing
+/// them. A file that merely shares the prefix is left alone.
+fn remove_staging_files(current: &Path) -> usize {
+    let Some(parent) = current.parent() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_staging_name(current, name) && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn fsync_dir(path: &Path) {
@@ -657,10 +986,30 @@ struct Health {
     active_turns: Option<usize>,
 }
 
-async fn running_daemon(config: &Config) -> Option<Health> {
-    let url = format!("http://{}/healthz", health_addr(config.bind));
+/// What can be said about the daemon that owns an installation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DaemonState {
+    /// No service is active and nothing is listening: safe to replace.
+    Stopped,
+    /// The daemon answered `/healthz`.
+    Running {
+        /// Version it reported, when it reports one.
+        version: Option<String>,
+        /// Turns in flight; `None` when the health response omits the field.
+        active_turns: Option<usize>,
+    },
+    /// Something is there (an active service or an open port) but it did not
+    /// answer the health check. The guard fails closed.
+    Unreachable {
+        /// The health address that was probed.
+        addr: SocketAddr,
+    },
+}
+
+async fn health_at(addr: SocketAddr) -> Option<Health> {
+    let url = format!("http://{addr}/healthz");
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_millis(1500))
+        .timeout(HEALTH_TIMEOUT)
         .build()
         .ok()?;
     let response = http.get(url).send().await.ok()?;
@@ -670,18 +1019,121 @@ async fn running_daemon(config: &Config) -> Option<Health> {
     response.json().await.ok()
 }
 
+async fn port_open(addr: SocketAddr) -> bool {
+    matches!(
+        tokio::time::timeout(PORT_TIMEOUT, tokio::net::TcpStream::connect(addr)).await,
+        Ok(Ok(_))
+    )
+}
+
+/// Probes the daemon that would have to restart for this update.
+///
+/// `service_active` is the service manager's view; an active unit whose
+/// daemon cannot answer still blocks the update rather than being treated as
+/// stopped.
+pub async fn daemon_state(addr: SocketAddr, service_active: bool) -> DaemonState {
+    if addr.port() == 0 {
+        // An ephemeral port cannot be probed from another process.
+        return DaemonState::Unreachable { addr };
+    }
+    if let Some(health) = health_at(addr).await {
+        return DaemonState::Running {
+            version: health.version,
+            active_turns: health.active_turns,
+        };
+    }
+    if service_active || port_open(addr).await {
+        return DaemonState::Unreachable { addr };
+    }
+    DaemonState::Stopped
+}
+
+/// Why an update must not continue, or `None` when it is safe.
+///
+/// Reads "fails closed": an unanswerable daemon and a health response without
+/// `active_turns` both block the update.
+pub fn state_refusal(state: &DaemonState) -> Option<String> {
+    match state {
+        DaemonState::Stopped => None,
+        DaemonState::Running {
+            active_turns: Some(0),
+            ..
+        } => None,
+        DaemonState::Running {
+            version,
+            active_turns: Some(turns),
+        } => Some(format!(
+            "h4rnd {} is running with {turns} active turn(s)",
+            version.as_deref().unwrap_or("(unknown version)")
+        )),
+        DaemonState::Running {
+            version,
+            active_turns: None,
+        } => Some(format!(
+            "h4rnd {} is running but its health check does not report active turns",
+            version.as_deref().unwrap_or("(unknown version)")
+        )),
+        DaemonState::Unreachable { addr } if addr.port() == 0 => Some(format!(
+            "h4rnd is configured to listen on an ephemeral port ({addr}), so it cannot be \
+             probed for active turns"
+        )),
+        DaemonState::Unreachable { addr } => Some(format!(
+            "h4rnd appears to be running at {addr} but did not answer its health check"
+        )),
+    }
+}
+
+/// Refuses to replace the binary while a turn is running or the daemon cannot
+/// say whether one is.
+///
+/// Called before the download and again immediately before the binary is
+/// replaced, so a turn that started during the download still blocks the
+/// restart.
+pub async fn check_daemon_idle(addr: SocketAddr, service_active: bool, force: bool) -> Result<()> {
+    let state = daemon_state(addr, service_active).await;
+    if let Some(problem) = state_refusal(&state) {
+        if !force {
+            bail!("{problem}; finish the turn, stop the service, or pass --force to update anyway");
+        }
+        println!("warning: {problem}; continuing because --force was passed");
+        return Ok(());
+    }
+    if let DaemonState::Running { version, .. } = &state {
+        match version {
+            Some(version) => println!("h4rnd {version} is running and idle."),
+            None => println!("h4rnd is running and idle."),
+        }
+    }
+    Ok(())
+}
+
 /// Runs one `h4rnd update`.
 pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
     if options.rollback && (options.check || options.version.is_some()) {
         bail!("--rollback cannot be combined with --check or --version");
     }
+    let current = crate::service::current_binary_path()?;
+    let addr = health_addr(config.bind);
+
     if options.rollback {
-        let current = crate::service::current_binary_path()?;
+        // One update at a time, and the same fail-closed guard as an update:
+        // rolling back while a turn runs would interrupt it just as badly.
+        let _lock = UpdateLock::acquire(&current)?;
+        check_daemon_idle(addr, crate::service::is_active(), options.force).await?;
         rollback_binary(&current)?;
         println!("Restored the previous h4rnd binary.");
-        restart_or_explain(config)?;
+        restart_or_explain(&current);
         return Ok(());
     }
+
+    // One `h4rnd update` at a time for this installation. `--check` only reads
+    // release metadata, so it does not need the lock (or a writable install
+    // directory).
+    let _lock = if options.check {
+        None
+    } else {
+        Some(UpdateLock::acquire(&current)?)
+    };
 
     let repository = ReleaseRepository::configured()?;
     let client = ReleaseClient::new(repository.clone())?;
@@ -708,69 +1160,40 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
         print_manual_steps(&repository, &release);
         bail!("self-update is disabled in this build (no H4RN_UPDATER_PUBKEY)");
     };
+    // The checksums are only trusted through their signature, which binds the
+    // release version and target through the asset name inside the file.
+    let sums_url = release.assets.get("SHA256SUMS.sig").with_context(|| {
+        format!(
+            "release {} has no SHA256SUMS.sig; refusing to install a release whose \
+             checksums are not signed",
+            release.version
+        )
+    })?;
 
-    if !options.force
-        && let Some(health) = running_daemon(config).await
-    {
-        let version = health.version.as_deref().unwrap_or("unknown");
-        match update_refusal(version, health.active_turns) {
-            Some(reason) => bail!("{reason}"),
-            None => println!("h4rnd {version} is running and idle; it will be restarted."),
-        }
-    }
+    // Fail before downloading anything when a turn is in flight.
+    check_daemon_idle(addr, crate::service::is_active(), options.force).await?;
 
     let asset_name = archive_name(&release.version, TARGET_TRIPLE);
     let archive = client.download(release.asset(&asset_name)?).await?;
     let sums = client.download(release.asset("SHA256SUMS")?).await?;
-    let sums_signature = match release.assets.get("SHA256SUMS.sig") {
-        Some(url) => Some(
-            String::from_utf8(client.download(url).await?)
-                .context("SHA256SUMS.sig is not UTF-8")?,
-        ),
-        None => None,
-    };
-    let archive_signature = match release.assets.get(&format!("{asset_name}.sig")) {
-        Some(url) => Some(
-            String::from_utf8(client.download(url).await?)
-                .context("the archive signature is not UTF-8")?,
-        ),
-        None => None,
-    };
+    let sums_signature = String::from_utf8(client.download(sums_url).await?)
+        .context("SHA256SUMS.sig is not UTF-8")?;
     let sums = String::from_utf8(sums).context("SHA256SUMS is not UTF-8")?;
-    verify_download(
-        &asset_name,
-        &archive,
-        &sums,
-        sums_signature.as_deref(),
-        archive_signature.as_deref(),
-        public_key,
-    )?;
+    verify_download(&asset_name, &archive, &sums, &sums_signature, public_key)?;
     let binary = extract_binary(&archive, TARGET_TRIPLE)?;
 
-    let current = crate::service::current_binary_path()?;
+    // A turn that started while the download ran must not be cut off by the
+    // restart below.
+    check_daemon_idle(addr, crate::service::is_active(), options.force).await?;
+
     replace_binary(&current, &binary)?;
     println!(
         "Installed h4rnd {} at {}.",
         release.version,
         current.display()
     );
-    restart_or_explain(config)?;
+    restart_or_explain(&current);
     Ok(())
-}
-
-/// Why a running daemon blocks an update, or `None` when it is idle.
-fn update_refusal(version: &str, active_turns: Option<usize>) -> Option<String> {
-    match active_turns {
-        Some(0) => None,
-        Some(turns) => Some(format!(
-            "h4rnd {version} is running with {turns} active turn(s); \
-             stop the turn or pass --force to update anyway"
-        )),
-        None => Some(format!(
-            "h4rnd {version} is running and does not report active turns; \
-             stop the daemon or pass --force to update anyway"
-        )),
-    }
 }
 
 fn report_versions(release: &ReleaseInfo) {
@@ -785,20 +1208,35 @@ fn report_versions(release: &ReleaseInfo) {
     }
 }
 
-fn restart_or_explain(config: &Config) -> Result<()> {
-    match crate::service::is_installed() {
-        Ok(true) => {
-            crate::service::restart(config)?;
-            Ok(())
+/// Restarts the service only when it runs the binary that was just replaced.
+///
+/// A restart failure is a warning: the binary is already installed and the
+/// user can restart the service by hand.
+fn restart_or_explain(current: &Path) {
+    use crate::service::RestartOutcome;
+
+    match crate::service::restart_after_update(current) {
+        RestartOutcome::Restarted => {
+            println!("Restarted the h4rnd service.");
         }
-        Ok(false) => {
+        RestartOutcome::NotInstalled => {
             println!("Restart h4rnd to use the new binary.");
-            Ok(())
         }
-        Err(error) => {
-            eprintln!("warning: could not check for an installed service: {error}");
-            println!("Restart h4rnd to use the new binary.");
-            Ok(())
+        RestartOutcome::OtherInstall(installed) => {
+            println!(
+                "The h4rnd service runs {}, not the binary that was just replaced.",
+                installed.display()
+            );
+            println!("It was not restarted. Run `h4rnd service restart` there, or");
+            println!("`h4rnd service install` from this binary to switch the service.");
+        }
+        RestartOutcome::UnknownInstall => {
+            println!("The h4rnd service is installed, but the binary it runs could not be read.");
+            println!("It was not restarted. Run `h4rnd service restart` to pick up the new build.");
+        }
+        RestartOutcome::Failed(error) => {
+            eprintln!("warning: the binary was updated but the service did not restart: {error}");
+            eprintln!("Run `h4rnd service restart` to pick up the new binary.");
         }
     }
 }
@@ -809,7 +1247,7 @@ fn print_manual_steps(repository: &ReleaseRepository, release: &ReleaseInfo) {
     println!("This build has no updater public key, so it will not install an unsigned binary.");
     println!("Update by hand:");
     println!("  1. Download {asset} from {}", repository.releases_url());
-    println!("  2. Verify it against SHA256SUMS and its signature.");
+    println!("  2. Verify it against SHA256SUMS and SHA256SUMS.sig.");
     println!("  3. Replace this h4rnd with the binary inside the archive.");
     println!("  4. Restart h4rnd (or `h4rnd service restart`).");
     println!();
@@ -857,6 +1295,19 @@ mod tests {
         let sums = format!("{}  ./{name}\n", sha256_hex(archive));
         let signature = sign(sums.as_bytes(), key);
         (sums, signature)
+    }
+
+    fn install_dir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir
+            .path()
+            .join(if cfg!(windows) { "h4rnd.exe" } else { "h4rnd" });
+        std::fs::write(&current, b"old").unwrap();
+        (dir, current)
+    }
+
+    fn staged_path(current: &Path) -> PathBuf {
+        current.parent().unwrap().join(staging_name(current, 0))
     }
 
     #[test]
@@ -940,7 +1391,7 @@ mod tests {
         let archive = b"daemon archive";
         let name = "h4rnd-v1.0.0-x86_64-unknown-linux-gnu.tar.gz";
         let (sums, signature) = signed_sums(archive, name, &key);
-        verify_download(name, archive, &sums, Some(&signature), None, &public_key)
+        verify_download(name, archive, &sums, &signature, &public_key)
             .expect("a correctly signed release verifies");
     }
 
@@ -953,7 +1404,7 @@ mod tests {
         // Tauri stores base64 of the whole minisign text for both values.
         let signature = B64.encode(signature.as_bytes());
         let public_key = B64.encode(format!("untrusted comment: public key\n{public_key}\n"));
-        verify_download(name, archive, &sums, Some(&signature), None, &public_key)
+        verify_download(name, archive, &sums, &signature, &public_key)
             .expect("the desktop updater's encoding verifies");
     }
 
@@ -963,15 +1414,8 @@ mod tests {
         let archive = b"daemon archive";
         let name = "h4rnd-v1.0.0-x86_64-unknown-linux-gnu.tar.gz";
         let (sums, signature) = signed_sums(archive, name, &key);
-        let error = verify_download(
-            name,
-            b"tampered archive",
-            &sums,
-            Some(&signature),
-            None,
-            &public_key,
-        )
-        .unwrap_err();
+        let error =
+            verify_download(name, b"tampered archive", &sums, &signature, &public_key).unwrap_err();
         assert!(error.to_string().contains("does not match SHA256SUMS"));
     }
 
@@ -982,49 +1426,33 @@ mod tests {
         let name = "h4rnd-v1.0.0-x86_64-unknown-linux-gnu.tar.gz";
         let (sums, signature) = signed_sums(archive, name, &key);
         let tampered = sums.replace(&sha256_hex(archive), &"0".repeat(64));
-        assert!(
-            verify_download(
-                name,
-                archive,
-                &tampered,
-                Some(&signature),
-                None,
-                &public_key
-            )
-            .is_err()
-        );
-        assert!(
-            verify_download(name, archive, &sums, None, None, &public_key)
-                .unwrap_err()
-                .to_string()
-                .contains("no minisign signature")
-        );
+        assert!(verify_download(name, archive, &tampered, &signature, &public_key).is_err());
+        // No signature over the checksum file: refuse, even though the hash
+        // matches. An archive signature alone would not bind version/target.
+        for missing in ["", "   \n"] {
+            let error = verify_download(name, archive, &sums, missing, &public_key).unwrap_err();
+            assert!(
+                error.to_string().contains("no SHA256SUMS.sig"),
+                "unexpected error: {error}"
+            );
+        }
         // A line appended to SHA256SUMS keeps the archive hash valid but breaks
         // the signature over the file.
         let appended = format!("{sums}{}  other-asset\n", "c".repeat(64));
-        assert!(
-            verify_download(
-                name,
-                archive,
-                &appended,
-                Some(&signature),
-                None,
-                &public_key
-            )
-            .is_err()
-        );
-        assert!(verify_download(name, archive, &sums, Some(&signature), None, "").is_err());
+        assert!(verify_download(name, archive, &appended, &signature, &public_key).is_err());
+        assert!(verify_download(name, archive, &sums, &signature, "").is_err());
     }
 
     #[test]
-    fn an_archive_signature_is_accepted() {
+    fn a_signature_for_another_asset_does_not_verify_this_one() {
         let (key, public_key) = test_key();
         let archive = b"daemon archive";
         let name = "h4rnd-v1.0.0-x86_64-unknown-linux-gnu.tar.gz";
-        let (sums, _) = signed_sums(archive, name, &key);
-        let signature = sign(archive, &key);
-        verify_download(name, archive, &sums, None, Some(&signature), &public_key)
-            .expect("a signed archive verifies");
+        // The signature is valid, but over checksums for a different version.
+        let other = "h4rnd-v0.9.0-x86_64-unknown-linux-gnu.tar.gz";
+        let (sums, signature) = signed_sums(archive, other, &key);
+        let error = verify_download(name, archive, &sums, &signature, &public_key).unwrap_err();
+        assert!(error.to_string().contains("no entry"));
     }
 
     #[test]
@@ -1083,16 +1511,16 @@ mod tests {
 
     #[test]
     fn replacing_and_rolling_back_keep_one_previous_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let current = dir.path().join("h4rnd");
-        std::fs::write(&current, b"old").unwrap();
+        let (_dir, current) = install_dir();
         replace_binary(&current, b"new").unwrap();
         assert_eq!(std::fs::read(&current).unwrap(), b"new");
         assert_eq!(
             std::fs::read(previous_binary_path(&current)).unwrap(),
             b"old"
         );
-        assert!(!temporary_binary_path(&current).exists());
+        // The staged file was renamed into place, not left behind.
+        assert_eq!(remove_staging_files(&current), 0);
+        assert!(!staged_path(&current).exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1105,43 +1533,197 @@ mod tests {
         rollback_binary(&current).unwrap();
         assert_eq!(std::fs::read(&current).unwrap(), b"old");
         assert!(!previous_binary_path(&current).exists());
+        assert!(
+            !failed_binary_path(&current).exists(),
+            "rollback needs no intermediate moved-aside file on Unix"
+        );
         assert!(rollback_binary(&current).is_err());
     }
 
     #[test]
-    fn stale_files_are_cleaned_or_restored() {
-        let dir = tempfile::tempdir().unwrap();
-        let current = dir.path().join("h4rnd");
-        let old = old_binary_path(&current);
-        std::fs::write(&old, b"old").unwrap();
-        cleanup_stale_update_files(&current);
-        assert_eq!(std::fs::read(&current).unwrap(), b"old");
-        assert!(!old.exists());
-
-        std::fs::write(old_binary_path(&current), b"stale").unwrap();
-        std::fs::write(temporary_binary_path(&current), b"staged").unwrap();
-        cleanup_stale_update_files(&current);
-        assert_eq!(std::fs::read(&current).unwrap(), b"old");
-        assert!(!old_binary_path(&current).exists());
-        assert!(!temporary_binary_path(&current).exists());
-
-        // A rollback interrupted between the two renames leaves only
-        // `.failed`; the next start puts it back instead of deleting it.
-        std::fs::remove_file(&current).unwrap();
-        std::fs::write(failed_binary_path(&current), b"new").unwrap();
-        cleanup_stale_update_files(&current);
-        assert_eq!(std::fs::read(&current).unwrap(), b"new");
-        assert!(!failed_binary_path(&current).exists());
+    fn sidecar_names_keep_a_windows_extension() {
+        assert_eq!(
+            previous_binary_path(Path::new("/opt/h4rn/h4rnd")),
+            PathBuf::from("/opt/h4rn/h4rnd.previous")
+        );
+        assert_eq!(
+            previous_binary_path(Path::new(r"C:\h4rn\h4rnd.exe")),
+            PathBuf::from(r"C:\h4rn\h4rnd.previous.exe")
+        );
+        assert_eq!(
+            install_path_for(Path::new(r"C:\h4rn\h4rnd.old.exe")),
+            PathBuf::from(r"C:\h4rn\h4rnd.exe")
+        );
+        assert_eq!(
+            install_path_for(Path::new("/opt/h4rn/h4rnd.failed")),
+            PathBuf::from("/opt/h4rn/h4rnd")
+        );
+        // A normal binary name is not mistaken for a sidecar.
+        assert_eq!(
+            install_path_for(Path::new("/opt/h4rn/olden")),
+            PathBuf::from("/opt/h4rn/olden")
+        );
     }
 
     #[test]
-    fn an_active_turn_blocks_an_update_unless_forced() {
-        assert!(update_refusal("1.0.0", Some(0)).is_none());
-        let busy = update_refusal("1.0.0", Some(2)).unwrap();
-        assert!(busy.contains("2 active turn(s)"));
-        assert!(busy.contains("--force"));
-        let unknown = update_refusal("1.0.0", None).unwrap();
-        assert!(unknown.contains("does not report active turns"));
+    fn only_one_update_can_hold_the_installation_lock() {
+        let (_dir, current) = install_dir();
+        let held = UpdateLock::acquire(&current).unwrap();
+        let error = UpdateLock::acquire(&current).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("another `h4rnd update` is already running"),
+            "unexpected error: {error}"
+        );
+        assert!(UpdateLock::try_acquire(&current).unwrap().is_none());
+        drop(held);
+        assert!(UpdateLock::try_acquire(&current).unwrap().is_some());
+    }
+
+    #[test]
+    fn recovery_restores_a_binary_interrupted_between_renames() {
+        let (_dir, current) = install_dir();
+        let old = old_binary_path(&current);
+        let staging = staged_path(&current);
+        // A Windows replace moved the running binary aside and died before the
+        // new one landed; a staged file is left behind too.
+        std::fs::rename(&current, &old).unwrap();
+        std::fs::write(&staging, b"new").unwrap();
+
+        // The real startup entry point, run from the moved-aside image (which
+        // is all that exists at this point).
+        let report = startup_recovery_for(&old);
+        assert!(report.restored);
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert!(!old.exists());
+        assert!(!staging.exists(), "an orphaned staging file is removed");
+    }
+
+    #[test]
+    fn recovery_leaves_another_runs_staging_file_alone() {
+        let (_dir, current) = install_dir();
+        let staging = staged_path(&current);
+        std::fs::write(&staging, b"partial").unwrap();
+        // A neighbouring file that only shares the prefix is not a staging
+        // file and must survive too.
+        let lookalike = current.parent().unwrap().join(format!(
+            "{}.update-notes.txt",
+            current.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&lookalike, b"notes").unwrap();
+
+        // A live update holds the lock: its staging file is not ours to remove.
+        let held = UpdateLock::acquire(&current).unwrap();
+        let report = startup_recovery_for(&current);
+        assert!(report.skipped_locked);
+        assert!(staging.exists());
+        drop(held);
+
+        // With the lock free the leftovers belong to a dead run.
+        let report = startup_recovery_for(&current);
+        assert!(!report.skipped_locked);
+        assert_eq!(report.removed_staging, 1);
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert!(!staging.exists());
+        assert!(lookalike.exists());
+    }
+
+    #[test]
+    fn recovery_restores_a_rollback_interrupted_after_the_first_rename() {
+        let (_dir, current) = install_dir();
+        let failed = failed_binary_path(&current);
+        std::fs::rename(&current, &failed).unwrap();
+        let report = startup_recovery_for(&current);
+        assert!(report.restored);
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert!(!failed.exists());
+    }
+
+    #[test]
+    fn a_health_report_without_turns_fails_closed() {
+        let running = DaemonState::Running {
+            version: Some("1.0.0".into()),
+            active_turns: Some(2),
+        };
+        assert!(
+            state_refusal(&running)
+                .unwrap()
+                .contains("2 active turn(s)")
+        );
+        let unknown = DaemonState::Running {
+            version: Some("1.0.0".into()),
+            active_turns: None,
+        };
+        assert!(state_refusal(&unknown).unwrap().contains("does not report"));
+        assert!(
+            state_refusal(&DaemonState::Running {
+                version: Some("1.0.0".into()),
+                active_turns: Some(0),
+            })
+            .is_none()
+        );
+        assert!(state_refusal(&DaemonState::Stopped).is_none());
+        let unreachable = DaemonState::Unreachable {
+            addr: "127.0.0.1:47800".parse().unwrap(),
+        };
+        assert!(
+            state_refusal(&unreachable)
+                .unwrap()
+                .contains("did not answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_but_active_daemon_blocks_the_update() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept the connection but never answer the health request.
+        let accept = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            socket.readable().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        assert!(matches!(
+            daemon_state(addr, true).await,
+            DaemonState::Unreachable { .. }
+        ));
+        let error = check_daemon_idle(addr, true, false).await.unwrap_err();
+        assert!(error.to_string().contains("did not answer"), "{error}");
+        assert!(error.to_string().contains("--force"), "{error}");
+        check_daemon_idle(addr, true, true)
+            .await
+            .expect("--force continues");
+        accept.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stopped_or_idle_daemon_does_not_block_the_update() {
+        // Nothing is listening on a port that was just released.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        assert_eq!(daemon_state(addr, false).await, DaemonState::Stopped);
+        check_daemon_idle(addr, false, false).await.unwrap();
+
+        // An active service whose port is closed still fails closed.
+        assert!(matches!(
+            daemon_state(addr, true).await,
+            DaemonState::Unreachable { .. }
+        ));
+        assert!(check_daemon_idle(addr, true, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_ephemeral_port_cannot_be_probed_and_fails_closed() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert!(matches!(
+            daemon_state(addr, false).await,
+            DaemonState::Unreachable { .. }
+        ));
+        let error = check_daemon_idle(addr, false, false).await.unwrap_err();
+        assert!(error.to_string().contains("ephemeral port"), "{error}");
+        check_daemon_idle(addr, false, true).await.unwrap();
     }
 
     #[test]

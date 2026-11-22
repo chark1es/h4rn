@@ -441,6 +441,57 @@ async fn healthz_reports_no_active_turns_when_idle() {
 }
 
 #[tokio::test]
+async fn an_active_turn_blocks_the_update_guard() {
+    // An empty script leaves the first turn running, so `/healthz` reports it
+    // for as long as this test takes.
+    let daemon = boot_with(
+        ThreadManagerOptions {
+            settings: LifecycleSettings::default()
+                .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
+                .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+            tick_interval: Duration::from_millis(20),
+            clock: None,
+        },
+        FakeHarness::with_events(Vec::new()),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    create_with_host(
+        &mut client,
+        host,
+        "update me after this turn",
+        HarnessKind::ClaudeCode,
+    )
+    .await;
+
+    let health: serde_json::Value = reqwest::get(format!("http://{}/healthz", daemon.addr))
+        .await
+        .expect("fetch healthz")
+        .json()
+        .await
+        .expect("parse healthz");
+    assert!(
+        health["active_turns"].as_u64().expect("active_turns") >= 1,
+        "the turn must still be running: {health}"
+    );
+
+    let refused = h4rn_daemon::update::check_daemon_idle(daemon.addr, false, false)
+        .await
+        .expect_err("an active turn must block an update");
+    assert!(refused.to_string().contains("active turn"), "{refused}");
+    assert!(refused.to_string().contains("--force"), "{refused}");
+
+    // `--force` overrides the busy guard; it only prints a warning.
+    h4rn_daemon::update::check_daemon_idle(daemon.addr, false, true)
+        .await
+        .expect("--force overrides the busy guard");
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn rejects_missing_and_wrong_tokens() {
     let daemon = boot().await;
     let url = format!("ws://{}/ws", daemon.addr);

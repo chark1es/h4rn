@@ -14,15 +14,38 @@ All notable changes to h4rn are recorded here. The format follows
   on every platform, and `uninstall` stops and removes the service without touching
   the data directory. Installation is idempotent, refuses a binary under
   `target/debug` or a temp directory unless `--force`, and mentions
-  `loginctl enable-linger` on Linux when lingering is off.
+  `loginctl enable-linger` on Linux when lingering is off. Reinstalling an
+  unchanged launch agent that is already running leaves it alone. On Windows the
+  task is named per account (`h4rn-<user>`) and runs a small recovery step before
+  the daemon, so it still starts after an interrupted update.
 - **`h4rnd update` installs signed daemon releases.** It finds the latest GitHub
   release for the repository baked in at build time, downloads the archive for
   this target triple and `SHA256SUMS`, verifies the hash and a minisign signature
-  against the compiled `H4RN_UPDATER_PUBKEY`, and replaces the binary atomically.
-  The previous binary is kept for `h4rnd update --rollback`; a running service is
-  restarted, and an active turn stops the update unless `--force`. Builds without
-  a public key refuse to self-update and print manual steps instead. Release
-  builds with the signing key now publish `SHA256SUMS.sig`.
+  over `SHA256SUMS` against the compiled `H4RN_UPDATER_PUBKEY`, and replaces the
+  binary atomically. The previous binary is kept for `h4rnd update --rollback`; a
+  running service is restarted, and an active turn stops the update unless
+  `--force`. Builds without a public key refuse to self-update and print manual
+  steps instead. Release builds with the signing key now publish
+  `SHA256SUMS.sig`; an archive signature alone is not accepted.
+- **Updates are one-at-a-time and interruption-safe.** An advisory lock beside the
+  binary serializes updates, rollbacks and startup recovery, and staging files are
+  created exclusively with unique names. On Unix the replace and the rollback are
+  each a single `rename` over the install path; on Windows the moved-aside binary
+  is restored by the next start (or by the scheduled task's recovery step).
+- **`h4rnd update` checks the daemon again right before replacing the binary**,
+  so a turn that starts during the download still blocks the restart. The guard
+  fails closed: a daemon that is active or listening but does not answer
+  `/healthz` blocks the update, as does a health response without `active_turns`,
+  unless `--force` is passed. `--rollback` uses the same guard. The update only
+  restarts the service when that unit/plist/task runs the binary being replaced;
+  a failed restart is a warning, not a failed update.
+- **Windows service reporting has two limits.** `h4rnd service status` reports
+  `enabled: unknown` there, because Task Scheduler's states do not map cleanly to
+  "starts at logon", and `h4rnd service logs` prints guidance instead of following
+  a file because the task runs without a console and the daemon writes no log
+  file. Task names are per account, and a task installed by an older release
+  (which started `h4rnd.exe` directly) keeps working and is updated the next time
+  `h4rnd service install` runs.
 
 ### Fixed
 
