@@ -1636,6 +1636,166 @@ async fn azure_rejects_a_malformed_comment_id() {
 }
 
 #[tokio::test]
+async fn azure_rejects_a_thread_id_before_building_the_url() {
+    // The id is a caller-supplied string. Parsing it as a positive integer
+    // before formatting the path keeps `../` and similar text out of the URL,
+    // and an invalid id costs no request at all.
+    let server = MockServer::start().await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&server.uri());
+    for thread_id in [
+        "abc",
+        "101/../iterations",
+        "0",
+        "-1",
+        "99999999999999999999",
+    ] {
+        let error = client
+            .reply(&repo, 7, Some(thread_id), "1", "Fixed.")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ForgeError::InvalidRequest(_)),
+            "thread id {thread_id:?}: {error:?}"
+        );
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "an invalid id must not be turned into a request path"
+    );
+}
+
+#[tokio::test]
+async fn azure_redacts_the_configured_pat_in_an_error_body() {
+    // Azure can quote the credential it rejected. Both the verbatim PAT and the
+    // Base64 Basic credential must be gone before the error leaves the client.
+    let pat = "azp/7Kq+2f9Xr3Lm0";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/acme/platform/_apis/git/repositories/widget/pullrequests/7",
+        ))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "message": format!(
+                "The personal access token \"{pat}\" was rejected: Authorization: Basic {encoded}"
+            )
+        })))
+        .mount(&server)
+        .await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), pat, 120).unwrap();
+    let repo = azure_repo(&server.uri());
+    let message = client.get_pr(&repo, 7).await.unwrap_err().to_string();
+    assert!(!message.contains(pat), "{message}");
+    assert!(!message.contains(&encoded), "{message}");
+    assert!(message.contains("[redacted]"), "{message}");
+}
+
+/// Mounts the PR and its latest iteration, then answers the change entries
+/// with `body`.
+async fn azure_changes_server(body: Value) -> MockServer {
+    let server = MockServer::start().await;
+    let repo = "/acme/platform/_apis/git/repositories/widget";
+    let pr = format!("{repo}/pullrequests/7");
+    Mock::given(method("GET"))
+        .and(path(&pr))
+        .respond_with(ok(AZ_PR))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/iterations")))
+        .respond_with(ok(AZ_ITERATIONS))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/iterations/2/changes")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn azure_missing_change_entries_are_unknown_not_empty() {
+    let missing = azure_changes_server(json!({"nextSkip": 0})).await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", missing.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&missing.uri());
+    let pr = client.get_pr(&repo, 7).await.unwrap();
+    assert!(
+        !pr.changed_files_known,
+        "a 200 without changeEntries is not a zero-file PR"
+    );
+    assert_eq!(pr.changed_files, 0);
+    let error = client.get_diff(&repo, 7, 1, 10).await.unwrap_err();
+    assert!(matches!(error, ForgeError::Parse(_)), "{error:?}");
+
+    let empty = azure_changes_server(json!({"changeEntries": [], "nextSkip": 0})).await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", empty.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&empty.uri());
+    let pr = client.get_pr(&repo, 7).await.unwrap();
+    assert_eq!(pr.changed_files, 0);
+    assert!(pr.changed_files_known, "a real empty list is known");
+    let diff = client.get_diff(&repo, 7, 1, 10).await.unwrap();
+    assert!(diff.files.is_empty());
+    assert!(!diff.has_more);
+}
+
+#[tokio::test]
+async fn azure_missing_threads_are_an_error_not_no_comments() {
+    let missing = MockServer::start().await;
+    let pr = "/acme/platform/_apis/git/repositories/widget/pullrequests/7";
+    Mock::given(method("GET"))
+        .and(path(pr))
+        .respond_with(ok(AZ_PR))
+        .mount(&missing)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/threads")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"count": 0})))
+        .mount(&missing)
+        .await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", missing.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&missing.uri());
+    let error = client.list_comments(&repo, 7).await.unwrap_err();
+    assert!(matches!(error, ForgeError::Parse(_)), "{error:?}");
+
+    let empty = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(pr))
+        .respond_with(ok(AZ_PR))
+        .mount(&empty)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/threads")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"count": 0, "value": []})))
+        .mount(&empty)
+        .await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", empty.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&empty.uri());
+    let page = client.list_comments(&repo, 7).await.unwrap();
+    assert!(page.comments.is_empty());
+    assert!(page.threads.is_empty());
+}
+
+#[tokio::test]
+async fn bitbucket_rejects_an_invalid_comment_id_before_posting() {
+    let server = MockServer::start().await;
+    let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&server.uri());
+    for comment_id in ["not-a-number", "-1", "9100/../../comments"] {
+        let error = client
+            .reply(&repo, 42, Some("9100"), comment_id, "Fixed.")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ForgeError::InvalidRequest(_)),
+            "comment id {comment_id:?}: {error:?}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn bitbucket_writes_replies_comments_and_pull_requests() {
     let server = bitbucket_server().await;
     let api = "/2.0/repositories/acme/widget";

@@ -5,7 +5,9 @@
 //! ignored by default and gated on environment variables; `scripts/test-forges.sh`
 //! runs them against Docker when the user asks.
 
-use h4rn_forge::{Forge, ForgeError, GitHubClient, GitLabClient, GiteaClient};
+use h4rn_forge::{
+    Forge, ForgeError, GitHubClient, GitLabClient, GiteaClient, pr_context_for_agent,
+};
 use h4rn_protocol::{ForgeDiffSide, ForgeKind, ForgePrFilter, ForgePrState, ForgeRepoRef};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, path_regex, query_param};
@@ -394,6 +396,10 @@ async fn gitlab_reads_merge_requests_discussions_and_jobs() {
     assert_eq!(pr.additions, 2);
     assert_eq!(pr.deletions, 1);
     assert_eq!(pr.changed_files, 1);
+    assert!(
+        pr.line_counts_known,
+        "get_pr sums the changes, so the totals are real"
+    );
     assert_eq!(pr.reviewers[0].author, "bob");
 
     let diff = client.get_diff(&repo, 7, 1, 30).await.unwrap();
@@ -409,6 +415,54 @@ async fn gitlab_reads_merge_requests_discussions_and_jobs() {
     assert_eq!(checks.head_sha, "abc123");
     assert_eq!(checks.failed, 1);
     assert_eq!(checks.total, 1);
+
+    let context = pr_context_for_agent(&pr, &[], &checks);
+    assert!(
+        context.contains("Diff: +2 −1 across 1 file"),
+        "the agent handoff carries the summed totals:\n{context}"
+    );
+}
+
+#[tokio::test]
+async fn gitlab_truncated_changes_leave_line_totals_unknown() {
+    // `overflow: true` means GitLab cut the changes list off. A partial sum
+    // would be a wrong number, so the handoff says the totals are unknown.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v4/projects/[^/]+/merge_requests/7$"))
+        .respond_with(json_body(gitlab_mr_detail()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/api/v4/projects/[^/]+/merge_requests/7/changes$",
+        ))
+        .respond_with(json_body(json!({
+            "overflow": true,
+            "changes": [{
+                "old_path": "src/lib.rs",
+                "new_path": "src/lib.rs",
+                "new_file": false,
+                "renamed_file": false,
+                "deleted_file": false,
+                "diff": "@@ -1 +1 @@\n-old\n+new"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitLabClient::new(&server.uri(), "glpat-test", 120).unwrap();
+    let repo = repo(ForgeKind::GitLab, &server.uri());
+    let pr = client.get_pr(&repo, 7).await.unwrap();
+    assert!(
+        !pr.line_counts_known,
+        "a truncated changes list cannot report line totals"
+    );
+    let context = pr_context_for_agent(&pr, &[], &client.list_checks(&repo, 7).await.unwrap());
+    assert!(
+        context.contains("additions and deletions unknown"),
+        "{context}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -105,6 +105,32 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Forge errors never repeat the account's own credential.** Every client now
+  redacts the configured token verbatim before an error leaves it or reaches a
+  log, including a token quoted in a JSON error body, a percent-encoded copy
+  from a URL, and the Base64 Basic credential Azure DevOps can echo back. The
+  pattern-based token redaction stays as a second layer.
+- **Azure DevOps comment ids are parsed before they become a URL.** A reply's
+  thread and comment ids must be positive 32-bit integers; an invalid one
+  returns `InvalidRequest` without sending a request.
+- **A `DefaultCollection` Azure DevOps checkout finds its account in the UI.**
+  Account matching applies the daemon's alias rule
+  (`https://acme.visualstudio.com` equals
+  `https://acme.visualstudio.com/DefaultCollection`, host case and trailing
+  slashes ignored), so Open PR works whichever spelling the remote uses.
+- **GitLab merge requests report their real line totals.** `get_pr` already
+  summed the `/changes` diffs; it now marks the counts known so the UI and the
+  agent handoff show them. A truncated answer (`overflow: true`) leaves them
+  unknown instead of reporting a partial sum.
+- **Azure DevOps missing collections are errors, not empty answers.** A 200
+  without `threads` or `changeEntries` is a parse error, while an explicit
+  empty list stays empty; a missing `changeEntries` leaves
+  `changed_files_known` false rather than reporting zero files.
+- **Azure DevOps links and diff totals are correct for unusual names and
+  content.** The browser-URL fallback percent-encodes the project and
+  repository segments (a repository named `release%20notes` no longer links to
+  `release notes`), and a file's totals count added or removed lines whose
+  content starts `+++` or `---` instead of mistaking them for file headers.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen

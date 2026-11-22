@@ -194,10 +194,17 @@ impl Forge for GitLabClient {
         pr.reviewers = self.reviewers(repo, number, &value).await;
         pr.summary.review = aggregate_review(&pr.reviewers);
         // GitLab omits line counts on the MR, so the detail sums the diff once.
-        if let Ok((_, additions, deletions, files)) = self.change_stats(repo, number).await {
+        // An `overflow` answer means the list of changes was cut off: a partial
+        // sum would be a wrong number, so the counts stay unknown instead.
+        if let Ok((_, additions, deletions, files, overflow)) =
+            self.change_stats(repo, number).await
+            && !overflow
+        {
             pr.additions = additions;
             pr.deletions = deletions;
+            pr.line_counts_known = true;
             pr.changed_files = files;
+            pr.changed_files_known = true;
         }
         Ok(pr)
     }
@@ -509,16 +516,24 @@ impl GitLabClient {
         reviews
     }
 
+    /// The MR's changes, their summed line counts and whether GitLab cut the
+    /// list off.
+    ///
+    /// When `overflow` is true the `changes` array is incomplete, so its line
+    /// totals and file count would be partial; the caller keeps them unknown.
     async fn change_stats(
         &self,
         repo: &ForgeRepoRef,
         number: u32,
-    ) -> Result<(Value, u32, u32, u32)> {
+    ) -> Result<(Value, u32, u32, u32, bool)> {
         let value = self
             .http
             .get_json(&format!("{}/changes", self.mr_url(repo, number)))
             .await?;
-        let changes = value["changes"].as_array().cloned().unwrap_or_default();
+        let changes = value["changes"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| ForgeError::Parse("GitLab returned no changes collection".into()))?;
         let mut additions = 0;
         let mut deletions = 0;
         for change in &changes {
@@ -527,7 +542,8 @@ impl GitLabClient {
             deletions += dels;
         }
         let files = changes.len() as u32;
-        Ok((value, additions, deletions, files))
+        let overflow = value["overflow"].as_bool().unwrap_or(false);
+        Ok((value, additions, deletions, files, overflow))
     }
 }
 

@@ -121,6 +121,65 @@ describe("account matching", () => {
       accountForRepo([account], { ...repo, base_url: "https://ghe.example.com" }),
     ).toBeUndefined();
   });
+
+  test("matches an Azure DevOps DefaultCollection alias in both directions", () => {
+    const azure = (baseUrl: string): ForgeAccount => ({
+      ...account,
+      forge: "azure_devops",
+      base_url: baseUrl,
+    });
+    const azureRepo = (baseUrl: string): ForgeRepoRef => ({
+      forge: "azure_devops",
+      base_url: baseUrl,
+      owner: "platform",
+      repo: "widget",
+    });
+
+    expect(
+      accountForRepo(
+        [azure("https://acme.visualstudio.com/DefaultCollection")],
+        azureRepo("https://acme.visualstudio.com"),
+      )?.base_url,
+    ).toBe("https://acme.visualstudio.com/DefaultCollection");
+    expect(
+      accountForRepo(
+        [azure("https://acme.visualstudio.com")],
+        azureRepo("https://acme.visualstudio.com/DefaultCollection/"),
+      )?.base_url,
+    ).toBe("https://acme.visualstudio.com");
+  });
+
+  test("compares the Azure DevOps host case-insensitively", () => {
+    const azure: ForgeAccount = {
+      ...account,
+      forge: "azure_devops",
+      base_url: "https://ACME.VisualStudio.com/DefaultCollection",
+    };
+    expect(
+      accountForRepo([azure], {
+        forge: "azure_devops",
+        base_url: "https://acme.visualstudio.com",
+        owner: "platform",
+        repo: "widget",
+      })?.account_id,
+    ).toBe("a1");
+  });
+
+  test("keeps DefaultCollection distinct for a non-Visual Studio host", () => {
+    const azure: ForgeAccount = {
+      ...account,
+      forge: "azure_devops",
+      base_url: "https://ado.example.test/DefaultCollection",
+    };
+    expect(
+      accountForRepo([azure], {
+        forge: "azure_devops",
+        base_url: "https://ado.example.test",
+        owner: "platform",
+        repo: "widget",
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("labels", () => {

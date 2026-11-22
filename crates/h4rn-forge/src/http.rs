@@ -43,6 +43,11 @@ pub struct ForgeHttp {
     forge: ForgeKind,
     base_url: String,
     auth: Option<(HeaderName, HeaderValue)>,
+    /// The configured credential in every form it can be echoed back in: the
+    /// raw token, its percent-encoded spellings, the Base64 basic credential
+    /// and the decoded `user:token` pair. An error body that quotes one of
+    /// them is redacted before the message leaves this client.
+    secrets: Vec<String>,
     accept: String,
     cache: Mutex<HashMap<String, CachedResponse>>,
     limiter: RateLimiter,
@@ -93,11 +98,17 @@ impl ForgeHttp {
             }
             None => None,
         };
+        let secrets = auth
+            .as_ref()
+            .and_then(|(_, value)| value.to_str().ok())
+            .map(secret_forms)
+            .unwrap_or_default();
         Ok(Self {
             client,
             forge,
             base_url: base_url.trim_end_matches('/').to_owned(),
             auth,
+            secrets,
             accept: accept.to_owned(),
             cache: Mutex::new(HashMap::new()),
             limiter: RateLimiter::new(requests_per_minute.max(1)),
@@ -150,7 +161,7 @@ impl ForgeHttp {
         let response = request
             .send()
             .await
-            .map_err(|error| ForgeError::Network(redact_network_error(&error)))?;
+            .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
 
         let status = response.status();
         let headers = response.headers().clone();
@@ -186,7 +197,7 @@ impl ForgeHttp {
         let body = response
             .text()
             .await
-            .map_err(|error| ForgeError::Network(redact_network_error(&error)))?;
+            .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
 
         if method == Method::GET
             && status.is_success()
@@ -267,7 +278,7 @@ impl ForgeHttp {
 
     /// Classifies a failed response.
     pub fn status_error(&self, response: &HttpResponse) -> ForgeError {
-        let message = response_message(&response.body);
+        let message = self.sanitize(&response_message(&response.body));
         match response.status {
             StatusCode::UNAUTHORIZED => ForgeError::Unauthorized {
                 forge: self.forge,
@@ -312,6 +323,24 @@ impl ForgeHttp {
             retry_at,
             message: message.to_owned(),
         }
+    }
+
+    /// Removes the configured credential, then anything that looks like a
+    /// token, from a message before it reaches a client or a log.
+    ///
+    /// The account's own secret is matched verbatim first: an Azure DevOps
+    /// pasted in a JSON error body, a Basic header echoed back, or a
+    /// percent-encoded copy inside a URL all contain it. The pattern-based
+    /// [`redact`] pass stays as a second layer for credentials that do not
+    /// belong to this account (a proxy or a shared error page).
+    fn sanitize(&self, value: &str) -> String {
+        let mut output = value.to_owned();
+        for secret in &self.secrets {
+            if output.contains(secret) {
+                output = output.replace(secret, "[redacted]");
+            }
+        }
+        redact(&output)
     }
 
     fn cached(&self, key: &str) -> Option<CachedResponse> {
@@ -490,12 +519,57 @@ fn token_run_len(value: &str) -> usize {
         .unwrap_or(value.len())
 }
 
-fn redact_network_error(error: &reqwest::Error) -> String {
-    let value = error.to_string();
-    // reqwest includes the URL but never an Authorization header; strip a
-    // token if the URL itself carried one (GitLab accepts no such form, but a
-    // user-supplied custom base URL might).
-    redact(&value)
+/// Every spelling of a configured credential that an error body or a URL can
+/// echo back.
+///
+/// The auth header carries the token in one of three shapes: `Basic <b64>`
+/// (Bitbucket API tokens and Azure DevOps PATs), `Bearer <token>` (GitHub,
+/// Bitbucket access tokens) and `token <token>` (Gitea/Forgejo), or the bare
+/// token in a custom header (GitLab). Each is reduced to the secret it holds,
+/// then the percent-encoded forms are added: an error body can quote a token
+/// copied out of a URL, where `/`, `+` and `:` arrive escaped.
+fn secret_forms(header: &str) -> Vec<String> {
+    use base64::Engine as _;
+
+    let header = header.trim();
+    let mut secrets = vec![header.to_owned()];
+    if let Some(encoded) = header.strip_prefix("Basic ") {
+        secrets.push(encoded.to_owned());
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded)
+            && let Ok(decoded) = String::from_utf8(decoded)
+        {
+            if let Some((_, token)) = decoded.split_once(':') {
+                secrets.push(token.to_owned());
+            }
+            secrets.push(decoded);
+        }
+    } else if let Some(token) = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("token "))
+        .or_else(|| header.strip_prefix("Token "))
+    {
+        secrets.push(token.to_owned());
+    }
+
+    for secret in secrets.clone() {
+        let form = url::form_urlencoded::byte_serialize(secret.as_bytes()).collect::<String>();
+        if form != secret {
+            secrets.push(form);
+        }
+        let path = encode_path_segment(&secret);
+        if path != secret {
+            secrets.push(path);
+        }
+    }
+
+    // A Base64 credential decodes to `user:token`; an empty username leaves
+    // the whole token. Short values are not credentials and would mangle
+    // ordinary words.
+    secrets.retain(|secret| secret.chars().count() >= 4);
+    // Longest first so a Base64 credential is replaced whole, not in pieces.
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets.dedup();
+    secrets
 }
 
 /// A local token bucket plus the forge's documented remaining quota.
@@ -733,5 +807,62 @@ mod tests {
                 .unwrap(),
             b":pat"
         );
+    }
+
+    fn error_for(client: &ForgeHttp, body: String) -> String {
+        let response = HttpResponse {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            body,
+            content_type: None,
+            from_cache: false,
+        };
+        client.status_error(&response).to_string()
+    }
+
+    #[test]
+    fn configured_azure_pat_is_redacted_quoted_and_as_a_basic_header() {
+        use base64::Engine as _;
+        let pat = "azp/7Kq+2f9Xr3Lm0";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
+        let client = ForgeHttp::new(
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.test/acme",
+            basic_auth_header("", pat),
+            "application/json",
+            120,
+        )
+        .unwrap();
+        // A quoted PAT, the Base64 Basic credential echoed in the same JSON
+        // message, and the percent-encoded spelling a URL would carry.
+        let body = format!(
+            r#"{{"message":"bad PAT \"{pat}\" in Authorization: Basic {encoded}; saw azp%2F7Kq%2B2f9Xr3Lm0"}}"#
+        );
+        let message = error_for(&client, body);
+        assert!(!message.contains(pat), "{message}");
+        assert!(!message.contains(&encoded), "{message}");
+        assert!(!message.contains("azp%2F7Kq%2B2f9Xr3Lm0"), "{message}");
+        assert!(message.contains("[redacted]"), "{message}");
+    }
+
+    #[test]
+    fn pattern_redaction_stays_as_a_second_layer() {
+        let client = ForgeHttp::new(
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.test/acme",
+            basic_auth_header("", "azp_configured"),
+            "application/json",
+            120,
+        )
+        .unwrap();
+        let message = error_for(
+            &client,
+            r#"{"message":"proxy said token ghp_outsider leaked"}"#.into(),
+        );
+        assert!(
+            message.contains("[redacted]"),
+            "a credential that is not this account's is still hidden: {message}"
+        );
+        assert!(!message.contains("ghp_outsider"), "{message}");
     }
 }
