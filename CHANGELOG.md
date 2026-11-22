@@ -118,6 +118,62 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Forge errors never repeat the account's own credential.** Every client now
+  redacts the configured token verbatim before an error leaves it or reaches a
+  log, including a token quoted in a JSON error body, a percent-encoded copy
+  from a URL and the Base64 Basic credential Azure DevOps can echo back. Every
+  copy goes, whichever hex case and whichever spelling: the plain value plus an
+  uppercase-escaped and a lowercase-escaped copy in one body all disappear.
+  Nested JSON error details are redacted as decoded strings before they are
+  serialized into the message, so a credential containing a quote cannot
+  survive as a JSON-escaped value, and the escaped spelling is matched as a
+  second layer. Object keys are redacted as well as values (a credential used
+  as a key cannot slip through a serialized `error` object), and a JSON body
+  with no `message`, `error`, `detail` or `errors` key is serialized from the
+  redacted decoded value instead of echoing the raw body, so no `\/` or
+  `\u00xx` spelling survives. Matching normalizes the text once and reads every
+  match offset from that normalised copy, so a body that echoes a credential
+  thousands of times is redacted in one linear pass. The configured secret is
+  removed before the pattern-based token pass, which stays as a second layer.
+- **Azure DevOps reply ids are parsed before they are used.** A reply's thread
+  id goes into the request URL and its comment id into the JSON body; both must
+  be positive 32-bit integers, and an invalid one returns `InvalidRequest`
+  without sending a request.
+- **A `DefaultCollection` Azure DevOps checkout finds its account in the UI.**
+  Account matching applies the daemon's alias rule
+  (`https://acme.visualstudio.com` equals
+  `https://acme.visualstudio.com/DefaultCollection`, host case, the segment's
+  letter case and trailing slashes ignored), so Open PR works whichever
+  spelling the remote uses.
+- **GitLab merge requests report their real line totals.** `get_pr` already
+  summed the `/changes` diffs; it now counts added and removed lines by their
+  first character inside a hunk (content that itself begins `+++` or `---`
+  counts) and marks the totals known so the UI and the agent handoff show
+  them. A truncated answer (`overflow: true`, or a change marked `collapsed` or
+  `too_large`) leaves them unknown instead of reporting a partial sum.
+- **Every pull-request tab recovers on its own.** The detail, comments, checks,
+  diff and commits load independently, and each tab has its own loading state
+  and Retry: a quiet “Loading…” fills the tab while its request is in flight
+  instead of a “did not load” or empty state, Retry re-runs only that tab's
+  request while the PR header, checks and the rest of the detail stay on
+  screen, and a live checks update clears a failed Checks load. A live update
+  also wins over a checks request that was already in flight: its late answer,
+  success or failure, describes an older snapshot and no longer replaces what
+  the daemon pushed. An error still stays inside its own tab.
+- **Azure DevOps missing collections are errors, not empty answers.** A 200
+  without `threads` or `changeEntries` is a parse error, while an explicit
+  empty list stays empty; a missing `changeEntries` leaves
+  `changed_files_known` false rather than reporting zero files.
+- **Azure DevOps links and diff totals are correct for unusual names and
+  content.** The browser-URL fallback percent-encodes the project and
+  repository segments (a repository named `release%20notes` no longer links to
+  `release notes`), and a file's totals count added or removed lines whose
+  content starts `+++` or `---` instead of mistaking them for file headers.
+- **A literal `%` in an Azure DevOps project or repository name works.** Azure
+  returns decoded names, so `release%20notes` is a name, not an escaped space.
+  Shared validation accepts it and every segment is percent-encoded before it
+  enters a request or browser URL (`%` becomes `%25`), while the checks that
+  keep a segment a single safe path step still reject separators and `.`/`..`.
 - **The composer's phone sheet stays inside the keyboard, and the panel sheet takes focus.** The
   `@` sheet now ends at whichever comes first, the composer or the visible viewport's bottom, so no
   row hides under an open keyboard when the composer itself sits below it. When less than the header

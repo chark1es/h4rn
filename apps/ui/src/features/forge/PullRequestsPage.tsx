@@ -11,7 +11,7 @@ import {
   MessageSquareTextIcon,
   RotateCwIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -123,6 +123,40 @@ function duration(ms: bigint | null): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${String(Math.round(seconds % 60)).padStart(2, "0")}s`;
+}
+
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** One tab's own load failure, with the rest of the PR still on screen. */
+function TabError({
+  title,
+  message,
+  onRetry,
+}: {
+  title: string;
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="q-empty" style={{ margin: "18px 0" }}>
+      <h3>{title}</h3>
+      <p>{message}</p>
+      <button type="button" className="q-btn secondary" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
+/** One tab's request still in flight, shown inside the tab. */
+function TabLoading({ label }: { label: string }) {
+  return (
+    <p className="q-faint" role="status" style={{ margin: "12px 0", fontSize: 12.5 }}>
+      {label}
+    </p>
+  );
 }
 
 /**
@@ -769,8 +803,26 @@ function PrDetail({
   const [diffLoading, setDiffLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [commentsLoading, setCommentsLoading] = useState(true);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [diffInitialLoading, setDiffInitialLoading] = useState(true);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [commitsLoading, setCommitsLoading] = useState(true);
+  const [commitsError, setCommitsError] = useState<string | null>(null);
+  const [checksLoading, setChecksLoading] = useState(true);
+  const [checksError, setChecksError] = useState<string | null>(null);
+  // Bumped by every live checks update. A request that started before the
+  // update carries an older generation, so its late answer (or failure) must
+  // not overwrite the fresher snapshot the daemon pushed.
+  const checksGeneration = useRef(0);
   const [tab, setTab] = useState<"conversation" | "commits" | "checks" | "files">("conversation");
-  const [reloadNonce, setReloadNonce] = useState(0);
+  // One nonce per request. A tab's Retry bumps only its own, so the PR header
+  // and the checks stay on screen while that tab loads again.
+  const [detailNonce, setDetailNonce] = useState(0);
+  const [commentsNonce, setCommentsNonce] = useState(0);
+  const [checksNonce, setChecksNonce] = useState(0);
+  const [commitsNonce, setCommitsNonce] = useState(0);
+  const [diffNonce, setDiffNonce] = useState(0);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyBusy, setReplyBusy] = useState<Record<string, boolean>>({});
   const [replyOpen, setReplyOpen] = useState<Record<string, boolean>>({});
@@ -791,43 +843,123 @@ function PrDetail({
   );
 
   useEffect(() => {
-    void reloadNonce;
+    void detailNonce;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    Promise.all([
-      api().getPr(repo, number),
-      api().comments(repo, number),
-      api()
-        .checks(repo, number)
-        .catch(() => null),
-      api().getDiff(repo, number, 1),
-      api()
-        .commits(repo, number)
-        .catch(() => null),
-    ])
-      .then(([detail, page, checksResult, diff, commitList]) => {
+    // The detail gates the page. Every tab owns its own request, so one
+    // failed request (a diff, a comment page) cannot hide the PR header and
+    // the checks.
+    api()
+      .getPr(repo, number)
+      .then((detail) => {
         if (cancelled) return;
         setPr(detail);
-        setComments(page);
-        setChecks(checksResult);
-        setCommits(commitList);
-        setDiffPage(diff);
-        setDiffFiles(diff.files);
         setLoading(false);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(errorMessage(cause));
         setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [repo, number, reloadNonce]);
+  }, [repo, number, detailNonce]);
+
+  useEffect(() => {
+    void commentsNonce;
+    let cancelled = false;
+    setCommentsLoading(true);
+    setCommentsError(null);
+    api()
+      .comments(repo, number)
+      .then((page) => {
+        if (cancelled) return;
+        setComments(page);
+        setCommentsLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setCommentsError(errorMessage(cause));
+        setCommentsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, commentsNonce]);
+
+  useEffect(() => {
+    void checksNonce;
+    let cancelled = false;
+    const generation = checksGeneration.current;
+    setChecksLoading(true);
+    setChecksError(null);
+    api()
+      .checks(repo, number)
+      .then((result) => {
+        if (cancelled || generation !== checksGeneration.current) return;
+        setChecks(result);
+        setChecksLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled || generation !== checksGeneration.current) return;
+        setChecksError(errorMessage(cause));
+        setChecksLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, checksNonce]);
+
+  useEffect(() => {
+    void diffNonce;
+    let cancelled = false;
+    setDiffInitialLoading(true);
+    setDiffError(null);
+    api()
+      .getDiff(repo, number, 1)
+      .then((diff) => {
+        if (cancelled) return;
+        setDiffPage(diff);
+        setDiffFiles(diff.files);
+        setDiffInitialLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setDiffError(errorMessage(cause));
+        setDiffInitialLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, diffNonce]);
+
+  useEffect(() => {
+    void commitsNonce;
+    let cancelled = false;
+    setCommitsLoading(true);
+    setCommitsError(null);
+    api()
+      .commits(repo, number)
+      .then((commitList) => {
+        if (cancelled) return;
+        setCommits(commitList);
+        setCommitsLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setCommitsError(errorMessage(cause));
+        setCommitsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, commitsNonce]);
 
   // Live checks: the daemon broadcasts a transient update when a watched PR's
-  // checks change, so the side column never needs to poll.
+  // checks change, so the side column never needs to poll. A real update is
+  // also what recovers the Checks tab from a failed load.
   useEffect(() => {
     return getClient().onEvent(({ event }) => {
       if (
@@ -836,18 +968,33 @@ function PrDetail({
         event.repo.repo === repo.repo &&
         event.number === number
       ) {
+        checksGeneration.current += 1;
         setChecks(event.checks);
+        setChecksError(null);
+        setChecksLoading(false);
       }
     });
   }, [repo, number]);
 
+  const retryPage = () => {
+    setDetailNonce((value) => value + 1);
+    setCommentsNonce((value) => value + 1);
+    setChecksNonce((value) => value + 1);
+    setCommitsNonce((value) => value + 1);
+    setDiffNonce((value) => value + 1);
+  };
+
   const rerunFailed = async () => {
     if (rerunBusy) return;
     setRerunBusy(true);
+    const generation = checksGeneration.current;
     try {
-      setChecks(await api().rerunChecks(repo, number));
+      const result = await api().rerunChecks(repo, number);
+      if (generation !== checksGeneration.current) return;
+      setChecks(result);
       pushToast({ title: "Re-running the failed checks.", variant: "success" });
     } catch (cause) {
+      if (generation !== checksGeneration.current) return;
       pushToast({
         title: "Could not re-run the checks.",
         description: cause instanceof Error ? cause.message : String(cause),
@@ -1073,11 +1220,7 @@ function PrDetail({
                 <button type="button" className="q-btn secondary" onClick={onBack}>
                   Back to list
                 </button>
-                <button
-                  type="button"
-                  className="q-btn secondary"
-                  onClick={() => setReloadNonce((value) => value + 1)}
-                >
+                <button type="button" className="q-btn secondary" onClick={retryPage}>
                   Retry
                 </button>
               </div>
@@ -1211,45 +1354,25 @@ function PrDetail({
                   )}
                 </div>
 
-                {comments?.comments.map((comment) => (
-                  <div className="q-cmt" key={comment.comment_id}>
-                    <div className="q-cmt-h">
-                      <EntityAvatar
-                        seed={userSeed(comment.author)}
-                        kind="user"
-                        label={comment.author}
-                        size={18}
-                      />
-                      <b>{comment.author}</b> · {relativeAge(comment.created_at)}
-                      {comment.comment_id.startsWith("tmp_") ? (
-                        <span className="q-faint"> · sending…</span>
-                      ) : null}
-                    </div>
-                    <Markdown text={comment.body} />
-                  </div>
-                ))}
-
-                {comments?.threads.map((thread) => (
-                  <div className="q-cmt" key={thread.thread_id}>
-                    <div className="q-cmt-h">
-                      <MessageSquareIcon className="q-icon s14 q-faint" aria-hidden />
-                      <span className="q-mono">
-                        {thread.path}
-                        {thread.line !== null ? ` · line ${thread.line}` : ""}
-                      </span>
-                      {thread.resolved ? (
-                        <span className="q-badge ok" style={{ height: 18 }}>
-                          Resolved
-                        </span>
-                      ) : (
-                        <span className="q-faint">Unresolved</span>
-                      )}
-                      {thread.outdated ? <span className="q-faint">· outdated</span> : null}
-                    </div>
-                    <ThreadQuote thread={thread} files={diffFiles} />
-                    {thread.comments.map((comment) => (
-                      <div key={comment.comment_id} style={{ marginBottom: 10 }}>
-                        <div className="q-cmt-h" style={{ marginBottom: 2 }}>
+                {commentsLoading ? (
+                  <TabLoading label="Loading comments…" />
+                ) : commentsError ? (
+                  <TabError
+                    title="Comments did not load"
+                    message={commentsError}
+                    onRetry={() => setCommentsNonce((value) => value + 1)}
+                  />
+                ) : (
+                  <>
+                    {comments?.comments.map((comment) => (
+                      <div className="q-cmt" key={comment.comment_id}>
+                        <div className="q-cmt-h">
+                          <EntityAvatar
+                            seed={userSeed(comment.author)}
+                            kind="user"
+                            label={comment.author}
+                            size={18}
+                          />
                           <b>{comment.author}</b> · {relativeAge(comment.created_at)}
                           {comment.comment_id.startsWith("tmp_") ? (
                             <span className="q-faint"> · sending…</span>
@@ -1258,110 +1381,154 @@ function PrDetail({
                         <Markdown text={comment.body} />
                       </div>
                     ))}
-                    {replyOpen[thread.thread_id] || (replyDrafts[thread.thread_id] ?? "") !== "" ? (
-                      <div className="q-cmt-reply">
-                        <textarea
-                          className="q-input"
-                          rows={2}
-                          ref={focusOnMount}
-                          placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
-                          value={replyDrafts[thread.thread_id] ?? ""}
-                          onChange={(event) =>
-                            setReplyDrafts((current) => ({
-                              ...current,
-                              [thread.thread_id]: event.target.value,
-                            }))
-                          }
-                          aria-label={`Reply to ${thread.path}`}
-                        />
+
+                    {comments?.threads.map((thread) => (
+                      <div className="q-cmt" key={thread.thread_id}>
+                        <div className="q-cmt-h">
+                          <MessageSquareIcon className="q-icon s14 q-faint" aria-hidden />
+                          <span className="q-mono">
+                            {thread.path}
+                            {thread.line !== null ? ` · line ${thread.line}` : ""}
+                          </span>
+                          {thread.resolved ? (
+                            <span className="q-badge ok" style={{ height: 18 }}>
+                              Resolved
+                            </span>
+                          ) : (
+                            <span className="q-faint">Unresolved</span>
+                          )}
+                          {thread.outdated ? <span className="q-faint">· outdated</span> : null}
+                        </div>
+                        <ThreadQuote thread={thread} files={diffFiles} />
+                        {thread.comments.map((comment) => (
+                          <div key={comment.comment_id} style={{ marginBottom: 10 }}>
+                            <div className="q-cmt-h" style={{ marginBottom: 2 }}>
+                              <b>{comment.author}</b> · {relativeAge(comment.created_at)}
+                              {comment.comment_id.startsWith("tmp_") ? (
+                                <span className="q-faint"> · sending…</span>
+                              ) : null}
+                            </div>
+                            <Markdown text={comment.body} />
+                          </div>
+                        ))}
+                        {replyOpen[thread.thread_id] ||
+                        (replyDrafts[thread.thread_id] ?? "") !== "" ? (
+                          <div className="q-cmt-reply">
+                            <textarea
+                              className="q-input"
+                              rows={2}
+                              ref={focusOnMount}
+                              placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
+                              value={replyDrafts[thread.thread_id] ?? ""}
+                              onChange={(event) =>
+                                setReplyDrafts((current) => ({
+                                  ...current,
+                                  [thread.thread_id]: event.target.value,
+                                }))
+                              }
+                              aria-label={`Reply to ${thread.path}`}
+                            />
+                            <div className="q-cmt-a">
+                              <button
+                                type="button"
+                                className="q-btn primary"
+                                disabled={
+                                  (replyDrafts[thread.thread_id] ?? "").trim() === "" ||
+                                  replyBusy[thread.thread_id]
+                                }
+                                onClick={() => void submitReply(thread)}
+                              >
+                                {replyBusy[thread.thread_id] ? "Sending…" : "Send reply"}
+                              </button>
+                              <button
+                                type="button"
+                                className="q-btn ghost"
+                                onClick={() => {
+                                  setReplyOpen((current) => ({
+                                    ...current,
+                                    [thread.thread_id]: false,
+                                  }));
+                                  setReplyDrafts((current) => ({
+                                    ...current,
+                                    [thread.thread_id]: "",
+                                  }));
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="q-cmt-a">
                           <button
                             type="button"
-                            className="q-btn primary"
-                            disabled={
-                              (replyDrafts[thread.thread_id] ?? "").trim() === "" ||
-                              replyBusy[thread.thread_id]
+                            className="q-btn secondary"
+                            onClick={() =>
+                              setReplyOpen((current) => ({ ...current, [thread.thread_id]: true }))
                             }
-                            onClick={() => void submitReply(thread)}
                           >
-                            {replyBusy[thread.thread_id] ? "Sending…" : "Send reply"}
+                            <MessageSquareIcon className="q-icon s14" aria-hidden />
+                            Reply
                           </button>
                           <button
                             type="button"
-                            className="q-btn ghost"
-                            onClick={() => {
-                              setReplyOpen((current) => ({
-                                ...current,
-                                [thread.thread_id]: false,
-                              }));
-                              setReplyDrafts((current) => ({ ...current, [thread.thread_id]: "" }));
-                            }}
+                            className="q-btn secondary"
+                            disabled={handBusy || !linkedThread}
+                            title={
+                              linkedThread
+                                ? `Send to ${linkedThread.title}`
+                                : "Open a thread first so the agent has a workspace"
+                            }
+                            onClick={() => void handToAgent(thread)}
                           >
-                            Cancel
+                            <HandIcon className="q-icon s14" aria-hidden />
+                            {handoff === thread.thread_id ? "Handing…" : "Hand to agent"}
                           </button>
                         </div>
                       </div>
-                    ) : null}
-                    <div className="q-cmt-a">
-                      <button
-                        type="button"
-                        className="q-btn secondary"
-                        onClick={() =>
-                          setReplyOpen((current) => ({ ...current, [thread.thread_id]: true }))
-                        }
-                      >
-                        <MessageSquareIcon className="q-icon s14" aria-hidden />
-                        Reply
-                      </button>
-                      <button
-                        type="button"
-                        className="q-btn secondary"
-                        disabled={handBusy || !linkedThread}
-                        title={
-                          linkedThread
-                            ? `Send to ${linkedThread.title}`
-                            : "Open a thread first so the agent has a workspace"
-                        }
-                        onClick={() => void handToAgent(thread)}
-                      >
-                        <HandIcon className="q-icon s14" aria-hidden />
-                        {handoff === thread.thread_id ? "Handing…" : "Hand to agent"}
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                    ))}
 
-                <div style={{ marginTop: 18 }}>
-                  <div className="q-composer">
-                    <textarea
-                      aria-label={`Comment on #${number}`}
-                      placeholder={`Comment on #${number}`}
-                      value={commentDraft}
-                      onChange={(event) => setCommentDraft(event.target.value)}
-                    />
-                    <div className="q-comp-f">
-                      <span className="grow" />
-                      <span className="q-faint" style={{ fontSize: 11.5 }}>
-                        {forgeLabel(repo.forge)}
-                      </span>
-                      <button
-                        type="button"
-                        className="q-btn primary"
-                        disabled={commentDraft.trim() === "" || commentBusy}
-                        onClick={() => void submitComment()}
-                      >
-                        <MessageSquareTextIcon className="q-icon s14" aria-hidden />
-                        {commentBusy ? "Posting…" : "Comment"}
-                      </button>
+                    <div style={{ marginTop: 18 }}>
+                      <div className="q-composer">
+                        <textarea
+                          aria-label={`Comment on #${number}`}
+                          placeholder={`Comment on #${number}`}
+                          value={commentDraft}
+                          onChange={(event) => setCommentDraft(event.target.value)}
+                        />
+                        <div className="q-comp-f">
+                          <span className="grow" />
+                          <span className="q-faint" style={{ fontSize: 11.5 }}>
+                            {forgeLabel(repo.forge)}
+                          </span>
+                          <button
+                            type="button"
+                            className="q-btn primary"
+                            disabled={commentDraft.trim() === "" || commentBusy}
+                            onClick={() => void submitComment()}
+                          >
+                            <MessageSquareTextIcon className="q-icon s14" aria-hidden />
+                            {commentBusy ? "Posting…" : "Comment"}
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
+                  </>
+                )}
               </>
             ) : null}
 
             {tab === "commits" ? (
               <div>
-                {commits && commits.commits.length > 0 ? (
+                {commitsLoading ? (
+                  <TabLoading label="Loading commits…" />
+                ) : commitsError ? (
+                  <TabError
+                    title="Commits did not load"
+                    message={commitsError}
+                    onRetry={() => setCommitsNonce((value) => value + 1)}
+                  />
+                ) : commits && commits.commits.length > 0 ? (
                   <>
                     {commits.commits.map((commit) => (
                       <div className="q-commit" key={commit.sha}>
@@ -1396,12 +1563,8 @@ function PrDetail({
                   </>
                 ) : (
                   <div className="q-empty">
-                    <h3>{commits ? "No commits" : "Commits did not load"}</h3>
-                    <p>
-                      {commits
-                        ? "This pull request has no commits."
-                        : `${forgeLabel(repo.forge)} did not return the commit list.`}
-                    </p>
+                    <h3>No commits</h3>
+                    <p>This pull request has no commits.</p>
                   </div>
                 )}
               </div>
@@ -1409,7 +1572,15 @@ function PrDetail({
 
             {tab === "checks" ? (
               <div>
-                {checks ? (
+                {checksLoading ? (
+                  <TabLoading label="Loading checks…" />
+                ) : checksError ? (
+                  <TabError
+                    title="Checks did not load"
+                    message={checksError}
+                    onRetry={() => setChecksNonce((value) => value + 1)}
+                  />
+                ) : checks ? (
                   <>
                     <div className="q-muted" style={{ marginBottom: 10 }}>
                       {checksLabel(checks.state, checks.passed, checks.total)} ·{" "}
@@ -1459,78 +1630,102 @@ function PrDetail({
 
             {tab === "files" ? (
               <div>
-                {diffFiles.map((file) => {
-                  const { directory, name } = splitPath(file.path);
-                  const rows = parsePatch(file.patch);
-                  return (
-                    <div key={file.path} className="q-dfile">
-                      <div className="q-dfile-h">
-                        <span className="p q-mono">
-                          <span className="q-faint">{directory}</span>
-                          {name}
-                        </span>
-                        <span className="grow" />
-                        <span className="q-num q-pm">
-                          <span className="q-add">+{file.additions}</span>{" "}
-                          <span className="q-del">−{file.deletions}</span>
-                        </span>
-                      </div>
-                      {rows.length > 0 ? (
-                        <div
-                          className="q-hunk"
-                          style={{ font: "12px/18px var(--mono)", background: "var(--bg-sunk)" }}
-                        >
-                          {rows.map((row) =>
-                            row.kind === "hunk" ? (
-                              <div className="hh" key={`${file.path}:hunk:${row.text}`}>
-                                {row.text}
-                              </div>
-                            ) : (
-                              <div
-                                key={`${file.path}:${row.newLine ?? row.oldLine ?? row.text}`}
-                                className={
-                                  row.kind === "add"
-                                    ? "q-ln a"
-                                    : row.kind === "del"
-                                      ? "q-ln d"
-                                      : "q-ln"
-                                }
-                              >
-                                <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
-                                <span className="sg" aria-hidden>
-                                  {row.kind === "add" ? "+" : row.kind === "del" ? "−" : " "}
+                {diffInitialLoading ? (
+                  <TabLoading label="Loading the diff…" />
+                ) : (
+                  <>
+                    {diffError ? (
+                      <TabError
+                        title="The diff did not load"
+                        message={diffError}
+                        onRetry={() => setDiffNonce((value) => value + 1)}
+                      />
+                    ) : null}
+                    {!diffError
+                      ? diffFiles.map((file) => {
+                          const { directory, name } = splitPath(file.path);
+                          const rows = parsePatch(file.patch);
+                          return (
+                            <div key={file.path} className="q-dfile">
+                              <div className="q-dfile-h">
+                                <span className="p q-mono">
+                                  <span className="q-faint">{directory}</span>
+                                  {name}
                                 </span>
-                                <span className="q-cx">{row.text || " "}</span>
+                                <span className="grow" />
+                                <span className="q-num q-pm">
+                                  <span className="q-add">+{file.additions}</span>{" "}
+                                  <span className="q-del">−{file.deletions}</span>
+                                </span>
                               </div>
-                            ),
-                          )}
-                        </div>
-                      ) : (
-                        <div className="q-hunk">
-                          <div className="hh">
-                            {file.binary
-                              ? "Binary file"
-                              : file.truncated
-                                ? "Patch truncated by the forge"
-                                : "No inline patch"}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-                {diffPage?.has_more ? (
-                  <div style={{ padding: "12px 0" }}>
-                    <button
-                      type="button"
-                      className="q-btn secondary"
-                      disabled={diffLoading}
-                      onClick={() => void loadMoreDiff()}
-                    >
-                      {diffLoading ? "Loading…" : "Load more files"}
-                    </button>
-                  </div>
-                ) : null}
+                              {rows.length > 0 ? (
+                                <div
+                                  className="q-hunk"
+                                  style={{
+                                    font: "12px/18px var(--mono)",
+                                    background: "var(--bg-sunk)",
+                                  }}
+                                >
+                                  {rows.map((row) =>
+                                    row.kind === "hunk" ? (
+                                      <div className="hh" key={`${file.path}:hunk:${row.text}`}>
+                                        {row.text}
+                                      </div>
+                                    ) : (
+                                      <div
+                                        key={`${file.path}:${row.newLine ?? row.oldLine ?? row.text}`}
+                                        className={
+                                          row.kind === "add"
+                                            ? "q-ln a"
+                                            : row.kind === "del"
+                                              ? "q-ln d"
+                                              : "q-ln"
+                                        }
+                                      >
+                                        <span className="n">
+                                          {row.newLine ?? row.oldLine ?? ""}
+                                        </span>
+                                        <span className="sg" aria-hidden>
+                                          {row.kind === "add"
+                                            ? "+"
+                                            : row.kind === "del"
+                                              ? "−"
+                                              : " "}
+                                        </span>
+                                        <span className="q-cx">{row.text || " "}</span>
+                                      </div>
+                                    ),
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="q-hunk">
+                                  <div className="hh">
+                                    {file.binary
+                                      ? "Binary file"
+                                      : file.truncated
+                                        ? "Patch truncated by the forge"
+                                        : "No inline patch"}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      : null}
+                    {diffPage?.has_more && !diffError ? (
+                      <div style={{ padding: "12px 0" }}>
+                        <button
+                          type="button"
+                          className="q-btn secondary"
+                          disabled={diffLoading}
+                          onClick={() => void loadMoreDiff()}
+                        >
+                          {diffLoading ? "Loading…" : "Load more files"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </>
+                )}
               </div>
             ) : null}
           </div>
@@ -1560,9 +1755,15 @@ function PrDetail({
             <div className="q-side-sec" hidden={tab === "checks"}>
               <h3>
                 <span>Checks</span>
-                <span>{checks ? `${passed} of ${total} passed` : "Unknown"}</span>
+                <span>
+                  {checksLoading ? "Loading…" : checks ? `${passed} of ${total} passed` : "Unknown"}
+                </span>
               </h3>
-              {checks && checks.checks.length > 0 ? (
+              {checksLoading ? (
+                <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
+                  Loading checks…
+                </p>
+              ) : checks && checks.checks.length > 0 ? (
                 checks.checks.slice(0, 8).map((check) => (
                   <div className="q-chk" key={check.name}>
                     <CheckIcon status={check.status} />
@@ -1577,7 +1778,7 @@ function PrDetail({
                 ))
               ) : (
                 <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                  No checks reported.
+                  {checksError ? "Checks did not load." : "No checks reported."}
                 </p>
               )}
               {checks && checks.checks.length > 0 ? (
