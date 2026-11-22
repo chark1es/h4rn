@@ -17,7 +17,15 @@ All notable changes to h4rn are recorded here. The format follows
   the ACP adapter closes the transport and then reports the turn failed from its prompt task. The
   completion arm settled that as a failure with an error row even though the person had already
   stopped the turn. A failed completion on a closed transport now follows the same rule as a stream
-  end on a stopped turn: interrupted, with the death's report dropped instead of published.
+  end on a stopped turn: interrupted, with the death's report dropped instead of published. Only a
+  `Failed` report is rewritten: a turn the adapter already reported completed stays completed when a
+  Stop arrives while its exit report is still on its way.
+- **Each dying agent keeps its own diagnostic row and reset.** Two sessions can die between turns
+  before the first one's exit report arrives — a message sent in the window replaces the dead
+  session, and the replacement can die too. The pending deaths were kept in one slot, so the second
+  overwrote the first and the first death's row and reset were lost. They are kept per session now,
+  and each pump finalizes only its own. A reset a death already applied is also kept with it, so an
+  exit report that repeats a reset after the person cancelled the resume no longer arms it again.
 - **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
   typed limit before the completion and the same reset on the exit report after it. The
   closed-completion wait now collects those limits and applies one after the wait, preferring the

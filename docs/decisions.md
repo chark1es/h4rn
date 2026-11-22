@@ -684,6 +684,17 @@ interrupted, not failed, even when the adapter reports its `TurnCompleted{Failed
 closed the transport: the same rule the stream end already followed, with the death's report dropped
 so it takes no error row.
 
+**Addendum: every dying generation keeps its own death, and only a failed completion follows a Stop.**
+Pending idle deaths are kept by session generation, not in one slot. The first dead session's
+replacement can be started by a Send and die too before the first exit report arrives; each pump now
+finalizes only its own generation, so both deaths publish their own row and their own reset instead
+of the second overwriting the first. The reset a death already applied is likewise kept on that
+death, so an exit report that repeats it cannot arm a new schedule after the person cancelled the
+resume during the window, even though the live schedule is gone. Finally, the Stop override on a
+closed-transport completion applies to a `Failed` report only: when ACP already reported the turn
+`Completed`, a Stop that arrives while the exit report is still on its way leaves it completed — the
+work was done, and the person's Stop never reached the agent.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

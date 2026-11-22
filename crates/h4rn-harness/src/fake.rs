@@ -273,14 +273,43 @@ impl SessionCount {
 /// A shared count of sessions a fake harness shut down.
 ///
 /// A test reads it to prove a startup that lost its slot discarded the session
-/// it made instead of attaching it.
+/// it made instead of attaching it. It also notifies waiters, so a test can wait
+/// for the shutdown itself instead of spinning on the count.
 #[derive(Clone, Debug, Default)]
-pub struct ShutdownCount(Arc<AtomicUsize>);
+pub struct ShutdownCount {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
 
 impl ShutdownCount {
     /// How many sessions the fake harness has shut down so far.
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Waits until at least `count` sessions have been shut down.
+    pub async fn wait_for(&self, count: usize) {
+        loop {
+            if self.get() >= count {
+                return;
+            }
+            // Register before re-checking: `note` wakes only waiters that are
+            // already registered, so a shutdown counted between the load above
+            // and this await would otherwise be lost.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.get() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Counts one more shutdown and wakes the waiters.
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
@@ -1270,7 +1299,7 @@ impl HarnessSession for FakeSession {
         self.closed = true;
         self.health.close();
         if let Some(count) = &self.shutdown_count {
-            count.0.fetch_add(1, Ordering::SeqCst);
+            count.note();
         }
         // Dropping the sender would end the stream; keep it alive until the
         // session is dropped so an in-flight event is not lost.
