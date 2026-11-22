@@ -138,6 +138,11 @@ pub struct FakeHarness {
     interrupt_failures: Option<Arc<AtomicUsize>>,
     /// A test-only latch before a session is returned from `start_session`.
     start_gate: Option<Gate>,
+    /// When set with [`Self::start_gate`], only startups from this index on
+    /// wait on it (0-based). `None` gates every startup.
+    start_gate_after: Option<usize>,
+    /// Startups seen so far, so [`Self::start_gate_after`] can count.
+    starts_seen: Arc<AtomicUsize>,
     /// A test-only message: after the start gate, `start_session` fails.
     start_failure: Option<String>,
     /// How many startups fail before one succeeds; `None` fails every one.
@@ -429,6 +434,8 @@ impl Default for FakeHarness {
             interrupt_count: None,
             interrupt_failures: None,
             start_gate: None,
+            start_gate_after: None,
+            starts_seen: Arc::new(AtomicUsize::new(0)),
             start_failure: None,
             start_failure_budget: None,
             start_attempts: None,
@@ -546,6 +553,18 @@ impl FakeHarness {
     pub fn with_start_gate(mut self) -> (Self, Gate) {
         let gate = Gate::new();
         self.start_gate = Some(gate.clone());
+        (self, gate)
+    }
+
+    /// Holds every startup after the first `starts` until the gate is released.
+    ///
+    /// A test uses this to keep a replacement session from booting while it
+    /// arranges the state that startup will find, without also holding the
+    /// session the thread already has.
+    pub fn with_start_gate_after(mut self, starts: usize) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.start_gate = Some(gate.clone());
+        self.start_gate_after = Some(starts);
         (self, gate)
     }
 
@@ -791,7 +810,12 @@ impl Harness for FakeHarness {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(spec.model.clone());
         }
-        if let Some(gate) = &self.start_gate {
+        let starts_seen = self.starts_seen.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.start_gate
+            && self
+                .start_gate_after
+                .is_none_or(|after| starts_seen >= after)
+        {
             gate.wait().await;
         }
         if let Some(message) = &self.start_failure {

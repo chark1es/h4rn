@@ -160,11 +160,67 @@ All notable changes to h4rn are recorded here. The format follows
   overwrote the first and the first death's row and reset were lost. They are kept per session now,
   and each pump finalizes only its own. A reset a death already applied is also kept with it, so an
   exit report that repeats a reset after the person cancelled the resume no longer arms it again.
+- **Auto-resume stays cancelled, waits for the newest reset, and covers retried writes.** A
+  `LimitHit` followed by an `Exit` with the same reset, with no EOF in between, used to re-arm the
+  pause after the person cancelled it; the live session now remembers the reset it applied and hands
+  it to the death. When two dead sessions are waiting for their exit reports, an older one's later,
+  earlier reset no longer replaces the newer one's schedule: both deaths keep their row, but the
+  thread waits for the newest reset. Finally, a failed write whose session was lost still honors the
+  adapter's typed limit: the retry is held behind the schedule and delivered when it fires, instead
+  of running straight into the paused provider.
+- **A paused requeued prompt is never stranded, and the pause belongs to the session that reported
+  it.** A failed write that put its prompt back behind a typed limit left the turn Pending when the
+  person then cancelled the resume or sent a message: clearing the schedule removed the only thing
+  that would deliver it. Both actions now release that turn. A Send queues its message behind it,
+  so the parked prompt runs first. An older session generation's delayed exit report no longer
+  marks the live replacement's reset as applied, and a requeued write's pause names the generation
+  that claimed the write instead of `None`. A newer generation that confirms the same reset takes
+  ownership of the pause without re-arming it, so an older generation's later, earlier reset can no
+  longer replace it. A firing schedule re-checks under the record lock that the pause is still its
+  own before it clears anything or hands off delivery. Finally, a typed limit without a reset time
+  on a requeued write waits the meter's unknown-reset backoff instead of retrying immediately.
+- **A parked resume survives storage errors, restarts and unrelated pauses.** Releasing a parked
+  prompt never waits on a storage write now: the fire's ledger outcome and the Send/cancel state
+  write are logged if they fail, and the prompt is delivered either way, so a failed write can no
+  longer leave a Pending turn with no delivery owner. A released turn is projected as running
+  rather than left Rate limited: the thread leaves the paused phase and drops its limit without
+  counting a second turn, so a cancelled or superseded pause shows Working and no resume time. A
+  fire only acts when the record still names the schedule it claimed; a missing or different
+  identity is not a match, and the failover model change now happens after that check. A pause parks
+  only the prompt it was armed for, so an old agent's exit report no longer holds a replacement turn
+  a Send started. Applied resets are recorded per session generation, including when a live session
+  adopts an equal reset, so a cancelled resume stays cancelled through that generation's exit-only
+  repeat. Finally, the parked prompt is stored with the thread row: a daemon restart restores the
+  dispatch and its schedule delivers the person's message instead of the policy's "continue".
 - **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
   typed limit before the completion and the same reset on the exit report after it. The
   closed-completion wait now collects those limits and applies one after the wait, preferring the
   exit report's reset, and does not replace a schedule the turn already armed for that reset. The
   attempt counter keeps its first value and the jitter is no longer silently changed.
+- **Auto-resume round 3: a schedule is only fired, held and released by the record that owns it.**
+  A fire now checks that the thread's record names the schedule before it claims the attempt in the
+  ledger, and the daemon resyncs that record before it starts the ticker, so a restarted daemon
+  cannot consume a due attempt it never knew about. A delayed report from an older session
+  generation no longer overwrites a newer turn's applied-reset marker (the marker is only written by
+  the generation that owns the turn), so that turn's own completion cannot re-arm a pause the person
+  cancelled. The failed-write retry decides whether a pause holds it with the same
+  `pause_parks_turn` predicate `advance_queue` uses: a pause armed by another generation does not
+  hold a dispatch it does not name. A newer limit that replaces a parked pause keeps carrying the
+  prompt the pause was holding, so a pump-end advance cannot deliver it into the paused provider.
+  Finally, a parked prompt whose ledger schedule did not survive a restart is released exactly as a
+  cancel releases it — recorded as `LimitResumeReleased` with the limit cleared — instead of running
+  while the thread still claims to be rate limited.
+- **Auto-resume round 4: shutdown, restart and firing keep the parked prompt and its own turn.** A
+  graceful daemon shutdown now leaves a prompt parked behind an armed schedule exactly as it is, so
+  reopening restores the dispatch and the schedule delivers the person's message instead of the
+  policy's "continue". The restart resync restores schedule ids from the ledger even when the limit
+  history cannot be read, and the ticker retries a failed ledger read until it succeeds, so a
+  restored pause never stays unnamed. A fire only releases the pending turn its own pause parks: a
+  Send's startup that merely happens to be pending is left alone and spends no attempt. If a claimed
+  fire then finds the record no longer names its schedule, it marks the attempt `Cancelled` with
+  "superseded before delivery" instead of leaving it looking `Fired`, and a newer row that replaced
+  the attempt is untouched. A release whose journal append fails is no longer hidden by a cached
+  summary: the next tick publishes the running state.
 - **A request refused after an agent death names what actually closed.** The client keeps the close
   it observed (stdout EOF, a failed read, a writer failure or the process exit) and uses it when a
   later request is rejected, so a stdout death no longer looks like a dead writer in the failure row.
