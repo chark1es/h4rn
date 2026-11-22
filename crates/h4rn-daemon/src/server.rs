@@ -950,10 +950,18 @@ impl Connection {
                     terminal_id,
                     cols,
                     rows,
+                    reply_positions,
                 } => self
                     .state
                     .terminals
-                    .attach(&terminal_id, self.viewer_id, self.tx.clone(), cols, rows)
+                    .attach(
+                        &terminal_id,
+                        self.viewer_id,
+                        self.tx.clone(),
+                        cols,
+                        rows,
+                        reply_positions,
+                    )
                     .map(|attached| {
                         let Attached {
                             terminal,

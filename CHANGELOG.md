@@ -15,18 +15,29 @@ All notable changes to h4rn are recorded here. The format follows
   foreground group cached from `tcgetpgrp`, which a job started during shell startup can own. A
   `nohup` job and one that moved itself into another session with `setsid` are left alone. The wait
   after the hangup ends as soon as the shell exits (bounded at two seconds), so a loaded machine no
-  longer needs a fixed pause long enough for the shell to forward it.
+  longer needs a fixed pause long enough for the shell to forward it; the two-second wait now runs
+  only when a hangup was actually delivered, so closing a terminal on Windows does not pause. If the
+  close wait reaped the shell, the exit report keeps that status instead of reporting `-1`.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries with the output position that
   carried the query and the answer's ordinal within that chunk (one chunk can ask several questions
   and xterm answers each separately), and the daemon writes each distinct answer once from any
-  viewer; exact duplicates are dropped. A reply naming output the daemon never sent to that viewer is
-  ignored, so a bogus position cannot suppress a real answer, and acceptance and the PTY write happen
-  under one lock so accepted replies cannot reach the shell out of order. A stalled or backgrounded
-  viewer no longer holds an owner role that blocks the others. An older client's answer without a
-  position keeps the previous single-owner rule while that viewer stays attached, and the per-answer
-  rule resumes when it detaches.
+  viewer. Only exact duplicates and positions at or below the evicted high-water mark are dropped;
+  a reply for an older position that has not been answered yet is accepted, because it can only
+  rescue a pending query. A reply naming output the daemon never sent to that viewer is ignored, so
+  a bogus position cannot suppress a real answer, and acceptance and the PTY write happen under one
+  lock so accepted replies cannot reach the shell out of order. An answer's ordinal is counted per
+  chunk, so a viewer that attached mid-query numbers answers differently; the daemon records the
+  first output chunk each viewer was sent after its snapshot and drops a reply for a chunk whose
+  predecessor that viewer never parsed, leaving the answer to an earlier-attached viewer. A query
+  spanning more than two 64 KiB chunks is out of scope. The sent bound advances only when a frame
+  is really handed to the outbound channel, so a blocked send cannot let a reply name unseen output.
+  Clients declare reply-position support when they attach; while any attached viewer does not, every
+  reply keeps the legacy single-owner rule, whichever client's reply arrives first. A stalled or
+  backgrounded viewer no longer holds an owner role that blocks the others. The per-answer record
+  keeps 64 recent chunks with 1024 answers each by design, and older chunks collapse to a high-water
+  mark, so memory stays constant.
 - **A batched colour query marks every answer it earns.** The query tracker kept at most 32 pending
   answers, so an `OSC 4` palette query with more entries left its tail looking like typed input. It
   now tracks the whole batch.

@@ -97,24 +97,62 @@ impl Viewer {
         self.notify.notify_waiters();
     }
 
-    /// Resets the window after a snapshot; the snapshot replaces all output.
+    /// Resets the window after an attach snapshot.
     ///
-    /// The snapshot also becomes the latest output position this viewer has
-    /// received, so a reply may name it (and anything older).
+    /// The snapshot replaces all output, so it becomes the latest position
+    /// this viewer has, and the viewer starts parsing raw output at the next
+    /// chunk. A reply may name a later chunk only once `seq`'s successor has
+    /// also arrived, because a query that started in `seq` is invisible to a
+    /// parser that only renders the snapshot.
     pub fn reset_credit(&self, seq: u64) {
         let mut credit = lock(&self.credit);
         credit.outstanding.clear();
         credit.bytes = 0;
-        credit.sent_through = credit.sent_through.max(seq);
+        credit.snapshot_at(seq);
         self.notify.notify_waiters();
     }
 
+    /// Clears the window before a resync snapshot is handed over.
+    ///
+    /// The sent bound and the reply bound stay put until the snapshot really
+    /// reaches the outbound channel (see [`Viewer::record_snapshot_sent`]).
+    pub fn begin_resync(&self) {
+        let mut credit = lock(&self.credit);
+        credit.outstanding.clear();
+        credit.bytes = 0;
+    }
+
+    /// Records that a resync snapshot reached the outbound channel.
+    pub fn record_snapshot_sent(&self, seq: u64) {
+        let mut credit = lock(&self.credit);
+        credit.snapshot_at(seq);
+    }
+
     /// Records a sent chunk so a later ack can free its credit.
+    ///
+    /// The sent bound advances only when the frame has been handed to the
+    /// outbound channel, so a reply cannot name output the viewer never got.
+    /// The receiver can acknowledge the frame before the sender gets here (the
+    /// handoff and the ack are on different tasks), so a chunk at or below the
+    /// acked position is already accounted for and must not be recorded again.
     pub fn record_sent(&self, seq: u64, bytes: usize) {
         let mut credit = lock(&self.credit);
+        credit.sent_through = credit.sent_through.max(seq);
+        if seq <= credit.acked_through {
+            return;
+        }
         credit.outstanding.push_back((seq, bytes));
         credit.bytes += bytes;
-        credit.sent_through = credit.sent_through.max(seq);
+    }
+
+    /// The earliest output position whose answer this viewer may name.
+    ///
+    /// The viewer must have parsed the raw bytes of the chunk before the one
+    /// it answers, so a query that started in the previous chunk is part of
+    /// its numbering. A viewer that attached at position zero is the
+    /// exception: no earlier chunk exists, so its first chunk is answerable.
+    pub fn answer_from(&self) -> u64 {
+        lock(&self.credit).answer_from
     }
 
     /// The latest output position actually sent to this viewer.
@@ -128,8 +166,11 @@ impl Viewer {
     /// Frees credit acknowledged by `up_to`.
     pub fn ack(&self, up_to: u64) {
         let mut credit = lock(&self.credit);
+        // The ack can arrive before the corresponding `record_sent`, so the
+        // position is remembered and a late record for it is skipped.
+        credit.acked_through = credit.acked_through.max(up_to);
         while let Some((seq, bytes)) = credit.outstanding.front().copied() {
-            if seq > up_to {
+            if seq > credit.acked_through {
                 break;
             }
             credit.outstanding.pop_front();
@@ -166,12 +207,44 @@ impl Viewer {
 }
 
 /// Outstanding chunk credit for one viewer.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Credit {
     outstanding: VecDeque<(u64, usize)>,
     bytes: usize,
     /// Latest output position sent to this viewer.
     sent_through: u64,
+    /// Earliest output position this viewer may answer (see
+    /// [`Viewer::answer_from`]).
+    answer_from: u64,
+    /// Highest position the viewer acknowledged.
+    ///
+    /// An ack can overtake the send that records the same chunk, so this also
+    /// tells a late record that the chunk is already accounted for.
+    acked_through: u64,
+}
+
+impl Default for Credit {
+    fn default() -> Self {
+        Self {
+            outstanding: VecDeque::new(),
+            bytes: 0,
+            sent_through: 0,
+            answer_from: 1,
+            acked_through: 0,
+        }
+    }
+}
+
+impl Credit {
+    /// Applies a snapshot at `seq`: it becomes the latest position, and the
+    /// parser restarts at the next raw chunk.
+    fn snapshot_at(&mut self, seq: u64) {
+        self.sent_through = self.sent_through.max(seq);
+        // The snapshot carries position `seq` as rendered state, not as raw
+        // bytes. To number answers the way an earlier viewer does, this one
+        // needs both `seq + 1` and the chunk before the one it answers.
+        self.answer_from = if seq == 0 { 1 } else { seq + 2 };
+    }
 }
 
 /// One attached viewer with its requested viewport.
@@ -183,14 +256,18 @@ pub struct ViewerEntry {
     pub cols: u16,
     /// Requested rows.
     pub rows: u16,
-    /// Whether this viewer has sent a reply that names no output position.
+    /// Whether this client names the output position on every marked reply.
     ///
-    /// Only a reply from an older client lacks a position. While such a viewer
-    /// stays attached, the terminal uses the legacy single-owner rule for every
-    /// reply: this viewer's replies are written and every other viewer's are
-    /// dropped. Without one, each answer is decided by its `(position, ordinal)`
-    /// through [`AnsweredQueries`].
-    pub answers_queries: bool,
+    /// A client that does not is an older build. While one is attached the
+    /// terminal uses the legacy single-owner rule for every reply; only when
+    /// every attached viewer declares positions is each answer decided by its
+    /// `(position, ordinal)` through [`AnsweredQueries`].
+    pub reply_positions: bool,
+    /// Whether this viewer owns every reply while a legacy client is attached.
+    ///
+    /// The first viewer to send a marked reply takes the role; it passes to
+    /// another viewer only when it detaches.
+    pub legacy_owner: bool,
 }
 
 /// A PTY session.
@@ -216,6 +293,12 @@ pub struct Session {
     shell_pid: Option<i32>,
     process_group: Option<i32>,
     exit: Mutex<Option<TerminalExit>>,
+    /// Status captured when `wait_for_shell_exit` reaped the child.
+    ///
+    /// `finish` runs on the reader thread and may reach `wait` after that, so
+    /// the captured status is reused instead of reporting the failed second
+    /// wait as `-1`.
+    reaped_status: Mutex<Option<portable_pty::ExitStatus>>,
     alive: AtomicBool,
 }
 
@@ -268,6 +351,7 @@ impl Session {
             shell_pid,
             process_group,
             exit: Mutex::new(None),
+            reaped_status: Mutex::new(None),
             alive: AtomicBool::new(true),
         }
     }
@@ -361,8 +445,17 @@ impl Session {
             return;
         }
         let status = {
-            let mut child = lock(&self.child);
-            child.wait().ok()
+            // `wait_for_shell_exit` may already have reaped the child while
+            // closing the terminal; a second `wait` would then fail and lose
+            // the real status.
+            let captured = lock(&self.reaped_status).take();
+            match captured {
+                Some(status) => Some(status),
+                None => {
+                    let mut child = lock(&self.child);
+                    child.wait().ok()
+                }
+            }
         };
         let exit = match status {
             Some(status) => {
@@ -403,20 +496,32 @@ impl Session {
     /// Adds a viewer and recomputes the effective size.
     ///
     /// Attaching twice on one connection replaces the old viewer entry; the
-    /// previous task is closed so it cannot outlive its successor. Positioned
-    /// replies need no per-viewer role, and the legacy owner for replies with
-    /// no position is claimed lazily by [`Session::write_viewer_input`], so a
-    /// new attach never has to be told about or granted the role.
-    pub fn add_viewer(&self, id: ViewerId, cols: u16, rows: u16, viewer: Arc<Viewer>) {
+    /// previous task is closed so it cannot outlive its successor. A client
+    /// that does not declare positioned replies keeps the terminal in the
+    /// legacy single-owner mode for as long as it is attached.
+    pub fn add_viewer(
+        &self,
+        id: ViewerId,
+        cols: u16,
+        rows: u16,
+        reply_positions: bool,
+        viewer: Arc<Viewer>,
+    ) {
         let previous = {
             let mut viewers = lock(&self.viewers);
+            if !reply_positions {
+                // The reply owner is chosen afresh while a legacy client is
+                // present; an earlier owner's role must not outlive it.
+                clear_legacy_owners(&mut viewers);
+            }
             viewers.insert(
                 id,
                 ViewerEntry {
                     viewer,
                     cols,
                     rows,
-                    answers_queries: false,
+                    reply_positions,
+                    legacy_owner: false,
                 },
             )
         };
@@ -455,7 +560,11 @@ impl Session {
             }
             // Dropping the entry also drops the legacy owner for replies with
             // no position, so another old client can take over.
-            viewers.remove(&id)
+            let removed = viewers.remove(&id);
+            if removed.as_ref().is_some_and(|entry| !entry.reply_positions) {
+                clear_legacy_owners(&mut viewers);
+            }
+            removed
         };
         let Some(removed) = removed else {
             return;
@@ -576,17 +685,19 @@ impl Session {
     /// Waiting for the shell rather than a fixed delay is what makes the
     /// hangup reliable under load: an interactive shell forwards SIGHUP to its
     /// jobs before it exits, and a loaded machine can take longer than any
-    /// fixed pause. Windows has no POSIX sessions or signals: the ConPTY closes
-    /// when the PTY is dropped, which ends the console processes attached to
-    /// it, and the SIGHUP/SIGTERM steps are no-ops there.
+    /// fixed pause. The wait only runs when the platform actually delivered a
+    /// hangup, so closing a terminal on Windows still takes no two seconds.
+    /// Windows has no POSIX sessions or signals: the ConPTY closes when the PTY
+    /// is dropped, which ends the console processes attached to it, and the
+    /// SIGHUP/SIGTERM steps are no-ops there.
     pub async fn kill_with_grace(&self) {
         // Hang up first and wait, so the shell can run its hangup path and
         // its jobs hear SIGHUP; only then fall back to TERM and KILL for the
         // shell's group.
-        if let Some(pid) = hangup_pid(self.shell_pid, self.process_group) {
-            signal_shell(pid);
+        let hung_up = hangup_pid(self.shell_pid, self.process_group).is_some_and(signal_shell);
+        if hung_up {
+            self.wait_for_shell_exit(HANGUP_GRACE).await;
         }
-        self.wait_for_shell_exit(HANGUP_GRACE).await;
         if let Some(pgid) = self.process_group {
             signal_group(pgid, Signal::Term);
         }
@@ -604,18 +715,26 @@ impl Session {
 
     /// Waits until the shell exits, or `limit` passes.
     ///
-    /// `try_wait` reaps the shell when it has exited. The reader thread may
-    /// then see its own `wait` fail, which is harmless: the terminal is closing
-    /// and no viewer is left to read the exit status.
+    /// `try_wait` reaps the shell when it has exited; the status is kept so
+    /// `finish` can still report it when the reader thread notices the close.
     async fn wait_for_shell_exit(&self, limit: Duration) {
         let deadline = Instant::now() + limit;
         loop {
-            {
+            let status = {
                 let mut child = lock(&self.child);
                 match child.try_wait() {
-                    Ok(Some(_)) | Err(_) => return,
-                    Ok(None) => {}
+                    Ok(Some(status)) => Some(Some(status)),
+                    Err(_) => Some(None),
+                    Ok(None) => None,
                 }
+            };
+            match status {
+                Some(Some(status)) => {
+                    *lock(&self.reaped_status) = Some(status);
+                    return;
+                }
+                Some(None) => return,
+                None => {}
             }
             if Instant::now() >= deadline {
                 return;
@@ -670,33 +789,50 @@ fn accepts_reply(
     reply: QueryReply,
 ) -> bool {
     let latest = viewer.sent_through();
+    let answer_from = viewer.answer_from();
     let mut viewers = lock(viewers);
-    // While an old client that has already answered is attached, the mixed
-    // versions share one rule instead of racing: its unpositioned replies
-    // cannot be correlated with positions, so it owns every reply and the
-    // others stay silent until it detaches. Positioned replies from the owner
-    // are still validated and deduplicated.
-    if let Some((owner_id, _)) = viewers.iter().find(|(_, entry)| entry.answers_queries) {
-        if *owner_id != viewer_id {
-            return false;
+    // Mixed versions are decided when each client attaches, not by whichever
+    // reply happens to arrive first. While any attached viewer cannot name a
+    // position, every reply follows the legacy single-owner rule: the first
+    // viewer to send a marked reply owns them all, and its positioned replies
+    // are still validated and deduplicated. Any arrival order therefore writes
+    // one answer, never two.
+    if viewers.values().any(|entry| !entry.reply_positions) {
+        let owner = viewers
+            .iter()
+            .find(|(_, entry)| entry.legacy_owner)
+            .map(|(id, _)| *id);
+        match owner {
+            Some(owner) if owner != viewer_id => return false,
+            Some(_) => {}
+            None => match viewers.get_mut(&viewer_id) {
+                Some(entry) => entry.legacy_owner = true,
+                None => return false,
+            },
         }
         return match reply {
             QueryReply::No | QueryReply::Unpositioned => true,
             QueryReply::At { position, ordinal } => {
-                accept_position(answers, position, ordinal, latest)
+                accept_position(answers, position, ordinal, latest, answer_from)
             }
         };
     }
     match reply {
         QueryReply::No => true,
-        QueryReply::Unpositioned => match viewers.get_mut(&viewer_id) {
-            Some(entry) => {
-                entry.answers_queries = true;
-                true
-            }
-            None => false,
-        },
-        QueryReply::At { position, ordinal } => accept_position(answers, position, ordinal, latest),
+        // Every attached viewer declared positions, so an unpositioned reply
+        // breaks that contract and names no answer: writing it could duplicate
+        // a query another viewer already answered.
+        QueryReply::Unpositioned => false,
+        QueryReply::At { position, ordinal } => {
+            accept_position(answers, position, ordinal, latest, answer_from)
+        }
+    }
+}
+
+/// Clears every legacy reply owner.
+fn clear_legacy_owners(viewers: &mut HashMap<ViewerId, ViewerEntry>) {
+    for entry in viewers.values_mut() {
+        entry.legacy_owner = false;
     }
 }
 
@@ -706,11 +842,15 @@ fn accept_position(
     position: u64,
     ordinal: u64,
     latest: u64,
+    answer_from: u64,
 ) -> bool {
-    // A viewer cannot answer a query from output it was never sent. Drop the
-    // reply without advancing the record, so it cannot suppress the answer of
-    // a viewer that really was sent that output.
-    if position == 0 || position > latest {
+    // A viewer cannot answer a query from output it was never sent, nor from
+    // a chunk whose predecessor it never parsed: an answer's ordinal is counted
+    // from the start of the chunk, so a viewer that attached mid-query would
+    // number the same answers differently. Drop the reply without advancing
+    // the record, so it cannot suppress the answer of a viewer that really saw
+    // the query.
+    if position == 0 || position > latest || position < answer_from {
         return false;
     }
     lock(answers).accept(position, ordinal)
@@ -802,6 +942,25 @@ impl AnsweredQueries {
         }
         self.recent.entry(position).or_default().accept(ordinal)
     }
+
+    /// Whether `(position, ordinal)` is already recorded.
+    #[cfg(test)]
+    fn answered(&self, position: u64, ordinal: u64) -> bool {
+        if position <= self.through {
+            return true;
+        }
+        let Some(chunk) = self.recent.get(&position) else {
+            return false;
+        };
+        let Ok(index) = usize::try_from(ordinal) else {
+            return false;
+        };
+        if index < ANSWERED_ORDINALS_PER_CHUNK {
+            chunk.bits[index / 64] & (1_u64 << (index % 64)) != 0
+        } else {
+            ordinal <= chunk.overflow
+        }
+    }
 }
 
 /// Why a viewer's input was not written.
@@ -833,15 +992,17 @@ fn hangup_pid(shell_pid: Option<i32>, process_group: Option<i32>) -> Option<i32>
 ///
 /// `pid` is the spawned child's pid, not the cached foreground process group:
 /// a shell that starts a job while it boots would otherwise see the hangup go
-/// to that job.
-fn signal_shell(pid: i32) {
+/// to that job. Returns whether a hangup was actually delivered, so Windows
+/// (and a pid that already exited) can skip the close wait.
+fn signal_shell(pid: i32) -> bool {
     #[cfg(unix)]
     {
-        let _ = unsafe { libc::kill(pid, libc::SIGHUP) };
+        unsafe { libc::kill(pid, libc::SIGHUP) == 0 }
     }
     #[cfg(windows)]
     {
         let _ = pid;
+        false
     }
 }
 
@@ -892,16 +1053,20 @@ pub fn snapshot_frame(stream_id: u32, snapshot: &Snapshot) -> Vec<u8> {
 }
 
 /// Sends one numbered chunk to a viewer and records its credit.
+///
+/// The outbound slot is reserved first, so the sent bound advances only once
+/// the frame is guaranteed to be handed over: a blocked send leaves it
+/// unchanged, and recording before the permit is used means an ack cannot
+/// overtake the record.
 pub async fn send_chunk(
     viewer: &Viewer,
     stream_id: u32,
     chunk: &OutputChunk,
-) -> Result<(), mpsc::error::SendError<Outbound>> {
+) -> Result<(), mpsc::error::SendError<()>> {
+    let permit = viewer.tx.reserve().await?;
     viewer.record_sent(chunk.seq, chunk.data.len());
-    viewer
-        .tx
-        .send(Outbound::Binary(output_frame(stream_id, chunk)))
-        .await
+    permit.send(Outbound::Binary(output_frame(stream_id, chunk)));
+    Ok(())
 }
 
 /// Runs one viewer task until the terminal closes or the connection drops.
@@ -962,12 +1127,15 @@ pub async fn run_viewer(
                             last_seq = last_seq.max(chunk.seq);
                         }
                         let snapshot = session.snapshot();
-                        viewer.reset_credit(snapshot.seq);
+                        viewer.begin_resync();
                         let frame = snapshot_frame(stream_id, &snapshot);
-                        last_seq = snapshot.seq;
                         if viewer.tx.send(Outbound::Binary(frame)).await.is_err() {
                             break;
                         }
+                        // The viewer can only answer queries from raw output
+                        // it receives after this snapshot.
+                        viewer.record_snapshot_sent(snapshot.seq);
+                        last_seq = snapshot.seq;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -1040,6 +1208,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ack_that_overtakes_the_sent_record_is_not_lost() {
+        let (viewer, _rx) = viewer();
+        // The receiver can acknowledge each frame before the viewer task gets
+        // back from `tx.send` to record it; every chunk is then already free.
+        for seq in 1..=u64::from(CREDIT_MAX_CHUNKS) * 3 {
+            viewer.ack(seq);
+            viewer.record_sent(seq, CREDIT_MAX_BYTES as usize);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), viewer.wait_for_credit(1))
+                .await
+                .is_ok(),
+            "pre-acknowledged chunks must not keep the window closed"
+        );
+    }
+
+    #[tokio::test]
     async fn closing_a_viewer_releases_a_credit_wait() {
         let (viewer, _rx) = viewer();
         for seq in 1..=u64::from(CREDIT_MAX_CHUNKS) {
@@ -1052,6 +1237,123 @@ mod tests {
         assert!(!task.await.expect("task joins"));
     }
 
+    #[tokio::test]
+    async fn a_blocked_send_does_not_advance_the_sent_bound() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let viewer = Arc::new(Viewer::new(tx.clone()));
+        viewer.reset_credit(0);
+        // Fill the outbound queue so the chunk cannot be handed over yet.
+        tx.send(Outbound::Text("filler".into()))
+            .await
+            .expect("fill the queue");
+
+        let chunk = Arc::new(OutputChunk {
+            seq: 1,
+            data: vec![b'x'; 4],
+        });
+        let sending = tokio::spawn({
+            let viewer = Arc::clone(&viewer);
+            let chunk = Arc::clone(&chunk);
+            async move { send_chunk(&viewer, 1, &chunk).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            viewer.sent_through(),
+            0,
+            "a frame waiting for the outbound queue has not reached the viewer"
+        );
+
+        let first = rx.recv().await.expect("filler");
+        assert!(matches!(first, Outbound::Text(_)));
+        sending
+            .await
+            .expect("send task joins")
+            .expect("send succeeds");
+        assert_eq!(
+            viewer.sent_through(),
+            1,
+            "the bound advances once the frame is handed over"
+        );
+        let _ = rx.recv().await;
+    }
+
+    #[test]
+    fn a_viewer_that_attached_late_cannot_number_its_first_chunk() {
+        let (viewer, _rx) = viewer();
+        viewer.reset_credit(0);
+        assert_eq!(viewer.answer_from(), 1, "a fresh viewer may answer chunk 1");
+        viewer.reset_credit(5);
+        assert_eq!(
+            viewer.answer_from(),
+            7,
+            "a viewer that attached at position 5 first needs chunk 6"
+        );
+    }
+
+    /// A child that was already reaped by `try_wait` and refuses a second
+    /// `wait`, standing in for the close path's race with the reader thread.
+    #[derive(Debug)]
+    struct ReapedChild;
+
+    impl portable_pty::ChildKiller for ReapedChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(ReapedChild)
+        }
+    }
+
+    impl portable_pty::Child for ReapedChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(7)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::other("the child was already reaped"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_reuses_a_status_captured_by_the_close_wait() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let session = Session::new(
+            TerminalId::new("term_reaped"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(ReapedChild),
+            writer,
+        );
+
+        session
+            .wait_for_shell_exit(Duration::from_millis(100))
+            .await;
+        session.finish();
+        let exit = session.info().exit.expect("exit status");
+        assert_eq!(
+            exit.status, 7,
+            "the remove path keeps the reaped status instead of reporting -1"
+        );
+    }
     #[test]
     fn stream_ids_start_at_one_and_increase() {
         let counter = AtomicU64::new(0);
@@ -1073,7 +1375,9 @@ mod tests {
 
     fn attached_viewer(seq: u64) -> (Arc<Viewer>, mpsc::Receiver<Outbound>) {
         let (viewer, rx) = viewer();
-        viewer.reset_credit(seq);
+        // A viewer that attached at position zero and was sent chunks through
+        // `seq` may answer any of them.
+        viewer.record_sent(seq, 1);
         (viewer, rx)
     }
 
@@ -1091,7 +1395,8 @@ mod tests {
                     viewer: Arc::clone(viewer),
                     cols: 80,
                     rows: 24,
-                    answers_queries: false,
+                    reply_positions: true,
+                    legacy_owner: false,
                 },
             );
         }
@@ -1149,6 +1454,7 @@ mod tests {
     fn acceptance_and_write_are_one_critical_section() {
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
         let written = Arc::new(Mutex::new(Vec::new()));
         let writer: Mutex<Option<Box<dyn Write + Send>>> =
             Mutex::new(Some(Box::new(GatedWriter {
@@ -1179,6 +1485,7 @@ mod tests {
                 .expect("the first write must start");
 
             let second = scope.spawn(|| {
+                let _ = second_started_tx.send(());
                 write_input_locked(
                     &writer,
                     &viewers,
@@ -1191,10 +1498,17 @@ mod tests {
                     },
                 )
             });
+            second_started_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the second write must start");
             std::thread::sleep(Duration::from_millis(100));
             assert!(
                 lock(&written).is_empty(),
                 "the second write must wait for the first"
+            );
+            assert!(
+                !lock(&answers).answered(4, 0),
+                "a reply still waiting for the writer must not enter the answered record"
             );
 
             release_tx.send(()).expect("release the first write");
@@ -1203,5 +1517,9 @@ mod tests {
         });
 
         assert_eq!(&*lock(&written), b"34", "writes keep the accepted order");
+        assert!(
+            lock(&answers).answered(4, 0),
+            "the released reply is recorded once it is written"
+        );
     }
 }

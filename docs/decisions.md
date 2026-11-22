@@ -145,24 +145,48 @@ job in the foreground and it would receive the hangup instead. An interactive sh
 to its jobs and skips `nohup`'d and `disown`'d ones, so background jobs end without special-casing
 `nohup`, and a job that called `setsid` has left the session and survives. Walking `ps` for session
 members is deliberately not done: `sess` is not portable and signalling every member reaches jobs the
-user detached. Attached viewers share one PTY, so the UI marks xterm's answer to a query the program
-just asked (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input
-frame's `seq` flag. Bit 0 marks a reply, bits 1-32 carry the output chunk whose bytes xterm was
-parsing when it saw the query, and bits 33-52 carry the answer's ordinal among the answers expected
-for that chunk: one chunk can ask several questions (two DSR/OSC queries, a batched `OSC 4` palette
-query) and xterm answers each separately. A query split across chunks names the chunk that contained
-its end. The daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer, and
-drops exact duplicates; an unanswered position is still answerable after a later position was
-answered. A reply naming a position the daemon never sent to that viewer is ignored and leaves the
-record untouched, so a bogus claim cannot suppress a real answer. Acceptance and the PTY write happen
-under the same writer lock, so two connections cannot be accepted in one order and write out of
-order. Recent chunks keep a bounded bitset of answered ordinals (64 chunks, 1024 answers each); older
-chunks collapse into a high-water mark, so memory stays constant. A reply that names no position
-comes from an older client. While such a viewer that has answered stays attached, the legacy
-single-owner rule governs every reply: its replies are written and the others are dropped. When it
-detaches, the per-answer rule resumes. A stalled or backgrounded viewer therefore never blocks
-another viewer's answer, and two active viewers never both answer. The client never gives up
-reconnecting: after
+user detached. The two-second wait runs only when a hangup was actually delivered; Windows has no
+POSIX signals, so closing a terminal there does not pause. When the close wait reaps the shell, the
+reader thread's exit report reuses that status rather than reporting `-1` from a second failed wait.
+
+Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
+(through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's
+`seq` flag. Bit 0 marks a reply, bits 1-32 carry the output chunk whose bytes xterm was parsing when
+it saw the query, and bits 33-52 carry the answer's ordinal among the answers expected for that
+chunk: one chunk can ask several questions (two DSR/OSC queries, a batched `OSC 4` palette query)
+and xterm answers each separately. A query split across chunks names the chunk that contained its
+end. The daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer; only
+exact duplicates and positions at or below the evicted high-water mark are dropped. A reply for an
+older position that has not been answered yet is accepted, because it can only rescue a pending
+query. A reply naming a position the daemon never sent to that viewer is ignored and leaves the
+record untouched, so a bogus claim cannot suppress a real answer.
+
+An answer's ordinal is counted from the start of its chunk, so the answer identity is only shared
+by viewers that began parsing the chunk at the same place. The daemon records, per viewer, the
+first raw output chunk it was sent after a snapshot; a reply naming chunk P is accepted only if
+that viewer also received chunk P-1, which means it attached at or before P-1 and parsed any query
+that started in the previous chunk. A viewer that attached at position 0 is the exception, because
+there is no earlier chunk, so its first chunk is answerable. A viewer that attached mid-query is
+dropped rather than allowed to renumber another viewer's answers, and the earlier-attached viewer
+writes them. A query spanning more than two 64 KiB chunks is out of scope: only the previous chunk
+is known to the daemon, and such a query is already unanswerable by a parser that attaches between
+its start and end. The sent bound also advances only when a frame is actually handed to the viewer's
+outbound channel, so a blocked send leaves it unchanged.
+
+Clients declare reply-position support in the attach request (default false, so an older build is
+recognised immediately). While any attached viewer has not declared it, every reply follows the
+legacy single-owner rule: the first viewer to send a marked reply owns them all, and its positioned
+replies are still validated and deduplicated. Both arrival orders therefore write exactly one
+answer. When every attached viewer has declared positions, each answer is decided by its
+`(position, ordinal)` alone. Acceptance and the PTY write happen under the same writer lock, so two
+connections cannot be accepted in one order and write out of order. Recent chunks keep a bounded
+bitset of answered ordinals: 64 chunks with 1024 answers each, deliberately fixed so memory stays
+constant; the tail of a larger chunk collapses to a single high-water ordinal, and chunks older than
+the window collapse into the evicted high-water mark. Those limits are deliberate, not a missing
+feature: a 1024-answer batch in one 64 KiB chunk is already far beyond real queries, and the
+collapse can only drop answers for a chunk that has left the window. A stalled or backgrounded
+viewer therefore never blocks another viewer's answer, and two active viewers never both answer.
+The client never gives up reconnecting: after
 the fast backoff it retries at the capped interval, and an online, focus or visibility event retries
 at once, except during the very first connect, which is not yet a retry, and while an attempt that
 started less than a second ago is still opening.

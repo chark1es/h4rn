@@ -230,6 +230,7 @@ impl TerminalManager {
         tx: tokio::sync::mpsc::Sender<Outbound>,
         cols: Option<u16>,
         rows: Option<u16>,
+        reply_positions: bool,
     ) -> Result<Attached, TerminalError> {
         let session = self.session(terminal_id)?;
         let current = session.info();
@@ -238,7 +239,7 @@ impl TerminalManager {
 
         let output = session.subscribe();
         let viewer = Arc::new(Viewer::new(tx));
-        session.add_viewer(viewer_id, cols, rows, Arc::clone(&viewer));
+        session.add_viewer(viewer_id, cols, rows, reply_positions, Arc::clone(&viewer));
         let snapshot = session.snapshot();
         // The snapshot replaces everything older, so the window starts empty.
         viewer.reset_credit(snapshot.seq);

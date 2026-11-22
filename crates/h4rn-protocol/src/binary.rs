@@ -302,6 +302,14 @@ mod tests {
     }
 
     #[test]
+    fn the_flag_word_has_a_literal_golden_vector() {
+        // The UI's `ptyInputReplySeq(1, 1)` asserts the same number: position
+        // 1 sits one bit in and ordinal 1 starts at bit 33.
+        assert_eq!(pty_input_reply_seq(1, 1), 8_589_934_595);
+        assert_eq!(pty_input_reply_seq(1, 1), (1_u64 << 33) + 3);
+    }
+
+    #[test]
     fn a_reply_flag_word_stays_within_the_javascript_safe_integer() {
         // The UI encodes the same layout with a plain number.
         let seq = pty_input_reply_seq(PTY_INPUT_POSITION_MAX, PTY_INPUT_ORDINAL_MAX);

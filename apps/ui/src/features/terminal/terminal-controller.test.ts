@@ -108,19 +108,22 @@ const TERMINAL_INFO = {
 
 type BinarySink = { handler: ((data: ArrayBuffer) => void) | null };
 
-function fakeClient(sent: BinaryFrame[], binary: BinarySink) {
+function fakeClient(sent: BinaryFrame[], binary: BinarySink, startSeq = 0) {
   return {
     getSnapshot: () => ({ status: "online" }),
-    request: async (body: { type: string }) => {
+    request: async (body: { type: string; reply_positions?: boolean }) => {
       if (body.type === "terminal_open") {
         return { type: "terminal_opened", terminal: TERMINAL_INFO };
       }
       if (body.type === "terminal_attach") {
+        if (body.reply_positions !== true) {
+          throw new Error("attach must declare that replies carry positions");
+        }
         return {
           type: "terminal_attached",
           terminal: TERMINAL_INFO,
           snapshot: "",
-          start_seq: 0,
+          start_seq: startSeq,
         };
       }
       return { type: "ack" };
@@ -137,11 +140,11 @@ function fakeClient(sent: BinaryFrame[], binary: BinarySink) {
   } as unknown as H4rnClient;
 }
 
-async function startController(sent: BinaryFrame[]) {
+async function startController(sent: BinaryFrame[], startSeq = 0) {
   const controller = new TerminalController();
   const binary: BinarySink = { handler: null };
   await controller.start({
-    client: fakeClient(sent, binary),
+    client: fakeClient(sent, binary, startSeq),
     threadId: null,
     host: "host_test",
     cwd: "/tmp",
@@ -205,8 +208,10 @@ describe("terminal controller query replies", () => {
 
   it("marks xterm's answer on the wire and forwards the same bytes as input without a query", async () => {
     const sent: BinaryFrame[] = [];
-    const { controller, term } = await startController(sent);
+    const { controller, term, binary } = await startController(sent);
 
+    // A query always arrives in output; give the parser chunk 1 to answer in.
+    pushOutput(binary, 1, "");
     // The program asks for the cursor position; xterm answers.
     expect(term.query({ final: "n" }, [6])).toBe(false);
     term.input("\x1b[12;40R");
@@ -216,7 +221,7 @@ describe("terminal controller query replies", () => {
     term.input("ls\r");
 
     expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([
-      [1, "\x1b[12;40R"],
+      [ptyInputReplySeq(1), "\x1b[12;40R"],
       [0, "\x1b[1;2R"],
       [0, "ls\r"],
     ]);
@@ -225,14 +230,18 @@ describe("terminal controller query replies", () => {
 
   it("marks device attribute and colour answers", async () => {
     const sent: BinaryFrame[] = [];
-    const { controller, term } = await startController(sent);
+    const { controller, term, binary } = await startController(sent);
 
+    pushOutput(binary, 1, "");
     term.query({ final: "c" });
     term.input("\x1b[?1;2c");
     term.query({ prefix: "?", intermediates: "$", final: "p" }, [12]);
     term.input("\x1b[?12;2$y");
 
-    expect(sent.map((frame) => frame.seq)).toEqual([1, 1]);
+    expect(sent.map((frame) => frame.seq)).toEqual([
+      ptyInputReplySeq(1, 0),
+      ptyInputReplySeq(1, 1),
+    ]);
     controller.dispose();
   });
 
@@ -290,5 +299,41 @@ describe("terminal controller query replies", () => {
 
     expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(8)]);
     controller.dispose();
+  });
+
+  it("answers a split query once when a second viewer attached mid-query", async () => {
+    // The early viewer parses chunks 7 and 8. The late one attaches with
+    // chunk 7 already folded into its snapshot, so it parses only chunk 8 and
+    // numbers its answers differently.
+    const earlySent: BinaryFrame[] = [];
+    const early = await startController(earlySent, 0);
+    const lateSent: BinaryFrame[] = [];
+    const late = await startController(lateSent, 7);
+
+    pushOutput(early.binary, 7, "\x1b[?12");
+    early.term.finishWrite();
+    pushOutput(early.binary, 8, ";2$y");
+    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    early.term.input("\x1b[?12;2$y");
+    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    early.term.input("\x1b[?25;2$y");
+    early.term.finishWrite();
+
+    // The late viewer sees only the tail of the split query and the second
+    // query, which it numbers as ordinal 0.
+    pushOutput(late.binary, 8, ";2$y");
+    expect(late.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    late.term.input("\x1b[?25;2$y");
+    late.term.finishWrite();
+    late.term.input("ls\r");
+
+    expect(earlySent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(8, 0), "\x1b[?12;2$y"],
+      [ptyInputReplySeq(8, 1), "\x1b[?25;2$y"],
+    ]);
+    expect(lateSent.map((frame) => [frame.seq, payload(frame)])).toEqual([[0, "ls\r"]]);
+
+    early.controller.dispose();
+    late.controller.dispose();
   });
 });
