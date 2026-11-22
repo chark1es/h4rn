@@ -8,6 +8,7 @@ import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
+import { WorktreeSettings } from "@/features/worktrees/WorktreeSettings";
 import {
   COMMAND_GROUPS,
   COMMANDS,
@@ -320,6 +321,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   devices: () => <LiveHostsForm pairing />,
   providers: ProxySettings,
   harnesses: HarnessSettings,
+  worktrees: WorktreeSettings,
   resume: AutoResumeSettings,
   forges: ForgeSettings,
   general: GeneralForm,

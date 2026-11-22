@@ -423,6 +423,18 @@ impl DaemonBuilder {
             .register_provider(Arc::new(SubagentProvider::new(Arc::clone(&subagents))));
         subagents.start();
 
+        // Worktrees h4rn made, plus the ones threads and their harnesses use.
+        let worktrees = Arc::new(
+            crate::worktrees::WorktreeTracker::open(
+                Arc::clone(&manager),
+                Arc::clone(&subagents),
+                self.config.data_dir.clone(),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open the worktree tracker: {error}"))?,
+        );
+        worktrees.start();
+
         let harness_versions = Arc::new(crate::harness_versions::HarnessVersionService::new(
             Arc::clone(&catalog),
             self.harness_registry
@@ -438,6 +450,7 @@ impl DaemonBuilder {
             projects,
             manager,
             subagents,
+            worktrees,
             hosts,
             terminals,
             blobs,
@@ -463,6 +476,7 @@ pub struct Daemon {
     config: Config,
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
+    worktrees: Arc<crate::worktrees::WorktreeTracker>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     blobs: Arc<BlobStore>,
@@ -504,6 +518,11 @@ impl Daemon {
     /// Subagent supervisor handle (tests and diagnostics).
     pub fn subagents(&self) -> Arc<SubagentManager> {
         Arc::clone(&self.subagents)
+    }
+
+    /// Worktree tracker handle (tests and diagnostics).
+    pub fn worktrees(&self) -> Arc<crate::worktrees::WorktreeTracker> {
+        Arc::clone(&self.worktrees)
     }
 
     /// Terminal manager handle (tests and diagnostics).
@@ -606,6 +625,7 @@ impl Daemon {
         let state = AppState {
             manager: Arc::clone(&self.manager),
             subagents: Arc::clone(&self.subagents),
+            worktrees: Arc::clone(&self.worktrees),
             hosts,
             terminals: Arc::clone(&self.terminals),
             blobs: Arc::clone(&self.blobs),
@@ -689,6 +709,7 @@ impl Daemon {
             addrs,
             manager: self.manager,
             subagents: self.subagents,
+            worktrees: self.worktrees,
             terminals: self.terminals,
             forge: self.forge,
             mcp: self.mcp,
@@ -708,6 +729,7 @@ pub struct BoundDaemon {
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
+    worktrees: Arc<crate::worktrees::WorktreeTracker>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
     mcp: Arc<McpService>,
@@ -742,6 +764,11 @@ impl BoundDaemon {
         Arc::clone(&self.subagents)
     }
 
+    /// Worktree tracker for in-process tests and diagnostics.
+    pub fn worktrees(&self) -> Arc<crate::worktrees::WorktreeTracker> {
+        Arc::clone(&self.worktrees)
+    }
+
     /// MCP hub service for in-process tests and diagnostics.
     pub fn mcp(&self) -> Arc<McpService> {
         Arc::clone(&self.mcp)
@@ -760,6 +787,7 @@ impl BoundDaemon {
             addrs,
             manager,
             subagents,
+            worktrees,
             terminals,
             forge,
             mcp,
@@ -785,6 +813,7 @@ impl BoundDaemon {
         }
         forge.shutdown();
         mcp.shutdown().await;
+        worktrees.shutdown().await;
         subagents.shutdown().await;
         manager.shutdown().await;
         terminals.shutdown().await;

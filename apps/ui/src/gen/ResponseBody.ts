@@ -53,10 +53,12 @@ import type { SkillImportPreview } from "./SkillImportPreview";
 import type { SkillInventory } from "./SkillInventory";
 import type { SkillSummary } from "./SkillSummary";
 import type { SkillSyncStatus } from "./SkillSyncStatus";
+import type { SkippedWorktree } from "./SkippedWorktree";
 import type { SubagentView } from "./SubagentView";
 import type { TerminalInfo } from "./TerminalInfo";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
+import type { TrackedWorktree } from "./TrackedWorktree";
 import type { TurnId } from "./TurnId";
 import type { UploadState } from "./UploadState";
 import type { UploadTicket } from "./UploadTicket";
@@ -454,7 +456,23 @@ subagent: SubagentView, } | { "type": "harness_versions",
 /**
  * One row per harness, in stable order.
  */
-harnesses: Array<HarnessVersionInfo>, } | { "type": "projects", 
+harnesses: Array<HarnessVersionInfo>, } | { "type": "worktrees", 
+/**
+ * Active first, then orphaned, then settled; newest first within each.
+ */
+worktrees: Array<TrackedWorktree>, } | { "type": "worktrees_cleared", 
+/**
+ * Paths removed.
+ */
+removed: Array<string>, 
+/**
+ * Paths left in place, with reasons.
+ */
+skipped: Array<SkippedWorktree>, 
+/**
+ * The fresh list after clearing.
+ */
+worktrees: Array<TrackedWorktree>, } | { "type": "projects", 
 /**
  * Projects.
  */

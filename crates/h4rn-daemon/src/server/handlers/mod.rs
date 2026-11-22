@@ -20,6 +20,7 @@ pub(super) mod proxy;
 pub(super) mod skills;
 pub(super) mod subagents;
 pub(super) mod usage;
+pub(super) mod worktrees;
 
 /// Generates the service enum, request classification, dispatch and forwarder
 /// spawning from one registration list.
@@ -78,6 +79,7 @@ declare_services! {
     Subagents => subagents,
     Usage => usage,
     HarnessVersions => harness_versions,
+    Worktrees => worktrees,
     Projects => projects,
     NetworkAccess => network_access,
 }

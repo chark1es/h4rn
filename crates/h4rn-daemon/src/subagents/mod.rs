@@ -384,6 +384,16 @@ impl SubagentManager {
         Some(view)
     }
 
+    /// The repository stored for every subagent that runs in a worktree,
+    /// keyed by subagent id.
+    pub async fn worktree_repos(&self) -> HashMap<String, PathBuf> {
+        let records = self.inner.records.lock().await;
+        records
+            .iter()
+            .filter_map(|(id, record)| record.repo.clone().map(|repo| (id.clone(), repo)))
+            .collect()
+    }
+
     /// Waits up to `wait` for a terminal state, then returns the current view.
     ///
     /// The caller (the MCP tool) clamps this well below its own timeout.
@@ -655,16 +665,35 @@ impl Inner {
         let (workspace_path, branch, repo, worktree_dir) = match request.isolation {
             SubagentIsolation::Shared => (parent.workspace_path.clone(), None, None, None),
             SubagentIsolation::Worktree => {
-                let repo = PathBuf::from(&parent.workspace_path);
-                if !worktree::is_git_repo(&repo) {
-                    return Err(SubagentError::Invalid(format!(
-                        "worktree isolation needs a git repository; {} is not one",
-                        parent.workspace_path
-                    )));
-                }
+                let workspace = PathBuf::from(&parent.workspace_path);
                 let branch = format!("h4rn/sa-{}", short_id(subagent_id.as_str()));
                 let dest = worktree::worktree_path(&self.data_dir, subagent_id.as_str());
-                worktree::create(&repo, &dest, &branch).map_err(SubagentError::Internal)?;
+                // Every probe and `git worktree add` shells out and blocks, so
+                // they run off the async runtime.
+                let workspace_text = parent.workspace_path.clone();
+                let (create_branch, create_dest) = (branch.clone(), dest.clone());
+                let repo = tokio::task::spawn_blocking(move || {
+                    if !worktree::is_git_repo(&workspace) {
+                        return Err(SubagentError::Invalid(format!(
+                            "worktree isolation needs a git repository; {workspace_text} is not one"
+                        )));
+                    }
+                    // A nested child's parent workspace may itself be a
+                    // subagent worktree (a linked worktree). Record the
+                    // repository's main worktree so the branch can be found
+                    // after that directory is removed. The worktree is still
+                    // created from the parent's workspace so the child
+                    // branches from the parent's HEAD.
+                    let repo = crate::worktrees::git::repo_of(&workspace)
+                        .unwrap_or_else(|| workspace.clone());
+                    worktree::create(&workspace, &create_dest, &create_branch)
+                        .map_err(SubagentError::Internal)?;
+                    Ok(repo)
+                })
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!("the worktree setup task failed: {error}"))
+                })??;
                 (
                     dest.display().to_string(),
                     Some(branch),
@@ -746,9 +775,14 @@ impl Inner {
                 let record = self.records.lock().await.remove(subagent_id.as_str());
                 let _ = self.store.remove(subagent_id.as_str()).await;
                 if let Some(record) = record
-                    && let (Some(repo), Some(worktree)) = (&record.repo, &record.worktree)
+                    && let (Some(repo), Some(worktree)) = (record.repo, record.worktree)
                 {
-                    worktree::remove(repo, worktree, record.view.branch.as_deref());
+                    let branch = record.view.branch;
+                    // Shells out to git; keep it off the runtime.
+                    let _ = tokio::task::spawn_blocking(move || {
+                        worktree::remove(&repo, &worktree, branch.as_deref());
+                    })
+                    .await;
                 }
                 return Err(error.into());
             }
@@ -1190,16 +1224,23 @@ impl Inner {
         if let Some(repo) = &repo
             && let Some(worktree) = &worktree
         {
-            result.files_changed = worktree::changes(worktree);
             let delete_branch = matches!(
                 state,
                 SubagentState::Cancelled | SubagentState::BudgetExceeded
             );
-            worktree::remove(
-                repo,
-                worktree,
-                delete_branch.then_some(view.branch.as_deref()).flatten(),
-            );
+            let (repo, worktree) = (repo.clone(), worktree.clone());
+            let branch = delete_branch.then(|| view.branch.clone()).flatten();
+            // Both shell out to git; keep them off the runtime.
+            result.files_changed = tokio::task::spawn_blocking(move || {
+                let changes = worktree::changes(&worktree);
+                worktree::remove(&repo, &worktree, branch.as_deref());
+                changes
+            })
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "the subagent worktree cleanup task failed");
+                Vec::new()
+            });
         }
         if state == SubagentState::Failed || state == SubagentState::BudgetExceeded {
             let records = self.records.lock().await;

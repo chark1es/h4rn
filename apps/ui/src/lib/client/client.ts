@@ -21,7 +21,7 @@ import type {
 } from "./types";
 import { WebSocketTransport } from "./ws";
 
-export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
+type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello"
   ? Extract<ResponseBody, { type: "hello" }>
   : T extends "list_harness_versions"
     ? Extract<ResponseBody, { type: "harness_versions" }>
@@ -229,6 +229,12 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                                                                                       type: "ack";
                                                                                                     }
                                                                                                   >;
+
+export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktrees"
+  ? Extract<ResponseBody, { type: "worktrees" }>
+  : T extends "clear_worktrees"
+    ? Extract<ResponseBody, { type: "worktrees_cleared" }>
+    : ResponseOfRest<T>;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

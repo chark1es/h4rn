@@ -42,6 +42,7 @@ pub mod subagents;
 pub mod supervisor;
 pub mod terminal;
 pub mod threads;
+pub mod worktrees;
 
 pub use cli::{Cli, Command};
 pub use config::Config;

@@ -1380,6 +1380,20 @@ impl ThreadManager {
         Some(record.meta.clone())
     }
 
+    /// Whether a turn is in flight for this thread.
+    ///
+    /// True from the moment `begin_turn` runs until the record completes and
+    /// clears it. This is independent of the agent state: a failed or denied
+    /// tool call sets `AgentState::Error` while the turn keeps running, so a
+    /// caller asking "could this thread still write?" must ask both.
+    pub async fn turn_in_flight(&self, thread_id: &ThreadId) -> bool {
+        let Ok(handle) = self.inner.handle(thread_id).await else {
+            return false;
+        };
+        let record = handle.lock().await;
+        record.active.is_some()
+    }
+
     /// Current projection of one thread.
     pub async fn thread_summary(&self, thread_id: &ThreadId) -> Option<ThreadSummary> {
         let handle = self.inner.handle(thread_id).await.ok()?;

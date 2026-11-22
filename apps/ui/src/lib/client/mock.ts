@@ -58,11 +58,13 @@ import type {
   SkillSource,
   SkillSummary,
   SkillSyncStatus,
+  SkippedWorktree,
   SubagentView,
   TerminalExit,
   TerminalInfo,
   ThreadSummary,
   ToolCall,
+  TrackedWorktree,
   TransportStatus,
   TurnStatus,
   Usage,
@@ -1930,6 +1932,7 @@ class MockDaemon {
   private proxyProfiles: ProxyProfile[] = [];
   private harnessVersions: HarnessVersionInfo[] = mockHarnessVersions();
   private harnessUpdating = new Set<HarnessKind>();
+  private worktrees: TrackedWorktree[] = mockWorktrees();
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
   private networkAccess = { enabled: false };
   /** Devices paired directly; seeded so Settings shows a realistic list. */
@@ -2905,6 +2908,25 @@ class MockDaemon {
       case "update_harness":
         this.updateHarness(frame.id, body.harness);
         return;
+      case "list_worktrees":
+        this.ok(frame.id, { type: "worktrees", worktrees: this.worktrees });
+        return;
+      case "clear_worktrees": {
+        const { removed, skipped } = clearMockWorktrees(
+          this.worktrees,
+          body.paths ?? null,
+          body.force,
+          body.bulk,
+        );
+        this.worktrees = this.worktrees.filter((entry) => !removed.includes(entry.path));
+        this.ok(frame.id, {
+          type: "worktrees_cleared",
+          removed,
+          skipped,
+          worktrees: this.worktrees,
+        });
+        return;
+      }
       case "list_proxy_profiles":
         this.ok(frame.id, { type: "proxy_profiles", profiles: this.proxyProfiles });
         return;
@@ -4484,6 +4506,191 @@ class MockDaemon {
     }, ms);
     this.timers.add(timer);
   }
+}
+
+/** The one sample branch with commits not yet merged into HEAD. */
+const MOCK_UNMERGED_BRANCH = "h4rn/sa-b71d04aa";
+
+/** The sample agent checkout that holds a submodule of the repository. */
+const MOCK_SUBMODULE_PATH = "/home/you/code/api/.claude/worktrees/agent-a41c9e0d";
+
+/**
+ * Workspaces of the sample threads. A row that is one of them, or holds one
+ * anywhere inside it, is a thread workspace that Clear all leaves alone.
+ */
+const MOCK_THREAD_WORKSPACES = [
+  "/home/you/.t3/worktrees/api/feature-search-index",
+  "/home/you/code/api/.claude/worktrees/agent-77e0b3f1/packages/web",
+];
+
+/** A path's components, split on both `/` and `\` (Windows paths too). */
+function mockPathComponents(path: string): string[] {
+  return path.split(/[\\/]/).filter((part) => part !== "");
+}
+
+/** Whether Clear all leaves this row alone, compared by whole path components. */
+function isMockThreadWorkspace(entry: TrackedWorktree, workspaces: readonly string[]): boolean {
+  if (entry.origin === "thread") return true;
+  const root = mockPathComponents(entry.path);
+  return workspaces.some((workspace) => {
+    const parts = mockPathComponents(workspace);
+    return parts.length >= root.length && root.every((part, index) => parts[index] === part);
+  });
+}
+
+/**
+ * What a clear does to the sample rows, as the daemon would decide it.
+ *
+ * Settings sends the explicit paths of the rows the user saw (for Clear all
+ * too, with `bulk`); `paths: null` keeps other callers working. Clear all
+ * (`bulk`, or no paths) never removes a thread workspace, by origin or by path,
+ * and reports each one it leaves out as skipped.
+ */
+export function clearMockWorktrees(
+  worktrees: readonly TrackedWorktree[],
+  paths: readonly string[] | null,
+  force: boolean,
+  bulk: boolean,
+  workspaces: readonly string[] = MOCK_THREAD_WORKSPACES,
+): { removed: string[]; skipped: SkippedWorktree[] } {
+  const removed: string[] = [];
+  const skipped: SkippedWorktree[] = [];
+  const targets =
+    paths ?? worktrees.filter((entry) => entry.status !== "active").map((entry) => entry.path);
+  const excludeThreads = bulk || paths === null;
+  for (const path of targets) {
+    const entry = worktrees.find((candidate) => candidate.path === path);
+    const reason = !entry
+      ? "not tracked"
+      : excludeThreads && isMockThreadWorkspace(entry, workspaces)
+        ? "is a thread workspace"
+        : worktreeSkipReason(entry, force);
+    if (reason) skipped.push({ path, reason });
+    else removed.push(path);
+  }
+  return { removed, skipped };
+}
+
+/** Why a clear leaves this worktree in place, or null when it can go. */
+function worktreeSkipReason(entry: TrackedWorktree, force: boolean): string | null {
+  if (entry.status === "active") {
+    return `in use by ${entry.accessed_by.find((a) => a.working)?.title ?? "a thread"}`;
+  }
+  if (force) return null;
+  if (entry.dirty) return "has uncommitted changes";
+  if (entry.owned && entry.branch === MOCK_UNMERGED_BRANCH) {
+    return `branch ${entry.branch} has unmerged commits`;
+  }
+  if (entry.path === MOCK_SUBMODULE_PATH) return "contains submodules";
+  return null;
+}
+
+/**
+ * Six worktrees: one in use, then a kept branch, an orphan, two agent
+ * checkouts (one holding a thread's workspace) and a dirty one.
+ */
+function mockWorktrees(): TrackedWorktree[] {
+  const repo = "/home/you/code/api";
+  const minutes = (ago: number) => new Date(Date.now() - ago * 60_000).toISOString();
+  const access = (title: string, working: boolean, ago: number) => ({
+    thread_id: `mock-wt-${title.length}-${ago}`,
+    title,
+    subagent_id: null,
+    working,
+    last_seen: minutes(ago),
+  });
+  return [
+    {
+      path: "/home/you/.local/share/h4rn/subagents/3f9a1c2e/worktree",
+      repo,
+      branch: "h4rn/sa-3f9a1c2e",
+      origin: "subagent",
+      status: "active",
+      exists: true,
+      dirty: true,
+      owned: true,
+      subagent_id: "3f9a1c2e",
+      task: "Add rate limiting to the session endpoints",
+      accessed_by: [access("Rate limit session endpoints", true, 1)],
+      first_seen: minutes(40),
+      last_seen: minutes(1),
+    },
+    {
+      path: "/home/you/.local/share/h4rn/subagents/b71d04aa/worktree",
+      repo,
+      branch: "h4rn/sa-b71d04aa",
+      origin: "subagent",
+      status: "orphaned",
+      exists: true,
+      dirty: false,
+      owned: true,
+      subagent_id: "b71d04aa",
+      task: "Split the billing module",
+      accessed_by: [access("Split the billing module", false, 1500)],
+      first_seen: minutes(1600),
+      last_seen: minutes(1500),
+    },
+    {
+      path: "/home/you/code/api/.claude/worktrees/agent-a41c9e0d",
+      repo,
+      branch: "worktree-agent-a41c9e0d",
+      origin: "harness",
+      status: "settled",
+      exists: true,
+      dirty: false,
+      owned: false,
+      subagent_id: null,
+      task: null,
+      accessed_by: [access("Audit the auth middleware", false, 300)],
+      first_seen: minutes(320),
+      last_seen: minutes(300),
+    },
+    {
+      path: "/home/you/code/api/.claude/worktrees/agent-77e0b3f1",
+      repo,
+      branch: "worktree-agent-77e0b3f1",
+      origin: "harness",
+      status: "settled",
+      exists: true,
+      dirty: false,
+      owned: false,
+      subagent_id: null,
+      task: null,
+      accessed_by: [access("Tidy the web package", false, 900)],
+      first_seen: minutes(960),
+      last_seen: minutes(900),
+    },
+    {
+      path: "/home/you/.t3/worktrees/api/feature-search-index",
+      repo,
+      branch: "feature/search-index",
+      origin: "thread",
+      status: "settled",
+      exists: true,
+      dirty: true,
+      owned: false,
+      subagent_id: null,
+      task: null,
+      accessed_by: [access("Index usage events by harness", false, 2900)],
+      first_seen: minutes(4000),
+      last_seen: minutes(2900),
+    },
+    {
+      path: "/home/you/.local/share/h4rn/subagents/0c52e7b8/worktree",
+      repo,
+      branch: "h4rn/sa-0c52e7b8",
+      origin: "subagent",
+      status: "settled",
+      exists: false,
+      dirty: null,
+      owned: true,
+      subagent_id: "0c52e7b8",
+      task: "Rename harness instance ids",
+      accessed_by: [access("Rename harness instance ids", false, 6000)],
+      first_seen: minutes(6100),
+      last_seen: minutes(6000),
+    },
+  ];
 }
 
 function harnessName(harness: HarnessKind): string {

@@ -943,7 +943,21 @@ request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "u
 /**
  * Harness to update.
  */
-harness: HarnessKind, } | { "type": "list_projects", 
+harness: HarnessKind, } | { "type": "list_worktrees" } | { "type": "clear_worktrees", 
+/**
+ * Worktree paths to clear; `None` clears every non-active entry
+ * except thread workspaces, which are only removed when named.
+ */
+paths: Array<string> | null, 
+/**
+ * Remove even with uncommitted changes or unmerged commits.
+ */
+force: boolean, 
+/**
+ * Clear all: apply the same exclusions as `paths: None` — never a
+ * thread workspace — to the given paths.
+ */
+bulk: boolean, } | { "type": "list_projects", 
 /**
  * Host to list.
  */

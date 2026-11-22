@@ -516,6 +516,20 @@ pub enum ResponseBody {
         /// One row per harness, in stable order.
         harnesses: Vec<crate::HarnessVersionInfo>,
     },
+    /// Tracked git worktrees.
+    Worktrees {
+        /// Active first, then orphaned, then settled; newest first within each.
+        worktrees: Vec<crate::TrackedWorktree>,
+    },
+    /// The outcome of [`crate::ClientRequest::ClearWorktrees`].
+    WorktreesCleared {
+        /// Paths removed.
+        removed: Vec<String>,
+        /// Paths left in place, with reasons.
+        skipped: Vec<crate::SkippedWorktree>,
+        /// The fresh list after clearing.
+        worktrees: Vec<crate::TrackedWorktree>,
+    },
     /// Registered projects on one host, oldest first.
     Projects {
         /// Projects.

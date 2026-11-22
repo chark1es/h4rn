@@ -66,6 +66,8 @@ pub struct AppState {
     pub manager: Arc<ThreadManager>,
     /// Delegated child threads and their budgets (ADR-038).
     pub subagents: Arc<crate::subagents::SubagentManager>,
+    /// Tracked git worktrees: subagent, thread and harness-made.
+    pub worktrees: Arc<crate::worktrees::WorktreeTracker>,
     /// Host inventory.
     pub hosts: Arc<HostInventory>,
     /// Daemon-owned PTY terminals.
