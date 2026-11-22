@@ -245,16 +245,23 @@ export function NewThreadDialog() {
   // The model list comes from the agent's own handshake. Probe once when the
   // picker selects it; the daemon starts the command once and stops it. A
   // device without admin cannot probe, and the failure is remembered so the
-  // picker does not retry on every render or selection.
+  // picker does not retry on every render or selection. One probe at a time:
+  // while a handshake is in flight a second start would only race it.
   useEffect(() => {
     if (!open || !agentId || probes[agentId] || probeErrors[agentId]) return;
+    if (probingAgents[agentId] === true) return;
     void probeAcpAgent(agentId);
-  }, [open, agentId, probes, probeErrors]);
+  }, [open, agentId, probes, probeErrors, probingAgents]);
 
   // The probe fills from an admin device; every device still sees the last
-  // successful result the daemon stored in the list. A failed probe falls back
-  // to that stored result instead of emptying the picker.
-  const agentModels = acpModelChoices(probe, Boolean(probeError), selectedAgent?.models);
+  // successful result the daemon stored in the list. A failed probe (a rejected
+  // request, or an answer that carries an error) falls back to that stored
+  // result instead of emptying the picker.
+  const agentModels = acpModelChoices(
+    probe,
+    Boolean(probeError) || Boolean(probe?.error),
+    selectedAgent?.models,
+  );
   const firstAgentModel = agentModels[0];
   useEffect(() => {
     if (!open || harness !== "acp" || !firstAgentModel) return;

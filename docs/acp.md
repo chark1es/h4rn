@@ -67,12 +67,15 @@ protocol gets:
 - plans and thought chunks (thoughts stay out of the transcript);
 - `session/request_permission` approvals, answered by the thread's approval card;
 - cancel, which asks the agent to stop the current turn without killing the process;
-- `session/load` resume when the agent advertises it; without it a restart starts a fresh session
-  and replaces the stored id rather than failing the thread;
+- `session/load` resume when the agent advertises `loadSession`/`sessionCapabilities.load`, and
+  `session/resume` when it advertises only `sessionCapabilities.resume` (resume reattaches without
+  replaying history); when it advertises neither, a restart starts a fresh session and replaces the
+  stored id rather than failing the thread;
 - plans, forwarded as plan events so the thread shows every step and its status;
 - the models and modes the agent advertises, whether in `session/new`'s legacy `models`/`modes`
-  objects or in the ACP v1 `configOptions` (selections use `session/set_config_option` for the
-  latter).
+  objects or in the ACP v1 `configOptions`. A generic agent that advertises both uses
+  `configOptions` and selects with `session/set_config_option`; the legacy catalogue is used only
+  when no v1 model or mode option is offered.
 
 Antigravity keeps its exact catalogue of models, its case-sensitive default aliases and its own
 wording ("Antigravity stopped the turn: …", "Antigravity is requesting permission", "the account
@@ -86,8 +89,11 @@ opens a session cannot leave the old id behind to be replayed by the next try.
 Model choices are read from the last successful `Check` result, which is stored in the list, so a
 `view`-scoped device can offer them without starting a process. A probe is admin-only; when one is
 refused, the picker shows the error and lets you type a model id instead of retrying the probe. A
-failed `Check` keeps the previous models and version; a probe whose configuration was edited while
-it ran stores nothing, because its answer describes the command that no longer exists.
+failed `Check` (a refused request, or an answer that carries the agent's own error) falls back to the
+previous models; a probe whose configuration was edited while it ran stores nothing and reports a
+conflict, because its answer describes the command that no longer exists. One probe runs per agent at
+a time, and a probe never holds the connection: other requests on the same socket keep answering
+while an agent finishes its handshake.
 
 A plan an agent publishes is shown in the turn as a quiet checklist: each step with a mark for
 pending, in progress or done. The newest plan replaces the previous one for that turn.
@@ -111,7 +117,9 @@ Writes need the `admin` pairing scope; listing is available to `view`.
 
 The list lives in `acp-agents.json` in the daemon's data directory. Entries are validated on load as
 well as on save: a hand-edited entry the form would reject (a NUL in an argument, an empty command)
-is dropped with one log line instead of failing a thread at spawn time.
+is dropped with one log line instead of failing a thread at spawn time. When two entries claim the
+same instance id, the first is kept and the later one is dropped with a warning, so a configuration
+never has two answers to "which command is this agent".
 
 ## Security
 

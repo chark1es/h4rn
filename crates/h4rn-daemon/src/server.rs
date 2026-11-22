@@ -659,6 +659,20 @@ impl Connection {
         }
 
         let result: Result<ResponseBody, ProtoError> = match handlers::Service::of(&body) {
+            // A probe starts a process and can take seconds. It answers from its
+            // own task, so this socket keeps serving frames meanwhile.
+            Some(_) if handlers::acp_agents::defers_reply(&body) => {
+                let state = self.state.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let frame = match handlers::acp_agents::handle_deferred(&state, body).await {
+                        Ok(body) => response_frame(id, body),
+                        Err(error) => error_frame(id, error),
+                    };
+                    let _ = tx.send(Outbound::Text(frame)).await;
+                });
+                return None;
+            }
             Some(service) => service.handle(self, body).await,
             None => match body {
                 ClientRequest::Hello {

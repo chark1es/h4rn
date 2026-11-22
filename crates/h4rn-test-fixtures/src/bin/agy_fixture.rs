@@ -104,16 +104,30 @@ fn main() {
             "initialize" => reply(
                 &mut stdout,
                 id,
-                json!({
-                    "protocolVersion": 1,
-                    "agentInfo": {"name": "agy fixture", "version": env!("CARGO_PKG_VERSION")},
-                    "agentCapabilities": {
-                        "loadSession": true,
-                        "promptCapabilities": {"image": false, "embeddedContext": false},
-                        "mcpCapabilities": {},
-                        "sessionCapabilities": {"load": {}, "close": {}}
-                    }
-                }),
+                if std::env::var_os("H4RN_FIXTURE_RESUME_ONLY").is_some() {
+                    // A resume-only agent: it can continue a conversation but
+                    // has no `session/load`.
+                    json!({
+                        "protocolVersion": 1,
+                        "agentInfo": {"name": "agy fixture", "version": env!("CARGO_PKG_VERSION")},
+                        "agentCapabilities": {
+                            "promptCapabilities": {"image": false, "embeddedContext": false},
+                            "mcpCapabilities": {},
+                            "sessionCapabilities": {"resume": {}},
+                        }
+                    })
+                } else {
+                    json!({
+                        "protocolVersion": 1,
+                        "agentInfo": {"name": "agy fixture", "version": env!("CARGO_PKG_VERSION")},
+                        "agentCapabilities": {
+                            "loadSession": true,
+                            "promptCapabilities": {"image": false, "embeddedContext": false},
+                            "mcpCapabilities": {},
+                            "sessionCapabilities": {"load": {}, "close": {}}
+                        }
+                    })
+                },
             ),
             "session/new" => {
                 sessions += 1;
@@ -134,6 +148,17 @@ fn main() {
                     .to_string();
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, &format!("load {session_id}"));
+                }
+                reply(&mut stdout, id, session_reply(&session_id));
+            }
+            "session/resume" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("fixture-session")
+                    .to_string();
+                if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
+                    log_start(cwd, &format!("resume {session_id}"));
                 }
                 reply(&mut stdout, id, session_reply(&session_id));
             }

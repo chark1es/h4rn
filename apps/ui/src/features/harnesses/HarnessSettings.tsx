@@ -323,9 +323,9 @@ function AgentForm({
         <div className="ctl" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
           {form.args.map((argument, index) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: rows are ordered form fields, not keyed data
-            <div key={index} style={{ display: "flex", gap: 6 }}>
+            <div key={index} className="q-acp-row">
               <input
-                className="q-input q-mono"
+                className="q-input q-mono q-acp-value"
                 value={argument}
                 onChange={(event) => {
                   const args = [...form.args];
@@ -333,7 +333,6 @@ function AgentForm({
                   patch({ args });
                 }}
                 aria-label={`Argument ${index + 1}`}
-                style={{ flex: 1 }}
               />
               <button
                 type="button"
@@ -365,9 +364,9 @@ function AgentForm({
         <div className="ctl" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
           {form.env.map((row, index) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: rows are ordered form fields, not keyed data
-            <div key={index} style={{ display: "flex", gap: 6 }}>
+            <div key={index} className="q-acp-row">
               <input
-                className="q-input q-mono"
+                className="q-input q-mono q-acp-name"
                 value={row.key}
                 onChange={(event) => {
                   const env = [...form.env];
@@ -376,10 +375,9 @@ function AgentForm({
                 }}
                 aria-label={`Environment name ${index + 1}`}
                 placeholder="NAME"
-                style={{ flex: "0 0 180px" }}
               />
               <input
-                className="q-input q-mono"
+                className="q-input q-mono q-acp-value"
                 value={row.value}
                 onChange={(event) => {
                   const env = [...form.env];
@@ -387,7 +385,6 @@ function AgentForm({
                   patch({ env });
                 }}
                 aria-label={`Environment value ${index + 1}`}
-                style={{ flex: 1 }}
               />
               <button
                 type="button"

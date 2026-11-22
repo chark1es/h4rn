@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -113,6 +114,17 @@ describe("TurnBlock", () => {
     expect(markup).toContain('data-status="pending"');
     expect(markup).toContain("(done)");
     expect(markup).toContain("(in progress)");
+  });
+
+  it("marks a step in progress with a neutral mark, not the accent", () => {
+    const css = readFileSync(new URL("../../styles/quiet.css", import.meta.url), "utf8");
+    const start = css.indexOf('.q-plan .q-plan-step[data-status="in_progress"] .q-plan-mark');
+    expect(start).toBeGreaterThan(-1);
+    const rule = css.slice(start, css.indexOf("}", start));
+    // Blue means "you are needed"; the agent working through a plan is not a
+    // request for attention.
+    expect(rule).not.toMatch(/--accent/);
+    expect(rule).toMatch(/--fg/);
   });
 
   it("offers Reply, not a resend, after a failed or interrupted turn", () => {

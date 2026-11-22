@@ -252,6 +252,25 @@ All notable changes to h4rn are recorded here. The format follows
   changed while it ran stores nothing, a failed probe leaves the last good models in place, and an
   invalid entry loaded from `acp-agents.json` is dropped with one log line instead of failing at
   spawn.
+- **Local ACP agents: a probe is one conversation, and editing one never loses work.** A probe whose
+  configuration changed while it ran now reports a conflict instead of success, its answer is
+  discarded by the client even if it arrives after the edit, and the picker never starts a second
+  probe for an agent already handshaking. A probe also answers on its own task, so an agent that is
+  slow to start no longer holds the connection: other requests on the same socket keep answering
+  while the handshake runs. A probe answer that carries the agent's own error falls back to the
+  daemon's cached models instead of emptying the picker. The delegate dialog's erased task, summary
+  and budget survive a parent summary refresh while the dialog is open, and the environment editor
+  stacks its name, value and Remove controls with 44 px targets on a phone. A plan step that is in
+  progress now carries a neutral mark rather than the accent: blue still means the person is needed.
+- **Local ACP agents: the method the agent actually advertises.** `session/resume` is no longer read
+  as `session/load` support: an agent that advertises only resume is continued with
+  `session/resume`, one that advertises load replays with `session/load`, and one that advertises
+  neither starts a fresh session. A generic agent that advertises both a legacy `models`/`modes`
+  catalogue and v1 `configOptions` now uses `configOptions` and selects with
+  `session/set_config_option`; Antigravity keeps its own account catalogue. A command-line
+  fingerprint is structured (JSON), so an edit from no arguments to one empty argument starts a new
+  session instead of replaying the old id. Two entries with the same instance id in
+  `acp-agents.json` keep the first and drop the second with a warning.
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
   terminal now sends SIGHUP to the shell's own process id, waits for it to forward the hangup, keeps

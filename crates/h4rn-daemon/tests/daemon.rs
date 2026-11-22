@@ -2804,3 +2804,78 @@ async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
     );
     daemon.stop().await;
 }
+
+/// A probe starts a third-party process and can take seconds. Another request
+/// on the same connection must be answered while it is in flight.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_slow_acp_probe_does_not_block_the_connection() {
+    let daemon = boot_isolated().await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let dir = tempfile::tempdir().expect("probe dir");
+    let marker = dir.path().join("started");
+    let gate = dir.path().join("gate");
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("H4RN_TEST_MARKER".to_owned(), marker.display().to_string());
+    env.insert("H4RN_TEST_GATE".to_owned(), gate.display().to_string());
+    let added = client
+        .request(ClientRequest::AddAcpAgent {
+            agent: h4rn_protocol::AcpAgentSpec {
+                id: "slow".into(),
+                name: "Slow agent".into(),
+                command: "sh".into(),
+                // Parks inside the command until the test releases the gate, so
+                // the probe is provably still pending.
+                args: vec![
+                    "-c".into(),
+                    "touch \"$H4RN_TEST_MARKER\"; while [ ! -f \"$H4RN_TEST_GATE\" ]; do sleep 0.02; done"
+                        .into(),
+                ],
+                env,
+                working_dir: h4rn_protocol::AcpWorkingDir::ThreadWorkspace,
+            },
+        })
+        .await;
+    assert!(
+        matches!(added, Ok(ResponseBody::AcpAgent { .. })),
+        "configure the agent: {added:?}"
+    );
+
+    let probe_id = client
+        .send(ClientRequest::ProbeAcpAgent { id: "slow".into() })
+        .await;
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the probe starts the command");
+
+    // A plain read on the same socket must answer without waiting for the
+    // probe's handshake, which is still parked in the command.
+    let listed = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request(ClientRequest::ListAcpAgents),
+    )
+    .await
+    .expect("another request answers while the probe is pending");
+    assert!(
+        matches!(listed, Ok(ResponseBody::AcpAgents { .. })),
+        "{listed:?}"
+    );
+    assert!(!gate.exists(), "the probe was still pending");
+
+    std::fs::write(&gate, b"go").expect("release the probe");
+    let probe = tokio::time::timeout(EVENT_TIMEOUT, client.response(probe_id))
+        .await
+        .expect("the probe answers once it is released");
+    assert!(
+        matches!(probe, Ok(ResponseBody::AcpAgentProbe { .. })),
+        "{probe:?}"
+    );
+
+    daemon.stop().await;
+}

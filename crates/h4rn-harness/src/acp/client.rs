@@ -616,6 +616,28 @@ impl AcpClient {
         Ok(AcpSessionInfo::from_value(&result, session_id))
     }
 
+    /// Continues a stored session without replaying it (`session/resume`).
+    ///
+    /// `session/resume` is its own capability: an agent that advertises only
+    /// `resume` has no `session/load`, so callers must check
+    /// [`AgentCapabilities::supports_resume`] before choosing this method.
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        mcp_servers: &[super::protocol::AcpMcpServer],
+    ) -> Result<AcpSessionInfo, AcpError> {
+        let params = json!({
+            "sessionId": session_id,
+            "cwd": cwd.display().to_string(),
+            "mcpServers": mcp_servers.iter().map(|server| server.to_json()).collect::<Vec<_>>(),
+        });
+        let result = self
+            .call("session/resume", params, Some(SESSION_TIMEOUT))
+            .await?;
+        Ok(AcpSessionInfo::from_value(&result, session_id))
+    }
+
     /// Sends one prompt and waits for the agent's turn result.
     pub async fn prompt(
         &self,

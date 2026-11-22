@@ -8,9 +8,10 @@
 //! agent can reuse the same client with a different spawn line.
 //!
 //! The wire shapes live in [`protocol`]; this module owns the transport,
-//! request correlation, process supervision, and the filesystem scope. It does
-//! not translate `AcpEvent` into [`crate::HarnessEvent`] because that mapping
-//! is adapter policy (for example, whether thought chunks are surfaced).
+//! request correlation, process supervision, and the filesystem scope. The
+//! `AcpEvent` → [`crate::HarnessEvent`] mapping is owned by [`session`], the
+//! runtime every adapter shares; an adapter only supplies its
+//! [`AcpSessionPolicy`] (labels, its limit parser, model/mode preferences).
 //!
 //! # Process posture
 //!

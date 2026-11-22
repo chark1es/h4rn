@@ -5124,6 +5124,36 @@ fieldset.q-seg-fs {
   justify-content: space-between;
   gap: 12px;
 }
+/* One argument or environment override in the ACP agent form. */
+.q-acp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.q-acp-row .q-acp-name {
+  flex: 0 0 180px;
+}
+.q-acp-row .q-acp-value {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* A phone stacks the name, the value and Remove. Three controls in one row
+   leave each of them too narrow to read or tap. */
+@media (max-width: 639px) {
+  .q-acp-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .q-acp-row .q-acp-name,
+  .q-acp-row .q-acp-value {
+    flex: none;
+    width: 100%;
+  }
+  .q-acp-row .q-input,
+  .q-acp-row .q-btn {
+    min-height: 44px;
+  }
+}
 .q-harness-manual {
   margin: 0;
   padding: 8px 0 10px;
@@ -5415,8 +5445,10 @@ fieldset.q-seg-fs {
 .q-plan .q-plan-step[data-status="in_progress"] {
   color: var(--fg);
 }
+/* Work in progress is the agent moving, not the person being asked something,
+   so the mark stays neutral. Blue is reserved for the person. */
 .q-plan .q-plan-step[data-status="in_progress"] .q-plan-mark {
-  color: var(--accent-tx);
+  color: var(--fg-2);
 }
 .q-plan .q-plan-step[data-status="completed"] {
   color: var(--fg-3);

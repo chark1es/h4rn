@@ -197,6 +197,9 @@ fn antigravity_policy() -> AcpSessionPolicy {
         // Antigravity keeps its explicit unsupported error for an agent that
         // cannot load a stored session.
         fresh_without_load: false,
+        // Its `models`/`modes` objects are the complete account catalogue;
+        // Antigravity advertises `configOptions` alongside them.
+        config_options_first: false,
     }
 }
 

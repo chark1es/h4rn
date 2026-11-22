@@ -69,6 +69,7 @@ impl AcpAgentService {
         // A hand-edited file can hold an entry the add/update path would have
         // refused (a NUL in an argument, an empty command). Validate on load so
         // that entry is dropped here instead of panicking the spawn later.
+        let mut seen = std::collections::HashSet::new();
         let agents = file
             .agents
             .into_iter()
@@ -82,6 +83,21 @@ impl AcpAgentService {
                         "dropping an invalid configured ACP agent"
                     );
                     None
+                }
+            })
+            // Only the first entry for an id is kept. Two entries under one id
+            // would make `get_acp_agent` and a probe disagree about which
+            // configuration they describe.
+            .filter(|agent| {
+                if seen.insert(agent.spec.id.clone()) {
+                    true
+                } else {
+                    tracing::warn!(
+                        id = %agent.spec.id,
+                        path = %path.display(),
+                        "dropping a configured ACP agent whose id repeats an earlier entry"
+                    );
+                    false
                 }
             })
             .collect();
@@ -170,39 +186,46 @@ impl AcpAgentService {
     }
 
     /// Starts one agent, reports what it advertises, and stops it.
+    ///
+    /// The handshake takes seconds and the agent stays editable meanwhile. A
+    /// result for a configuration the person has already changed says nothing
+    /// about the new one, so it is neither stored nor returned as success: the
+    /// caller gets a conflict and the picker keeps the last good answer.
     pub async fn probe(&self, id: &str) -> Result<AcpAgentProbe, ProtoError> {
         let Some(spec) = self.spec(id) else {
             return Err(not_found(id));
         };
-        // The handshake takes seconds and the agent stays editable meanwhile.
-        // Remember which configuration this probe describes; a result for a
-        // configuration the person has already changed says nothing about the
-        // new one, so it is not stored.
         let fingerprint = spec_fingerprint(&spec);
         let probe = probe_acp_agent(&spec).await;
         // A failed probe keeps the last successful result: the picker can
         // still offer the models the agent advertised before, and the failure
         // itself is returned to the admin device that asked.
-        if probe.error.is_none() {
-            let mut agents = lock(&self.agents);
-            let mut next = agents.clone();
-            if let Some(agent) = next.iter_mut().find(|agent| agent.spec.id == id) {
-                if spec_fingerprint(&agent.spec) != fingerprint {
-                    tracing::debug!(
-                        id,
-                        "discarding an ACP probe whose configuration changed while it ran"
-                    );
-                    return Ok(probe);
-                }
-                agent.version = probe.version.clone();
-                agent.models = probe.models.clone();
-                agent.modes = probe.modes.clone();
-                if let Err(error) = save(&self.path, &next) {
-                    tracing::warn!(error = %error.message, "could not persist an ACP agent's probe result");
-                } else {
-                    *agents = next;
-                }
-            }
+        if probe.error.is_some() {
+            return Ok(probe);
+        }
+        let mut agents = lock(&self.agents);
+        let mut next = agents.clone();
+        let Some(agent) = next.iter_mut().find(|agent| agent.spec.id == id) else {
+            tracing::debug!(
+                id,
+                "discarding an ACP probe for an agent that was removed while it ran"
+            );
+            return Err(superseded(id));
+        };
+        if spec_fingerprint(&agent.spec) != fingerprint {
+            tracing::debug!(
+                id,
+                "discarding an ACP probe whose configuration changed while it ran"
+            );
+            return Err(superseded(id));
+        }
+        agent.version = probe.version.clone();
+        agent.models = probe.models.clone();
+        agent.modes = probe.modes.clone();
+        if let Err(error) = save(&self.path, &next) {
+            tracing::warn!(error = %error.message, "could not persist an ACP agent's probe result");
+        } else {
+            *agents = next;
         }
         Ok(probe)
     }
@@ -416,6 +439,15 @@ fn not_found(id: &str) -> ProtoError {
     ProtoError::plain(
         ProtoErrorCode::NotFound,
         format!("no ACP agent `{id}` is configured on this host"),
+    )
+}
+
+/// The configuration changed (or the agent was removed) while its probe ran.
+fn superseded(id: &str) -> ProtoError {
+    ProtoError::new(
+        ProtoErrorCode::Conflict,
+        format!("ACP agent `{id}` changed while its probe was running"),
+        "Run Check again; the models from the old command were discarded.",
     )
 }
 
@@ -635,6 +667,28 @@ mod tests {
             vec!["good"],
             "an invalid stored entry is dropped, not spawned"
         );
+    }
+
+    #[test]
+    fn a_repeated_id_in_the_file_keeps_the_first_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join(FILE);
+        // A hand-edited or merged file: two entries claim the same id.
+        std::fs::write(
+            &file,
+            r#"{"agents":[
+                {"id":"demo","name":"First","command":"demo-agent","args":[],"env":{},"working_dir":{"kind":"thread_workspace"}},
+                {"id":"demo","name":"Second","command":"other-agent","args":[],"env":{},"working_dir":{"kind":"thread_workspace"}}
+            ]}"#,
+        )
+        .expect("write");
+
+        let service = AcpAgentService::open(dir.path()).expect("open");
+        let agents = service.list();
+        assert_eq!(agents.len(), 1, "one id, one entry");
+        assert_eq!(agents[0].name, "First");
+        assert_eq!(agents[0].command, "demo-agent");
+        assert_eq!(service.spec("demo").expect("spec").name, "First");
     }
 
     #[test]

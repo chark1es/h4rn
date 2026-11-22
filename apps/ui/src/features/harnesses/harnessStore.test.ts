@@ -133,6 +133,64 @@ describe("harness versions store", () => {
     expect(getHarnessState().probeErrors.demo).toContain("admin");
   });
 
+  it("starts no second probe while one is already running", async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    request.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const first = probeAcpAgent("demo");
+    await vi.waitFor(() => expect(getHarnessState().probing.demo).toBe(true));
+
+    const second = await probeAcpAgent("demo");
+    expect(second).toBeNull();
+    expect(request).toHaveBeenCalledTimes(1);
+
+    finish({ type: "acp_agent_probe", probe: { id: "demo", installed: true, models: [] } });
+    request.mockResolvedValueOnce({ type: "acp_agents", agents: [] });
+    await first;
+    expect(getHarnessState().probing.demo).toBe(false);
+  });
+
+  it("drops a probe result that a configuration change invalidated", async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    request.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const pending = probeAcpAgent("demo");
+    await vi.waitFor(() => expect(getHarnessState().probing.demo).toBe(true));
+
+    // The agent is edited while its handshake is still in flight.
+    request.mockResolvedValueOnce({ type: "acp_agent", agent: { id: "demo" } });
+    request.mockResolvedValueOnce({ type: "acp_agents", agents: [] });
+    await updateAcpAgent("demo", {
+      id: "demo",
+      name: "Demo",
+      command: "demo-agent",
+      args: [],
+      env: {},
+      working_dir: { kind: "thread_workspace" },
+    });
+
+    // The old command's models arrive afterwards and must not reach the picker.
+    finish({
+      type: "acp_agent_probe",
+      probe: {
+        id: "demo",
+        installed: true,
+        models: [{ id: "old-model", name: "Old" }],
+        modes: [],
+      },
+    });
+    request.mockResolvedValue({ type: "acp_agents", agents: [] });
+    await pending;
+
+    expect(getHarnessState().probes.demo).toBeUndefined();
+  });
+
   it("drops a cached probe when the agent is edited", async () => {
     request.mockResolvedValueOnce({
       type: "acp_agent_probe",

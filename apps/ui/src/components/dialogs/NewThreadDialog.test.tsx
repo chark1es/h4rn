@@ -19,6 +19,21 @@ const mock = vi.hoisted(() => {
     localHostId: null,
     ui: { newThreadOpen: true, newThreadPreset: null },
   };
+  const harness: {
+    agents: unknown[];
+    probes: Record<string, unknown>;
+    probeErrors: Record<string, string>;
+    probing: Record<string, boolean>;
+    rows: unknown[];
+    loaded: boolean;
+  } = {
+    agents: [],
+    probes: {},
+    probeErrors: {},
+    probing: {},
+    rows: [],
+    loaded: false,
+  };
   const attachments = {
     attachments: [] as unknown[],
     tasks: [] as unknown[],
@@ -36,6 +51,7 @@ const mock = vi.hoisted(() => {
   };
   return {
     state,
+    harness,
     attachments,
     createThread: vi.fn<(input: Record<string, unknown>) => Promise<boolean>>(),
     closeNewThread: vi.fn(),
@@ -51,15 +67,7 @@ vi.mock("@/lib/store/appStore", () => ({
 vi.mock("@/features/harnesses/harnessStore", () => ({
   // The real store always carries a full state object; the dialog reads the
   // agents list and the harness rows from it.
-  useHarnesses: (selector: (value: unknown) => unknown) =>
-    selector({
-      agents: [],
-      probes: {},
-      probeErrors: {},
-      probing: {},
-      rows: [],
-      loaded: false,
-    }),
+  useHarnesses: (selector: (value: unknown) => unknown) => selector(mock.harness),
   useAcpAgents: () => undefined,
   useHarnessVersions: () => undefined,
   probeAcpAgent: () => Promise.resolve(null),
@@ -127,6 +135,12 @@ describe("NewThreadDialog drafts", () => {
     mock.state.localHostId = null;
     mock.state.ui.newThreadOpen = true;
     mock.state.ui.newThreadPreset = null;
+    mock.harness.agents = [];
+    mock.harness.probes = {};
+    mock.harness.probeErrors = {};
+    mock.harness.probing = {};
+    mock.harness.rows = [];
+    mock.harness.loaded = false;
     mock.createThread.mockReset();
     mock.closeNewThread.mockReset();
   });
@@ -306,6 +320,57 @@ describe("NewThreadDialog drafts", () => {
     expect(
       Object.keys(window.localStorage).filter((key) => key.startsWith("h4rn.newThread.workspace.")),
     ).toEqual([]);
+  });
+
+  it("falls back to the daemon's cached models when the probe answer carries an error", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.harness.agents = [
+      {
+        id: "demo",
+        name: "Demo agent",
+        command: "demo-agent",
+        env: {},
+        working_dir: { kind: "thread_workspace" },
+        installed: true,
+        models: [{ id: "cached-model", name: "Cached" }],
+        modes: [],
+        version: null,
+        path: "/usr/bin/demo-agent",
+      },
+    ];
+    // The probe completed, but the agent failed its handshake: its error is on
+    // the answer, not a rejected request.
+    mock.harness.probes = {
+      demo: {
+        id: "demo",
+        installed: true,
+        version: null,
+        models: [],
+        modes: [],
+        error: "the agent exited before the handshake",
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Demo agent" })).toBeTruthy(),
+    );
+    const options = Array.from(
+      document.querySelectorAll<HTMLOptionElement>("#h4rn-models-acp option"),
+    ).map((option) => option.value);
+    expect(options).toEqual(["cached-model"]);
+    expect(screen.getByText("the agent exited before the handshake")).toBeTruthy();
   });
 
   it("does not keep the Start-press flag after the pointer is cancelled", async () => {

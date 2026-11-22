@@ -159,6 +159,10 @@ impl Harness for GenericAcpHarness {
             // A stored id the agent can no longer load starts a fresh session
             // instead of failing the thread forever.
             fresh_without_load: true,
+            // A generic agent's v1 `configOptions` are what
+            // `session/set_config_option` selects from, even when it also
+            // publishes a legacy catalogue.
+            config_options_first: true,
         };
         match crate::acp::session_start(&client, &spec, policy, &workspace).await {
             Ok(session) => Ok(session.into_session()),
@@ -202,12 +206,15 @@ fn command_fingerprint(agent: &AcpAgentSpec, workspace: &Path) -> String {
         AcpWorkingDir::ThreadWorkspace => workspace,
         AcpWorkingDir::FixedPath { path } => Path::new(path),
     };
-    format!(
-        "{}\u{0}{}\u{0}{}",
-        agent.command,
-        agent.args.join("\u{0}"),
-        directory.display()
-    )
+    // JSON keeps the three parts separate: an empty argument list and a list
+    // holding one empty argument are different command lines, and joining them
+    // with a separator would encode both the same way.
+    serde_json::json!({
+        "command": agent.command,
+        "args": agent.args,
+        "directory": directory.display().to_string(),
+    })
+    .to_string()
 }
 
 /// Resolves a configured command to an absolute executable path.
@@ -516,6 +523,25 @@ mod tests {
                 .instance_fingerprint("demo", workspace.path())
                 .expect("fingerprint"),
             "a fixed directory replaces the thread workspace"
+        );
+    }
+
+    #[test]
+    fn an_empty_argument_is_not_the_same_as_no_argument() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut none = spec("demo", "agent");
+        none.args = Vec::new();
+        let mut empty = spec("demo", "agent");
+        empty.args = vec![String::new()];
+        let fingerprint = |agent: AcpAgentSpec| {
+            GenericAcpHarness::new(Arc::new(StaticAcpAgents::new().with(agent)))
+                .instance_fingerprint("demo", workspace.path())
+                .expect("fingerprint")
+        };
+        assert_ne!(
+            fingerprint(none),
+            fingerprint(empty),
+            "an empty argument list and one empty argument are different command lines"
         );
     }
 

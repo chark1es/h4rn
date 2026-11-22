@@ -225,8 +225,22 @@ export async function loadAcpAgentSpec(id: string): Promise<AcpAgentSpec> {
   return response.agent;
 }
 
+/**
+ * Bumped whenever an agent's configuration changes.
+ *
+ * A probe captures the generation it started under. A result from before an
+ * edit describes a command that no longer exists, so it is dropped instead of
+ * filling the picker with the old models.
+ */
+const probeGenerations = new Map<string, number>();
+
+function probeGeneration(id: string): number {
+  return probeGenerations.get(id) ?? 0;
+}
+
 /** Drops what a probe learned about an agent whose configuration changed. */
 function forgetProbe(id: string): void {
+  probeGenerations.set(id, probeGeneration(id) + 1);
   const { [id]: _probe, ...probes } = state.probes;
   const { [id]: _error, ...probeErrors } = state.probeErrors;
   const { [id]: _probing, ...probing } = state.probing;
@@ -235,10 +249,20 @@ function forgetProbe(id: string): void {
 
 /** Starts one agent once and records what it advertises. */
 export async function probeAcpAgent(id: string): Promise<string | null> {
+  // One probe per agent: a second start would run the command twice, and the
+  // later answer could describe the older handshake.
+  if (state.probing[id] === true) return null;
+  const generation = probeGeneration(id);
   patch({ probing: { ...state.probing, [id]: true } });
   try {
     const response = await getClient().request({ type: "probe_acp_agent", id });
-    if (response.type !== "acp_agent_probe") return null;
+    // The agent was edited or removed while this handshake ran; its answer
+    // belongs to no configuration that exists now.
+    if (probeGeneration(id) !== generation) return null;
+    if (response.type !== "acp_agent_probe") {
+      patch({ probing: { ...state.probing, [id]: false } });
+      return null;
+    }
     const { [id]: _error, ...probeErrors } = state.probeErrors;
     patch({
       probes: { ...state.probes, [id]: response.probe },
@@ -250,6 +274,7 @@ export async function probeAcpAgent(id: string): Promise<string | null> {
     await loadAcpAgents();
     return response.probe.error ?? null;
   } catch (error) {
+    if (probeGeneration(id) !== generation) return null;
     const message = protoMessage(error);
     patch({
       probing: { ...state.probing, [id]: false },
@@ -264,6 +289,7 @@ export async function probeAcpAgent(id: string): Promise<string | null> {
 export function resetHarnessStoreForTests(): void {
   unsubscribeFrames?.();
   unsubscribeFrames = null;
+  probeGenerations.clear();
   state = initialState;
   for (const listener of listeners) listener();
 }

@@ -1,5 +1,5 @@
 import { LoaderIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import {
   Dialog,
@@ -78,19 +78,40 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
     [hosts],
   );
 
+  /**
+   * Stable facts about the parent, for the seed.
+   *
+   * A parent summary is refreshed on every event (title, agent state, usage,
+   * last activity), so the raw `thread` object changes constantly while the
+   * dialog is open. Seeding from these scalars means only a new open, or a
+   * different parent identity, resets the draft: an erased task, summary or
+   * budget would otherwise vanish mid-typing because the daemon sent a tick.
+   */
+  const parentThreadId = thread.thread_id;
+  const parentHarness = thread.harness;
+  const parentHost = thread.host;
+  const parentModel = thread.model;
+  const seeded = useRef<string | null>(null);
+
   useEffect(() => {
-    if (!open) return;
-    const nextHarness: HarnessKind = thread.harness === "acp" ? "claude_code" : thread.harness;
+    if (!open) {
+      seeded.current = null;
+      return;
+    }
+    const seed = [parentThreadId, parentHarness, parentHost, parentModel].join("\u0000");
+    if (seeded.current === seed) return;
+    seeded.current = seed;
+    const nextHarness: HarnessKind = parentHarness === "acp" ? "claude_code" : parentHarness;
     setTask("");
     setHarness(nextHarness);
-    setHost(thread.host);
-    setModel(delegateModel(thread, nextHarness));
+    setHost(parentHost);
+    setModel(delegateModel({ harness: parentHarness, model: parentModel }, nextHarness));
     setIsolation("worktree");
     setMaxTurns("");
     setMaxMinutes("");
     setMaxTokens("");
     setSummary("");
-  }, [open, thread.harness, thread.host, thread.model, thread]);
+  }, [open, parentThreadId, parentHarness, parentHost, parentModel]);
 
   const submit = async () => {
     if (!task.trim() || spawning) return;

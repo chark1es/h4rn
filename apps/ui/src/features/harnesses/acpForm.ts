@@ -169,10 +169,11 @@ export function acpPickerOptions(
 /**
  * The model ids the new-thread picker offers for a configured agent.
  *
- * A probe that ran successfully is the fresh answer. A failed probe (or a
- * device that may not probe at all) falls back to the last successful result
- * the daemon stored in the list, so the picker is never emptied by a failure
- * that says nothing about the models the agent advertises.
+ * A probe that ran successfully is the fresh answer. A failed probe (a rejected
+ * request, an answer that carries `error`, or a device that may not probe at
+ * all) falls back to the last successful result the daemon stored in the list,
+ * so the picker is never emptied by a failure that says nothing about the
+ * models the agent advertises.
  */
 export function acpModelChoices(
   probe: { models: { id: string }[] } | undefined,

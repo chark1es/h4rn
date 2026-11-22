@@ -95,6 +95,14 @@ fn build_fixture() -> Option<PathBuf> {
 /// A manager and the agent service behind it. The data directory is returned
 /// too: editing a configuration later writes `acp-agents.json`.
 async fn manager_with_agents() -> Option<(ThreadManager, Arc<AcpAgentService>, tempfile::TempDir)> {
+    manager_with_agent_env(std::collections::BTreeMap::new()).await
+}
+
+/// The same manager with extra environment for the configured agent, so a test
+/// can switch a fixture behaviour (a resume-only handshake, a preamble gate).
+async fn manager_with_agent_env(
+    env: std::collections::BTreeMap<String, String>,
+) -> Option<(ThreadManager, Arc<AcpAgentService>, tempfile::TempDir)> {
     let binary = fixture_binary()?;
     let data = tempfile::tempdir().expect("data dir");
     let agents = Arc::new(AcpAgentService::open(data.path()).expect("agent service"));
@@ -104,7 +112,7 @@ async fn manager_with_agents() -> Option<(ThreadManager, Arc<AcpAgentService>, t
             name: "ACP fixture".into(),
             command: binary.display().to_string(),
             args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            env,
             working_dir: AcpWorkingDir::ThreadWorkspace,
         })
         .expect("configure the fixture");
@@ -284,6 +292,89 @@ async fn a_stale_resume_id_does_not_survive_a_failed_start() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn an_empty_argument_edit_starts_a_fresh_session() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let Some((manager, agents, _data)) = manager_with_agents().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let thread = create(&manager, workspace.path()).await;
+    let (status, _, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+
+    manager.restart_sessions(&[HarnessKind::Acp]).await;
+
+    // `[]` and `[""]` are different command lines even though joining them
+    // would look identical. The thread must open a new session, not replay the
+    // id the old command line produced.
+    let mut edited = agents.spec("fixture").expect("spec");
+    edited.args = vec![String::new()];
+    agents.update("fixture", edited).expect("update");
+    manager
+        .send_message(&thread, "after the empty argument".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(
+        text.contains("echo: after the empty argument"),
+        "got {text:?}"
+    );
+
+    let starts = std::fs::read_to_string(workspace.path().join(".agy-fixture-sessions"))
+        .expect("the fixture recorded its sessions");
+    let last = starts.lines().last().unwrap_or_default();
+    assert!(
+        last.starts_with("new"),
+        "the edited command line opens a new session: {starts:?}"
+    );
+    assert!(
+        !starts.contains("load"),
+        "an empty argument is not the same command line as no arguments: {starts:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_only_agent_restarts_with_session_resume() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("H4RN_FIXTURE_RESUME_ONLY".into(), "1".into());
+    let Some((manager, _agents, _data)) = manager_with_agent_env(env).await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let thread = create(&manager, workspace.path()).await;
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: hello"), "got {text:?}");
+
+    // A restart reopens the stored id. The agent advertises `resume` but not
+    // `load`, so the daemon must call the method the agent actually has.
+    manager.restart_sessions(&[HarnessKind::Acp]).await;
+    manager
+        .send_message(&thread, "after the restart".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: after the restart"), "got {text:?}");
+
+    let starts = std::fs::read_to_string(workspace.path().join(".agy-fixture-sessions"))
+        .expect("the fixture recorded its sessions");
+    assert!(
+        starts.lines().any(|line| line.starts_with("resume")),
+        "a resume-only agent is continued with session/resume: {starts:?}"
+    );
+    assert!(!starts.contains("load"), "resume is not load: {starts:?}");
+
+    manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_probe_for_a_configuration_that_changed_is_discarded() {
     let Some(binary) = fixture_binary() else {
         return skip_without_fixture();
@@ -327,13 +418,13 @@ async fn a_probe_for_a_configuration_that_changed_is_discarded() {
     let probe = tokio::time::timeout(TURN_TIMEOUT, probing)
         .await
         .expect("the probe finished")
-        .expect("probe task")
-        .expect("probe");
-    assert!(
-        probe.error.is_none(),
-        "the probe itself succeeded: {probe:?}"
+        .expect("probe task");
+    let error = probe.expect_err("a result for the old configuration is not success");
+    assert_eq!(
+        error.code,
+        h4rn_protocol::ProtoErrorCode::Conflict,
+        "the daemon names the discarded probe: {error:?}"
     );
-    assert!(probe.version.is_some());
     let listed = agents.list();
     assert!(
         listed[0].version.is_none() && listed[0].models.is_empty(),

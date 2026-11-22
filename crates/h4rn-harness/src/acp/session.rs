@@ -94,6 +94,14 @@ pub(crate) struct AcpSessionPolicy {
     /// agent does not advertise `session/load`. Generic agents start over;
     /// Antigravity keeps its explicit unsupported error.
     pub fresh_without_load: bool,
+    /// Whether the v1 `configOptions` catalogue wins over the legacy
+    /// `models`/`modes` objects when an agent advertises both.
+    ///
+    /// The catalogue and the RPC that selects from it belong together: choosing
+    /// `configOptions` means selecting with `session/set_config_option`.
+    /// Antigravity's account catalogue is the legacy one; a generic agent's v1
+    /// options are its own.
+    pub config_options_first: bool,
 }
 
 impl AcpSessionPolicy {
@@ -186,9 +194,17 @@ impl AcpSession {
                     .load_session(session_id, workspace, &servers)
                     .await
                     .map_err(|error| map_acp_error(error, policy.harness))?,
-                // A stored id from an agent that cannot load means the agent
-                // changed (or never supported resume). Starting over is the
-                // only honest option; the new id replaces the stored one.
+                // `session/resume` is a different method, not a synonym for
+                // `session/load`: an agent that only advertises resume has no
+                // load, so replaying an old conversation through `load` would
+                // fail. The history is not replayed here; the agent keeps it.
+                Some(session_id) if capabilities.supports_resume() => client
+                    .resume_session(session_id, workspace, &servers)
+                    .await
+                    .map_err(|error| map_acp_error(error, policy.harness))?,
+                // A stored id from an agent that can neither load nor resume
+                // means the agent changed (or never supported either). Starting
+                // over is the only honest option; the new id replaces the old.
                 Some(_) if policy.fresh_without_load => client
                     .new_session(workspace, &servers)
                     .await
@@ -205,6 +221,14 @@ impl AcpSession {
                     .await
                     .map_err(|error| map_acp_error(error, policy.harness))?,
             };
+        // Which catalogue a selection RPC understands is adapter policy:
+        // Antigravity's legacy `models`/`modes` objects win, a generic agent's
+        // v1 `configOptions` do.
+        let session = if policy.config_options_first {
+            session.prefer_config_options()
+        } else {
+            session
+        };
 
         let requested = spec.model.trim();
         if !requested.is_empty() && !policy.is_default_model(requested) {
@@ -1527,6 +1551,7 @@ mod tests {
             model_list_label: "the agent offers",
             case_sensitive_default_models: false,
             fresh_without_load: true,
+            config_options_first: false,
         }
     }
 
@@ -1855,6 +1880,128 @@ mod tests {
             other => panic!("unexpected first event {other:?}"),
         }
         drop(events);
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resume_only_agent_continues_with_session_resume() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            assert_eq!(initialize["method"], "initialize");
+            // `resume` without `load`: the agent can continue a conversation
+            // but cannot replay one.
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {"sessionCapabilities": {"resume": {}}}
+                    }
+                }),
+            )
+            .await;
+            let resume = next_frame(&mut reader).await;
+            assert_eq!(
+                resume["method"], "session/resume",
+                "the method the agent advertises, not session/load"
+            );
+            assert_eq!(resume["params"]["sessionId"], "s-old");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": resume["id"], "result": {"sessionId": "s-old"}}),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.resume_id = Some("s-old".into());
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("start session")
+            .into_session();
+        let mut events = session.events();
+        match events.next().await.expect("session started") {
+            HarnessEvent::SessionStarted { session_id } => assert_eq!(session_id, "s-old"),
+            other => panic!("unexpected first event {other:?}"),
+        }
+        drop(events);
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_generic_agent_prefers_its_config_options_catalogue() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+            )
+            .await;
+            let new_session = next_frame(&mut reader).await;
+            assert_eq!(new_session["method"], "session/new");
+            // Both catalogues, disagreeing: the legacy one lists "legacy", the
+            // v1 config option lists "v1-model".
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": new_session["id"],
+                    "result": {
+                        "sessionId": "s-1",
+                        "models": {
+                            "availableModels": [{"modelId": "legacy", "name": "Legacy"}],
+                            "currentModelId": "legacy"
+                        },
+                        "configOptions": [{
+                            "id": "model",
+                            "name": "Model",
+                            "category": "model",
+                            "type": "select",
+                            "currentValue": "legacy",
+                            "options": [
+                                {"value": "legacy", "name": "Legacy"},
+                                {"value": "v1-model", "name": "V1"}
+                            ]
+                        }]
+                    }
+                }),
+            )
+            .await;
+
+            let model = next_frame(&mut reader).await;
+            assert_eq!(
+                model["method"], "session/set_config_option",
+                "the catalogue the agent offered through configOptions is selected with the config RPC"
+            );
+            assert_eq!(model["params"]["configId"], "model");
+            assert_eq!(model["params"]["value"], "v1-model");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": model["id"], "result": {}}),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.model = "v1-model".into();
+        let policy = AcpSessionPolicy {
+            config_options_first: true,
+            ..policy()
+        };
+        let mut session = AcpSession::start(&client, &spec, policy, workspace.path())
+            .await
+            .expect("start session")
+            .into_session();
         agent.await.expect("agent");
         session.shutdown().await.expect("shutdown");
     }
