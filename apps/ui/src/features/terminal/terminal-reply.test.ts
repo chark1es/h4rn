@@ -171,6 +171,135 @@ describe("terminal query replies", () => {
     }
   });
 
+  it("records the output chunk and ordinal that carried each query", () => {
+    const tracker = new TerminalQueryTracker();
+
+    tracker.beginChunk(5);
+    tracker.expect(/pattern/);
+    expect(tracker.takeReply("pattern")).toEqual({ position: 5, ordinal: 0 });
+    tracker.endChunk();
+
+    // Two queued chunks: a query is attributed to the one being parsed.
+    tracker.beginChunk(6);
+    tracker.beginChunk(7);
+    tracker.expect(/first/);
+    expect(tracker.takeReply("first")).toEqual({ position: 6, ordinal: 0 });
+    tracker.endChunk();
+    tracker.expect(/second/);
+    expect(tracker.takeReply("second")).toEqual({ position: 7, ordinal: 0 });
+    tracker.endChunk();
+
+    // A query seen before any output names no position (old-client shape).
+    tracker.expect(/bare/);
+    expect(tracker.takeReply("bare")).toEqual({ position: 0, ordinal: 0 });
+    expect(tracker.takeReply("nothing")).toBeNull();
+  });
+
+  it("numbers every answer in one chunk, including after an earlier answer", () => {
+    const tracker = new TerminalQueryTracker();
+
+    tracker.beginChunk(9);
+    tracker.expect(/first/);
+    tracker.expect(/second/);
+    // The first answer arriving before the next query is recorded must not
+    // renumber the second: xterm parses and answers in one pass.
+    expect(tracker.takeReply("first")).toEqual({ position: 9, ordinal: 0 });
+    tracker.expect(/third/);
+    expect(tracker.takeReply("second")).toEqual({ position: 9, ordinal: 1 });
+    expect(tracker.takeReply("third")).toEqual({ position: 9, ordinal: 2 });
+  });
+
+  it("answers a mode query split across frames from the ending chunk", async () => {
+    const term = new Terminal({ cols: 80, rows: 24 });
+    const tracker = new TerminalQueryTracker();
+    const hooks = registerTerminalQueryHooks(term.parser, tracker);
+    const answers: string[] = [];
+    const onData = term.onData((data) => answers.push(data));
+    try {
+      // A real xterm parses DECRQM (`CSI ? Ps $ p`) and answers through
+      // onData. The query starts in chunk 7 and ends in chunk 8.
+      tracker.beginChunk(7);
+      await parse(term, "\x1b[?12");
+      tracker.endChunk();
+
+      tracker.beginChunk(8);
+      await parse(term, "$p");
+      tracker.endChunk();
+
+      expect(answers).toHaveLength(1);
+      expect(tracker.takeReply(answers[0] ?? "")).toEqual({ position: 8, ordinal: 0 });
+    } finally {
+      onData.dispose();
+      for (const hook of hooks) hook.dispose();
+      term.dispose();
+    }
+  });
+
+  it("gives a viewer that attached mid-query no answer for that chunk", async () => {
+    const earlyTerm = new Terminal({ cols: 80, rows: 24 });
+    const lateTerm = new Terminal({ cols: 80, rows: 24 });
+    const earlyTracker = new TerminalQueryTracker();
+    const lateTracker = new TerminalQueryTracker();
+    const earlyHooks = registerTerminalQueryHooks(earlyTerm.parser, earlyTracker);
+    const lateHooks = registerTerminalQueryHooks(lateTerm.parser, lateTracker);
+    const earlyAnswers: string[] = [];
+    const lateAnswers: string[] = [];
+    const earlyData = earlyTerm.onData((data) => earlyAnswers.push(data));
+    const lateData = lateTerm.onData((data) => lateAnswers.push(data));
+    try {
+      // Chunk 7 starts a mode query; chunk 8 ends it and asks another.
+      earlyTracker.beginChunk(7);
+      await parse(earlyTerm, "\x1b[?12");
+      earlyTracker.endChunk();
+      earlyTracker.beginChunk(8);
+      await parse(earlyTerm, ";2$p");
+      await parse(earlyTerm, "\x1b[?25$p");
+      earlyTracker.endChunk();
+
+      // The second viewer attached with chunk 7 folded into its snapshot, so
+      // it parses only chunk 8 and numbers the second query as ordinal 0.
+      lateTracker.beginChunk(8);
+      await parse(lateTerm, ";2$p");
+      await parse(lateTerm, "\x1b[?25$p");
+      lateTracker.endChunk();
+
+      const earlyReplies = earlyAnswers
+        .map((answer) => earlyTracker.takeReply(answer))
+        .filter((reply) => reply !== null);
+      const lateReplies = lateAnswers
+        .map((answer) => lateTracker.takeReply(answer))
+        .filter((reply) => reply !== null);
+
+      expect(earlyReplies).toEqual([
+        { position: 8, ordinal: 0 },
+        { position: 8, ordinal: 1 },
+      ]);
+      // The late viewer's single answer is the early viewer's second query,
+      // renumbered as the first answer of its own chunk.
+      expect(lateReplies).toEqual([{ position: 8, ordinal: 0 }]);
+      expect(lateAnswers).toEqual([earlyAnswers[1]]);
+
+      // The attach-boundary rule drops the late viewer's reply, so each query
+      // is answered exactly once by the viewer that saw the whole query.
+      const attachFloor = 9;
+      const written = [
+        ...earlyReplies,
+        ...lateReplies.filter((reply) => reply.position >= attachFloor),
+      ];
+      expect(written).toEqual([
+        { position: 8, ordinal: 0 },
+        { position: 8, ordinal: 1 },
+      ]);
+    } finally {
+      earlyData.dispose();
+      lateData.dispose();
+      for (const hook of earlyHooks) hook.dispose();
+      for (const hook of lateHooks) hook.dispose();
+      earlyTerm.dispose();
+      lateTerm.dispose();
+    }
+  });
+
   it("forgets a query xterm did not answer when its chunk is done", async () => {
     // Enable window reports so xterm's parser lets the window-size query
     // through to the hook.

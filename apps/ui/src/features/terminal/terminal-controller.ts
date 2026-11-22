@@ -12,10 +12,11 @@ import {
   decodeBinaryFrame,
   encodeBinaryFrame,
   PTY_INPUT_REPLY,
+  ptyInputReplySeq,
 } from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 import { H4rnRequestError } from "@/lib/client/errors";
-
+import type { TerminalQueryReply } from "./terminal-reply";
 import { registerTerminalQueryHooks, TerminalQueryTracker } from "./terminal-reply";
 import { isDarkTheme, terminalTheme } from "./theme";
 
@@ -164,6 +165,7 @@ export class TerminalController {
         terminal_id: this.terminalId,
         cols: Math.max(term.cols, 2),
         rows: Math.max(term.rows, 1),
+        reply_positions: true,
       });
       if (this.disposed) return;
       this.streamId = attached.terminal.stream_id;
@@ -187,18 +189,28 @@ export class TerminalController {
   /**
    * Sends raw text as PTY input (used by the phone key row and tests).
    *
-   * `reply` marks xterm's own answer to a terminal query; the daemon writes
-   * only one attached viewer's answers.
+   * `reply` names the output position that carried the query xterm is
+   * answering and the answer's ordinal within that chunk, or null for typed
+   * input. The daemon writes one answer per `(position, ordinal)` and decides
+   * whether this viewer may answer it: a reply is never dropped here, because
+   * a sole viewer that attached at a snapshot has no other parser to collide
+   * with and may answer its first raw chunk.
    */
-  send(data: string, reply = false): void {
+  send(data: string, reply: TerminalQueryReply | null = null): void {
     if (!this.client || this.streamId === 0) return;
     const payload = new TextEncoder().encode(data);
+    const seq =
+      reply === null
+        ? 0
+        : reply.position > 0
+          ? ptyInputReplySeq(reply.position, reply.ordinal)
+          : PTY_INPUT_REPLY;
     try {
       this.client.sendBinary(
         encodeBinaryFrame({
           kind: BinaryKind.PtyInput,
           streamId: this.streamId,
-          seq: reply ? PTY_INPUT_REPLY : 0,
+          seq,
           payload,
         }),
       );
@@ -260,7 +272,7 @@ export class TerminalController {
     }
     this.track(
       term.onData((data) => {
-        this.send(data, this.queryTracker.take(data));
+        this.send(data, this.queryTracker.takeReply(data));
       }),
     );
     this.track(
@@ -398,10 +410,14 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       // Queries in this chunk are only answerable while it is being parsed:
       // once xterm is done, anything it did not answer has missed its chance
-      // and a later answer-shaped paste must stay input.
+      // and a later answer-shaped paste must stay input. The tracker also
+      // remembers which chunk is being parsed, so an answer names the output
+      // position the daemon uses to keep one answer per query.
       const mark = this.queryTracker.mark();
+      this.queryTracker.beginChunk(frame.seq);
       term.write(frame.payload, () => {
         this.queryTracker.settle(mark);
+        this.queryTracker.endChunk();
         this.tracker?.applied(frame.seq);
         this.scheduleAck();
       });
@@ -412,7 +428,11 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       term.reset();
       this.tracker.reset(frame.seq);
-      term.write(new TextDecoder().decode(frame.payload), () => this.scheduleAck());
+      this.queryTracker.beginChunk(frame.seq);
+      term.write(new TextDecoder().decode(frame.payload), () => {
+        this.queryTracker.endChunk();
+        this.scheduleAck();
+      });
     }
   }
 

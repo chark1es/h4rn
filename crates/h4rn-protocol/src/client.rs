@@ -221,6 +221,13 @@ pub enum ClientRequest {
         /// Viewer height, when known.
         #[serde(default)]
         rows: Option<u16>,
+        /// Whether this client names the output position on every marked reply.
+        ///
+        /// A client that omits it is an older build. While one is attached the
+        /// terminal keeps the legacy single-owner reply rule, because its
+        /// answers cannot be correlated with a query position.
+        #[serde(default)]
+        reply_positions: bool,
     },
     /// List terminals owned by this daemon.
     TerminalList {
