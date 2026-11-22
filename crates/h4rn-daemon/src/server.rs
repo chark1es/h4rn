@@ -98,6 +98,8 @@ pub struct AppState {
     pub meter: Arc<h4rn_meter::MeterHub>,
     /// Harness CLI versions and updates (ADR-043).
     pub harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
+    /// User-configured local ACP agents.
+    pub acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     /// Registered sidebar projects.
     pub projects: Arc<crate::projects::ProjectService>,
     /// Server boot time, for `/healthz`.
@@ -669,6 +671,21 @@ impl Connection {
         }
 
         let result: Result<ResponseBody, ProtoError> = match handlers::Service::of(&body) {
+            // A probe starts a process and can take seconds. It answers from its
+            // own task, so this socket keeps serving frames meanwhile.
+            Some(_) if handlers::acp_agents::defers_reply(&body) => {
+                let state = self.state.clone();
+                let tx = self.tx.clone();
+                let frame_limit = self.frame_limit();
+                tokio::spawn(async move {
+                    let frame = match handlers::acp_agents::handle_deferred(&state, body).await {
+                        Ok(body) => response_frame(id, body, frame_limit),
+                        Err(error) => error_frame(id, error),
+                    };
+                    let _ = tx.send(Outbound::Text(frame)).await;
+                });
+                return None;
+            }
             Some(service) => service.handle(self, body).await,
             None => match body {
                 ClientRequest::Hello {
@@ -783,6 +800,7 @@ impl Connection {
                 ClientRequest::CreateThread {
                     host,
                     harness,
+                    agent_id,
                     workspace_path,
                     model,
                     prompt,
@@ -796,6 +814,7 @@ impl Connection {
                         subagent_id: None,
                         host,
                         harness,
+                        agent_id,
                         workspace_path: workspace_path.clone(),
                         model,
                         prompt,
@@ -808,6 +827,9 @@ impl Connection {
                             // A thread's workspace becomes an authorised IDE root.
                             // This is the only way a workspace is added at runtime,
                             // so IDE mode cannot reach a path the user never opened.
+                            // Authorise the folder the thread actually uses: an ACP
+                            // agent with a fixed directory replaces the one sent.
+                            let workspace_path = created.summary.workspace_path.clone();
                             if let Err(error) = self.state.fs.allow_root(&workspace_path) {
                                 tracing::warn!(%workspace_path, %error, "IDE root not authorised");
                             }
@@ -1838,6 +1860,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             title,
             workspace_path: "/tmp/work".into(),
             branch: None,

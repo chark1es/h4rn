@@ -14,6 +14,7 @@ import type { Item } from "./Item";
 import type { McpCaller } from "./McpCaller";
 import type { McpServerStatusKind } from "./McpServerStatusKind";
 import type { McpShareApproval } from "./McpShareApproval";
+import type { PlanStep } from "./PlanStep";
 import type { SkillSyncStatus } from "./SkillSyncStatus";
 import type { SubagentId } from "./SubagentId";
 import type { SubagentView } from "./SubagentView";
@@ -84,7 +85,19 @@ turn_id: TurnId,
 /**
  * Current tool-call state.
  */
-tool_call: ToolCall, } | { "type": "approval_requested", 
+tool_call: ToolCall, } | { "type": "plan", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * Turn the plan belongs to.
+ */
+turn_id: TurnId, 
+/**
+ * Every step, in the agent's order.
+ */
+entries: Array<PlanStep>, } | { "type": "approval_requested", 
 /**
  * Thread.
  */

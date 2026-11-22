@@ -2,8 +2,9 @@
 
 A cross-harness, cross-machine control surface for coding agents — the prompt book above the work.
 
-h4rn is one instrument for every agent you run: Claude Code, Codex, OpenCode, Antigravity and
-whatever comes next, on this machine or another one. The desktop, mobile and browser clients are
+h4rn is one instrument for every agent you run: Claude Code, Codex, OpenCode, Antigravity, any
+local ACP command ([docs/acp.md](docs/acp.md)) and whatever comes next, on this machine or another
+one. The desktop, mobile and browser clients are
 pure views over a single Rust daemon and one typed WebSocket protocol.
 
 > **Status: v1.0.1.** The daemon, the typed protocol, the Noise transport,

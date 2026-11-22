@@ -449,6 +449,7 @@ async fn thread_messages_carry_attachment_metadata_and_materialise_a_path() {
         .request(ClientRequest::CreateThread {
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: "/tmp/h4rn-workspace".into(),
             model: "fake-model".into(),
             prompt: "read the notes".into(),

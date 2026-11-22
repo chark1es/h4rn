@@ -212,6 +212,7 @@ async fn start_thread(threads: &ThreadManager, workspace: &Path, prompt: &str) -
             subagent_id: None,
             host: HostId::new("host_local"),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: workspace.to_string_lossy().into_owned(),
             model: "default".into(),
             prompt: prompt.to_owned(),
