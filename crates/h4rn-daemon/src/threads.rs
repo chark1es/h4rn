@@ -935,6 +935,14 @@ impl ThreadRecord {
             branch: self.branch.clone(),
             model: self.meta.model.clone(),
             tab,
+            // The manual override sticks until the next turn starts, so this
+            // is true exactly for the placement it caused: a lifecycle
+            // transition to Done after a new turn reports false.
+            placed_by_user: self
+                .state
+                .manual
+                .as_ref()
+                .is_some_and(|manual| manual.tab == tab),
             pinned: self.state.pinned(),
             snoozed_until: is_snoozed(&self.state, now)
                 .then_some(self.state.snoozed_until)
@@ -1531,6 +1539,18 @@ impl ThreadManager {
         self.inner
             .journal
             .read_wire_since_global(after)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))
+    }
+
+    /// The journal head, for the subscribe answer's replay boundary.
+    ///
+    /// The caller must hold [`ThreadManager::lock_append`] so no event can be
+    /// allocated above the returned sequence between the read and going live.
+    pub async fn journal_head(&self) -> Result<u64, ManagerError> {
+        self.inner
+            .journal
+            .head()
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))
     }
