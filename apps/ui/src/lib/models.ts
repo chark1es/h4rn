@@ -26,12 +26,16 @@ export const HARNESS_MODELS: Record<HarnessKind, HarnessModelInfo> = {
   codex: {
     default: "gpt-5.1-codex",
     models: ["gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1"],
-    thinking: { kind: "Reasoning effort", levels: ["minimal", "low", "medium", "high"] },
+    thinking: {
+      kind: "Reasoning effort",
+      levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    },
   },
   opencode: {
     default: "claude-sonnet-5-5",
     models: ["claude-sonnet-5-5", "claude-opus-5-5", "gpt-5.1-codex"],
-    thinking: { kind: "Variant", levels: ["low", "medium", "high"] },
+    // OpenCode's per-model variants are not a thread-level effort control.
+    thinking: null,
   },
   antigravity: {
     default: "gemini-4-argon-medium",

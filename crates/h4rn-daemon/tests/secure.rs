@@ -367,6 +367,8 @@ async fn create_thread_over_secure() -> ThreadSummary {
             prompt: "created over noise".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -655,6 +657,8 @@ fn create_thread_in(host: h4rn_protocol::HostId, workspace: &str) -> ClientReque
         prompt: "scope test".into(),
         attachments: Vec::new(),
         runtime_mode: RuntimeMode::ApprovalRequired,
+        reasoning_effort: None,
+        fast: false,
         worktree: None,
     }
 }

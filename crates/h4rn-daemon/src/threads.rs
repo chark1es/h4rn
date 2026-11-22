@@ -157,6 +157,11 @@ pub struct NewThread {
     pub attachments: Vec<AttachmentId>,
     /// Permission autonomy for the whole thread.
     pub runtime_mode: RuntimeMode,
+    /// Reasoning effort in the harness's own vocabulary, when the caller asked
+    /// for one.
+    pub reasoning_effort: Option<String>,
+    /// Whether the thread asks for the harness's fast tier.
+    pub fast: bool,
     /// Worktree creation intent.
     pub worktree: Option<WorktreeRequest>,
 }
@@ -372,6 +377,24 @@ impl Default for ResyncRetry {
     }
 }
 
+/// A thread's settings as one request reads them.
+#[derive(Clone, Debug)]
+struct ThreadSettings {
+    runtime_mode: RuntimeMode,
+    model: String,
+    reasoning_effort: Option<String>,
+    fast: bool,
+}
+
+/// One thread-setting change a request asks for.
+#[derive(Clone, Debug)]
+enum ThreadSettingsChange {
+    Mode(RuntimeMode),
+    Model(String),
+    Effort(Option<String>),
+    Fast(bool),
+}
+
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
 
 /// A harness session shared with the task that is writing to it.
@@ -445,6 +468,8 @@ struct ThreadRecord {
     resume_at: Option<DateTime<Utc>>,
     /// Latest limit observation shown on the thread summary (ADR-024).
     limit: Option<LimitBrief>,
+    /// Effort values the live session advertised.
+    advertised_efforts: Vec<String>,
     /// Time to first token of the most recent metered turn (ADR-024).
     ttft_ms: Option<u64>,
     /// Context window of the model the session is running (ADR-015/024).
@@ -1071,6 +1096,10 @@ impl ThreadRecord {
             workspace_path: self.meta.workspace_path.clone(),
             branch: self.branch.clone(),
             model: self.meta.model.clone(),
+            runtime_mode: self.meta.runtime_mode,
+            reasoning_effort: self.meta.reasoning_effort.clone(),
+            reasoning_efforts: self.advertised_efforts.clone(),
+            fast: self.meta.fast,
             tab,
             // The manual override sticks until the next turn starts, so this
             // is true exactly for the placement it caused: a lifecycle
@@ -1166,6 +1195,7 @@ impl ThreadRecord {
                 return None;
             }
         }
+        self.advertised_efforts.clear();
         match std::mem::replace(&mut self.session, SessionSlot::None) {
             SessionSlot::Live { session, .. } => Some(session),
             SessionSlot::None | SessionSlot::Starting(_) => None,
@@ -1211,6 +1241,7 @@ impl ThreadRecord {
             },
         );
         self.pump = None;
+        self.advertised_efforts.clear();
         #[cfg(test)]
         self.dying_notify.notify_one();
     }
@@ -1911,6 +1942,13 @@ impl ThreadManager {
                 "worktree creation is not implemented in this daemon".into(),
             ));
         }
+        request.reasoning_effort = normalize_effort(request.reasoning_effort);
+        check_thread_controls(
+            request.harness,
+            request.runtime_mode,
+            request.reasoning_effort.as_deref(),
+            request.fast,
+        )?;
 
         let now = self.now();
         let thread_id = request
@@ -1933,6 +1971,8 @@ impl ThreadManager {
             workspace_path: request.workspace_path,
             model: request.model,
             runtime_mode: request.runtime_mode,
+            reasoning_effort: request.reasoning_effort,
+            fast: request.fast,
             worktree: request.worktree,
             created_at: now,
             usage: Usage::default(),
@@ -1960,6 +2000,7 @@ impl ThreadManager {
             scheduled_limit: None,
             resume_at: None,
             limit: None,
+            advertised_efforts: Vec::new(),
             ttft_ms: None,
             context_window: None,
             branch: None,
@@ -2527,6 +2568,212 @@ impl ThreadManager {
             .emit(&mut record, domain, Vec::new())
             .await
             .map(|(summary, _)| summary)
+    }
+
+    /// Changes a thread's permission mode.
+    ///
+    /// A live session that can switch applies it at once; every other case
+    /// keeps it for the next session start, and an idle session is detached so
+    /// that start is the next turn.
+    pub async fn set_thread_runtime_mode(
+        &self,
+        thread_id: &ThreadId,
+        mode: RuntimeMode,
+    ) -> Result<ThreadSummary, ManagerError> {
+        self.apply_thread_settings(thread_id, ThreadSettingsChange::Mode(mode))
+            .await
+    }
+
+    /// Changes a thread's model.
+    pub async fn set_thread_model(
+        &self,
+        thread_id: &ThreadId,
+        model: String,
+    ) -> Result<ThreadSummary, ManagerError> {
+        self.apply_thread_settings(thread_id, ThreadSettingsChange::Model(model))
+            .await
+    }
+
+    /// Changes a thread's reasoning effort (`None` is the harness default).
+    pub async fn set_thread_reasoning_effort(
+        &self,
+        thread_id: &ThreadId,
+        effort: Option<String>,
+    ) -> Result<ThreadSummary, ManagerError> {
+        self.apply_thread_settings(thread_id, ThreadSettingsChange::Effort(effort))
+            .await
+    }
+
+    /// Asks for (or stops asking for) a harness's fast tier.
+    pub async fn set_thread_fast(
+        &self,
+        thread_id: &ThreadId,
+        fast: bool,
+    ) -> Result<ThreadSummary, ManagerError> {
+        self.apply_thread_settings(thread_id, ThreadSettingsChange::Fast(fast))
+            .await
+    }
+
+    /// Applies one thread-setting change and records it.
+    ///
+    /// The live session is asked first, so a setting the adapter cannot switch
+    /// in place falls back to the next session start instead of being refused as
+    /// a bad value. Validation against the harness's catalogue happens before
+    /// either path, so an unsupported value never reaches the session slot.
+    async fn apply_thread_settings(
+        &self,
+        thread_id: &ThreadId,
+        change: ThreadSettingsChange,
+    ) -> Result<ThreadSummary, ManagerError> {
+        let handle = self.inner.handle(thread_id).await?;
+        let (harness, mut settings, session, generation, idle) = {
+            let record = handle.lock().await;
+            (
+                record.meta.harness,
+                ThreadSettings {
+                    runtime_mode: record.meta.runtime_mode,
+                    model: record.meta.model.clone(),
+                    reasoning_effort: record.meta.reasoning_effort.clone(),
+                    fast: record.meta.fast,
+                },
+                record.session.live().cloned(),
+                record.session.generation(),
+                record.active.is_none(),
+            )
+        };
+
+        match &change {
+            ThreadSettingsChange::Mode(mode) => settings.runtime_mode = *mode,
+            ThreadSettingsChange::Model(model) => {
+                let model = model.trim().to_string();
+                if model.is_empty() {
+                    return Err(ManagerError::InvalidRequest(
+                        "model must not be empty".into(),
+                    ));
+                }
+                settings.model = model;
+            }
+            ThreadSettingsChange::Effort(effort) => {
+                settings.reasoning_effort = normalize_effort(effort.clone());
+            }
+            ThreadSettingsChange::Fast(fast) => settings.fast = *fast,
+        }
+
+        check_thread_controls(
+            harness,
+            settings.runtime_mode,
+            settings.reasoning_effort.as_deref(),
+            settings.fast,
+        )?;
+
+        let mut switched = false;
+        if let Some(session) = session {
+            let mut session = session.lock().await;
+            let advertised = session.controls();
+            let static_controls = h4rn_harness::thread_controls(harness);
+            // A session that advertised its own catalogue is stricter than the
+            // harness as a whole: an ACP agent offers only the modes, models
+            // and efforts it named.
+            if let Some(controls) = &advertised {
+                if !controls.modes.is_empty() && !controls.modes.contains(&settings.runtime_mode) {
+                    return Err(ManagerError::Unsupported(format!(
+                        "this agent has no {} mode",
+                        runtime_mode_label(settings.runtime_mode)
+                    )));
+                }
+                if let Some(models) = &controls.models
+                    && !models.iter().any(|model| model == &settings.model)
+                {
+                    return Err(ManagerError::Unsupported(format!(
+                        "this agent does not offer model `{}`",
+                        settings.model
+                    )));
+                }
+                if let Some(effort) = settings.reasoning_effort.as_deref()
+                    && !controls.efforts.is_empty()
+                    && !controls
+                        .efforts
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(effort))
+                {
+                    return Err(ManagerError::Unsupported(format!(
+                        "this agent does not offer reasoning effort `{effort}`"
+                    )));
+                }
+                if settings.fast && !controls.fast {
+                    return Err(ManagerError::Unsupported(
+                        "this agent has no fast mode".into(),
+                    ));
+                }
+            }
+            let switch_in_place = match &advertised {
+                Some(controls) => match change {
+                    ThreadSettingsChange::Mode(_) => controls.switch_mode,
+                    ThreadSettingsChange::Model(_) => controls.switch_model,
+                    ThreadSettingsChange::Effort(_) => controls.switch_effort,
+                    ThreadSettingsChange::Fast(_) => controls.switch_fast,
+                },
+                None => match change {
+                    ThreadSettingsChange::Mode(_) => static_controls.switch_mode,
+                    ThreadSettingsChange::Model(_) => static_controls.switch_model,
+                    ThreadSettingsChange::Effort(_) => static_controls.switch_effort,
+                    ThreadSettingsChange::Fast(_) => static_controls.switch_fast,
+                },
+            };
+            if switch_in_place {
+                let result = match &change {
+                    ThreadSettingsChange::Mode(mode) => session.set_runtime_mode(*mode).await,
+                    ThreadSettingsChange::Model(model) => session.set_model(model).await,
+                    ThreadSettingsChange::Effort(effort) => {
+                        session.set_reasoning_effort(effort.as_deref()).await
+                    }
+                    ThreadSettingsChange::Fast(fast) => session.set_fast(*fast).await,
+                };
+                match result {
+                    Ok(()) => switched = true,
+                    // The adapter said the value itself is unsupported (an
+                    // agent's pinned mode, an unknown effort): refuse it rather
+                    // than pretend the next start will differ. Clearing an
+                    // effort is always valid, so that one falls back to a
+                    // restart when the session cannot reset it in place.
+                    Err(error @ h4rn_harness::HarnessError::Unsupported { .. })
+                        if !matches!(change, ThreadSettingsChange::Effort(None)) =>
+                    {
+                        return Err(ManagerError::Unsupported(error.to_string()));
+                    }
+                    Err(h4rn_harness::HarnessError::Unsupported { .. }) => {}
+                    Err(error) => return Err(ManagerError::Internal(error.to_string())),
+                }
+            }
+        }
+
+        let (summary, parked) = {
+            let mut record = handle.lock().await;
+            record.meta.runtime_mode = settings.runtime_mode;
+            record.meta.model = settings.model;
+            record.meta.reasoning_effort = settings.reasoning_effort;
+            record.meta.fast = settings.fast;
+            // A different model can have a different context window; the
+            // proxy catalog fills it again on the next session start.
+            if matches!(change, ThreadSettingsChange::Model(_)) {
+                record.context_window = None;
+            }
+            // A setting the live session could not take is picked up by the
+            // next start. Detaching an idle session makes that start the next
+            // turn; a running turn keeps its session until it ends.
+            let parked = match (switched, idle, generation) {
+                (false, true, Some(generation)) => record.detach_session(generation),
+                _ => None,
+            };
+            let (summary, _) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
+            (summary, parked)
+        };
+        if let Some(session) = parked
+            && let Err(error) = session.lock().await.shutdown().await
+        {
+            tracing::warn!(%thread_id, %error, "harness shutdown after a thread setting change failed");
+        }
+        Ok(summary)
     }
 
     /// Snoozes a thread until `until`, or wakes it when `None`.
@@ -3473,6 +3720,7 @@ impl Inner {
                 scheduled_limit: None,
                 resume_at: None,
                 limit: None,
+                advertised_efforts: Vec::new(),
                 ttft_ms: None,
                 context_window: None,
                 branch,
@@ -3771,6 +4019,8 @@ impl Inner {
                 workspace,
                 model: record.meta.model.clone(),
                 runtime_mode: record.meta.runtime_mode,
+                reasoning_effort: record.meta.reasoning_effort.clone(),
+                fast: record.meta.fast,
                 resume_id,
                 mcp_endpoint,
                 env_overrides,
@@ -3821,6 +4071,7 @@ impl Inner {
 
         let stream = session.events();
         let health = session.transport_health();
+        let controls = session.controls();
         let session: SharedSession = Arc::new(Mutex::new(session));
         {
             let mut record = handle.lock().await;
@@ -3840,6 +4091,9 @@ impl Inner {
                 session: Arc::clone(&session),
                 applied_limit_reset: None,
             };
+            record.advertised_efforts = controls
+                .map(|controls| controls.efforts)
+                .unwrap_or_default();
             // This session was started for the captured turn: the pump can
             // tell its death from the end of a previous turn's agent.
             turn.note_started_generation(generation);
@@ -6231,6 +6485,68 @@ fn user_item_id(turn_id: &TurnId) -> String {
     format!("item_user_{}", turn_suffix(turn_id))
 }
 
+/// Trims a requested effort and treats blank as "the harness default".
+fn normalize_effort(effort: Option<String>) -> Option<String> {
+    effort
+        .map(|effort| effort.trim().to_string())
+        .filter(|effort| !effort.is_empty())
+}
+
+/// A human label for one permission mode, used in refusals.
+fn runtime_mode_label(mode: RuntimeMode) -> &'static str {
+    match mode {
+        RuntimeMode::ApprovalRequired => "approval required",
+        RuntimeMode::AutoAcceptEdits => "auto-accept edits",
+        RuntimeMode::Plan => "plan",
+        RuntimeMode::FullAccess => "full access",
+    }
+}
+
+/// Refuses a mode, effort or fast tier the harness cannot honour.
+///
+/// A configured ACP agent advertises its modes at session start, so its mode is
+/// checked there; asking for plan on any other adapter is a caller error rather
+/// than a setting that quietly does nothing.
+fn check_thread_controls(
+    harness: HarnessKind,
+    mode: RuntimeMode,
+    effort: Option<&str>,
+    fast: bool,
+) -> Result<(), ManagerError> {
+    let controls = h4rn_harness::thread_controls(harness);
+    if harness != HarnessKind::Acp && !controls.offers_mode(mode) {
+        return Err(ManagerError::Unsupported(format!(
+            "{harness:?} has no {} mode; it offers {}",
+            runtime_mode_label(mode),
+            controls
+                .modes
+                .iter()
+                .map(|mode| runtime_mode_label(*mode))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if let Some(effort) = effort
+        && harness != HarnessKind::Acp
+        && !controls.offers_effort(effort)
+    {
+        return Err(ManagerError::Unsupported(if controls.efforts.is_empty() {
+            format!("{harness:?} exposes no reasoning effort")
+        } else {
+            format!(
+                "{harness:?} does not offer reasoning effort `{effort}`; it offers {}",
+                controls.efforts.join(", ")
+            )
+        }));
+    }
+    if fast && !controls.fast {
+        return Err(ManagerError::Unsupported(format!(
+            "{harness:?} has no fast mode"
+        )));
+    }
+    Ok(())
+}
+
 /// Converts committed attachments into the harness adapter's delivery refs.
 fn harness_refs(attachments: &[Attachment]) -> Vec<AttachmentRef> {
     attachments
@@ -6722,6 +7038,8 @@ mod tests {
             prompt: prompt.into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         }
     }
@@ -7411,6 +7729,8 @@ mod tests {
                 prompt: "first".into(),
                 attachments: Vec::new(),
                 runtime_mode: RuntimeMode::ApprovalRequired,
+                reasoning_effort: None,
+                fast: false,
                 worktree: None,
             })
             .await
@@ -15151,5 +15471,217 @@ mod tests {
         assert_eq!(status, TurnStatus::Completed);
         assert_eq!(sends.get(), 1);
         assert_eq!(sessions.get(), 1);
+    }
+
+    /// Waits until the fake session's run of the first turn is done, so a
+    /// settings test does not race the priming prompt.
+    async fn wait_for_idle(manager: &ThreadManager, thread_id: &ThreadId) {
+        let handle = manager.inner.handle(thread_id).await.expect("handle");
+        assert!(
+            wait_until(|| {
+                let record = handle.try_lock();
+                record.is_ok_and(|record| record.active.is_none())
+            })
+            .await,
+            "the first turn never finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_settings_switch_a_live_session_in_place() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, settings) = FakeHarness::new().with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .set_thread_runtime_mode(&created.thread_id, RuntimeMode::Plan)
+            .await
+            .expect("switch the mode");
+        assert_eq!(summary.runtime_mode, RuntimeMode::Plan);
+        let summary = manager
+            .set_thread_model(&created.thread_id, "other-model".into())
+            .await
+            .expect("switch the model");
+        assert_eq!(summary.model, "other-model");
+        let summary = manager
+            .set_thread_reasoning_effort(&created.thread_id, Some("high".into()))
+            .await
+            .expect("switch the effort");
+        assert_eq!(summary.reasoning_effort.as_deref(), Some("high"));
+        assert!(
+            summary
+                .reasoning_efforts
+                .iter()
+                .any(|effort| effort == "high"),
+            "the session advertised its effort catalogue: {summary:?}"
+        );
+
+        let changes = settings.get();
+        assert!(
+            changes.contains(&h4rn_harness::SettingChange::Mode(RuntimeMode::Plan)),
+            "the live session got the mode: {changes:?}"
+        );
+        assert!(
+            changes.contains(&h4rn_harness::SettingChange::Model("other-model".into())),
+            "the live session got the model: {changes:?}"
+        );
+        assert!(
+            changes.contains(&h4rn_harness::SettingChange::Effort(Some("high".into()))),
+            "the live session got the effort: {changes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_harness_without_live_switching_restarts_on_the_next_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, settings) = FakeHarness::new()
+            .with_unswitchable_settings()
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        manager
+            .set_thread_model(&created.thread_id, "next-model".into())
+            .await
+            .expect("record the model");
+        // The idle session was detached, so the next message starts a new one
+        // on the recorded model instead of writing to the old session.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            wait_until(|| settings
+                .get()
+                .iter()
+                .filter(|change| { matches!(change, h4rn_harness::SettingChange::Started { .. }) })
+                .count()
+                >= 2)
+            .await,
+            "a fresh session started"
+        );
+        let changes = settings.get();
+        let started = changes
+            .iter()
+            .rev()
+            .find_map(|change| match change {
+                h4rn_harness::SettingChange::Started { model, .. } => Some(model.clone()),
+                _ => None,
+            })
+            .expect("a started session");
+        assert_eq!(started, "next-model");
+    }
+
+    #[tokio::test]
+    async fn a_value_the_harness_cannot_honour_is_refused() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // OpenCode has no plan mode, no reasoning effort and no fast tier.
+        let harness = FakeHarness::new().with_kind(HarnessKind::Opencode);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Opencode;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let error = manager
+            .set_thread_runtime_mode(&created.thread_id, RuntimeMode::Plan)
+            .await
+            .expect_err("plan is not an OpenCode mode");
+        assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
+
+        let error = manager
+            .set_thread_reasoning_effort(&created.thread_id, Some("high".into()))
+            .await
+            .expect_err("OpenCode has no effort control");
+        assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
+
+        let error = manager
+            .set_thread_fast(&created.thread_id, true)
+            .await
+            .expect_err("OpenCode has no fast tier");
+        assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
+
+        let error = manager
+            .set_thread_model(&created.thread_id, "  ".into())
+            .await
+            .expect_err("an empty model is refused");
+        assert!(
+            matches!(error, ManagerError::InvalidRequest(_)),
+            "{error:?}"
+        );
+
+        // Nothing changed after the refusals.
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(summary.runtime_mode, RuntimeMode::ApprovalRequired);
+        assert_eq!(summary.model, "fake-model");
+        assert_eq!(summary.reasoning_effort, None);
+        assert!(!summary.fast);
+    }
+
+    #[tokio::test]
+    async fn thread_settings_survive_a_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        // Codex is the harness with a real fast tier.
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_session_settings();
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        manager
+            .set_thread_runtime_mode(&created.thread_id, RuntimeMode::FullAccess)
+            .await
+            .expect("mode");
+        manager
+            .set_thread_model(&created.thread_id, "gpt-next".into())
+            .await
+            .expect("model");
+        manager
+            .set_thread_reasoning_effort(&created.thread_id, Some("xhigh".into()))
+            .await
+            .expect("effort");
+        manager
+            .set_thread_fast(&created.thread_id, true)
+            .await
+            .expect("fast");
+        drop(manager);
+
+        let reopened = open_test_manager_with_journal(
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+            host,
+            journal,
+        )
+        .await;
+        let summary = reopened
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("reopened summary")
+            .summary;
+        assert_eq!(summary.runtime_mode, RuntimeMode::FullAccess);
+        assert_eq!(summary.model, "gpt-next");
+        assert_eq!(summary.reasoning_effort.as_deref(), Some("xhigh"));
+        assert!(summary.fast);
     }
 }

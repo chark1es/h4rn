@@ -1,24 +1,10 @@
-import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, PaperclipIcon, PlusIcon } from "lucide-react";
+import { ArrowUpIcon, AtSignIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
 import { useWorkspaceFiles } from "@/features/composer/workspaceFiles";
-import {
-  proxyModelsFor,
-  proxyOverrideFor,
-  useProxy,
-  useProxyCatalog,
-} from "@/features/proxy/proxyStore";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { composerCommands } from "@/lib/composerCommands";
@@ -48,6 +34,7 @@ import { openPhonePanel } from "@/lib/phonePanels";
 import { getState, sendMessage, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { ComposerMenu, type ComposerMenuRow } from "./ComposerMenu";
+import { ThreadControls } from "./ThreadControls";
 
 type OpenMenu = { trigger: ComposerTrigger; activeIndex: number };
 
@@ -125,7 +112,6 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [text, setText] = useState(() => readThreadDraft(summary.host, summary.thread_id));
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   const [anchor, setAnchor] = useState({ left: 0, bottom: 0 });
   const ref = useRef<HTMLTextAreaElement | null>(null);
@@ -145,11 +131,6 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const historyIndex = useRef(-1);
   /** The in-progress text captured before the first ArrowUp. */
   const historyDraft = useRef("");
-
-  useProxyCatalog();
-  useProxy((state) => state.profiles);
-  const proxyActive = proxyOverrideFor(summary.harness);
-  const proxyModels = proxyModelsFor(summary.harness);
 
   const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
   const view = useApp((state) => state.ui.layout.view);
@@ -514,7 +495,6 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         if (
           (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
           event.nativeEvent.isComposing ||
-          menuOpen ||
           event.metaKey ||
           event.ctrlKey ||
           event.altKey ||
@@ -745,46 +725,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           </button>
           <span className="grow" />
 
-          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="q-model"
-                aria-label="Harness and model"
-                title={`${harnessLabel(summary.harness)} · ${summary.model}`}
-              >
-                <span className="truncate" style={{ maxWidth: 210 }}>
-                  {summary.model}
-                </span>
-                <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-60">
-              <DropdownMenuLabel>Harness</DropdownMenuLabel>
-              <DropdownMenuItem disabled>{harnessLabel(summary.harness)}</DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>Model</DropdownMenuLabel>
-              <DropdownMenuItem disabled>
-                <span className="font-mono">{summary.model}</span>
-              </DropdownMenuItem>
-              {proxyActive && proxyModels.length > 0 ? (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>Proxy models · {proxyActive.profile.name}</DropdownMenuLabel>
-                  {proxyModels.slice(0, 8).map((model) => (
-                    <DropdownMenuItem key={model.id} disabled>
-                      <span className="font-mono">{model.id}</span>
-                      <span className="ml-auto text-small text-fg-3">{model.source}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </>
-              ) : null}
-              <DropdownMenuSeparator />
-              <p className="px-2 py-1.5 text-small leading-relaxed text-fg-3">
-                Harness and model are fixed for a thread. Start a new thread to change them.
-              </p>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <ThreadControls summary={summary} />
 
           {sendButton}
         </div>

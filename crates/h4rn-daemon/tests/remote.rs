@@ -1342,6 +1342,8 @@ async fn relay_pairing_failover_and_revocation() {
             prompt: "created over the relay".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

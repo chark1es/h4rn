@@ -503,6 +503,9 @@ function summary(input: {
     workspace_path: input.workspace ?? "/home/you/code/api",
     ...(input.branch ? { branch: input.branch } : {}),
     model: input.model,
+    runtime_mode: "approval_required",
+    reasoning_efforts: [],
+    fast: false,
     tab: input.tab,
     placed_by_user: false,
     pinned: input.pinned ?? false,
@@ -2301,6 +2304,10 @@ class MockDaemon {
           title: body.prompt.split("\n")[0]?.slice(0, 56) || "New thread",
           workspace_path: body.workspace_path,
           model: body.model,
+          runtime_mode: body.runtime_mode,
+          reasoning_efforts: [],
+          ...(body.reasoning_effort ? { reasoning_effort: body.reasoning_effort } : {}),
+          fast: body.fast,
           tab: "working",
           placed_by_user: false,
           pinned: false,
@@ -2410,6 +2417,41 @@ class MockDaemon {
           needs_attention: false,
           last_activity: iso(),
         };
+        this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+        return;
+      }
+      case "set_thread_runtime_mode": {
+        const entry = this.threads.get(body.thread_id);
+        this.ok(frame.id, { type: "ack" });
+        if (!entry) return;
+        entry.summary = { ...entry.summary, runtime_mode: body.mode };
+        this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+        return;
+      }
+      case "set_thread_model": {
+        const entry = this.threads.get(body.thread_id);
+        this.ok(frame.id, { type: "ack" });
+        if (!entry) return;
+        entry.summary = { ...entry.summary, model: body.model };
+        this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+        return;
+      }
+      case "set_thread_reasoning_effort": {
+        const entry = this.threads.get(body.thread_id);
+        this.ok(frame.id, { type: "ack" });
+        if (!entry) return;
+        entry.summary = {
+          ...entry.summary,
+          ...(body.effort ? { reasoning_effort: body.effort } : {}),
+        };
+        this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+        return;
+      }
+      case "set_thread_fast": {
+        const entry = this.threads.get(body.thread_id);
+        this.ok(frame.id, { type: "ack" });
+        if (!entry) return;
+        entry.summary = { ...entry.summary, fast: body.fast };
         this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
         return;
       }

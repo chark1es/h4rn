@@ -78,6 +78,12 @@ pub enum ClientRequest {
         /// Permission autonomy for the whole thread.
         #[serde(default)]
         runtime_mode: RuntimeMode,
+        /// Reasoning effort in the harness's own vocabulary, when it has one.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+        /// Ask for the harness's fast tier, where one exists (Codex).
+        #[serde(default)]
+        fast: bool,
         /// Run in an isolated git worktree, optionally naming the branch.
         #[serde(default)]
         worktree: Option<WorktreeRequest>,
@@ -107,6 +113,50 @@ pub enum ClientRequest {
         /// Selected [`crate::ApprovalOption`] id, when answering a question.
         #[serde(default)]
         option_id: Option<String>,
+    },
+    /// Change a thread's permission mode.
+    ///
+    /// Applies to a live session where the harness can switch in place, and
+    /// always applies at the next session start. A mode the harness cannot
+    /// honour is refused with [`crate::ProtoErrorCode::Unsupported`].
+    SetThreadRuntimeMode {
+        /// Thread to change.
+        thread_id: ThreadId,
+        /// New permission autonomy.
+        mode: RuntimeMode,
+    },
+    /// Change a thread's model.
+    ///
+    /// Applies to a live session where the harness can switch in place, and
+    /// always applies at the next session start. The conversation is kept
+    /// through the harness's resume path when a session has to restart.
+    SetThreadModel {
+        /// Thread to change.
+        thread_id: ThreadId,
+        /// New model slug.
+        model: String,
+    },
+    /// Change a thread's reasoning effort.
+    ///
+    /// `None` returns the thread to the harness's own default. Only a harness
+    /// that exposes a real effort control accepts this; any other refuses with
+    /// [`crate::ProtoErrorCode::Unsupported`].
+    SetThreadReasoningEffort {
+        /// Thread to change.
+        thread_id: ThreadId,
+        /// New effort value in the harness's vocabulary, or `None` for its
+        /// default.
+        effort: Option<String>,
+    },
+    /// Ask for (or stop asking for) a harness's fast tier.
+    ///
+    /// Only a harness with a real fast tier accepts this; any other refuses
+    /// with [`crate::ProtoErrorCode::Unsupported`].
+    SetThreadFast {
+        /// Thread to change.
+        thread_id: ThreadId,
+        /// Whether to use the fast tier.
+        fast: bool,
     },
     /// Move a thread by hand. The override sticks until the next turn starts.
     SetThreadTab {
@@ -1103,6 +1153,10 @@ impl ClientRequest {
             | Self::AbortUpload { .. }
             | Self::QueryUpload { .. }
             | Self::SetThreadTab { .. }
+            | Self::SetThreadRuntimeMode { .. }
+            | Self::SetThreadModel { .. }
+            | Self::SetThreadReasoningEffort { .. }
+            | Self::SetThreadFast { .. }
             | Self::Snooze { .. }
             | Self::CancelResume { .. }
             | Self::ResumeNow { .. }
@@ -1321,6 +1375,34 @@ mod tests {
                 Approve,
             ),
             (
+                ClientRequest::SetThreadRuntimeMode {
+                    thread_id: thread(),
+                    mode: RuntimeMode::Plan,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::SetThreadModel {
+                    thread_id: thread(),
+                    model: "m".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::SetThreadReasoningEffort {
+                    thread_id: thread(),
+                    effort: Some("high".into()),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::SetThreadFast {
+                    thread_id: thread(),
+                    fast: true,
+                },
+                Approve,
+            ),
+            (
                 ClientRequest::Snooze {
                     thread_id: thread(),
                     until: None,
@@ -1452,15 +1534,41 @@ mod tests {
     fn request_round_trips() {
         let frame = ClientFrame {
             id: 1,
-            body: ClientRequest::SetThreadTab {
+            body: ClientRequest::SetThreadRuntimeMode {
                 thread_id: ThreadId::new("th_1"),
-                tab: ThreadTab::Working,
-                pinned: true,
+                mode: RuntimeMode::Plan,
             },
         };
         let json = serde_json::to_string(&frame).unwrap();
         let back: ClientFrame = serde_json::from_str(&json).unwrap();
         assert_eq!(frame, back);
-        assert!(json.contains("\"type\":\"set_thread_tab\""));
+        assert!(json.contains("\"type\":\"set_thread_runtime_mode\""));
+        assert!(json.contains("\"mode\":\"plan\""));
+    }
+
+    #[test]
+    fn an_old_create_thread_without_thread_controls_still_deserializes() {
+        let json = serde_json::json!({
+            "type": "create_thread",
+            "host": "host_1",
+            "harness": "claude_code",
+            "workspace_path": "/tmp/work",
+            "model": "claude-sonnet-5",
+            "prompt": "hello",
+            "attachments": [],
+        });
+        let request: ClientRequest = serde_json::from_value(json).expect("old JSON");
+        let ClientRequest::CreateThread {
+            runtime_mode,
+            reasoning_effort,
+            fast,
+            ..
+        } = request
+        else {
+            panic!("expected create_thread");
+        };
+        assert_eq!(runtime_mode, RuntimeMode::ApprovalRequired);
+        assert_eq!(reasoning_effort, None);
+        assert!(!fast);
     }
 }

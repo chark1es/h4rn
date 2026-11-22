@@ -455,6 +455,8 @@ async fn thread_messages_carry_attachment_metadata_and_materialise_a_path() {
             prompt: "read the notes".into(),
             attachments: vec![blob.id.clone()],
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

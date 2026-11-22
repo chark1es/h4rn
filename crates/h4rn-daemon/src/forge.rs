@@ -887,6 +887,8 @@ impl ForgeService {
                         prompt: context.clone(),
                         attachments: Vec::new(),
                         runtime_mode: RuntimeMode::ApprovalRequired,
+                        reasoning_effort: None,
+                        fast: false,
                         worktree: None,
                     })
                     .await?;

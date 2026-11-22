@@ -19,6 +19,7 @@ import {
 import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { useRemote } from "@/features/remote/remoteStore";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
+import { ThreadSettingsForm } from "@/features/threads/ThreadSettings";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 import { WorktreeSettings } from "@/features/worktrees/WorktreeSettings";
@@ -621,6 +622,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   appearance: AppearanceForm,
   notifications: NotificationsForm,
   shortcuts: ShortcutsForm,
+  threads: ThreadSettingsForm,
   account: LiveAccountForm,
 };
 

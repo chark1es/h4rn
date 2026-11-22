@@ -117,6 +117,10 @@ export function runCommand(id: CommandId, state: State = getState()): boolean {
       if (!openId) return false;
       requestComposerFocus();
       return true;
+    case "thread.permissions":
+      if (!openId) return false;
+      window.dispatchEvent(new CustomEvent("h4rn:permissions"));
+      return true;
     case "approval.approve":
     case "approval.deny": {
       if (!openId) return false;

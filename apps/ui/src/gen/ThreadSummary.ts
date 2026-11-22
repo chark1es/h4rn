@@ -3,6 +3,7 @@ import type { AgentState } from "./AgentState";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { LimitBrief } from "./LimitBrief";
+import type { RuntimeMode } from "./RuntimeMode";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
 import type { Usage } from "./Usage";
@@ -53,6 +54,34 @@ branch?: string,
  * Model slug reported by the harness.
  */
 model: string, 
+/**
+ * Permission autonomy for the thread.
+ *
+ * Older daemons did not report the live setting; their threads
+ * deserialize as [`RuntimeMode::ApprovalRequired`], the old fixed mode.
+ */
+runtime_mode: RuntimeMode, 
+/**
+ * Reasoning effort for the thread, in the harness's own vocabulary.
+ *
+ * `None` leaves the harness on its own default. Harnesses without a real
+ * effort control never report a value here.
+ */
+reasoning_effort?: string, 
+/**
+ * Effort values the live session advertised.
+ *
+ * Empty until a session names a catalogue. A configured ACP agent only
+ * reveals its effort option at session start, so the picker fills from
+ * here rather than guessing.
+ */
+reasoning_efforts: Array<string>, 
+/**
+ * Whether the thread asks the harness for its fast tier.
+ *
+ * Only harnesses with a real fast tier (Codex service tiers) report this.
+ */
+fast: boolean, 
 /**
  * Derived tab placement.
  */

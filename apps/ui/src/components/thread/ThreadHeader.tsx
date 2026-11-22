@@ -23,6 +23,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useThreadSettings } from "@/features/threads/settings";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
@@ -44,6 +45,7 @@ import {
   toggleTheme,
   useApp,
 } from "@/lib/store/appStore";
+import { nonDefaultSettings } from "@/lib/threadControls";
 import { cn } from "@/lib/utils";
 
 export function ViewCluster({
@@ -128,6 +130,8 @@ export function ThreadHeader({
 }) {
   const hostOnline = host?.online ?? false;
   const working = summary.tab === "working";
+  const threadSettings = useThreadSettings();
+  const changedSettings = nonDefaultSettings(summary, threadSettings.defaultPermissionMode);
   const unreachable =
     summary.agent_state === "unreachable" ||
     summary.agent_state === "error" ||
@@ -293,6 +297,11 @@ export function ThreadHeader({
           <span className="opt">
             <span className="q-sep">/</span> {summary.model}
           </span>
+          {changedSettings.length > 0 ? (
+            <span className="q-faint" style={{ fontSize: 11.5 }}>
+              {changedSettings.join(" · ")}
+            </span>
+          ) : null}
           {summary.branch ? (
             <span className="br">
               <span className="q-sep">/</span>

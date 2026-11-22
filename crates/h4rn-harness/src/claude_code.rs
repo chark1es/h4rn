@@ -211,26 +211,10 @@ impl Harness for ClaudeCodeHarness {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        if !spec.model.trim().is_empty() && spec.model != "default" {
-            command.args(["--model", spec.model.trim()]);
-        }
-        if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
-            command.args(["--resume", resume_id]);
-        }
-        if let Some(config) = &mcp_config {
-            command.arg("--mcp-config").arg(config.path());
-            command.arg("--strict-mcp-config");
-        }
-        if let Some(mode) = permission_mode(&spec.env_overrides, spec.runtime_mode) {
-            command.args(["--permission-mode", &mode]);
-        }
-        if let Some(tool) = spec
-            .env_overrides
-            .get(ENV_PERMISSION_PROMPT_TOOL)
-            .filter(|tool| !tool.trim().is_empty())
-        {
-            command.args(["--permission-prompt-tool", tool.trim()]);
-        }
+        command.args(session_args(
+            &spec,
+            mcp_config.as_ref().map(|config| config.path()),
+        ));
 
         for key in SCRUBBED_ENV {
             command.env_remove(key);
@@ -310,6 +294,7 @@ impl Harness for ClaudeCodeHarness {
             first_send: true,
             closed: false,
             control_seq: 0,
+            fixed_permission_mode: spec.env_overrides.contains_key(ENV_PERMISSION_MODE),
         }))
     }
 }
@@ -333,6 +318,9 @@ pub struct ClaudeCodeSession {
     first_send: bool,
     closed: bool,
     control_seq: u64,
+    /// The mode is pinned by an explicit environment override, so the thread
+    /// control cannot change it.
+    fixed_permission_mode: bool,
 }
 
 /// State the session exposes from the parser running on the stdout task.
@@ -426,10 +414,39 @@ impl ClaudeCodeSession {
         self.control_seq = self.control_seq.wrapping_add(1);
         format!("h4rn-{}", self.control_seq)
     }
+
+    /// Sends one `control_request` on the stream-json channel.
+    ///
+    /// Claude Code answers with a `control_response`; the daemon does not wait
+    /// for it because the switch applies to the next turn, and a refusal is
+    /// visible in the harness's next output.
+    async fn send_control_request(
+        &mut self,
+        request: serde_json::Value,
+    ) -> Result<(), HarnessError> {
+        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: "session is shut down".into(),
+            });
+        }
+        let request_id = self.next_request_id();
+        let frame = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": request,
+        });
+        let bytes = encode_frame(&frame)?;
+        self.write_frame(bytes).await
+    }
 }
 
 #[async_trait]
 impl HarnessSession for ClaudeCodeSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {
@@ -524,6 +541,34 @@ impl HarnessSession for ClaudeCodeSession {
 
     fn stderr_tail(&self) -> String {
         ClaudeCodeSession::stderr_tail(self)
+    }
+
+    async fn set_runtime_mode(&mut self, mode: RuntimeMode) -> Result<(), HarnessError> {
+        if self.fixed_permission_mode {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: format!(
+                    "changing the permission mode; {ENV_PERMISSION_MODE} pins it for this thread"
+                ),
+            });
+        }
+        self.send_control_request(json!({
+            "subtype": "set_permission_mode",
+            "mode": mode_for_runtime(mode),
+        }))
+        .await
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
+        let model = model.trim();
+        if model.is_empty() || model == "default" {
+            return Ok(());
+        }
+        self.send_control_request(json!({
+            "subtype": "set_model",
+            "model": model,
+        }))
+        .await
     }
 
     async fn shutdown(&mut self) -> Result<(), HarnessError> {
@@ -784,6 +829,49 @@ fn encode_frame(frame: &serde_json::Value) -> Result<Vec<u8>, HarnessError> {
     Ok(bytes)
 }
 
+/// The optional CLI arguments one thread's Claude Code session is started with.
+///
+/// Kept separate from the spawn so a test can prove the real flag each thread
+/// setting turns into.
+fn session_args(spec: &SessionSpec, mcp_config: Option<&Path>) -> Vec<String> {
+    let mut args = Vec::new();
+    if !spec.model.trim().is_empty() && spec.model != "default" {
+        args.push("--model".into());
+        args.push(spec.model.trim().to_string());
+    }
+    if let Some(effort) = spec
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+    {
+        args.push("--effort".into());
+        args.push(effort.to_string());
+    }
+    if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
+        args.push("--resume".into());
+        args.push(resume_id.to_string());
+    }
+    if let Some(config) = mcp_config {
+        args.push("--mcp-config".into());
+        args.push(config.display().to_string());
+        args.push("--strict-mcp-config".into());
+    }
+    if let Some(mode) = permission_mode(&spec.env_overrides, spec.runtime_mode) {
+        args.push("--permission-mode".into());
+        args.push(mode);
+    }
+    if let Some(tool) = spec
+        .env_overrides
+        .get(ENV_PERMISSION_PROMPT_TOOL)
+        .filter(|tool| !tool.trim().is_empty())
+    {
+        args.push("--permission-prompt-tool".into());
+        args.push(tool.trim().to_string());
+    }
+    args
+}
+
 fn permission_mode(env: &BTreeMap<String, String>, runtime_mode: RuntimeMode) -> Option<String> {
     let requested = match env.get(ENV_PERMISSION_MODE) {
         Some(requested) => requested,
@@ -800,6 +888,7 @@ fn mode_for_runtime(runtime_mode: RuntimeMode) -> &'static str {
     match runtime_mode {
         RuntimeMode::ApprovalRequired => "default",
         RuntimeMode::AutoAcceptEdits => "acceptEdits",
+        RuntimeMode::Plan => "plan",
         RuntimeMode::FullAccess => "bypassPermissions",
     }
 }
@@ -1091,5 +1180,51 @@ mod tests {
             permission_mode(&env, RuntimeMode::FullAccess).as_deref(),
             Some("bypassPermissions")
         );
+        assert_eq!(
+            permission_mode(&env, RuntimeMode::Plan).as_deref(),
+            Some("plan")
+        );
+    }
+
+    fn spec(workspace: &Path) -> SessionSpec {
+        SessionSpec {
+            workspace: workspace.to_path_buf(),
+            model: "claude-sonnet-5-5".into(),
+            runtime_mode: RuntimeMode::Plan,
+            reasoning_effort: Some("xhigh".into()),
+            fast: false,
+            resume_id: Some("sess-1".into()),
+            mcp_endpoint: None,
+            env_overrides: BTreeMap::new(),
+            attachments: Vec::new(),
+            agent_id: None,
+        }
+    }
+
+    #[test]
+    fn a_thread_starts_claude_with_its_model_effort_and_plan_mode() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let args = session_args(&spec(workspace.path()), None);
+        let pair = |flag: &str| {
+            args.iter()
+                .position(|arg| arg == flag)
+                .and_then(|index| args.get(index + 1))
+                .map(String::as_str)
+        };
+        assert_eq!(pair("--model"), Some("claude-sonnet-5-5"));
+        assert_eq!(pair("--effort"), Some("xhigh"));
+        assert_eq!(pair("--permission-mode"), Some("plan"));
+        assert_eq!(pair("--resume"), Some("sess-1"));
+    }
+
+    #[test]
+    fn a_default_model_and_effort_add_no_empty_flags() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut spec = spec(workspace.path());
+        spec.model = "default".into();
+        spec.reasoning_effort = None;
+        let args = session_args(&spec, None);
+        assert!(!args.iter().any(|arg| arg == "--model"));
+        assert!(!args.iter().any(|arg| arg == "--effort"));
     }
 }

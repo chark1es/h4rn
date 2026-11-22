@@ -187,6 +187,8 @@ function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "
     prompt: "hello",
     attachments: [],
     runtime_mode: "approval_required",
+    reasoning_effort: null,
+    fast: false,
     worktree: null,
   };
 }

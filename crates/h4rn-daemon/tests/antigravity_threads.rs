@@ -166,6 +166,8 @@ fn new_thread(host: &HostId, workspace: &std::path::Path, prompt: &str) -> NewTh
         prompt: prompt.into(),
         attachments: Vec::new(),
         runtime_mode: RuntimeMode::ApprovalRequired,
+        reasoning_effort: None,
+        fast: false,
         worktree: None,
     }
 }

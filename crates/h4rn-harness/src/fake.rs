@@ -158,6 +158,10 @@ pub struct FakeHarness {
     completion_gate_first_send: bool,
     /// A test-only count of sessions this harness has started.
     session_count: Option<SessionCount>,
+    /// The settings each session started with, and every live switch applied.
+    session_settings: Option<SessionSettings>,
+    /// Whether a live session accepts in-place setting changes.
+    switchable: bool,
     /// A test-only count of sessions this harness shut down.
     shutdown_count: Option<ShutdownCount>,
     /// A test-only switch: prompts after the first `n` fail as a dead transport.
@@ -335,6 +339,54 @@ impl SessionModels {
     }
 }
 
+/// One setting change a fake thread went through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettingChange {
+    /// A session started with these thread settings.
+    Started {
+        /// Model the session was started on.
+        model: String,
+        /// Permission mode the session was started on.
+        runtime_mode: h4rn_protocol::RuntimeMode,
+        /// Reasoning effort the session was started on.
+        reasoning_effort: Option<String>,
+        /// Whether the session was asked for the fast tier.
+        fast: bool,
+    },
+    /// The live session was switched to a permission mode.
+    Mode(h4rn_protocol::RuntimeMode),
+    /// The live session was switched to a model.
+    Model(String),
+    /// The live session was switched to an effort (`None` is the default).
+    Effort(Option<String>),
+    /// The live session was switched on (or off) the fast tier.
+    Fast(bool),
+}
+
+/// Every setting a fake thread started with, and every live switch it applied.
+///
+/// A test reads this to prove whether a change reached the live session or was
+/// kept for the next start.
+#[derive(Clone, Debug, Default)]
+pub struct SessionSettings(Arc<Mutex<Vec<SettingChange>>>);
+
+impl SessionSettings {
+    /// Every recorded change, in the order the fake saw it.
+    pub fn get(&self) -> Vec<SettingChange> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn note(&self, change: SettingChange) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(change);
+    }
+}
+
 /// A shared count of cancels a fake session was asked to send.
 ///
 /// A test reads it to prove a Stop either dropped the prompt or cancelled one
@@ -440,6 +492,8 @@ impl Default for FakeHarness {
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
+            session_settings: None,
+            switchable: true,
             completion_gate: None,
             completion_gate_first_send: true,
             session_count: None,
@@ -607,6 +661,23 @@ impl FakeHarness {
         let models = SessionModels::default();
         self.session_models = Some(models.clone());
         (self, models)
+    }
+
+    /// Records each session's starting settings and every live switch it
+    /// applies.
+    pub fn with_session_settings(mut self) -> (Self, SessionSettings) {
+        let settings = SessionSettings::default();
+        self.session_settings = Some(settings.clone());
+        (self, settings)
+    }
+
+    /// A live session that refuses in-place setting changes.
+    ///
+    /// The daemon must then keep the change for the next session start, which
+    /// the settings log proves.
+    pub fn with_unswitchable_settings(mut self) -> Self {
+        self.switchable = false;
+        self
     }
 
     /// Ends the session's event stream once the returned gate is released.
@@ -810,6 +881,14 @@ impl Harness for FakeHarness {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(spec.model.clone());
         }
+        if let Some(settings) = &self.session_settings {
+            settings.note(SettingChange::Started {
+                model: spec.model.clone(),
+                runtime_mode: spec.runtime_mode,
+                reasoning_effort: spec.reasoning_effort.clone(),
+                fast: spec.fast,
+            });
+        }
         let starts_seen = self.starts_seen.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = &self.start_gate
             && self
@@ -886,6 +965,8 @@ impl Harness for FakeHarness {
             receiver: Some(receiver),
             script: self.script.clone(),
             session_scripts,
+            settings: self.session_settings.clone(),
+            switchable: self.switchable,
             primed,
             delay,
             send_gate: self.send_gate.clone(),
@@ -924,6 +1005,10 @@ pub struct FakeSession {
     receiver: Option<BoxStream<'static, HarnessEvent>>,
     script: Option<Vec<HarnessEvent>>,
     session_scripts: Option<Arc<SessionScripts>>,
+    /// Where setting changes are recorded, when a test asked for them.
+    settings: Option<SessionSettings>,
+    /// Whether this session accepts in-place setting changes.
+    switchable: bool,
     /// The daemon's first `send` is the input that started the scripted turn.
     primed: bool,
     /// Env-gated pause before an echo turn, for cancel-flow e2e tests.
@@ -979,6 +1064,27 @@ pub struct FakeSession {
 
 #[async_trait]
 impl HarnessSession for FakeSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    fn controls(&self) -> Option<crate::SessionControls> {
+        // The fake advertises its harness kind's catalogue, so a test can ask
+        // for the same modes, efforts and fast tier the real adapter offers.
+        // It switches all of them in place unless the test asked otherwise.
+        let base = crate::thread_controls(self.kind);
+        Some(crate::SessionControls {
+            modes: base.modes,
+            models: None,
+            efforts: base.efforts,
+            fast: base.fast,
+            switch_mode: self.switchable,
+            switch_model: self.switchable,
+            switch_effort: self.switchable,
+            switch_fast: self.switchable,
+        })
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed {
             return Err(HarnessError::Transport {
@@ -1330,6 +1436,61 @@ impl HarnessSession for FakeSession {
         Ok(())
     }
 
+    async fn set_runtime_mode(
+        &mut self,
+        mode: h4rn_protocol::RuntimeMode,
+    ) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching the permission mode on a live session".into(),
+            });
+        }
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Mode(mode));
+        }
+        Ok(())
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching the model on a live session".into(),
+            });
+        }
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Model(model.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn set_reasoning_effort(&mut self, effort: Option<&str>) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching reasoning effort on a live session".into(),
+            });
+        }
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Effort(effort.map(str::to_string)));
+        }
+        Ok(())
+    }
+
+    async fn set_fast(&mut self, fast: bool) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching the fast tier on a live session".into(),
+            });
+        }
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Fast(fast));
+        }
+        Ok(())
+    }
+
     fn stderr_tail(&self) -> String {
         self.stderr.clone()
     }
@@ -1389,6 +1550,8 @@ pub fn test_spec() -> SessionSpec {
         workspace: PathBuf::from("/tmp/h4rn-workspace"),
         model: "test-model".into(),
         runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+        reasoning_effort: None,
+        fast: false,
         resume_id: None,
         mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
         env_overrides: BTreeMap::new(),

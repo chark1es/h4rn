@@ -33,6 +33,7 @@ export type CommandId =
   | "thread.next"
   | "thread.previous"
   | "thread.reply"
+  | "thread.permissions"
   | "approval.approve"
   | "approval.deny"
   | "turn.interrupt"
@@ -141,6 +142,13 @@ export const COMMANDS: readonly CommandSpec[] = [
     inInputs: true,
   },
   {
+    id: "thread.permissions",
+    label: "Thread permissions",
+    group: "Thread",
+    binding: "mod+shift+a",
+    inInputs: true,
+  },
+  {
     id: "approval.approve",
     label: "Approve pending action",
     group: "Thread",
@@ -180,7 +188,7 @@ export const COMMANDS: readonly CommandSpec[] = [
     id: "thread.acknowledge",
     label: "Acknowledge (Done)",
     group: "Thread",
-    binding: "mod+shift+a",
+    binding: "mod+alt+a",
     inInputs: true,
   },
   {

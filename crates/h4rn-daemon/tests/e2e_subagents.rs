@@ -234,6 +234,8 @@ async fn create_parent_with(
             prompt: prompt.to_owned(),
             attachments: Vec::new(),
             runtime_mode,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

@@ -13,7 +13,9 @@
 //! - 256-bit local access-token authentication for the WebSocket upgrade;
 //! - `GET /healthz` and `GET /ws`;
 //! - Hello, ListHosts, ListThreads, GetThread, CreateThread, SendMessage,
-//!   Interrupt, RespondApproval, SetThreadTab, Snooze and Subscribe;
+//!   Interrupt, RespondApproval, SetThreadTab, SetThreadRuntimeMode,
+//!   SetThreadModel, SetThreadReasoningEffort, SetThreadFast, Snooze and
+//!   Subscribe;
 //! - a thread manager with live harness sessions, durable replay and a
 //!   background placement ticker;
 //! - per-connection bounded queues with resume hints, and graceful shutdown.

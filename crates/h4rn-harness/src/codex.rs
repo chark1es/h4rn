@@ -83,6 +83,8 @@ pub const ENV_API_KEY_ENV: &str = "H4RN_CODEX_API_KEY_ENV";
 pub const ENV_WIRE_API: &str = "H4RN_CODEX_WIRE_API";
 
 const MCP_TOOL_TIMEOUT_SECS: u64 = 3_900;
+/// The service tier Codex labels "Fast" (2x speed, increased usage).
+const FAST_SERVICE_TIER: &str = "priority";
 const EVENT_CHANNEL_CAPACITY: usize = 512;
 const STDIN_CHANNEL_CAPACITY: usize = 64;
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -245,6 +247,13 @@ impl Harness for CodexHarness {
             first_attachments: spec.attachments.clone(),
             first_send: true,
             closed: false,
+            settings: CodexSettings {
+                model: spec.model.clone(),
+                runtime_mode: spec.runtime_mode,
+                effort: spec.reasoning_effort.clone(),
+                fast: spec.fast,
+            },
+            catalog: None,
         };
 
         session.handshake(&spec).await?;
@@ -271,6 +280,34 @@ pub struct CodexSession {
     first_attachments: Vec<AttachmentRef>,
     first_send: bool,
     closed: bool,
+    /// Settings the next `turn/start` carries.
+    ///
+    /// Codex applies model, approval policy, sandbox and reasoning effort per
+    /// turn ("this turn and subsequent turns"), so a live thread switch is one
+    /// field change followed by the next turn.
+    settings: CodexSettings,
+    /// What the current model's catalogue says it supports, once fetched.
+    catalog: Option<CodexCatalog>,
+}
+
+/// The per-model options Codex's `model/list` advertised.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexCatalog {
+    /// Reasoning efforts this model accepts.
+    efforts: Vec<String>,
+    /// The effort the model runs at unless the thread overrides it.
+    default_effort: Option<String>,
+    /// Whether this model has a fast service tier.
+    fast: bool,
+}
+
+/// The thread settings a Codex session applies to each turn.
+#[derive(Clone, Debug)]
+struct CodexSettings {
+    model: String,
+    runtime_mode: RuntimeMode,
+    effort: Option<String>,
+    fast: bool,
 }
 
 /// State the session exposes from the parser running on the stdout task.
@@ -365,8 +402,35 @@ impl CodexSession {
         if let Some(model) = model_argument(&spec.model) {
             params["model"] = Value::String(model.to_string());
         }
+        if spec.fast {
+            params["serviceTier"] = Value::String(FAST_SERVICE_TIER.to_string());
+        }
         if let Some(config) = config {
             params["config"] = config;
+        }
+        if let Some(effort) = spec
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+        {
+            // Thread creation has no top-level effort field; the config key is
+            // Codex's own `model_reasoning_effort`.
+            let config = params
+                .as_object_mut()
+                .and_then(|params| params.get_mut("config"))
+                .and_then(Value::as_object_mut);
+            match config {
+                Some(config) => {
+                    config.insert(
+                        "model_reasoning_effort".into(),
+                        Value::String(effort.to_string()),
+                    );
+                }
+                None => {
+                    params["config"] = json!({ "model_reasoning_effort": effort });
+                }
+            }
         }
         if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
             params["threadId"] = Value::String(resume_id.to_string());
@@ -392,11 +456,65 @@ impl CodexSession {
             .or_else(|| result["thread"]["model"].as_str())
             .map(str::to_string);
 
-        let mut shared = lock(&self.shared);
-        shared.session_id = Some(thread_id);
-        shared.model = model;
-        shared.state = AgentState::Idle;
+        {
+            let mut shared = lock(&self.shared);
+            shared.session_id = Some(thread_id);
+            shared.model = model;
+            shared.state = AgentState::Idle;
+        }
+
+        // The model catalogue says which efforts and speed tiers this thread
+        // can actually use. A failed fetch leaves it unknown; the adapter then
+        // does not guess, and the thread keeps its requested values.
+        self.refresh_catalog().await;
+        if let Some(catalog) = &self.catalog
+            && let Some(effort) = self.settings.effort.as_deref()
+            && !catalog.efforts.is_empty()
+            && !catalog
+                .efforts
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(effort))
+        {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: format!(
+                    "reasoning effort `{effort}`; this model offers: {}",
+                    catalog.efforts.join(", ")
+                ),
+            });
+        }
+        if let Some(catalog) = &self.catalog
+            && self.settings.fast
+            && !catalog.fast
+        {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "a fast tier for this model".into(),
+            });
+        }
         Ok(())
+    }
+
+    /// Reads `model/list` and records what the current model supports.
+    ///
+    /// Best effort: an older Codex without the method, or a provider whose
+    /// catalogue is unavailable, leaves `catalog` as it was (usually `None`),
+    /// so no valid setting is rejected on a guess.
+    async fn refresh_catalog(&mut self) {
+        let requested = {
+            let named = model_argument(&self.settings.model).map(str::to_string);
+            match named {
+                Some(model) => Some(model),
+                None => {
+                    let shared = lock(&self.shared);
+                    shared.model.clone()
+                }
+            }
+        };
+        let Ok(result) = self.request("model/list", json!({})).await else {
+            return;
+        };
+        self.catalog = catalog_from_model_list(&result, requested.as_deref());
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, HarnessError> {
@@ -455,6 +573,114 @@ impl CodexSession {
 
 #[async_trait]
 impl HarnessSession for CodexSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    async fn set_runtime_mode(&mut self, mode: RuntimeMode) -> Result<(), HarnessError> {
+        self.settings.runtime_mode = mode;
+        Ok(())
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "an empty model".into(),
+            });
+        }
+        let previous = self.settings.model.clone();
+        self.settings.model = model.to_string();
+        self.refresh_catalog().await;
+        let catalog = self.catalog.clone();
+        let effort = self.settings.effort.clone();
+        // A model switch can leave the thread's effort unsupported by the new
+        // model; refuse it here rather than send a turn Codex will reject.
+        if let Some(catalog) = &catalog
+            && let Some(effort) = effort.as_deref()
+            && !catalog.efforts.is_empty()
+            && !catalog
+                .efforts
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(effort))
+        {
+            self.settings.model = previous;
+            self.refresh_catalog().await;
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: format!(
+                    "model `{model}` with reasoning effort `{effort}`; the model offers: {}",
+                    catalog.efforts.join(", ")
+                ),
+            });
+        }
+        if let Some(catalog) = &catalog
+            && self.settings.fast
+            && !catalog.fast
+        {
+            self.settings.model = previous;
+            self.refresh_catalog().await;
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: format!("model `{model}` with fast mode; it has no fast tier"),
+            });
+        }
+        Ok(())
+    }
+
+    async fn set_reasoning_effort(&mut self, effort: Option<&str>) -> Result<(), HarnessError> {
+        if let Some(effort) = effort
+            && let Some(catalog) = &self.catalog
+            && !catalog.efforts.is_empty()
+            && !catalog
+                .efforts
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(effort))
+        {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: format!(
+                    "reasoning effort `{effort}`; this model offers: {}",
+                    catalog.efforts.join(", ")
+                ),
+            });
+        }
+        self.settings.effort = effort.map(str::to_string);
+        Ok(())
+    }
+
+    async fn set_fast(&mut self, fast: bool) -> Result<(), HarnessError> {
+        if fast
+            && let Some(catalog) = &self.catalog
+            && !catalog.fast
+        {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "a fast tier for this model".into(),
+            });
+        }
+        self.settings.fast = fast;
+        Ok(())
+    }
+
+    fn controls(&self) -> Option<crate::SessionControls> {
+        let catalog = self.catalog.as_ref()?;
+        let base = crate::thread_controls(self.kind);
+        Some(crate::SessionControls {
+            modes: base.modes,
+            // The catalogue lists selectable models, but a provider can run a
+            // custom slug too; the model itself is left unconstrained.
+            models: None,
+            efforts: catalog.efforts.clone(),
+            fast: catalog.fast,
+            switch_mode: true,
+            switch_model: true,
+            switch_effort: true,
+            switch_fast: true,
+        })
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {
@@ -474,12 +700,20 @@ impl HarnessSession for CodexSession {
             message: "codex session has no thread id".into(),
         })?;
         let turn_input = build_turn_input(&input.text, &attachments);
-        let result = self
-            .request(
-                "turn/start",
-                json!({ "threadId": thread_id, "input": turn_input }),
-            )
-            .await?;
+        // The turn carries the thread's current settings: a switch made
+        // between turns is in effect from this prompt on, without restarting
+        // the conversation.
+        let default_effort = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.default_effort.clone());
+        let params = turn_params(
+            &self.settings,
+            default_effort.as_deref(),
+            thread_id,
+            turn_input,
+        );
+        let result = self.request("turn/start", params).await?;
 
         if let Some(turn_id) = result["turn"]["id"].as_str() {
             lock(&self.shared).turn_id = Some(turn_id.to_string());
@@ -869,7 +1103,7 @@ fn model_argument(model: &str) -> Option<&str> {
 /// The Codex `approvalPolicy` value for a thread's autonomy setting.
 fn approval_policy(runtime_mode: RuntimeMode) -> &'static str {
     match runtime_mode {
-        RuntimeMode::ApprovalRequired => "untrusted",
+        RuntimeMode::ApprovalRequired | RuntimeMode::Plan => "untrusted",
         RuntimeMode::AutoAcceptEdits => "on-request",
         RuntimeMode::FullAccess => "never",
     }
@@ -880,7 +1114,99 @@ fn sandbox_mode(runtime_mode: RuntimeMode) -> &'static str {
     match runtime_mode {
         RuntimeMode::ApprovalRequired => "read-only",
         RuntimeMode::AutoAcceptEdits => "workspace-write",
+        // Codex has no plan mode; the daemon refuses it for this harness.
+        RuntimeMode::Plan => "read-only",
         RuntimeMode::FullAccess => "danger-full-access",
+    }
+}
+
+/// The catalogue entry for one thread's model, from a `model/list` reply.
+///
+/// `requested` is the model the thread named; without one the catalogue's
+/// default entry is the thread's model. An unknown id leaves the catalogue
+/// unknown rather than guessing from another model.
+fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<CodexCatalog> {
+    let entries = result["data"].as_array()?;
+    let entry = match requested {
+        Some(id) => entries
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(id))?,
+        None => entries.iter().find(|entry| entry["isDefault"] == true)?,
+    };
+    let efforts = entry["supportedReasoningEfforts"]
+        .as_array()
+        .map(|efforts| {
+            efforts
+                .iter()
+                .filter_map(|option| option["reasoningEffort"].as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let fast = entry["serviceTiers"]
+        .as_array()
+        .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == FAST_SERVICE_TIER))
+        || entry["additionalSpeedTiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"));
+    let default_effort = entry["defaultReasoningEffort"].as_str().map(str::to_string);
+    Some(CodexCatalog {
+        efforts,
+        default_effort,
+        fast,
+    })
+}
+
+/// The `turn/start` parameters for one prompt.
+///
+/// Codex applies model, approval policy, sandbox, effort and service tier per
+/// turn ("this turn and subsequent turns"), so a live thread switch is a field
+/// change here and nothing more.
+fn turn_params(
+    settings: &CodexSettings,
+    default_effort: Option<&str>,
+    thread_id: String,
+    input: Vec<Value>,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": input,
+        "approvalPolicy": approval_policy(settings.runtime_mode),
+        "sandboxPolicy": sandbox_policy(settings.runtime_mode),
+        "serviceTierForTurn": if settings.fast {
+            FAST_SERVICE_TIER
+        } else {
+            "default"
+        },
+    });
+    if let Some(model) = model_argument(&settings.model) {
+        params["model"] = Value::String(model.to_string());
+    }
+    // An unset effort returns the model to its own default explicitly; simply
+    // omitting the field would keep the previous turn's override.
+    if let Some(effort) = settings
+        .effort
+        .as_deref()
+        .or(default_effort)
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+    {
+        params["effort"] = Value::String(effort.to_string());
+    }
+    params
+}
+
+/// The `turn/start` sandbox policy object for a permission mode.
+fn sandbox_policy(runtime_mode: RuntimeMode) -> Value {
+    match runtime_mode {
+        RuntimeMode::ApprovalRequired | RuntimeMode::Plan => {
+            json!({ "type": "readOnly", "networkAccess": false })
+        }
+        RuntimeMode::AutoAcceptEdits => json!({
+            "type": "workspaceWrite",
+            "networkAccess": false,
+        }),
+        RuntimeMode::FullAccess => json!({ "type": "dangerFullAccess" }),
     }
 }
 
@@ -1266,5 +1592,74 @@ mod tests {
         assert_eq!(model_argument("default"), None);
         assert_eq!(model_argument("  "), None);
         assert_eq!(model_argument("gpt-6.1-sol"), Some("gpt-6.1-sol"));
+    }
+
+    #[test]
+    fn a_turn_carries_the_threads_model_effort_and_fast_tier() {
+        let settings = CodexSettings {
+            model: "gpt-6.2-sol".into(),
+            runtime_mode: RuntimeMode::FullAccess,
+            effort: Some("xhigh".into()),
+            fast: true,
+        };
+        let params = turn_params(&settings, None, "thread-1".into(), vec![]);
+        assert_eq!(params["model"], "gpt-6.2-sol");
+        assert_eq!(params["effort"], "xhigh");
+        assert_eq!(params["serviceTierForTurn"], "priority");
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandboxPolicy"]["type"], "dangerFullAccess");
+    }
+
+    #[test]
+    fn a_turn_without_effort_or_fast_omits_them() {
+        let settings = CodexSettings {
+            model: "default".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            effort: None,
+            fast: false,
+        };
+        let params = turn_params(&settings, None, "thread-1".into(), vec![]);
+        assert!(params.get("model").is_none());
+        assert!(params.get("effort").is_none());
+        assert_eq!(params["serviceTierForTurn"], "default");
+        assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
+
+        // With no thread override the model's own default is sent explicitly:
+        // omitting the field would keep the previous turn's effort.
+        let params = turn_params(&settings, Some("medium"), "thread-1".into(), vec![]);
+        assert_eq!(params["effort"], "medium");
+    }
+
+    #[test]
+    fn the_model_catalogue_names_the_efforts_and_fast_tier_it_supports() {
+        let result = json!({
+            "data": [
+                {
+                    "id": "gpt-6.2-sol",
+                    "isDefault": true,
+                    "defaultReasoningEffort": "low",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low"},
+                        {"reasoningEffort": "high"}
+                    ],
+                    "serviceTiers": [{"id": "priority"}, {"id": "flex"}]
+                },
+                {
+                    "id": "gpt-plain",
+                    "isDefault": false,
+                    "supportedReasoningEfforts": [],
+                    "serviceTiers": []
+                }
+            ]
+        });
+        let catalog = catalog_from_model_list(&result, Some("gpt-6.2-sol")).expect("catalogue");
+        assert_eq!(catalog.efforts, vec!["low", "high"]);
+        assert_eq!(catalog.default_effort.as_deref(), Some("low"));
+        assert!(catalog.fast);
+        let plain = catalog_from_model_list(&result, Some("gpt-plain")).expect("catalogue");
+        assert!(plain.efforts.is_empty());
+        assert!(!plain.fast);
+        // An unknown id does not borrow another model's options.
+        assert_eq!(catalog_from_model_list(&result, Some("missing")), None);
     }
 }

@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::acp::{
-    AcpClient, AcpError, AcpEvent, AcpLocation, AcpMcpServer, AcpPermissionOption,
+    AcpClient, AcpError, AcpEvent, AcpLocation, AcpMcpServer, AcpMode, AcpPermissionOption,
     AcpPermissionRequest, AcpServerInfo, AcpSessionInfo, AcpToolCall, AcpToolKind, AcpToolStatus,
     AcpUpdate, AcpUsage, AgentCapabilities, ENV_MCP_STDIO_BRIDGE, PromptContent,
 };
@@ -150,6 +150,8 @@ pub(crate) struct AcpSession {
     first_attachments: Vec<AttachmentRef>,
     first_send: bool,
     closed: bool,
+    /// What the agent advertised when the session opened.
+    info: AcpSessionInfo,
     policy: AcpSessionPolicy,
 }
 
@@ -240,7 +242,7 @@ impl AcpSession {
         // Which catalogue a selection RPC understands is adapter policy:
         // Antigravity's legacy `models`/`modes` objects win, a generic agent's
         // v1 `configOptions` do.
-        let session = if policy.config_options_first {
+        let mut session = if policy.config_options_first {
             session.prefer_config_options()
         } else {
             session
@@ -300,7 +302,7 @@ impl AcpSession {
                 harness = ?policy.harness,
                 "the resumed session advertised no modes; keeping its current mode"
             );
-        } else if (policy.missing_mode_is_error)(spec) {
+        } else if spec.runtime_mode == RuntimeMode::Plan || (policy.missing_mode_is_error)(spec) {
             return Err(HarnessError::Unsupported {
                 harness: policy.harness,
                 feature: format!(
@@ -320,6 +322,42 @@ impl AcpSession {
                 mode = %wanted_mode,
                 "the agent did not offer the requested mode; keeping its current mode"
             );
+        }
+
+        // A thread that asked for an effort must get it or be refused; an
+        // agent with no effort option cannot honour one.
+        if let Some(requested) = spec
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+        {
+            let Some(config_id) = session.effort_config_id.as_deref() else {
+                return Err(HarnessError::Unsupported {
+                    harness: policy.harness,
+                    feature: format!(
+                        "reasoning effort `{requested}`; the agent exposes no effort option"
+                    ),
+                });
+            };
+            let Some(value) = session
+                .efforts
+                .iter()
+                .find(|value| value.eq_ignore_ascii_case(requested))
+            else {
+                return Err(HarnessError::Unsupported {
+                    harness: policy.harness,
+                    feature: format!(
+                        "reasoning effort `{requested}`; the agent offers: {}",
+                        session.efforts.join(", ")
+                    ),
+                });
+            };
+            client
+                .set_config_option(&session.session_id, config_id, value)
+                .await
+                .map_err(|error| map_acp_error(error, policy.harness))?;
+            session.current_effort = Some(value.clone());
         }
 
         let events = client.take_events().ok_or(HarnessError::Protocol {
@@ -352,7 +390,7 @@ impl AcpSession {
         Ok(StartedAcpSession {
             session: Self {
                 client: client.clone(),
-                session_id: session.session_id,
+                session_id: session.session_id.clone(),
                 events_rx: Some(events_rx),
                 events_tx,
                 bridge,
@@ -366,6 +404,7 @@ impl AcpSession {
                 first_attachments: spec.attachments.clone(),
                 first_send: true,
                 closed: false,
+                info: session,
                 policy,
             },
         })
@@ -387,12 +426,41 @@ fn available_models(session: &AcpSessionInfo) -> String {
 
 /// The ACP mode a thread's autonomy maps to by default.
 pub(crate) fn default_mode(spec: &SessionSpec) -> String {
-    match spec.runtime_mode {
+    mode_id_for(spec.runtime_mode).to_string()
+}
+
+/// The ACP mode id h4rn's permission mode asks for.
+pub(crate) fn mode_id_for(mode: RuntimeMode) -> &'static str {
+    match mode {
         RuntimeMode::ApprovalRequired => "default",
         RuntimeMode::AutoAcceptEdits => "accept-edits",
+        RuntimeMode::Plan => "plan",
         RuntimeMode::FullAccess => "auto",
     }
-    .to_string()
+}
+
+/// Maps an advertised ACP mode id onto h4rn's permission modes.
+///
+/// An id h4rn has no label for is not guessed: it is simply not offered.
+pub(crate) fn runtime_mode_for_id(id: &str) -> Option<RuntimeMode> {
+    let id = id.trim().to_ascii_lowercase();
+    match id.as_str() {
+        "default" | "ask" | "manual" | "supervised" => Some(RuntimeMode::ApprovalRequired),
+        "accept-edits" | "acceptedits" | "accept_edits" => Some(RuntimeMode::AutoAcceptEdits),
+        "plan" | "read-only" | "readonly" => Some(RuntimeMode::Plan),
+        "auto" | "full-access" | "full_access" | "bypass" | "bypasspermissions" => {
+            Some(RuntimeMode::FullAccess)
+        }
+        _ => None,
+    }
+}
+
+/// The id of the advertised mode that maps to `mode`.
+fn advertised_mode_for(mode: RuntimeMode, modes: &[AcpMode]) -> Option<String> {
+    modes
+        .iter()
+        .find(|advertised| runtime_mode_for_id(&advertised.id) == Some(mode))
+        .map(|advertised| advertised.id.clone())
 }
 
 fn mcp_servers(spec: &SessionSpec, capabilities: &AgentCapabilities) -> Vec<AcpMcpServer> {
@@ -447,6 +515,135 @@ pub(crate) fn map_acp_error(error: AcpError, harness: HarnessKind) -> HarnessErr
 
 #[async_trait]
 impl HarnessSession for AcpSession {
+    fn kind(&self) -> HarnessKind {
+        self.policy.harness
+    }
+
+    fn controls(&self) -> Option<crate::SessionControls> {
+        let modes = self
+            .info
+            .modes
+            .iter()
+            .filter_map(|mode| runtime_mode_for_id(&mode.id))
+            .collect::<Vec<_>>();
+        Some(crate::SessionControls {
+            modes,
+            models: (!self.info.models.is_empty()).then(|| {
+                self.info
+                    .models
+                    .iter()
+                    .map(|model| model.model_id.clone())
+                    .collect()
+            }),
+            efforts: self.info.efforts.clone(),
+            fast: false,
+            switch_mode: true,
+            switch_model: true,
+            // Attempt an effort switch even when the agent advertised no
+            // option: the daemon must refuse that request, not defer a change
+            // the next start cannot honour either.
+            switch_effort: true,
+            switch_fast: false,
+        })
+    }
+
+    async fn set_runtime_mode(&mut self, mode: RuntimeMode) -> Result<(), HarnessError> {
+        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
+            return Err(HarnessError::Transport {
+                harness: self.policy.harness,
+                message: "session is shut down".into(),
+            });
+        }
+        let Some(mode_id) = advertised_mode_for(mode, &self.info.modes) else {
+            return Err(HarnessError::Unsupported {
+                harness: self.policy.harness,
+                feature: format!(
+                    "mode `{}`; the agent offers: {}",
+                    mode_id_for(mode),
+                    self.info
+                        .modes
+                        .iter()
+                        .map(|mode| mode.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        };
+        let result = match self.info.mode_config_id.as_deref() {
+            Some(config_id) => {
+                self.client
+                    .set_config_option(&self.session_id, config_id, &mode_id)
+                    .await
+            }
+            None => self.client.set_mode(&self.session_id, &mode_id).await,
+        };
+        result.map_err(|error| map_acp_error(error, self.policy.harness))?;
+        self.info.current_mode_id = Some(mode_id);
+        Ok(())
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
+        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
+            return Err(HarnessError::Transport {
+                harness: self.policy.harness,
+                message: "session is shut down".into(),
+            });
+        }
+        let Some(model_id) = self.info.resolve_model(model) else {
+            return Err(HarnessError::Unsupported {
+                harness: self.policy.harness,
+                feature: self.policy.unknown_model(model, &self.info),
+            });
+        };
+        let result = match self.info.model_config_id.as_deref() {
+            Some(config_id) => {
+                self.client
+                    .set_config_option(&self.session_id, config_id, &model_id)
+                    .await
+            }
+            None => self.client.set_model(&self.session_id, &model_id).await,
+        };
+        result.map_err(|error| map_acp_error(error, self.policy.harness))?;
+        self.info.current_model_id = Some(model_id);
+        Ok(())
+    }
+
+    async fn set_reasoning_effort(&mut self, effort: Option<&str>) -> Result<(), HarnessError> {
+        let Some(effort) = effort.map(str::trim).filter(|effort| !effort.is_empty()) else {
+            return Err(HarnessError::Unsupported {
+                harness: self.policy.harness,
+                feature: "resetting reasoning effort on a live session; restart the session".into(),
+            });
+        };
+        let Some(config_id) = self.info.effort_config_id.clone() else {
+            return Err(HarnessError::Unsupported {
+                harness: self.policy.harness,
+                feature: format!("reasoning effort `{effort}`; the agent exposes no effort option"),
+            });
+        };
+        let Some(value) = self
+            .info
+            .efforts
+            .iter()
+            .find(|value| value.eq_ignore_ascii_case(effort))
+            .cloned()
+        else {
+            return Err(HarnessError::Unsupported {
+                harness: self.policy.harness,
+                feature: format!(
+                    "reasoning effort `{effort}`; the agent offers: {}",
+                    self.info.efforts.join(", ")
+                ),
+            });
+        };
+        self.client
+            .set_config_option(&self.session_id, &config_id, &value)
+            .await
+            .map_err(|error| map_acp_error(error, self.policy.harness))?;
+        self.info.current_effort = Some(value);
+        Ok(())
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         let harness = self.policy.harness;
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
@@ -1607,6 +1804,8 @@ mod tests {
             workspace: workspace.to_path_buf(),
             model: "default".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             resume_id: None,
             mcp_endpoint: None,
             env_overrides: std::collections::BTreeMap::new(),
@@ -2633,5 +2832,31 @@ mod tests {
         assert_eq!(tool_call.summary, "Read package.json");
         assert!(tool_call.output.is_some());
         assert!(lock(&shared).tool_labels.is_empty(), "the id is forgotten");
+    }
+
+    #[test]
+    fn advertised_modes_map_to_h4rn_permissions() {
+        assert_eq!(
+            runtime_mode_for_id("default"),
+            Some(RuntimeMode::ApprovalRequired)
+        );
+        assert_eq!(
+            runtime_mode_for_id("accept-edits"),
+            Some(RuntimeMode::AutoAcceptEdits)
+        );
+        assert_eq!(runtime_mode_for_id("plan"), Some(RuntimeMode::Plan));
+        assert_eq!(runtime_mode_for_id("auto"), Some(RuntimeMode::FullAccess));
+        assert_eq!(runtime_mode_for_id("agent-specific-mode"), None);
+
+        let modes = vec![AcpMode {
+            id: "plan".into(),
+            name: "Plan".into(),
+            description: None,
+        }];
+        assert_eq!(
+            advertised_mode_for(RuntimeMode::Plan, &modes).as_deref(),
+            Some("plan")
+        );
+        assert_eq!(advertised_mode_for(RuntimeMode::FullAccess, &modes), None);
     }
 }

@@ -81,4 +81,12 @@ describe("keybindings", () => {
     expect(chordText("mod+enter", false)).toBe("Ctrl+↵");
     expect(chordText("mod+shift+n", true)).toBe("⌘⇧N");
   });
+
+  it("opens the thread permission picker on mod+shift+a", () => {
+    expect(bindingFor("thread.permissions")).toBe("mod+shift+a");
+    const chord = chordFromEvent(press("KeyA", "A", { shiftKey: true }));
+    expect(chord && matchCommand(chord)).toBe("thread.permissions");
+    // Acknowledge moved off the chord the permission picker owns.
+    expect(bindingFor("thread.acknowledge")).toBe("mod+alt+a");
+  });
 });

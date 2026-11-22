@@ -511,6 +511,16 @@ impl StreamJsonSession {
 
 #[async_trait]
 impl HarnessSession for StreamJsonSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    fn controls(&self) -> Option<crate::SessionControls> {
+        // A stream-json process takes its model and mode at launch; a change
+        // is applied by the next session start, not in place.
+        Some(crate::SessionControls::default())
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {

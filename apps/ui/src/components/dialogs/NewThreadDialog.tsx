@@ -37,6 +37,7 @@ import {
   useProxy,
   useProxyCatalog,
 } from "@/features/proxy/proxyStore";
+import { useThreadSettings } from "@/features/threads/settings";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { DEFAULT_NEW_THREAD_WORKSPACE, drafts } from "@/lib/drafts";
@@ -45,6 +46,7 @@ import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
 import { NewThreadDraftSession, type NewThreadDraftSnapshot } from "@/lib/newThreadDraft";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
+import { effortLabel, fastSupported, threadEffortChoices } from "@/lib/threadControls";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_MODELS = Object.fromEntries(
@@ -106,7 +108,10 @@ export function NewThreadDialog() {
   const [agentId, setAgentId] = useState<string | null>(null);
   const [model, setModel] = useState(DEFAULT_MODELS.claude_code);
   const [workspace, setWorkspace] = useState(DEFAULT_NEW_THREAD_WORKSPACE);
-  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("approval_required");
+  const threadSettings = useThreadSettings();
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(threadSettings.defaultPermissionMode);
+  const [reasoningEffort, setReasoningEffort] = useState<string>("default");
+  const [fast, setFast] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   /** Host + folder slot the prompt box is showing; one per dialog open. */
@@ -272,6 +277,24 @@ export function NewThreadDialog() {
   const runtimeModeChoices =
     harness === "acp" ? acpRuntimeModeChoices(agentModes) : THREAD_RUNTIME_MODES;
   const modeManagedByAgent = harness === "acp" && runtimeModeChoices.length === 0;
+  // Open on this device's default for new threads; a harness that cannot honour
+  // it falls back to the first mode it offers below.
+  useEffect(() => {
+    if (!open) return;
+    setRuntimeMode(threadSettings.defaultPermissionMode);
+  }, [open, threadSettings.defaultPermissionMode]);
+  // Effort and fast belong to one harness: switching harnesses keeps a value
+  // the new one offers and otherwise returns to its default.
+  const effortKey = threadEffortChoices(harness).join(",");
+  useEffect(() => {
+    const offered = effortKey.split(",").filter(Boolean);
+    setReasoningEffort((current) =>
+      current === "default" || offered.includes(current) ? current : "default",
+    );
+    setFast(false);
+  }, [effortKey]);
+  const efforts = threadEffortChoices(harness);
+  const fastAvailable = fastSupported(harness);
   useEffect(() => {
     if (!open) return;
     // An agent that manages its own mode gets no choice from this dialog, so
@@ -341,6 +364,8 @@ export function NewThreadDialog() {
       prompt: draft.text.trim(),
       attachments: attachments.attachments,
       runtimeMode,
+      reasoningEffort: reasoningEffort === "default" ? null : reasoningEffort,
+      fast,
     });
     setStarting(false);
     if (ok) {
@@ -464,12 +489,8 @@ export function NewThreadDialog() {
                           : "No models read yet. Type one or leave `default`."}
               </span>
             ) : modelInfo.thinking ? (
-              <span className="text-small text-fg-3">
-                {modelInfo.thinking.kind}: {modelInfo.thinking.levels.join(", ")}
-              </span>
-            ) : (
-              <span className="text-small text-fg-3">No thinking modes.</span>
-            )}
+              <span className="text-small text-fg-3">{modelInfo.thinking.kind}</span>
+            ) : null}
             {proxyActive ? (
               <span className="text-small text-fg-3">
                 {proxyModels.length} models from {proxyActive.profile.name}; the harness routes
@@ -478,6 +499,44 @@ export function NewThreadDialog() {
             ) : null}
           </div>
         </div>
+
+        {efforts.length > 0 || fastAvailable ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {efforts.length > 0 ? (
+              <div className="flex flex-col gap-1">
+                <FieldLabel htmlFor="new-thread-effort" hint="the harness default when unset">
+                  Reasoning effort
+                </FieldLabel>
+                <ChipSelect
+                  id="new-thread-effort"
+                  block
+                  label="Reasoning effort"
+                  value={reasoningEffort}
+                  options={[
+                    { value: "default", label: "Default" },
+                    ...efforts.map((effort) => ({ value: effort, label: effortLabel(effort) })),
+                  ]}
+                  onChange={setReasoningEffort}
+                />
+              </div>
+            ) : null}
+            {fastAvailable ? (
+              <div className="flex flex-col gap-1">
+                <FieldLabel htmlFor="new-thread-fast">Speed</FieldLabel>
+                <button
+                  type="button"
+                  id="new-thread-fast"
+                  className="q-switch"
+                  role="switch"
+                  aria-checked={fast}
+                  aria-label="Fast mode"
+                  onClick={() => setFast((value) => !value)}
+                />
+                <span className="text-small text-fg-3">Priority service tier. Higher usage.</span>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-[1fr_1.2fr]">
           <div className="flex flex-col gap-1">

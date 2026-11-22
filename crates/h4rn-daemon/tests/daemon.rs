@@ -422,6 +422,8 @@ async fn create_with_model(
             prompt: prompt.into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -1328,6 +1330,8 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
             prompt: "needs a worktree".into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+            reasoning_effort: None,
+            fast: false,
             worktree: Some(h4rn_protocol::WorktreeRequest::Generated(true)),
         })
         .await
@@ -1345,6 +1349,8 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
             prompt: "report ids".into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -2547,6 +2553,8 @@ async fn an_edit_tool_call_reaches_the_client_with_its_diffstat() {
             prompt: "edit it [[write:notes.txt]]keep\nnew\nmore".into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -2609,6 +2617,8 @@ async fn turn_completed_carries_the_turns_change_set() {
             prompt: "make a note [[write:notes.txt]]hello from the fake harness".into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -2668,6 +2678,8 @@ async fn thread_summary_names_the_workspace_branch() {
             prompt: "name the branch".into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

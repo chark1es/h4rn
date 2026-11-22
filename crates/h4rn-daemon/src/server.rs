@@ -806,6 +806,8 @@ impl Connection {
                     prompt,
                     attachments,
                     runtime_mode,
+                    reasoning_effort,
+                    fast,
                     worktree,
                 } => {
                     let request = crate::threads::NewThread {
@@ -820,6 +822,8 @@ impl Connection {
                         prompt,
                         attachments,
                         runtime_mode,
+                        reasoning_effort,
+                        fast,
                         worktree,
                     };
                     match self.state.manager.create_thread(request).await {
@@ -896,6 +900,34 @@ impl Connection {
                     .state
                     .manager
                     .set_thread_tab(&thread_id, tab, pinned)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadRuntimeMode { thread_id, mode } => self
+                    .state
+                    .manager
+                    .set_thread_runtime_mode(&thread_id, mode)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadModel { thread_id, model } => self
+                    .state
+                    .manager
+                    .set_thread_model(&thread_id, model)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadReasoningEffort { thread_id, effort } => self
+                    .state
+                    .manager
+                    .set_thread_reasoning_effort(&thread_id, effort)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadFast { thread_id, fast } => self
+                    .state
+                    .manager
+                    .set_thread_fast(&thread_id, fast)
                     .await
                     .map(|_| ResponseBody::Ack)
                     .map_err(crate::threads::ManagerError::into_proto),
@@ -1865,6 +1897,10 @@ mod tests {
             workspace_path: "/tmp/work".into(),
             branch: None,
             model: "test-model".into(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
+            fast: false,
             tab: ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

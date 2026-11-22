@@ -7,6 +7,25 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Threads can change permission mode, model and reasoning effort mid-thread.**
+  The model chip in the composer now opens a thread-controls panel: permission
+  mode, model, reasoning effort and (on Codex) fast mode. A change applies to the
+  next turn — in place where the harness can switch (Claude Code's `set_model`
+  and `set_permission_mode`, Codex's per-turn model, effort and sandbox, ACP
+  `session/set_model`/`session/set_mode`/`set_config_option`, OpenCode's session
+  model and permissions), otherwise by closing an idle session so the next turn
+  resumes the conversation on the new settings. The thread summary reports the
+  live values and a thread that differs from this device's defaults shows them
+  quietly beside its model. Plan mode is offered for Claude Code and for ACP
+  agents that advertise it; reasoning effort for Claude Code and Codex; fast mode
+  for Codex. A value the harness cannot honour is refused with a clear reason.
+  New requests: `SetThreadRuntimeMode`, `SetThreadModel`,
+  `SetThreadReasoningEffort` and `SetThreadFast`; `CreateThread` accepts
+  `reasoning_effort` and `fast`, and older daemons/threads without the new fields
+  still deserialize. `⌘⇧A`/`Ctrl+Shift+A` opens the permission picker
+  (Acknowledge moves to `⌘⌥A`/`Ctrl+Alt+A`), and Settings → Threads → New
+  threads sets the default permission mode on this device.
+
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and
