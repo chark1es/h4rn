@@ -1338,6 +1338,7 @@ async fn relay_pairing_failover_and_revocation() {
         .request(ClientRequest::CreateThread {
             host: host.clone(),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: "/tmp/h4rn-remote-workspace".into(),
             model: "fake-model".into(),
             prompt: "created over the relay".into(),

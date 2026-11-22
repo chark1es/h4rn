@@ -201,6 +201,11 @@ impl DaemonBuilder {
         // and the desktop agree.
         let network_access_enabled = self.config.network_access_enabled();
 
+        let acp_agents = Arc::new(
+            crate::acp_agents::AcpAgentService::open(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open the ACP agent list: {error}"))?,
+        );
+
         let catalog: Arc<dyn HarnessCatalog> = match self.catalog {
             Some(catalog) => catalog,
             None => {
@@ -208,6 +213,10 @@ impl DaemonBuilder {
                 for harness in h4rn_harness::registry::builtin_adapters() {
                     catalog.register(harness);
                 }
+                catalog
+                    .register(Arc::new(h4rn_harness::GenericAcpHarness::new(
+                        Arc::clone(&acp_agents) as Arc<dyn h4rn_harness::AcpAgentConfigSource>,
+                    )));
                 // The fake adapter is available to the UI e2e through an
                 // explicit environment switch and never in a normal daemon.
                 if std::env::var("H4RN_FAKE_HARNESS").as_deref() == Ok("1") {
@@ -496,6 +505,7 @@ impl DaemonBuilder {
 
         Ok(Daemon {
             config: self.config,
+            acp_agents,
             harness_versions,
             projects,
             manager,
@@ -545,6 +555,7 @@ pub struct Daemon {
     proxy: Arc<h4rn_proxy::ProxyService>,
     meter: Arc<h4rn_meter::MeterHub>,
     harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
+    acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     projects: Arc<crate::projects::ProjectService>,
     text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// The network-listener setting resolved at build time.
@@ -694,6 +705,7 @@ impl Daemon {
             proxy: Arc::clone(&self.proxy),
             meter: Arc::clone(&self.meter),
             harness_versions: Arc::clone(&self.harness_versions),
+            acp_agents: Arc::clone(&self.acp_agents),
             projects: Arc::clone(&self.projects),
             text_generation: Arc::clone(&self.text_generation),
         };

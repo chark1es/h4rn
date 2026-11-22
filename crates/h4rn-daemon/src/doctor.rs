@@ -33,6 +33,7 @@ impl HarnessStatus {
             HarnessKind::Codex => "codex",
             HarnessKind::Opencode => "opencode",
             HarnessKind::Antigravity => "antigravity",
+            HarnessKind::Acp => "acp",
         }
     }
 }
@@ -190,6 +191,14 @@ pub async fn detect_harness(kind: HarnessKind) -> HarnessStatus {
         HarnessKind::Codex => "codex",
         HarnessKind::Opencode => "opencode",
         HarnessKind::Antigravity => "agy",
+        // A local ACP command has no single executable to detect.
+        HarnessKind::Acp => {
+            return HarnessStatus {
+                kind,
+                path: None,
+                version: None,
+            };
+        }
     };
 
     let Some(path) = find_in_path(binary) else {

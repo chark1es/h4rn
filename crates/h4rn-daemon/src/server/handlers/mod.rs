@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::server::Connection;
 
+pub(super) mod acp_agents;
 pub(super) mod forge;
 pub(super) mod harness_versions;
 pub(super) mod mcp;
@@ -80,6 +81,7 @@ declare_services! {
     Subagents => subagents,
     Usage => usage,
     HarnessVersions => harness_versions,
+    AcpAgents => acp_agents,
     Worktrees => worktrees,
     Projects => projects,
     NetworkAccess => network_access,

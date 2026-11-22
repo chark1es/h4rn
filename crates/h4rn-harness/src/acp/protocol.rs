@@ -80,10 +80,11 @@ impl AgentCapabilities {
         );
         let terminal = field(capabilities, &["terminal"]);
         Self {
+            // `session/load` and `session/resume` are different methods. An
+            // agent that advertises only `resume` cannot answer `load` with a
+            // replay: the resume capability must not be read as load support.
             load_session: bool_field(capabilities, &["loadSession", "load_session"])
-                || session.is_some_and(|value| {
-                    field(value, &["load"]).is_some() || field(value, &["resume"]).is_some()
-                }),
+                || session.is_some_and(|value| field(value, &["load"]).is_some()),
             resume_session: session.is_some_and(|value| field(value, &["resume"]).is_some()),
             close_session: session.is_some_and(|value| field(value, &["close"]).is_some()),
             list_sessions: session.is_some_and(|value| field(value, &["list"]).is_some()),
@@ -98,9 +99,18 @@ impl AgentCapabilities {
         }
     }
 
-    /// Whether a resume should use `session/load`.
+    /// Whether a stored conversation can be replayed with `session/load`.
     pub fn supports_load(&self) -> bool {
         self.load_session
+    }
+
+    /// Whether a stored conversation can be continued with `session/resume`.
+    ///
+    /// `session/resume` reattaches to a conversation without replaying its
+    /// history, so it is the right call only when the agent advertises it and
+    /// does not advertise `session/load`.
+    pub fn supports_resume(&self) -> bool {
+        self.resume_session
     }
 
     /// Whether MCP servers can be delivered over HTTP.
@@ -179,10 +189,17 @@ pub struct AcpSessionInfo {
     pub models: Vec<AcpModel>,
     /// The model selected when the session opened.
     pub current_model_id: Option<String>,
+    /// The `configOptions` id a model selection must use, when the agent
+    /// advertises models through the ACP v1 session config instead of
+    /// `models.availableModels`.
+    pub model_config_id: Option<String>,
     /// Modes the agent can run in.
     pub modes: Vec<AcpMode>,
     /// The mode selected when the session opened.
     pub current_mode_id: Option<String>,
+    /// The `configOptions` id a mode selection must use, when the agent
+    /// advertises modes through the ACP v1 session config.
+    pub mode_config_id: Option<String>,
     /// Select options the agent exposes (model, thought level, mode, ...).
     pub config_options: Value,
     /// The raw reply, for diagnostics.
@@ -192,30 +209,112 @@ pub struct AcpSessionInfo {
 impl AcpSessionInfo {
     /// Parses a session result, using `fallback_id` when the reply omits it
     /// (`session/load` on some builds returns only models and modes).
+    ///
+    /// A legacy `models`/`modes` object takes precedence over `configOptions`.
+    /// That is Antigravity's shape: it advertises both, and its `models` list
+    /// is the complete account catalogue. An adapter that must prefer the v1
+    /// `configOptions` calls [`Self::prefer_config_options`].
     pub fn from_value(result: &Value, fallback_id: &str) -> Self {
+        Self::parse(result, fallback_id, true)
+    }
+
+    /// Re-reads this reply with the v1 `configOptions` taking precedence.
+    ///
+    /// A generic agent can advertise both shapes; when it does, the choice it
+    /// exposes through `configOptions` is the one `session/set_config_option`
+    /// expects, so that is the catalogue and config id to use.
+    pub fn prefer_config_options(self) -> Self {
+        Self::parse(&self.raw, &self.session_id, false)
+    }
+
+    fn parse(result: &Value, fallback_id: &str, legacy_first: bool) -> Self {
         let models = field(result, &["models"]);
         let modes = field(result, &["modes"]);
+        let config_options = field(result, &["configOptions", "config_options"])
+            .cloned()
+            .unwrap_or(Value::Null);
+        let config_array = config_options.as_array();
+
+        // ACP v1 moved model and mode selection into `configOptions`. Many
+        // agents still advertise the legacy `models`/`modes` objects too; which
+        // one wins is adapter policy, so both are parsed here.
+        let model_option = config_array.and_then(|options| {
+            options.iter().find(|option| {
+                string_field(option, &["category"]).as_deref() == Some("model")
+                    && string_field(option, &["type"]).as_deref() == Some("select")
+            })
+        });
+        let mode_option = config_array.and_then(|options| {
+            options.iter().find(|option| {
+                string_field(option, &["category"]).as_deref() == Some("mode")
+                    && string_field(option, &["type"]).as_deref() == Some("select")
+            })
+        });
+
+        let mut available_models: Vec<AcpModel> = models
+            .and_then(|value| field(value, &["availableModels", "available_models"]))
+            .and_then(Value::as_array)
+            .map(|models| models.iter().map(parse_model).collect())
+            .unwrap_or_default();
+        let from_config_models = model_option.map(parse_config_models).unwrap_or_default();
+        // The catalogue a selection RPC understands is the one paired with a
+        // config id, so choosing `configOptions` means selecting with
+        // `session/set_config_option`.
+        let use_config_models =
+            !from_config_models.is_empty() && (!legacy_first || available_models.is_empty());
+        let model_config_id = if use_config_models {
+            available_models = from_config_models;
+            model_option.and_then(|option| string_field(option, &["id"]))
+        } else {
+            None
+        };
+        // The current value comes from the catalogue in use; the other shape is
+        // only a fallback for a reply that names an id in one place only.
+        let legacy_current_model =
+            models.and_then(|value| string_field(value, &["currentModelId", "current_model_id"]));
+        let config_current_model = model_option
+            .and_then(|option| string_field(option, &["currentValue", "current_value"]));
+        let current_model_id = if use_config_models {
+            config_current_model.or(legacy_current_model)
+        } else {
+            legacy_current_model.or(config_current_model)
+        };
+
+        let mut available_modes: Vec<AcpMode> = modes
+            .and_then(|value| field(value, &["availableModes", "available_modes"]))
+            .and_then(Value::as_array)
+            .map(|modes| modes.iter().map(parse_mode).collect())
+            .unwrap_or_default();
+        let from_config_modes = mode_option.map(parse_config_modes).unwrap_or_default();
+        let use_config_modes =
+            !from_config_modes.is_empty() && (!legacy_first || available_modes.is_empty());
+        let mode_config_id = if use_config_modes {
+            available_modes = from_config_modes;
+            mode_option.and_then(|option| string_field(option, &["id"]))
+        } else {
+            None
+        };
+        let legacy_current_mode =
+            modes.and_then(|value| string_field(value, &["currentModeId", "current_mode_id"]));
+        let config_current_mode =
+            mode_option.and_then(|option| string_field(option, &["currentValue", "current_value"]));
+        let current_mode_id = if use_config_modes {
+            config_current_mode.or(legacy_current_mode)
+        } else {
+            legacy_current_mode.or(config_current_mode)
+        };
+
         Self {
             session_id: string_field(result, &["sessionId", "session_id"])
                 .filter(|id| !id.is_empty())
                 .unwrap_or_else(|| fallback_id.to_string()),
-            models: models
-                .and_then(|value| field(value, &["availableModels", "available_models"]))
-                .and_then(Value::as_array)
-                .map(|models| models.iter().map(parse_model).collect())
-                .unwrap_or_default(),
-            current_model_id: models
-                .and_then(|value| string_field(value, &["currentModelId", "current_model_id"])),
-            modes: modes
-                .and_then(|value| field(value, &["availableModes", "available_modes"]))
-                .and_then(Value::as_array)
-                .map(|modes| modes.iter().map(parse_mode).collect())
-                .unwrap_or_default(),
-            current_mode_id: modes
-                .and_then(|value| string_field(value, &["currentModeId", "current_mode_id"])),
-            config_options: field(result, &["configOptions", "config_options"])
-                .cloned()
-                .unwrap_or(Value::Null),
+            models: available_models,
+            current_model_id,
+            model_config_id,
+            modes: available_modes,
+            current_mode_id,
+            mode_config_id,
+            config_options,
             raw: result.clone(),
         }
     }
@@ -291,6 +390,54 @@ fn parse_mode(value: &Value) -> AcpMode {
         name: string_field(value, &["name"]).unwrap_or_default(),
         description: string_field(value, &["description"]),
     }
+}
+
+/// Flattens one ACP v1 select option's choices, including grouped choices.
+fn config_choices(option: &Value) -> Vec<&Value> {
+    let mut choices = Vec::new();
+    let Some(options) = field(option, &["options"]).and_then(Value::as_array) else {
+        return choices;
+    };
+    for entry in options {
+        if field(entry, &["value"]).is_some() {
+            choices.push(entry);
+        } else if let Some(group) = field(entry, &["options"]).and_then(Value::as_array) {
+            choices.extend(
+                group
+                    .iter()
+                    .filter(|item| field(item, &["value"]).is_some()),
+            );
+        }
+    }
+    choices
+}
+
+fn parse_config_models(option: &Value) -> Vec<AcpModel> {
+    config_choices(option)
+        .into_iter()
+        .map(|choice| AcpModel {
+            model_id: string_field(choice, &["value"]).unwrap_or_default(),
+            name: string_field(choice, &["name"])
+                .or_else(|| string_field(choice, &["value"]))
+                .unwrap_or_default(),
+            description: string_field(choice, &["description"]),
+        })
+        .filter(|model| !model.model_id.is_empty())
+        .collect()
+}
+
+fn parse_config_modes(option: &Value) -> Vec<AcpMode> {
+    config_choices(option)
+        .into_iter()
+        .map(|choice| AcpMode {
+            id: string_field(choice, &["value"]).unwrap_or_default(),
+            name: string_field(choice, &["name"])
+                .or_else(|| string_field(choice, &["value"]))
+                .unwrap_or_default(),
+            description: string_field(choice, &["description"]),
+        })
+        .filter(|mode| !mode.id.is_empty())
+        .collect()
 }
 
 /// A content block in a `session/prompt`.
@@ -1292,6 +1439,116 @@ mod tests {
         let parsed = AgentCapabilities::from_value(&capabilities);
         assert!(parsed.supports_http_mcp());
         assert!(parsed.sse_mcp);
+    }
+
+    #[test]
+    fn session_config_options_supply_models_and_modes() {
+        let reply = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "m2",
+                    "options": [
+                        {"value": "m1", "name": "One"},
+                        {
+                            "group": "More",
+                            "name": "More",
+                            "options": [{"value": "m2", "name": "Two"}]
+                        }
+                    ]
+                },
+                {
+                    "id": "mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "auto",
+                    "options": [{"value": "default", "name": "Default"}, {"value": "auto"}]
+                }
+            ]
+        });
+        let info = AcpSessionInfo::from_value(&reply, "fallback");
+        assert_eq!(info.session_id, "s-1");
+        assert_eq!(info.model_config_id.as_deref(), Some("model"));
+        assert_eq!(info.current_model_id.as_deref(), Some("m2"));
+        assert_eq!(
+            info.models
+                .iter()
+                .map(|model| (model.model_id.as_str(), model.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("m1", "One"), ("m2", "Two")]
+        );
+        assert_eq!(info.mode_config_id.as_deref(), Some("mode"));
+        assert_eq!(info.current_mode_id.as_deref(), Some("auto"));
+        assert_eq!(
+            info.modes
+                .iter()
+                .map(|mode| (mode.id.as_str(), mode.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("default", "Default"), ("auto", "auto")]
+        );
+    }
+
+    #[test]
+    fn a_resume_only_agent_is_not_read_as_load_support() {
+        let capabilities = json!({"sessionCapabilities": {"resume": {}}});
+        let parsed = AgentCapabilities::from_value(&capabilities);
+        assert!(!parsed.load_session, "resume is not load");
+        assert!(!parsed.supports_load());
+        assert!(parsed.supports_resume());
+
+        let load_only = json!({"sessionCapabilities": {"load": {}}});
+        let parsed = AgentCapabilities::from_value(&load_only);
+        assert!(parsed.supports_load());
+        assert!(!parsed.supports_resume());
+    }
+
+    #[test]
+    fn the_config_catalogue_can_win_over_the_legacy_one() {
+        let reply = json!({
+            "sessionId": "s-1",
+            "models": {
+                "availableModels": [{"modelId": "legacy", "name": "Legacy"}],
+                "currentModelId": "legacy"
+            },
+            "modes": {"availableModes": [{"id": "old-mode", "name": "Old"}]},
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "m1",
+                    "options": [{"value": "m1", "name": "One"}]
+                },
+                {
+                    "id": "mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "new-mode",
+                    "options": [{"value": "new-mode", "name": "New"}]
+                }
+            ]
+        });
+
+        // Antigravity's shape: the legacy catalogue wins and no config id is
+        // used, so a selection goes through `session/set_model`.
+        let legacy = AcpSessionInfo::from_value(&reply, "fallback");
+        assert_eq!(legacy.models[0].model_id, "legacy");
+        assert!(legacy.model_config_id.is_none());
+        assert_eq!(legacy.modes[0].id, "old-mode");
+        assert!(legacy.mode_config_id.is_none());
+
+        // A generic agent's shape: `configOptions` wins and the config ids
+        // make the selection go through `session/set_config_option`.
+        let v1 = AcpSessionInfo::from_value(&reply, "fallback").prefer_config_options();
+        assert_eq!(v1.models[0].model_id, "m1");
+        assert_eq!(v1.model_config_id.as_deref(), Some("model"));
+        assert_eq!(v1.current_model_id.as_deref(), Some("m1"));
+        assert_eq!(v1.modes[0].id, "new-mode");
+        assert_eq!(v1.mode_config_id.as_deref(), Some("mode"));
+        assert_eq!(v1.current_mode_id.as_deref(), Some("new-mode"));
     }
 
     #[test]

@@ -1205,6 +1205,7 @@ fn harness_label(harness: HarnessKind) -> &'static str {
         HarnessKind::Codex => "Codex",
         HarnessKind::Opencode => "OpenCode",
         HarnessKind::Antigravity => "Antigravity",
+        HarnessKind::Acp => "the ACP agent",
     }
 }
 

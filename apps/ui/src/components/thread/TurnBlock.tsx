@@ -1,16 +1,30 @@
-import { CircleAlertIcon, ClockIcon, CornerDownLeftIcon, PauseIcon } from "lucide-react";
+import {
+  CheckIcon,
+  CircleAlertIcon,
+  CircleDotIcon,
+  CircleIcon,
+  ClockIcon,
+  CornerDownLeftIcon,
+  PauseIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import { ChangeSetCard } from "@/features/changes/ChangeSetCard";
-import type { ThreadSummary } from "@/gen";
+import type { PlanStep, ThreadSummary } from "@/gen";
 import { useSmoothText } from "@/hooks/use-smooth-text";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { absoluteTime, countdown } from "@/lib/format";
-import type { DelegatedItem, MessageItem, StreamTurn, TurnItem } from "@/lib/store/projection";
+import type {
+  DelegatedItem,
+  MessageItem,
+  PlanItem,
+  StreamTurn,
+  TurnItem,
+} from "@/lib/store/projection";
 import { stoppedNotice } from "@/lib/turn";
 import { cn } from "@/lib/utils";
 import { Markdown } from "./Markdown";
@@ -95,6 +109,40 @@ function ErrorItemView({
   );
 }
 
+function PlanItemView({ item }: { item: PlanItem }) {
+  return (
+    <div className="q-plan">
+      <ul aria-label="Plan">
+        {item.entries.map((step: PlanStep, index) => {
+          const status =
+            step.status === "completed"
+              ? "completed"
+              : step.status === "in_progress"
+                ? "in_progress"
+                : "pending";
+          return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: a plan is an ordered list without ids
+            <li key={`${index}:${step.content}`} data-status={status} className="q-plan-step">
+              <span className="q-plan-mark" aria-hidden>
+                {status === "completed" ? (
+                  <CheckIcon className="q-icon s12" strokeWidth={2} />
+                ) : status === "in_progress" ? (
+                  <CircleDotIcon className="q-icon s12" strokeWidth={1.75} />
+                ) : (
+                  <CircleIcon className="q-icon s12" strokeWidth={1.5} />
+                )}
+              </span>
+              <span className="q-plan-text">{step.content}</span>
+              {status === "completed" ? <span className="sr-only">(done)</span> : null}
+              {status === "in_progress" ? <span className="sr-only">(in progress)</span> : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function Item({ item, threadId }: { item: TurnItem; threadId: string }) {
   void threadId;
   switch (item.kind) {
@@ -108,6 +156,8 @@ function Item({ item, threadId }: { item: TurnItem; threadId: string }) {
       return <LimitItemView resetAt={item.resetAt} autoResume={item.autoResume} />;
     case "delegated":
       return <DelegatedItemView item={item} />;
+    case "plan":
+      return <PlanItemView item={item} />;
     case "error":
       return <ErrorItemView message={item.message} hint={item.hint} retryable={item.retryable} />;
   }

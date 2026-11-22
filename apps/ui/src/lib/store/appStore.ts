@@ -1394,6 +1394,8 @@ export async function sendMessage(
 export type CreateThreadInput = {
   host: HostId;
   harness: HarnessKind;
+  /** Configured ACP agent instance, when `harness` is `acp`. */
+  agentId?: string | null;
   workspacePath: string;
   model: string;
   prompt: string;
@@ -1451,6 +1453,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     parent_thread_id: null,
     host: input.host,
     harness: input.harness,
+    ...(input.agentId ? { agent_id: input.agentId } : {}),
     title,
     workspace_path: input.workspacePath,
     model: input.model,
@@ -1491,6 +1494,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       type: "create_thread",
       host: input.host,
       harness: input.harness,
+      agent_id: input.agentId ?? null,
       workspace_path: input.workspacePath,
       model: input.model,
       prompt: input.prompt,

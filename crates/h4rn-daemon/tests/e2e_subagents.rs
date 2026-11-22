@@ -230,6 +230,7 @@ async fn create_parent_with(
             subagent_id: None,
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: workspace.display().to_string(),
             model: "default".into(),
             prompt: prompt.to_owned(),

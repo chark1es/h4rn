@@ -198,6 +198,16 @@ All notable changes to h4rn are recorded here. The format follows
   prompts keep stepping with the caret at their first line. The history is read from the thread's
   own user messages, so it needs no separate copy and works on any device that can see the thread.
   Typing leaves history mode, and an open menu or IME composition leaves the arrow keys alone.
+- **Harnesses: run any ACP agent as a local command.** Settings → Harnesses can now store any
+  number of local ACP agents (display name, unique instance id, executable, literal arguments,
+  environment overrides and a thread-workspace or fixed working directory). A new `acp` harness
+  kind reuses the shared ACP session runtime, so prompts, tool calls, plans, permission requests,
+  cancel and `session/load` resume behave exactly as they do for Antigravity; the Antigravity
+  fallback transport and limit parsing stay in its own adapter. The new-thread picker lists
+  configured agents and reads the models each one advertises. Writes need the `admin` scope and are
+  persisted in `acp-agents.json`. Installed state comes from resolving the executable, and a version
+  is shown only when the agent reports one during `initialize`; h4rn does not install or update it.
+  See [docs/acp.md](docs/acp.md).
 
 ### Fixed
 
@@ -544,6 +554,71 @@ All notable changes to h4rn are recorded here. The format follows
   proof against `parts.uri.path()`, which excludes the query string, so signing
   `/v1/machines?linked=true` was rejected with 401 and took the whole account and machine refresh
   down with it. The client now signs `/v1/machines` and still fetches with `?linked=true`; a
+  presence failure falls back to an empty linked list instead of aborting the refresh.
+- **Local ACP agents: credentials stay off view-scoped devices.** `ListAcpAgents` now masks every
+  environment value and omits the literal argument list, which can also carry a secret; the edit form
+  reads the real configuration through a new admin-scoped `GetAcpAgent`. The last successful probe's
+  models, modes and version are stored and returned to every device, so the model picker no longer
+  needs to start the agent.
+- **Local ACP agents: absolute, same-file resolution and fresh restarts.** A configured command now
+  resolves to an absolute executable before the child starts (relative `PATH` entries are ignored;
+  Windows `.bat`/`.cmd` are refused), so detection, `Check` and launch name the same file. A stored
+  session id is replaced by a fresh session when the agent does not advertise `session/load`, and a
+  thread's stored id is cleared when its agent's command line or effective working directory changes
+  — in the thread itself, so a start that fails before the agent opens a session cannot leave the old
+  id to be replayed by the next attempt. Plans are forwarded and shown in the turn as a quiet
+  checklist, ACP v1 `configOptions` supply model and mode choices, and a view-only model picker shows
+  the last probe or its error instead of spinning.
+- **Local ACP agents are not a startable harness by themselves.** Host summaries and the new-thread,
+  quick-start and delegate pickers no longer offer the bare `acp` kind, so no request can create an
+  ACP thread or subagent without an instance; the daemon rejects both paths explicitly. Delegating
+  from an ACP thread starts the child on the fallback harness's own default model instead of sending
+  it a model id only the ACP agent knew.
+- **Antigravity is unchanged by the shared ACP runtime.** Its non-`auto` default-model aliases are
+  case-sensitive again, its "Antigravity stopped the turn" / "Antigravity is requesting permission"
+  wording is back, its unknown-model error still says "the account offers", and the UTF-16 attachment
+  test covers the shared prompt builder.
+- **ACP agent form saves and checks line up with the daemon.** Instance ids are capped at 64
+  characters, the form accepts either platform's absolute path form (`/dir`, `C:\dir`, UNC) because
+  the daemon's platform decides, and the display-name cap counts characters rather than bytes on both
+  sides. Explicitly added empty arguments are kept, and `Check` stays available and refreshes the
+  list after the binary is installed. Any edit clears the cached version, a probe whose configuration
+  changed while it ran stores nothing, a failed probe leaves the last good models in place, and an
+  invalid entry loaded from `acp-agents.json` is dropped with one log line instead of failing at
+  spawn.
+- **Local ACP agents: a probe is one conversation, and editing one never loses work.** A probe whose
+  configuration changed while it ran now reports a conflict instead of success, its answer is
+  discarded by the client even if it arrives after the edit, and the picker never starts a second
+  probe for an agent already handshaking. A probe also answers on its own task, so an agent that is
+  slow to start no longer holds the connection: other requests on the same socket keep answering
+  while the handshake runs. A probe answer that carries the agent's own error falls back to the
+  daemon's cached models instead of emptying the picker. The delegate dialog's erased task, summary
+  and budget survive a parent summary refresh while the dialog is open, and the environment editor
+  stacks its name, value and Remove controls with 44 px targets on a phone. A plan step that is in
+  progress now carries a neutral mark rather than the accent: blue still means the person is needed.
+- **Local ACP agents: the method the agent actually advertises.** `session/resume` is no longer read
+  as `session/load` support: an agent that advertises only resume is continued with
+  `session/resume`, one that advertises load replays with `session/load`, and one that advertises
+  neither starts a fresh session. A generic agent that advertises both a legacy `models`/`modes`
+  catalogue and v1 `configOptions` now uses `configOptions` and selects with
+  `session/set_config_option`; Antigravity keeps its own account catalogue. A command-line
+  fingerprint is structured (JSON), so an edit from no arguments to one empty argument starts a new
+  session instead of replaying the old id. Two entries with the same instance id in
+  `acp-agents.json` keep the first and drop the second with a warning.
+- **Local ACP agents: one answer for the catalogue, the resume and the process.** `Check` now reads
+  the same v1 `configOptions` catalogue a thread start selects from, so the picker no longer offers
+  legacy ids the agent would reject, and the model stays `default` until you choose one. The client
+  waits 45 s for a probe, covering the daemon's 30 s exchange plus its shutdown grace, instead of
+  abandoning it at the default 10 s. A `session/resume` or `session/load` reply that names no catalogue keeps the thread's saved
+  model and mode and still sends the prompt. A load's replayed history is consumed before the new
+  turn, so a conversation longer than the event queue no longer stalls the load and the old messages
+  are not shown twice. A probe edited while it ran reports the same conflict whether it succeeded or
+  failed, and the Check control stays busy until the original probe settles, so an edit cannot start
+  a second one. The resume fingerprint and the launch now come from one resolved configuration, so
+  an edit in between cannot hand the new command the old session id. The new-thread mode picker
+  offers only modes h4rn can map onto the agent's advertised ids and otherwise says
+  **Mode is managed by the agent**; a fixed working directory is shown before Start and becomes the
+  thread's workspace for Files and Changes.
   presence failure keeps the last known linked list (empty before the first successful fetch)
   instead of aborting the refresh.
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

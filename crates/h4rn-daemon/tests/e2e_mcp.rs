@@ -258,6 +258,7 @@ async fn real_harness_calls_h4rn_echo(harness: HarnessKind) {
             subagent_id: None,
             host,
             harness,
+            agent_id: None,
             workspace_path: repo.path().display().to_string(),
             model: "default".into(),
             prompt,

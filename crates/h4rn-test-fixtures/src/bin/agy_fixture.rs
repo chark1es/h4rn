@@ -27,9 +27,33 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 fn main() {
+    // A file in the working directory fails the process before the handshake,
+    // so a test can watch one session start fail and then retry the very same
+    // configuration without editing it again.
+    if std::path::Path::new(".agy-fixture-fail-initialize").exists() {
+        eprintln!("agy-fixture: failing before initialize");
+        std::process::exit(3);
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut sessions = 0u64;
+    // A turn the fixture is holding open for a permission answer or a cancel.
+    let mut pending_prompt: Option<Value> = None;
+    let mut pending_permission = false;
+
+    // `H4RN_FIXTURE_INITIALIZE_GATE` holds the handshake until the named file
+    // appears, so a test can edit the configured command while a probe is in
+    // flight. The `<gate>.waiting` marker says the fixture is parked there.
+    if let Ok(gate) = std::env::var("H4RN_FIXTURE_INITIALIZE_GATE") {
+        let gate = std::path::PathBuf::from(gate);
+        let _ = std::fs::write(gate.with_extension("waiting"), b"");
+        for _ in 0..600 {
+            if gate.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -42,7 +66,36 @@ fn main() {
         };
         let id = frame.get("id").cloned();
         let Some(method) = frame.get("method").and_then(Value::as_str) else {
-            // A response to a request this fixture never sends; nothing to do.
+            // The answer to our own `session/request_permission` request.
+            if pending_permission {
+                pending_permission = false;
+                if let Some(prompt_id) = pending_prompt.take() {
+                    let session_id = frame
+                        .get("params")
+                        .and_then(|params| params.get("sessionId"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "permission answered"}
+                                }
+                            }
+                        }),
+                    );
+                    reply(
+                        &mut stdout,
+                        Some(prompt_id),
+                        json!({"stopReason": "end_turn"}),
+                    );
+                }
+            }
             continue;
         };
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
@@ -51,16 +104,30 @@ fn main() {
             "initialize" => reply(
                 &mut stdout,
                 id,
-                json!({
-                    "protocolVersion": 1,
-                    "agentInfo": {"name": "agy fixture", "version": env!("CARGO_PKG_VERSION")},
-                    "agentCapabilities": {
-                        "loadSession": true,
-                        "promptCapabilities": {"image": false, "embeddedContext": false},
-                        "mcpCapabilities": {},
-                        "sessionCapabilities": {"load": {}, "close": {}}
-                    }
-                }),
+                if std::env::var_os("H4RN_FIXTURE_RESUME_ONLY").is_some() {
+                    // A resume-only agent: it can continue a conversation but
+                    // has no `session/load`.
+                    json!({
+                        "protocolVersion": 1,
+                        "agentInfo": {"name": "agy fixture", "version": env!("CARGO_PKG_VERSION")},
+                        "agentCapabilities": {
+                            "promptCapabilities": {"image": false, "embeddedContext": false},
+                            "mcpCapabilities": {},
+                            "sessionCapabilities": {"resume": {}},
+                        }
+                    })
+                } else {
+                    json!({
+                        "protocolVersion": 1,
+                        "agentInfo": {"name": "agy fixture", "version": env!("CARGO_PKG_VERSION")},
+                        "agentCapabilities": {
+                            "loadSession": true,
+                            "promptCapabilities": {"image": false, "embeddedContext": false},
+                            "mcpCapabilities": {},
+                            "sessionCapabilities": {"load": {}, "close": {}}
+                        }
+                    })
+                },
             ),
             "session/new" => {
                 sessions += 1;
@@ -82,9 +149,62 @@ fn main() {
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, &format!("load {session_id}"));
                 }
-                reply(&mut stdout, id, session_reply(&session_id));
+                // ACP replays the old conversation as `session/update` frames
+                // before the load reply. `H4RN_FIXTURE_LOAD_REPLAY` makes the
+                // replay longer than the client's bounded event queue, so a
+                // reader that cannot drain it deadlocks before the reply.
+                if let Ok(count) = std::env::var("H4RN_FIXTURE_LOAD_REPLAY")
+                    && let Ok(count) = count.parse::<u64>()
+                {
+                    for index in 0..count {
+                        write_frame(
+                            &mut stdout,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {
+                                    "sessionId": session_id,
+                                    "update": {
+                                        "sessionUpdate": "agent_message_chunk",
+                                        "content": {
+                                            "type": "text",
+                                            "text": format!("replayed history {index}")
+                                        }
+                                    }
+                                }
+                            }),
+                        );
+                    }
+                }
+                let result = if std::env::var_os("H4RN_FIXTURE_EMPTY_RESUME").is_some() {
+                    json!({ "sessionId": session_id })
+                } else {
+                    session_reply(&session_id)
+                };
+                reply(&mut stdout, id, result);
             }
-            "session/set_model" | "session/set_mode" | "session/close" => {
+            "session/resume" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("fixture-session")
+                    .to_string();
+                if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
+                    log_start(cwd, &format!("resume {session_id}"));
+                }
+                // Some agents answer a resume without repeating the catalogue:
+                // the thread's saved selection still applies.
+                let result = if std::env::var_os("H4RN_FIXTURE_EMPTY_RESUME").is_some() {
+                    json!({ "sessionId": session_id })
+                } else {
+                    session_reply(&session_id)
+                };
+                reply(&mut stdout, id, result);
+            }
+            "session/set_config_option"
+            | "session/set_model"
+            | "session/set_mode"
+            | "session/close" => {
                 reply(&mut stdout, id, Value::Null);
             }
             "session/prompt" => {
@@ -99,6 +219,169 @@ fn main() {
                             .join("\n")
                     })
                     .unwrap_or_default();
+                if text.contains("H4RN_FIXTURE_PERMISSION") {
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "tool_call",
+                                    "toolCallId": "perm-call-1",
+                                    "title": "Run the fixture command",
+                                    "kind": "execute",
+                                    "status": "pending",
+                                    "rawInput": {"command": "printf fixture"}
+                                }
+                            }
+                        }),
+                    );
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": "perm-1",
+                            "method": "session/request_permission",
+                            "params": {
+                                "sessionId": session_id,
+                                "toolCall": {
+                                    "toolCallId": "perm-call-1",
+                                    "title": "Run the fixture command",
+                                    "kind": "execute",
+                                    "status": "pending",
+                                    "rawInput": {"command": "printf fixture"}
+                                },
+                                "options": [
+                                    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                                    {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
+                                ]
+                            }
+                        }),
+                    );
+                    pending_prompt = id;
+                    pending_permission = true;
+                    continue;
+                }
+                if text.contains("H4RN_FIXTURE_TOOL") {
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    for (status, title) in [
+                        ("in_progress", "Run the fixture command"),
+                        ("completed", "Run the fixture command"),
+                    ] {
+                        let update = if status == "in_progress" {
+                            json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "tool_call",
+                                    "toolCallId": "tool-1",
+                                    "title": title,
+                                    "kind": "execute",
+                                    "status": status,
+                                    "rawInput": {"command": "printf fixture"}
+                                }
+                            })
+                        } else {
+                            json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "tool_call_update",
+                                    "toolCallId": "tool-1",
+                                    "status": status,
+                                    "rawOutput": "fixture output"
+                                }
+                            })
+                        };
+                        write_frame(
+                            &mut stdout,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": update
+                            }),
+                        );
+                    }
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": format!("echo: {text}")}
+                                }
+                            }
+                        }),
+                    );
+                    reply(
+                        &mut stdout,
+                        id,
+                        json!({"stopReason": "end_turn", "usage": {"inputTokens": 3, "outputTokens": 2}}),
+                    );
+                    continue;
+                }
+                if text.contains("H4RN_FIXTURE_PLAN") {
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "plan",
+                                    "entries": [
+                                        {
+                                            "content": "Inspect the workspace",
+                                            "priority": "high",
+                                            "status": "completed"
+                                        },
+                                        {
+                                            "content": "Change the fixture",
+                                            "priority": "medium",
+                                            "status": "in_progress"
+                                        }
+                                    ]
+                                }
+                            }
+                        }),
+                    );
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "plan: done"}
+                                }
+                            }
+                        }),
+                    );
+                    reply(&mut stdout, id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
+                if text.contains("H4RN_FIXTURE_CANCEL") {
+                    // Hold the turn open until `session/cancel` arrives.
+                    pending_prompt = id;
+                    continue;
+                }
                 if text.contains("H4RN_FIXTURE_EXIT") {
                     // Vanish mid-turn: stdout closes, the daemon's client sees a
                     // dead transport and never gets a prompt result. The death
@@ -261,7 +544,15 @@ fn main() {
                     stall_forever();
                 }
             }
-            "session/cancel" => {}
+            "session/cancel" => {
+                if let Some(prompt_id) = pending_prompt.take() {
+                    reply(
+                        &mut stdout,
+                        Some(prompt_id),
+                        json!({"stopReason": "cancelled"}),
+                    );
+                }
+            }
             other => {
                 if let Some(id) = id {
                     write_frame(
@@ -365,6 +656,42 @@ fn reply(stdout: &mut std::io::Stdout, id: Option<Value>, result: Value) {
 }
 
 fn session_reply(session_id: &str) -> Value {
+    // A dual-catalogue agent publishes both the legacy `models`/`modes`
+    // objects and ACP v1 `configOptions`, with different ids. The generic
+    // adapter must read and select the v1 catalogue.
+    if std::env::var_os("H4RN_FIXTURE_DUAL_CATALOGUE").is_some() {
+        return json!({
+            "sessionId": session_id,
+            "models": {
+                "availableModels": [{"modelId": "legacy-model", "name": "Legacy"}],
+                "currentModelId": "legacy-model"
+            },
+            "modes": {
+                "availableModes": [
+                    {"id": "legacy-mode", "name": "Legacy mode"}
+                ],
+                "currentModeId": "legacy-mode"
+            },
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "v1-model",
+                    "options": [{"value": "v1-model", "name": "V1 Model"}]
+                },
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "default",
+                    "options": [{"value": "default", "name": "Default"}]
+                }
+            ]
+        });
+    }
     json!({
         "sessionId": session_id,
         "models": {
