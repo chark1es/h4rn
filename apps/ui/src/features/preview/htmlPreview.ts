@@ -944,7 +944,9 @@ export function buildPreviewDocument(options: {
   /**
    * A tag whose rewrite could not be paid for is kept without the references
    * it would have inlined, so the preview origin still never receives a
-   * relative request, and those assets are reported as skipped.
+   * relative request, and those assets are reported as skipped. If even that
+   * form would grow the document, the element is left out entirely — the one
+   * form that cannot add bytes.
    */
   const dropRewritten = (tag: Tag, names: string[]): string => {
     for (const path of inlinedInTag) {
@@ -952,7 +954,10 @@ export function buildPreviewDocument(options: {
       missing.add(path);
     }
     inlinedInTag = [];
-    return formatTag(tag, dropAttrs(tag.attrs, names));
+    const fallback = formatTag(tag, dropAttrs(tag.attrs, names));
+    const growth = utf8Length(fallback) - utf8Length(tag.raw);
+    if (growth > 0 && !charge(growth)) return "";
+    return fallback;
   };
 
   const body = walk(
