@@ -100,6 +100,8 @@ pub struct AppState {
     pub harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
     /// Registered sidebar projects.
     pub projects: Arc<crate::projects::ProjectService>,
+    /// Title generation: coding-agent CLI or a configured text generator.
+    pub text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }

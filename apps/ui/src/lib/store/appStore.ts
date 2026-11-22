@@ -1000,7 +1000,10 @@ function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
 async function runThreadAction(
   threadId: ThreadId,
   label: string,
-  body: Extract<ClientRequest, { type: "set_thread_tab" | "snooze" | "interrupt" }>,
+  body: Extract<
+    ClientRequest,
+    { type: "set_thread_tab" | "snooze" | "interrupt" | "rename_thread" }
+  >,
 ): Promise<boolean> {
   // Moving a thread into Done or Settled is the person's placement, not the
   // daemon finishing a turn. Tell the notifier before the move so it cannot
@@ -1086,6 +1089,17 @@ export async function snoozeThread(threadId: ThreadId, until: string | null): Pr
 
 export async function interruptThread(threadId: ThreadId): Promise<void> {
   await runThreadAction(threadId, "Interrupting", { type: "interrupt", thread_id: threadId });
+}
+
+/** Renames a thread by hand. The daemon never replaces a name you typed. */
+export async function renameThread(threadId: ThreadId, title: string): Promise<boolean> {
+  const trimmed = title.trim();
+  if (!trimmed) return false;
+  return runThreadAction(threadId, "Renaming", {
+    type: "rename_thread",
+    thread_id: threadId,
+    title: trimmed,
+  });
 }
 
 /** The first approval of a thread that still needs an answer, if any. */

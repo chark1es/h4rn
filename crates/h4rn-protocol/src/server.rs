@@ -545,6 +545,31 @@ pub enum ResponseBody {
         /// The listing.
         listing: crate::projects::DirectoryListing,
     },
+    /// Configured text generators. Keys are never included.
+    TextGenerators {
+        /// Generators, oldest first.
+        generators: Vec<crate::text_generation::TextGenerator>,
+    },
+    /// One text generator after it was added or changed.
+    TextGenerator {
+        /// The generator.
+        generator: crate::text_generation::TextGenerator,
+    },
+    /// The outcome of [`crate::ClientRequest::TestTextGenerator`].
+    TextGeneratorTested {
+        /// What the tiny prompt did.
+        report: crate::text_generation::TextGeneratorTestReport,
+    },
+    /// Which model writes thread titles.
+    TextGenerationSettings {
+        /// Current settings.
+        settings: crate::text_generation::TextGenerationSettings,
+    },
+    /// A thread row after the owner renamed it.
+    ThreadRenamed {
+        /// The thread with its new title.
+        summary: ThreadSummary,
+    },
     /// A subscription was accepted and the replay it asked for is finished.
     ///
     /// Every journal event at or below `replay_through` was either sent as

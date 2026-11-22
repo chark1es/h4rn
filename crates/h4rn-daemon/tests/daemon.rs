@@ -25,8 +25,9 @@ use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     AgentState, ApprovalDecision, AutoResumePolicy, ClientFrame, ClientRequest, DeviceId,
     DeviceInfo, Event, HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode,
-    ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame, ThreadFilter, ThreadId, ThreadTab,
-    ToolCallStatus, Topic, TurnStatus, UsageGroupBy, UsageRange, UsageScope,
+    ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame, TextGenerationSettings,
+    ThreadFilter, ThreadId, ThreadTab, TitleModelMode, TitleModelSetting, ToolCallStatus, Topic,
+    TurnStatus, UsageGroupBy, UsageRange, UsageScope,
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -107,6 +108,15 @@ async fn boot_inner(
     harness: FakeHarness,
     isolated: bool,
 ) -> TestDaemon {
+    boot_inner_with_text_generation(options, harness, isolated, None).await
+}
+
+async fn boot_inner_with_text_generation(
+    options: ThreadManagerOptions,
+    harness: FakeHarness,
+    isolated: bool,
+    text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
+) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -123,6 +133,9 @@ async fn boot_inner(
         // No test may run a package manager against the machine's real CLIs.
         .with_update_runner(Arc::new(RefusingRunner))
         .with_lifecycle(options);
+    if let Some(service) = text_generation {
+        builder = builder.with_text_generation(service);
+    }
     builder = if isolated {
         builder.with_catalog(Arc::new(
             h4rn_daemon::harnesses::StaticHarnessCatalog::with(Arc::new(harness)),
@@ -2796,5 +2809,71 @@ async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
         ResumeState::Cancelled,
         "a new message supersedes the stale resume"
     );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
+    let support = tempfile::tempdir().expect("support dir");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-title-agent.sh");
+    let service = Arc::new(
+        h4rn_daemon::text_generation::TextGenerationService::open(support.path())
+            .expect("open text generation")
+            .with_file_keys()
+            .expect("file keys")
+            .with_agent_install(HarnessKind::ClaudeCode, &fixture),
+    );
+    service
+        .set_settings(TextGenerationSettings {
+            title: TitleModelSetting {
+                mode: TitleModelMode::CodingAgent,
+                harness: Some(HarnessKind::ClaudeCode),
+                generator_id: None,
+                model: None,
+            },
+        })
+        .expect("select the coding agent");
+    let daemon = boot_inner_with_text_generation(
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        Some(service),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::Subscribe {
+            topics: vec![Topic::All],
+            since_seq: None,
+        })
+        .await
+        .expect("subscribe");
+    let summary = create_with_host(
+        &mut client,
+        host,
+        "Fix the flaky auth test",
+        HarnessKind::ClaudeCode,
+    )
+    .await;
+    assert_eq!(summary.title, "Fix the flaky auth test");
+    let thread_id = summary.thread_id.clone();
+
+    client
+        .wait_event(|event| {
+            matches!(
+                event,
+                Event::ThreadUpserted(summary)
+                    if summary.thread_id == thread_id && summary.title == "Fixture title"
+            )
+        })
+        .await;
+
+    // Read the row back through the protocol as the authoritative check.
+    let renamed = thread_summary(&mut client, &summary.thread_id).await;
+    assert_eq!(renamed.title, "Fixture title");
     daemon.stop().await;
 }

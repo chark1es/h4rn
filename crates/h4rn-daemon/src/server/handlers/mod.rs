@@ -19,6 +19,7 @@ pub(super) mod projects;
 pub(super) mod proxy;
 pub(super) mod skills;
 pub(super) mod subagents;
+pub(super) mod text_generation;
 pub(super) mod usage;
 pub(super) mod worktrees;
 
@@ -82,6 +83,7 @@ declare_services! {
     Worktrees => worktrees,
     Projects => projects,
     NetworkAccess => network_access,
+    TextGeneration => text_generation,
 }
 
 /// Spawns every registered service's forwarder for one connection.

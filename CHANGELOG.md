@@ -7,6 +7,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Thread titles are written by a model.** A new thread still appears immediately with the first
+  line of your first prompt, then a title of at most 60 characters replaces it through the normal
+  thread update. Settings → Threads → Title model picks Off, an installed coding agent (Claude Code
+  or Codex, run once in an empty folder with no tools) or a text generator you configure under
+  Settings → Providers → Text generators: an OpenAI-compatible chat API (OpenAI, OpenRouter,
+  Ollama, LM Studio) or Anthropic. Generators have a Test button that sends a tiny prompt and shows
+  the provider's own error; keys are stored on the host like forge tokens and are never returned to
+  a client. Plain `http` base URLs are accepted only on loopback; everything else must be `https`.
+  Only the first prompt text and the workspace folder name are sent. A failed, timed-out or empty
+  answer keeps the first-line title and logs once. Renaming a thread yourself saves the name in the
+  thread menu, and no generated title ever replaces it. Subagent threads keep the title their task
+  gave them. See [docs/text-generation.md](docs/text-generation.md).
 - **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
   controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
   (the Web Notification API, asked for only when a switch is turned on; there is no separate

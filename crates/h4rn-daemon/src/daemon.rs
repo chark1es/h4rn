@@ -50,6 +50,7 @@ pub struct DaemonBuilder {
     local_host: Option<(h4rn_protocol::HostId, String)>,
     harness_registry: Option<Arc<dyn h4rn_harness::RegistryClient>>,
     update_runner: Option<Arc<dyn h4rn_harness::UpdateRunner>>,
+    text_generation: Option<Arc<crate::text_generation::TextGenerationService>>,
 }
 
 impl DaemonBuilder {
@@ -70,6 +71,7 @@ impl DaemonBuilder {
             local_host: None,
             harness_registry: None,
             update_runner: None,
+            text_generation: None,
         }
     }
 
@@ -130,6 +132,15 @@ impl DaemonBuilder {
     /// Replaces the harness catalog wholesale.
     pub fn with_catalog(mut self, catalog: Arc<dyn HarnessCatalog>) -> Self {
         self.catalog = Some(catalog);
+        self
+    }
+
+    /// Replaces the text-generation service (tests and fixture CLIs).
+    pub fn with_text_generation(
+        mut self,
+        service: Arc<crate::text_generation::TextGenerationService>,
+    ) -> Self {
+        self.text_generation = Some(service);
         self
     }
 
@@ -252,6 +263,19 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open CLIProxyAPI profiles: {error}"))?,
         );
         manager.set_proxy(Arc::clone(&proxy));
+
+        // Titles can come from an installed coding agent or a configured text
+        // generator; the service decides per thread from its saved settings.
+        let text_generation = match self.text_generation {
+            Some(service) => service,
+            None => Arc::new(
+                crate::text_generation::TextGenerationService::open(&self.config.data_dir)
+                    .map_err(|error| anyhow::anyhow!("open text generation: {error}"))?,
+            ),
+        };
+        manager.set_text_generation(
+            Arc::clone(&text_generation) as Arc<dyn crate::text_generation::TextGeneration>
+        );
 
         // Durable metering and auto-resume share the daemon data directory but
         // own a separate SQLite file so ledger writes never block the journal.
@@ -471,6 +495,7 @@ impl DaemonBuilder {
             proxy,
             meter,
             network_access_enabled,
+            text_generation,
         })
     }
 }
@@ -499,6 +524,7 @@ pub struct Daemon {
     meter: Arc<h4rn_meter::MeterHub>,
     harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
     projects: Arc<crate::projects::ProjectService>,
+    text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// The network-listener setting resolved at build time.
     network_access_enabled: bool,
 }
@@ -647,6 +673,7 @@ impl Daemon {
             meter: Arc::clone(&self.meter),
             harness_versions: Arc::clone(&self.harness_versions),
             projects: Arc::clone(&self.projects),
+            text_generation: Arc::clone(&self.text_generation),
         };
 
         // The network listener serves a restricted router: liveness and the

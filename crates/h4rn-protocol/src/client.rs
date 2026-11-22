@@ -931,6 +931,53 @@ pub enum ClientRequest {
         bulk: bool,
     },
     // ------------------------------------------------------------------
+    // Text generation: thread titles written by a model.
+    // ------------------------------------------------------------------
+    /// List the configured text generators.
+    ///
+    /// Keys are never included; each row only reports whether one is stored.
+    ListTextGenerators,
+    /// Add a text generator. Its key goes into the daemon secret store and
+    /// needs the `admin` scope.
+    AddTextGenerator {
+        /// Generator to add.
+        generator: crate::text_generation::TextGeneratorDraft,
+    },
+    /// Change a text generator. A replacement key needs the `admin` scope.
+    UpdateTextGenerator {
+        /// Generator to change.
+        generator_id: crate::text_generation::TextGeneratorId,
+        /// Fields to change.
+        patch: crate::text_generation::TextGeneratorPatch,
+    },
+    /// Remove a text generator and its stored key.
+    RemoveTextGenerator {
+        /// Generator to remove.
+        generator_id: crate::text_generation::TextGeneratorId,
+    },
+    /// Send a tiny prompt through one generator and return the honest result.
+    TestTextGenerator {
+        /// Generator to test.
+        generator_id: crate::text_generation::TextGeneratorId,
+        /// Model to test; `None` uses the generator's stored model.
+        #[serde(default)]
+        model: Option<String>,
+    },
+    /// Read which model writes thread titles.
+    GetTextGenerationSettings,
+    /// Replace the title model. Needs the `admin` scope.
+    SetTextGenerationSettings {
+        /// New settings.
+        settings: crate::text_generation::TextGenerationSettings,
+    },
+    /// Rename a thread. A generated title never replaces this name.
+    RenameThread {
+        /// Thread to rename.
+        thread_id: ThreadId,
+        /// New title, trimmed; empty is refused.
+        title: String,
+    },
+    // ------------------------------------------------------------------
     // Projects: sidebar folders that exist before their first thread.
     // ------------------------------------------------------------------
     /// List the registered projects on a host.
@@ -1014,7 +1061,9 @@ impl ClientRequest {
             | Self::ForgeListPrCommits { .. }
             | Self::ListProjects { .. }
             | Self::GetNetworkAccess
-            | Self::ListDirectDevices => View,
+            | Self::ListDirectDevices
+            | Self::ListTextGenerators
+            | Self::GetTextGenerationSettings => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
             | Self::Interrupt { .. }
@@ -1033,6 +1082,7 @@ impl ClientRequest {
             | Self::ForgeComment { .. }
             | Self::ForgeOpenPr { .. }
             | Self::ForgeHandPrToAgent { .. }
+            | Self::RenameThread { .. }
             | Self::RenameProject { .. }
             | Self::RemoveProject { .. } => Approve,
             Self::TerminalOpen { .. }
@@ -1085,7 +1135,12 @@ impl ClientRequest {
             | Self::RevokeDirectDevice { .. }
             | Self::ForgeImportCli { .. }
             | Self::UpdateHarness { .. }
-            | Self::ClearWorktrees { .. } => Admin,
+            | Self::ClearWorktrees { .. }
+            | Self::AddTextGenerator { .. }
+            | Self::UpdateTextGenerator { .. }
+            | Self::RemoveTextGenerator { .. }
+            | Self::TestTextGenerator { .. }
+            | Self::SetTextGenerationSettings { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers
                 | crate::mcp::McpRequest::ListTools { .. }

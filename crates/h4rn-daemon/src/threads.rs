@@ -15,7 +15,7 @@
 //!   transition happens: Working -> Done after the exit grace, auto-settle, or
 //!   snooze expiry.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -41,7 +41,8 @@ use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::blobs::{AttachmentResolver, BlobError};
-use crate::journal::{Journal, ParkedAttachment, ParkedPrompt, ThreadMeta, WireEvent};
+use crate::journal::{Journal, ParkedAttachment, ParkedPrompt, ThreadMeta, TitleSource, WireEvent};
+use crate::text_generation::TextGeneration;
 
 /// Capacity of the live event broadcast. A subscriber that falls further behind
 /// than this is dropped with a resume hint rather than slowing other clients.
@@ -275,6 +276,16 @@ struct Inner {
     mcp: std::sync::OnceLock<Arc<dyn McpSessionProvider>>,
     /// Durable metering, limits and auto-resume (ADR-024).
     meter: std::sync::OnceLock<Arc<MeterHub>>,
+    /// Title generation, installed once by the daemon assembly.
+    text_generation: std::sync::OnceLock<Arc<dyn TextGeneration>>,
+    /// Threads with a title generation attempt in flight, so a duplicate
+    /// never starts a second model call.
+    ///
+    /// A blocking mutex: the insert happens before the task is spawned, so a
+    /// test that waits for an idle set cannot miss the job it just started.
+    title_jobs: std::sync::Mutex<HashSet<String>>,
+    /// Signals that one title attempt finished (tests wait on it).
+    title_settled: tokio::sync::Notify,
     /// Throttles the due-schedule scan to about once a second.
     last_schedule_check: std::sync::Mutex<Option<DateTime<Utc>>>,
     /// Set when the startup ledger resync could not read the ledger.
@@ -1491,6 +1502,9 @@ impl ThreadManager {
                 proxy: std::sync::OnceLock::new(),
                 mcp: std::sync::OnceLock::new(),
                 meter: std::sync::OnceLock::new(),
+                text_generation: std::sync::OnceLock::new(),
+                title_jobs: std::sync::Mutex::new(HashSet::new()),
+                title_settled: tokio::sync::Notify::new(),
                 last_schedule_check: std::sync::Mutex::new(None),
                 resync_pending: AtomicBool::new(false),
                 clock,
@@ -1537,6 +1551,15 @@ impl ThreadManager {
     /// starting the ticker.
     pub fn set_meter(&self, meter: Arc<MeterHub>) {
         let _ = self.inner.meter.set(meter);
+    }
+
+    /// Attaches the text-generation service used for thread titles.
+    ///
+    /// Called once during daemon assembly. A manager without one simply keeps
+    /// every prompt-derived title, which is what unit tests and the mock
+    /// harness want.
+    pub fn set_text_generation(&self, service: Arc<dyn TextGeneration>) {
+        let _ = self.inner.text_generation.set(service);
     }
 
     /// The metering hub, when one has been attached.
@@ -1809,6 +1832,8 @@ impl ThreadManager {
             .resolve_attachments(&thread_id, &request.attachments)
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
+        let title_eligible = request.parent_thread_id.is_none() && request.subagent_id.is_none();
+        let title_prompt = request.prompt.clone();
         let meta = ThreadMeta {
             thread_id: thread_id.clone(),
             parent_thread_id: request.parent_thread_id.clone(),
@@ -1816,6 +1841,7 @@ impl ThreadManager {
             host: request.host,
             harness: request.harness,
             title: title_from_prompt(&request.prompt, &request.workspace_path),
+            title_source: TitleSource::Prompt,
             workspace_path: request.workspace_path,
             model: request.model,
             runtime_mode: request.runtime_mode,
@@ -1825,6 +1851,7 @@ impl ThreadManager {
             resume_id: None,
             parked: None,
         };
+        let title_workspace = meta.workspace_path.clone();
 
         let mut record = ThreadRecord {
             meta,
@@ -1897,6 +1924,11 @@ impl ThreadManager {
             .await
             .insert(thread_id.as_str().to_owned(), handle.clone());
 
+        if title_eligible {
+            self.inner
+                .spawn_title_job(thread_id.clone(), title_prompt, title_workspace);
+        }
+
         self.inner.spawn_session(handle);
         Ok(CreatedThread {
             thread_id,
@@ -1904,6 +1936,36 @@ impl ThreadManager {
             summary,
             seq,
         })
+    }
+
+    /// Renames a thread by hand. The name sticks; generation never replaces it.
+    pub async fn rename_thread(
+        &self,
+        thread_id: &ThreadId,
+        title: &str,
+    ) -> Result<ThreadSummary, ManagerError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(ManagerError::InvalidRequest(
+                "a thread title cannot be empty".into(),
+            ));
+        }
+        if title.chars().count() > 200 {
+            return Err(ManagerError::InvalidRequest(
+                "a thread title is at most 200 characters".into(),
+            ));
+        }
+        if title.contains(['\n', '\r']) {
+            return Err(ManagerError::InvalidRequest(
+                "a thread title must be one line".into(),
+            ));
+        }
+        let handle = self.inner.handle(thread_id).await?;
+        let mut record = handle.lock().await;
+        record.meta.title = title.to_owned();
+        record.meta.title_source = TitleSource::Renamed;
+        let (summary, _) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
+        Ok(summary)
     }
 
     /// Appends a user message and starts or queues its turn.
@@ -2863,6 +2925,80 @@ impl ThreadManager {
 }
 
 impl Inner {
+    /// Starts one title attempt in the background, at most one per thread.
+    ///
+    /// The first-prompt title is already on the row; a generated title replaces
+    /// it only while the row still says the title came from the prompt, so a
+    /// rename that lands first wins and a rename that lands later overwrites
+    /// the generated title.
+    fn spawn_title_job(self: &Arc<Self>, thread_id: ThreadId, prompt: String, workspace: String) {
+        let Some(service) = self.text_generation.get().cloned() else {
+            return;
+        };
+        if !self
+            .title_jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(thread_id.as_str().to_owned())
+        {
+            return;
+        }
+        let inner = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = service.thread_title(&prompt, &workspace).await;
+            match result {
+                Ok(title) => inner.apply_generated_title(&thread_id, title).await,
+                Err(error) => {
+                    // One line per failed attempt; the fallback title stays.
+                    tracing::info!(
+                        thread_id = thread_id.as_str(),
+                        %error,
+                        "kept the first-prompt thread title"
+                    );
+                }
+            }
+            inner
+                .title_jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(thread_id.as_str());
+            inner.title_settled.notify_waiters();
+        });
+    }
+
+    /// Applies a generated title unless the person already renamed the thread.
+    async fn apply_generated_title(&self, thread_id: &ThreadId, title: String) {
+        let Ok(handle) = self.handle(thread_id).await else {
+            return;
+        };
+        let mut record = handle.lock().await;
+        if record.meta.title_source != TitleSource::Prompt {
+            return;
+        }
+        record.meta.title = title;
+        record.meta.title_source = TitleSource::Generated;
+        if let Err(error) = self.emit(&mut record, Vec::new(), Vec::new()).await {
+            tracing::warn!(%error, thread_id = thread_id.as_str(), "could not publish a generated title");
+        }
+    }
+
+    /// Waits until no title attempt is in flight (tests).
+    #[cfg(test)]
+    async fn wait_for_titles(&self) {
+        loop {
+            let notified = self.title_settled.notified();
+            let busy = !self
+                .title_jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty();
+            if !busy {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// The clock every lifecycle decision reads.
     fn now(&self) -> DateTime<Utc> {
         self.clock.now()
@@ -6019,6 +6155,7 @@ mod tests {
     use super::*;
     use crate::harnesses::StaticHarnessCatalog;
     use crate::journal::SqliteJournal;
+    use crate::text_generation::{TextGeneration, TextGenerationError};
 
     /// Spawns `work` and returns when it is parked on the thread's record lock.
     ///
@@ -9490,6 +9627,211 @@ mod tests {
         );
         assert_eq!(title_from_prompt("   ", "/tmp/repo"), "repo");
         assert_eq!(title_from_prompt("", "/"), "Untitled thread");
+    }
+
+    /// A text generation backend whose answer the test controls.
+    struct TestTitles {
+        result: Result<String, TextGenerationError>,
+        started: Option<Arc<tokio::sync::Notify>>,
+        release: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    impl TestTitles {
+        fn fixed(title: &str) -> Self {
+            Self {
+                result: Ok(title.to_owned()),
+                started: None,
+                release: None,
+            }
+        }
+
+        fn failed(error: TextGenerationError) -> Self {
+            Self {
+                result: Err(error),
+                started: None,
+                release: None,
+            }
+        }
+
+        fn gated(title: &str) -> (Self, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            (
+                Self {
+                    result: Ok(title.to_owned()),
+                    started: Some(Arc::clone(&started)),
+                    release: Some(Arc::clone(&release)),
+                },
+                started,
+                release,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TextGeneration for TestTitles {
+        async fn thread_title(
+            &self,
+            _first_prompt: &str,
+            _workspace: &str,
+        ) -> Result<String, TextGenerationError> {
+            if let Some(started) = &self.started {
+                started.notify_one();
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            self.result.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_generated_title_replaces_the_first_prompt_title() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_title")).await;
+        manager.set_text_generation(Arc::new(TestTitles::fixed("Generated title")));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(
+                HostId::new("host_title"),
+                workspace.path(),
+                "Fix the login form",
+            ))
+            .await
+            .expect("create");
+        assert_eq!(created.summary.title, "Fix the login form");
+        manager.inner.wait_for_titles().await;
+
+        let meta = manager
+            .thread_meta(&created.thread_id)
+            .await
+            .expect("thread");
+        assert_eq!(meta.title, "Generated title");
+        assert_eq!(meta.title_source, TitleSource::Generated);
+
+        let mut saw_generated = false;
+        while let Ok(wire) = events.try_recv() {
+            if let Event::ThreadUpserted(summary) = wire.event
+                && summary.thread_id == created.thread_id
+                && summary.title == "Generated title"
+            {
+                saw_generated = true;
+            }
+        }
+        assert!(saw_generated, "the generated title is a normal upsert");
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_timed_out_title_keeps_the_fallback() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_title")).await;
+        manager.set_text_generation(Arc::new(TestTitles::failed(TextGenerationError::Timeout)));
+        let created = manager
+            .create_thread(new_thread(
+                HostId::new("host_title"),
+                workspace.path(),
+                "Keep this title",
+            ))
+            .await
+            .expect("create");
+        manager.inner.wait_for_titles().await;
+        let meta = manager
+            .thread_meta(&created.thread_id)
+            .await
+            .expect("thread");
+        assert_eq!(meta.title, "Keep this title");
+        assert_eq!(meta.title_source, TitleSource::Prompt);
+    }
+
+    #[tokio::test]
+    async fn a_rename_during_generation_wins() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_title")).await;
+        let (backend, started, release) = TestTitles::gated("Generated title");
+        manager.set_text_generation(Arc::new(backend));
+        let created = manager
+            .create_thread(new_thread(
+                HostId::new("host_title"),
+                workspace.path(),
+                "Fallback title",
+            ))
+            .await
+            .expect("create");
+
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("the title job started");
+        let renamed = manager
+            .rename_thread(&created.thread_id, "My own name")
+            .await
+            .expect("rename");
+        assert_eq!(renamed.title, "My own name");
+        release.notify_one();
+        manager.inner.wait_for_titles().await;
+
+        let meta = manager
+            .thread_meta(&created.thread_id)
+            .await
+            .expect("thread");
+        assert_eq!(meta.title, "My own name");
+        assert_eq!(meta.title_source, TitleSource::Renamed);
+    }
+
+    #[tokio::test]
+    async fn a_rename_must_be_one_non_empty_line() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_title")).await;
+        let created = manager
+            .create_thread(new_thread(
+                HostId::new("host_title"),
+                workspace.path(),
+                "Fallback title",
+            ))
+            .await
+            .expect("create");
+        assert!(
+            manager
+                .rename_thread(&created.thread_id, "  ")
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .rename_thread(&created.thread_id, "two\nlines")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .rename_thread(&created.thread_id, "  One line  ")
+                .await
+                .expect("rename")
+                .title,
+            "One line"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subagent_child_keeps_the_title_its_task_gave_it() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_title")).await;
+        manager.set_text_generation(Arc::new(TestTitles::fixed("Should not appear")));
+        let mut request = new_thread(
+            HostId::new("host_title"),
+            workspace.path(),
+            "Review the diff",
+        );
+        request.parent_thread_id = Some(ThreadId::new("th_parent"));
+        request.subagent_id = Some(SubagentId::new("sub_1"));
+        let created = manager.create_thread(request).await.expect("create");
+        // No job was started, so there is nothing to wait for; the prompt is
+        // the title its task gave it.
+        let meta = manager
+            .thread_meta(&created.thread_id)
+            .await
+            .expect("thread");
+        assert_eq!(meta.title, "Review the diff");
+        assert_eq!(meta.title_source, TitleSource::Prompt);
     }
 
     #[test]

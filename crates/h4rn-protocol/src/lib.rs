@@ -44,6 +44,7 @@ mod server;
 pub mod skills;
 mod subagents;
 mod terminal;
+mod text_generation;
 mod transport;
 mod usage;
 mod worktrees;
@@ -98,6 +99,10 @@ pub use subagents::{
 };
 pub use terminal::{
     CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,
+};
+pub use text_generation::{
+    TextGenerationSettings, TextGenerator, TextGeneratorDraft, TextGeneratorId, TextGeneratorKind,
+    TextGeneratorPatch, TextGeneratorTestReport, TitleModelMode, TitleModelSetting,
 };
 pub use transport::{
     TransportPathKind, TransportPathState, TransportPathStatus, TransportSessionState,

@@ -229,12 +229,51 @@ type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello"
                                                                                                         type: "direct_pairing_offer";
                                                                                                       }
                                                                                                     >
-                                                                                                  : Extract<
-                                                                                                      ResponseBody,
-                                                                                                      {
-                                                                                                        type: "ack";
-                                                                                                      }
-                                                                                                    >;
+                                                                                                  : T extends "list_text_generators"
+                                                                                                    ? Extract<
+                                                                                                        ResponseBody,
+                                                                                                        {
+                                                                                                          type: "text_generators";
+                                                                                                        }
+                                                                                                      >
+                                                                                                    : T extends
+                                                                                                          | "add_text_generator"
+                                                                                                          | "update_text_generator"
+                                                                                                      ? Extract<
+                                                                                                          ResponseBody,
+                                                                                                          {
+                                                                                                            type: "text_generator";
+                                                                                                          }
+                                                                                                        >
+                                                                                                      : T extends "test_text_generator"
+                                                                                                        ? Extract<
+                                                                                                            ResponseBody,
+                                                                                                            {
+                                                                                                              type: "text_generator_tested";
+                                                                                                            }
+                                                                                                          >
+                                                                                                        : T extends
+                                                                                                              | "get_text_generation_settings"
+                                                                                                              | "set_text_generation_settings"
+                                                                                                          ? Extract<
+                                                                                                              ResponseBody,
+                                                                                                              {
+                                                                                                                type: "text_generation_settings";
+                                                                                                              }
+                                                                                                            >
+                                                                                                          : T extends "rename_thread"
+                                                                                                            ? Extract<
+                                                                                                                ResponseBody,
+                                                                                                                {
+                                                                                                                  type: "thread_renamed";
+                                                                                                                }
+                                                                                                              >
+                                                                                                            : Extract<
+                                                                                                                ResponseBody,
+                                                                                                                {
+                                                                                                                  type: "ack";
+                                                                                                                }
+                                                                                                              >;
 
 export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktrees"
   ? Extract<ResponseBody, { type: "worktrees" }>

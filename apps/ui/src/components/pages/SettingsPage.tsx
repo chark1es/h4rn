@@ -17,6 +17,10 @@ import {
 import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { useRemote } from "@/features/remote/remoteStore";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
+import {
+  TextGeneratorsSettings,
+  ThreadSettings,
+} from "@/features/text-generation/TextGenerationSettings";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 import { WorktreeSettings } from "@/features/worktrees/WorktreeSettings";
@@ -521,7 +525,13 @@ function ShortcutsForm() {
 const FORMS: Record<string, () => React.ReactNode> = {
   hosts: () => <LiveHostsForm />,
   devices: () => <LiveHostsForm pairing />,
-  providers: ProxySettings,
+  threads: ThreadSettings,
+  providers: () => (
+    <>
+      <TextGeneratorsSettings />
+      <ProxySettings />
+    </>
+  ),
   harnesses: HarnessSettings,
   worktrees: WorktreeSettings,
   resume: AutoResumeSettings,
