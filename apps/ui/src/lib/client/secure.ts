@@ -185,6 +185,10 @@ export class SecureTransport implements Transport {
       if (this.closedByUs) return;
 
       const resolved = await this.resolveConfig();
+      // A wake may have replaced this transport while its config was being
+      // resolved. A cancelled attempt must not create wasm state, sockets or
+      // timers behind the replacement's back.
+      if (this.closedByUs) return;
       if (!resolved) {
         if (this.options.remote) {
           this.finishClose(

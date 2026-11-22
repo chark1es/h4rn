@@ -98,6 +98,13 @@ class DeadTransport extends FakeTransport {
   }
 }
 
+/** A socket whose connection never completes: `onOpen` does not fire. */
+class PendingTransport extends FakeTransport {
+  override connect(handlers: TransportHandlers): void {
+    this.handlers = handlers;
+  }
+}
+
 type Harness = {
   client: H4rnClient;
   transports: FakeTransport[];
@@ -106,7 +113,7 @@ type Harness = {
 
 type HarnessOptions = {
   requestTimeoutMs?: number;
-  reconnect?: { baseMs: number; jitter: number; maxAttempts?: number };
+  reconnect?: { baseMs: number; maxMs?: number; jitter: number; maxAttempts?: number };
 };
 
 function harness(
@@ -643,23 +650,214 @@ describe("H4rnClient", () => {
     expect(subscribe?.body).toMatchObject({ type: "subscribe", since_seq: 5 });
   });
 
-  it("goes offline after exhausting reconnect attempts", async () => {
+  it("keeps retrying at the capped interval instead of giving up", async () => {
     vi.useFakeTimers();
     try {
-      const { client } = harness(() => new DeadTransport(), {
-        reconnect: { baseMs: 1, jitter: 0, maxAttempts: 4 },
+      const { client, transports } = harness(() => new DeadTransport(), {
+        reconnect: { baseMs: 1, maxMs: 4, jitter: 0, maxAttempts: 2 },
       });
 
       client.start();
       await vi.advanceTimersByTimeAsync(1);
 
-      for (let index = 0; index < 6; index += 1) {
-        await vi.advanceTimersByTimeAsync(100);
+      for (let index = 0; index < 10; index += 1) {
+        await vi.advanceTimersByTimeAsync(10);
       }
 
-      expect(client.getSnapshot().status).toBe("offline");
+      expect(client.getSnapshot().status).toBe("degraded");
+      expect(client.getSnapshot().attempt).toBeGreaterThan(2);
+      expect(transports.length).toBeGreaterThan(2);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("retries at once on online and focus without stacking sockets", async () => {
+    vi.useFakeTimers();
+    const windowStub = new EventTarget();
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    try {
+      let opened = 0;
+      const staying = new FakeTransport();
+      const { client, transports } = harness(
+        () => (opened++ === 0 ? new DeadTransport() : staying),
+        { reconnect: { baseMs: 60_000, maxMs: 60_000, jitter: 0, maxAttempts: 4 } },
+      );
+
+      client.start();
+      expect(transports.length).toBe(1);
+      expect(client.getSnapshot().status).toBe("degraded");
+      // The 60 s backoff must not hold the retry back.
+      windowStub.dispatchEvent(new Event("online"));
+      await settle();
+      expect(transports.length).toBe(2);
+      expect(client.getSnapshot().status).toBe("online");
+
+      // An open socket is not replaced by another wake signal.
+      windowStub.dispatchEvent(new Event("focus"));
+      expect(transports.length).toBe(2);
+
+      transports[1]?.drop();
+      expect(client.getSnapshot()).toMatchObject({ status: "degraded", attempt: 1 });
+      windowStub.dispatchEvent(new Event("focus"));
+      await settle();
+      expect(transports.length).toBe(3);
+      expect(client.getSnapshot().attempt).toBe(0);
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores wakes while a fresh connect attempt is still opening", async () => {
+    vi.useFakeTimers();
+    const windowStub = new EventTarget();
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    try {
+      let opened = 0;
+      const { client, transports } = harness(
+        () => (opened++ === 0 ? new FakeTransport() : new PendingTransport()),
+        { reconnect: { baseMs: 60_000, maxMs: 60_000, jitter: 0, maxAttempts: 4 } },
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+
+      // A wake skips the 60 s backoff; the new socket never finishes opening.
+      transports[0]?.drop();
+      windowStub.dispatchEvent(new Event("online"));
+      expect(transports.length).toBe(2);
+      expect(client.getSnapshot().status).toBe("degraded");
+
+      // Wakes in the first second of that attempt must not restart it.
+      windowStub.dispatchEvent(new Event("focus"));
+      windowStub.dispatchEvent(new Event("online"));
+      await settle();
+      expect(transports.length).toBe(2);
+      expect(transports[1]?.closed).toBe(false);
+
+      // Once the attempt is a second old, a wake may retry again.
+      await vi.advanceTimersByTimeAsync(1_100);
+      windowStub.dispatchEvent(new Event("focus"));
+      expect(transports.length).toBe(3);
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not turn the first connect into a reconnect on wake signals", async () => {
+    const windowStub = new EventTarget();
+    const documentStub = new EventTarget() as EventTarget & {
+      visibilityState: DocumentVisibilityState;
+    };
+    documentStub.visibilityState = "visible";
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    Object.defineProperty(globalThis, "document", {
+      value: documentStub,
+      configurable: true,
+    });
+    try {
+      // Hello never answers, so the first socket is still connecting.
+      const { client, transports } = harness(() => new FakeTransport(() => true));
+      client.start();
+      expect(client.getSnapshot().status).toBe("connecting");
+
+      windowStub.dispatchEvent(new Event("online"));
+      windowStub.dispatchEvent(new Event("focus"));
+      documentStub.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+
+      expect(transports.length).toBe(1);
+      expect(client.getSnapshot().status).toBe("connecting");
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
+      Reflect.deleteProperty(globalThis, "document");
+    }
+  });
+
+  it("retries at once when the document becomes visible", async () => {
+    vi.useFakeTimers();
+    const documentStub = new EventTarget() as EventTarget & {
+      visibilityState: DocumentVisibilityState;
+    };
+    documentStub.visibilityState = "hidden";
+    Object.defineProperty(globalThis, "document", {
+      value: documentStub,
+      configurable: true,
+    });
+    try {
+      const { client, transports } = harness(() => new DeadTransport(), {
+        reconnect: { baseMs: 60_000, maxMs: 60_000, jitter: 0, maxAttempts: 4 },
+      });
+
+      client.start();
+      expect(transports.length).toBe(1);
+
+      documentStub.dispatchEvent(new Event("visibilitychange"));
+      expect(transports.length).toBe(1);
+
+      documentStub.visibilityState = "visible";
+      documentStub.dispatchEvent(new Event("visibilitychange"));
+      expect(transports.length).toBe(2);
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "document");
+      vi.useRealTimers();
+    }
+  });
+
+  it("reinstalls wake listeners when the user presses Reconnect", async () => {
+    vi.useFakeTimers();
+    const windowStub = new EventTarget();
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    try {
+      const { client, transports } = harness(() => new FakeTransport(), {
+        reconnect: { baseMs: 60_000, maxMs: 60_000, jitter: 0, maxAttempts: 4 },
+      });
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+
+      // Stopping removes the listeners; Reconnect must bring them back.
+      client.stop();
+      client.reconnectNow();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+      expect(transports.length).toBe(2);
+
+      transports[1]?.drop();
+      expect(client.getSnapshot()).toMatchObject({ status: "degraded", attempt: 1 });
+      // The 60 s backoff must not hold this retry back.
+      windowStub.dispatchEvent(new Event("online"));
+      await settle();
+      expect(transports.length).toBe(3);
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores wake signals after a fatal close", async () => {
+    const windowStub = new EventTarget();
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    try {
+      const { client, transports } = harness();
+      client.start();
+      await settle();
+      transports[0]?.drop(4401, "bad token");
+      windowStub.dispatchEvent(new Event("online"));
+      expect(transports.length).toBe(1);
+      expect(client.getSnapshot().status).toBe("offline");
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
     }
   });
 

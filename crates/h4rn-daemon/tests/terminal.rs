@@ -16,7 +16,7 @@ use h4rn_daemon::server::Outbound;
 use h4rn_daemon::terminal::{OpenSpec, TerminalManager, TracingAudit, run_viewer};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
-    HostId, ResponseBody, ServerFrame, TerminalId, TerminalInfo,
+    HostId, PTY_INPUT_REPLY, ResponseBody, ServerFrame, TerminalId, TerminalInfo,
 };
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -135,10 +135,14 @@ impl Client {
     }
 
     async fn send_input(&mut self, stream_id: u32, data: &[u8]) {
+        self.send_input_frame(stream_id, 0, data).await;
+    }
+
+    async fn send_input_frame(&mut self, stream_id: u32, seq: u64, data: &[u8]) {
         let frame = BinaryFrame {
             kind: BinaryKind::PtyInput,
             stream_id,
-            seq: 0,
+            seq,
             payload: data.to_vec(),
         };
         self.ws
@@ -590,5 +594,432 @@ async fn pty_input_needs_hello_and_an_attached_viewer() {
         })
         .await
         .expect("close terminal");
+    daemon.stop().await;
+}
+
+/// Two viewers' marked replies carry `PTY_INPUT_REPLY` in the binary frame's
+/// flag word. Only the owner's answer is written to the PTY; typed input is
+/// always written.
+#[tokio::test]
+async fn only_one_marked_reply_reaches_the_pty() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().to_string_lossy().to_string();
+
+    let mut first = Client::connect(&daemon).await;
+    first.hello().await;
+    let terminal = first
+        .open(
+            host,
+            &cwd,
+            Some("/bin/sh"),
+            vec!["-c".into(), "stty raw -echo; exec cat".into()],
+            80,
+            24,
+        )
+        .await;
+    first.attach(&terminal.terminal_id, 80, 24).await;
+
+    let mut second = Client::connect(&daemon).await;
+    second.hello().await;
+    second.attach(&terminal.terminal_id, 80, 24).await;
+
+    // Let the shell switch the PTY to raw, echo-free mode before writing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A mode report both viewers' xterm would answer identically.
+    let mode_reply: &[u8] = b"\x1b[?12;2$y";
+    let written = "\u{1b}[?12;2$y";
+    first
+        .send_input_frame(terminal.stream_id, PTY_INPUT_REPLY, mode_reply)
+        .await;
+    second
+        .send_input_frame(terminal.stream_id, PTY_INPUT_REPLY, mode_reply)
+        .await;
+    second
+        .send_input_frame(terminal.stream_id, 0, b"iHELLO")
+        .await;
+
+    let output = second.output_until("iHELLO").await;
+    assert_eq!(
+        output.matches(written).count(),
+        1,
+        "two viewers' replies must reach the shell once: {output:?}"
+    );
+
+    first
+        .request(ClientRequest::TerminalClose {
+            terminal_id: terminal.terminal_id,
+        })
+        .await
+        .expect("close terminal");
+    daemon.stop().await;
+}
+
+/// Reads one viewer's output until `done` accepts it, acknowledging chunks.
+async fn read_until(
+    rx: &mut mpsc::Receiver<Outbound>,
+    manager: &TerminalManager,
+    terminal_id: &TerminalId,
+    viewer_id: u64,
+    mut done: impl FnMut(&str) -> bool,
+) -> String {
+    let mut output = String::new();
+    loop {
+        let Ok(Some(message)) = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await
+        else {
+            panic!("terminal output timed out; got {output:?}");
+        };
+        let Outbound::Binary(bytes) = message else {
+            continue;
+        };
+        let frame = BinaryFrame::decode(&bytes).expect("decode output");
+        manager
+            .ack(terminal_id, viewer_id, frame.seq)
+            .expect("ack output");
+        if matches!(frame.kind, BinaryKind::PtyOutput | BinaryKind::PtySnapshot) {
+            output.push_str(&String::from_utf8_lossy(&frame.payload));
+            if done(&output) {
+                return output;
+            }
+        }
+    }
+}
+
+/// The first viewer to send a marked reply owns query replies until it
+/// detaches; another viewer's marked reply is dropped, while its typed input
+/// is always written.
+#[tokio::test]
+async fn one_viewer_answers_terminal_queries() {
+    let manager = Arc::new(TerminalManager::new(
+        HostId::new("host_test"),
+        Arc::new(TracingAudit),
+    ));
+    let cwd = tempfile::tempdir().unwrap();
+    let terminal = manager
+        .open(
+            OpenSpec {
+                thread_id: None,
+                host: HostId::new("host_test"),
+                cwd: cwd.path().to_string_lossy().to_string(),
+                shell: Some("/bin/sh".into()),
+                // Raw, echo-free: the test counts the bytes `cat` writes, not
+                // the PTY's caret-notation echo of them.
+                args: vec!["-c".into(), "stty raw -echo; exec cat".into()],
+                cols: 80,
+                rows: 24,
+            },
+            &device(),
+        )
+        .await
+        .expect("open");
+
+    let first_id = manager.next_viewer_id();
+    let (first_tx, _first_rx) = mpsc::channel::<Outbound>(4);
+    let first = manager
+        .attach(
+            &terminal.terminal_id,
+            first_id,
+            first_tx,
+            Some(80),
+            Some(24),
+        )
+        .expect("attach first");
+
+    let second_id = manager.next_viewer_id();
+    let (second_tx, mut second_rx) = mpsc::channel::<Outbound>(4);
+    let second = manager
+        .attach(
+            &terminal.terminal_id,
+            second_id,
+            second_tx,
+            Some(80),
+            Some(24),
+        )
+        .expect("attach second");
+    tokio::spawn(run_viewer(
+        Arc::clone(&second.session),
+        second_id,
+        Arc::clone(&second.viewer),
+        second.output,
+        second.snapshot.seq,
+    ));
+
+    // Let the shell switch the PTY to raw, echo-free mode before writing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A mode report every viewer's xterm would answer identically.
+    let mode_reply: &[u8] = b"\x1b[?12;2$y";
+    let written = "\u{1b}[?12;2$y";
+    manager
+        .input_by_stream(terminal.stream_id, first_id, mode_reply, true)
+        .expect("first reply");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, mode_reply, true)
+        .expect("second reply is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", false)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(written).count(),
+        1,
+        "two viewers' replies must reach the shell once: {output:?}"
+    );
+
+    // Detaching the owner frees the role; the remaining viewer's next marked
+    // reply is accepted.
+    manager.detach_viewer(first_id);
+    manager
+        .input_by_stream(terminal.stream_id, second_id, mode_reply, true)
+        .expect("reply after hand-over");
+    // This read starts empty, so one more written reply is the whole count.
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.matches(written).count() >= 1,
+    )
+    .await;
+    assert_eq!(
+        output.matches(written).count(),
+        1,
+        "the surviving viewer must take over replies: {output:?}"
+    );
+
+    drop(first);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+}
+
+/// Closing a terminal hangs up the shell, which forwards SIGHUP to its jobs.
+/// A job that put itself in another session survives, and so does one whose
+/// `nohup` explicitly ignores the hangup.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn closing_a_terminal_ends_background_jobs() {
+    use std::path::Path;
+
+    async fn read_pid(path: &Path) -> i32 {
+        for _ in 0..500 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{} never appeared", path.display());
+    }
+
+    fn process_running(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // A zombie is already gone; its parent just has not reaped it.
+            Ok(stat) => {
+                stat.rsplit(')')
+                    .next()
+                    .and_then(|rest| rest.split_whitespace().next())
+                    != Some("Z")
+            }
+            Err(_) => false,
+        }
+    }
+
+    async fn wait_until_gone(what: &str, pid: i32) {
+        for _ in 0..250 {
+            if !process_running(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{what} (pid {pid}) still runs after the terminal closed");
+    }
+
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let work = tempfile::tempdir().unwrap();
+    let cwd_path = work.path().to_path_buf();
+    let cwd = cwd_path.to_string_lossy().to_string();
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let terminal = client
+        .open(
+            host,
+            &cwd,
+            Some("/bin/bash"),
+            vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+            80,
+            24,
+        )
+        .await;
+    client.attach(&terminal.terminal_id, 80, 24).await;
+    // Let the prompt settle before typing.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Keep the shell itself out of the SIGTERM path, so the fixtures below
+    // exercise their own traps rather than the shell's exit.
+    client
+        .send_input(terminal.stream_id, b"trap '' TERM\n")
+        .await;
+
+    // `set -m` gives the job its own process group, the case a group-only
+    // signal misses; the shell's SIGHUP forwarding reaches it anyway.
+    client
+        .send_input(
+            terminal.stream_id,
+            b"set -m; sleep 1000 & echo $! > bg.pid\n",
+        )
+        .await;
+    let bg = read_pid(&cwd_path.join("bg.pid")).await;
+    assert!(process_running(bg), "background job did not start");
+
+    // `nohup` ignores the hangup, so only the person may end it.
+    client
+        .send_input(
+            terminal.stream_id,
+            b"nohup sleep 1000 >/dev/null 2>&1 & echo $! > nohup.pid\n",
+        )
+        .await;
+    let nohup_job = read_pid(&cwd_path.join("nohup.pid")).await;
+    assert!(process_running(nohup_job), "nohup job did not start");
+
+    // A job that moved itself into another session has left the terminal.
+    let has_setsid = std::process::Command::new("setsid")
+        .arg("--version")
+        .output()
+        .is_ok();
+    let detached = if has_setsid {
+        client
+            .send_input(
+                terminal.stream_id,
+                b"setsid sh -c 'echo $$ > detached.pid; exec sleep 1000' &\n",
+            )
+            .await;
+        Some(read_pid(&cwd_path.join("detached.pid")).await)
+    } else {
+        None
+    };
+
+    // A job that only dies when the shell forwards SIGHUP before SIGTERM.
+    // `set +m` leaves it in the shell's process group, so the TERM-first order
+    // reaches it first; that trap then ignores HUP and moves the job into a new
+    // session, which the group-wide KILL also misses. With HUP first the job
+    // exits at once, before TERM can run the trap.
+    let hup_first = if has_setsid {
+        client.send_input(terminal.stream_id, b"set +m\n").await;
+        client
+            .send_input(
+                terminal.stream_id,
+                b"( trap 'trap \"\" HUP; exec setsid sleep 1000' TERM; trap 'exit 0' HUP; while :; do sleep 0.05; done ) & echo $! > hup-first.pid\n",
+            )
+            .await;
+        let pid = read_pid(&cwd_path.join("hup-first.pid")).await;
+        // Give the loop a moment to install its traps.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Some(pid)
+    } else {
+        None
+    };
+
+    client
+        .request(ClientRequest::TerminalClose {
+            terminal_id: terminal.terminal_id,
+        })
+        .await
+        .expect("close terminal");
+
+    wait_until_gone("the background job", bg).await;
+    if let Some(pid) = hup_first {
+        wait_until_gone("the HUP-before-TERM job", pid).await;
+    }
+    for survivor in [Some(nohup_job), detached].into_iter().flatten() {
+        assert!(
+            process_running(survivor),
+            "a job that ignored or left the hangup must survive the terminal"
+        );
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &survivor.to_string()])
+            .status();
+        wait_until_gone("a detached job", survivor).await;
+    }
+    daemon.stop().await;
+}
+
+/// Closing a terminal keeps a grace period after SIGTERM, so a job whose TERM
+/// handler needs a moment to clean up finishes before the group is killed.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn closing_a_terminal_waits_for_term_cleanup() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let work = tempfile::tempdir().unwrap();
+    let cwd_path = work.path().to_path_buf();
+    let cwd = cwd_path.to_string_lossy().to_string();
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let terminal = client
+        .open(
+            host,
+            &cwd,
+            Some("/bin/bash"),
+            vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+            80,
+            24,
+        )
+        .await;
+    client.attach(&terminal.terminal_id, 80, 24).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // `set +m` keeps the job in the shell's process group, so the group-wide
+    // SIGTERM reaches it. It ignores SIGHUP and spends ~80 ms writing its
+    // marker after TERM; without the grace period the group is killed first.
+    client.send_input(terminal.stream_id, b"set +m\n").await;
+    client
+        .send_input(
+            terminal.stream_id,
+            b"( trap '' HUP; trap 'sleep 0.08; echo cleaned > cleanup.txt; exit 0' TERM; while :; do sleep 0.01; done ) & echo $! > worker.pid\n",
+        )
+        .await;
+    let worker = cwd_path.join("worker.pid");
+    for _ in 0..500 {
+        if worker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(worker.exists(), "the cleanup worker never started");
+    // Give the loop a moment to install its traps.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    client
+        .request(ClientRequest::TerminalClose {
+            terminal_id: terminal.terminal_id,
+        })
+        .await
+        .expect("close terminal");
+
+    let marker = cwd_path.join("cleanup.txt");
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        marker.exists(),
+        "the TERM handler was killed before it could write its marker"
+    );
     daemon.stop().await;
 }
