@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::Utc;
 use h4rn_protocol::{
     BinaryFrame, BinaryKind, CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, HostId, TerminalExit,
-    TerminalExitNotice, TerminalId, TerminalInfo, TerminalResponderNotice, ThreadId,
+    TerminalExitNotice, TerminalId, TerminalInfo, ThreadId,
 };
 use h4rn_vt::{AlacrittyVt, TerminalModel};
 use portable_pty::{Child, MasterPty, PtySize};
@@ -158,8 +158,12 @@ pub struct ViewerEntry {
     pub cols: u16,
     /// Requested rows.
     pub rows: u16,
-    /// Attach order; the highest value is the most recently attached viewer.
-    pub attached_at: u64,
+    /// Whether this viewer has answered a query on this terminal.
+    ///
+    /// At most one attached viewer owns replies at a time. The owner keeps
+    /// the role until it detaches; the next marked reply after that is
+    /// accepted from whichever viewer sends it.
+    pub answers_queries: bool,
 }
 
 /// A PTY session.
@@ -173,10 +177,6 @@ pub struct Session {
     screen: Mutex<Screen>,
     output: broadcast::Sender<Arc<OutputChunk>>,
     viewers: Mutex<HashMap<ViewerId, ViewerEntry>>,
-    /// The one viewer allowed to answer terminal queries, if any.
-    responder: Mutex<Option<ViewerId>>,
-    /// Monotonic attach order used to elect the responder.
-    next_attach: AtomicU64,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     pty: Mutex<Box<dyn MasterPty + Send>>,
@@ -224,8 +224,6 @@ impl Session {
             }),
             output,
             viewers: Mutex::new(HashMap::new()),
-            responder: Mutex::new(None),
-            next_attach: AtomicU64::new(0),
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(child),
             pty: Mutex::new(master),
@@ -366,13 +364,10 @@ impl Session {
     /// Adds a viewer and recomputes the effective size.
     ///
     /// Attaching twice on one connection replaces the old viewer entry; the
-    /// previous task is closed so it cannot outlive its successor.
-    ///
-    /// The most recently attached viewer becomes the one that answers terminal
-    /// queries; the previous responder is told to stop, because two xterm
-    /// instances answering one PTY give the shell duplicate replies.
-    pub fn add_viewer(&self, id: ViewerId, cols: u16, rows: u16, viewer: Arc<Viewer>) -> bool {
-        let attached_at = self.next_attach.fetch_add(1, Ordering::SeqCst) + 1;
+    /// previous task is closed so it cannot outlive its successor. The reply
+    /// owner is decided lazily by [`Session::write_viewer_input`], so a new
+    /// attach never has to be told about or granted the role.
+    pub fn add_viewer(&self, id: ViewerId, cols: u16, rows: u16, viewer: Arc<Viewer>) {
         let previous = {
             let mut viewers = lock(&self.viewers);
             viewers.insert(
@@ -381,20 +376,10 @@ impl Session {
                     viewer,
                     cols,
                     rows,
-                    attached_at,
+                    answers_queries: false,
                 },
             )
         };
-        {
-            // Hold the responder lock across the notice so a concurrent attach
-            // cannot reorder the two viewers' permissions.
-            let mut responder = lock(&self.responder);
-            if let Some(previous) = responder.replace(id)
-                && previous != id
-            {
-                self.notify_responder(previous, false);
-            }
-        }
         if let Some(previous) = previous {
             previous.viewer.close();
             if (previous.cols, previous.rows) != (cols, rows) {
@@ -403,7 +388,6 @@ impl Session {
         } else {
             self.apply_smallest_size();
         }
-        true
     }
 
     /// Removes one viewer and recomputes the effective size.
@@ -420,7 +404,7 @@ impl Session {
     }
 
     fn remove_viewer_matching(&self, id: ViewerId, expected: Option<&Arc<Viewer>>) {
-        let (removed, successor) = {
+        let removed = {
             let mut viewers = lock(&self.viewers);
             let matches = match viewers.get(&id) {
                 Some(entry) => expected.is_none_or(|viewer| Arc::ptr_eq(&entry.viewer, viewer)),
@@ -429,49 +413,22 @@ impl Session {
             if !matches {
                 return;
             }
-            let removed = viewers.remove(&id);
-            let successor = viewers
-                .iter()
-                .max_by_key(|(_, entry)| entry.attached_at)
-                .map(|(id, entry)| (*id, Arc::clone(&entry.viewer)));
-            (removed, successor)
+            // Dropping the entry also drops reply ownership, so the next
+            // marked reply from another viewer is accepted.
+            viewers.remove(&id)
         };
         let Some(removed) = removed else {
             return;
         };
         removed.viewer.close();
-        {
-            let mut responder = lock(&self.responder);
-            if *responder == Some(id) {
-                *responder = successor.as_ref().map(|(id, _)| *id);
-                if let Some((_, viewer)) = &successor {
-                    notify_responder_viewer(viewer, &self.id, true);
-                }
-            }
-        }
         self.apply_smallest_size();
     }
 
     /// Closes every viewer (daemon shutdown or terminal close).
     pub fn close_viewers(&self) {
         let viewers = std::mem::take(&mut *lock(&self.viewers));
-        *lock(&self.responder) = None;
         for entry in viewers.into_values() {
             entry.viewer.close();
-        }
-    }
-
-    /// The viewer currently allowed to answer terminal queries.
-    pub fn responder_id(&self) -> Option<ViewerId> {
-        *lock(&self.responder)
-    }
-
-    fn notify_responder(&self, id: ViewerId, answers_queries: bool) {
-        let viewer = lock(&self.viewers)
-            .get(&id)
-            .map(|entry| Arc::clone(&entry.viewer));
-        if let Some(viewer) = viewer {
-            notify_responder_viewer(&viewer, &self.id, answers_queries);
         }
     }
 
@@ -526,8 +483,34 @@ impl Session {
         }
     }
 
-    /// Writes user input to the PTY.
-    pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
+    /// Writes one attached viewer's input to the PTY.
+    ///
+    /// A marked `reply` is xterm's own answer to a terminal query, not typed
+    /// input. Viewers share one PTY, so only the reply owner's answer is
+    /// written; a marked reply from any other viewer is dropped. Ownership is
+    /// claimed by the first marked reply and lasts until that viewer detaches.
+    /// Membership and ownership are decided under the same lock, so a viewer
+    /// that detaches cannot answer afterwards.
+    pub fn write_viewer_input(
+        &self,
+        viewer_id: ViewerId,
+        data: &[u8],
+        reply: bool,
+    ) -> Result<(), ViewerInputError> {
+        {
+            let mut viewers = lock(&self.viewers);
+            if !viewers.contains_key(&viewer_id) {
+                return Err(ViewerInputError::NotAttached);
+            }
+            if reply && !accepts_query_reply(&mut viewers, viewer_id) {
+                return Ok(());
+            }
+        }
+        self.write_bytes(data).map_err(ViewerInputError::Io)
+    }
+
+    /// Writes raw bytes to the PTY.
+    fn write_bytes(&self, data: &[u8]) -> std::io::Result<()> {
         let mut writer = lock(&self.writer);
         let Some(writer) = writer.as_mut() else {
             return Err(std::io::Error::other("terminal input is closed"));
@@ -546,118 +529,112 @@ impl Session {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// Terminates every process in the terminal's session, then the child.
+    /// Hangs up the shell, then terminates its process group and the child.
     ///
-    /// With job control, a shell puts each background job in its own process
-    /// group, so signalling only the shell's group leaves `sleep 1000 &`
-    /// running. HUP goes to the whole session first: it makes the shell run
-    /// its hangup path and reaches the jobs directly, then TERM and KILL clean
-    /// up anything that ignored it.
+    /// An interactive shell forwards SIGHUP to its jobs and skips `nohup`'d
+    /// and `disown`'d ones. Only the shell is signalled here: with job control
+    /// each background job has its own process group, and signalling them
+    /// directly would also reach jobs the user detached on purpose. Afterwards
+    /// TERM and KILL clean up the shell's group.
     pub fn kill(&self) {
-        if let Some(sid) = self.process_group {
-            signal_session(sid, Signal::Hup);
-            signal_session(sid, Signal::Term);
+        if let Some(pgid) = self.process_group {
+            signal_shell(pgid);
+            signal_group(pgid, Signal::Term);
         }
         {
             let mut child = lock(&self.child);
             let _ = child.kill();
         }
-        if let Some(sid) = self.process_group {
-            signal_session(sid, Signal::Kill);
+        if let Some(pgid) = self.process_group {
+            signal_group(pgid, Signal::Kill);
         }
     }
 
-    /// Terminates with a short grace period so shells can save state.
+    /// Hangs up, waits, then terminates with a short grace period so shells
+    /// can save state.
+    ///
+    /// Windows has no POSIX sessions: closing the ConPTY ends the console
+    /// processes attached to it, and `child.kill()` below does that. The
+    /// SIGHUP below is a no-op there.
     pub async fn kill_with_grace(&self) {
-        // Hang up first, then Term, then wait, so the shell can run its exit
-        // hooks; only then fall back to SIGKILL for children that ignored it.
-        //
-        // Windows has no POSIX sessions: closing the ConPTY is what ends the
-        // console processes attached to it, and `child.kill()` below does that.
-        if let Some(sid) = self.process_group {
-            signal_session(sid, Signal::Hup);
-            signal_session(sid, Signal::Term);
+        // Hang up first and wait, so the shell can run its hangup path and
+        // its jobs hear SIGHUP; only then fall back to TERM and KILL for the
+        // shell's group.
+        if let Some(pgid) = self.process_group {
+            signal_shell(pgid);
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        if let Some(pgid) = self.process_group {
+            signal_group(pgid, Signal::Term);
+        }
         {
             let mut child = lock(&self.child);
             let _ = child.kill();
         }
-        if let Some(sid) = self.process_group {
-            signal_session(sid, Signal::Kill);
+        if let Some(pgid) = self.process_group {
+            signal_group(pgid, Signal::Kill);
         }
     }
+}
+
+/// Whether `viewer_id` may write this marked reply, claiming ownership if the
+/// role is free. The caller holds the viewers lock.
+fn accepts_query_reply(viewers: &mut HashMap<ViewerId, ViewerEntry>, viewer_id: ViewerId) -> bool {
+    if let Some((owner, _)) = viewers.iter().find(|(_, entry)| entry.answers_queries) {
+        return *owner == viewer_id;
+    }
+    match viewers.get_mut(&viewer_id) {
+        Some(entry) => {
+            entry.answers_queries = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Why a viewer's input was not written.
+#[derive(Debug)]
+pub enum ViewerInputError {
+    /// The viewer is not attached to this terminal (any more).
+    NotAttached,
+    /// The PTY could not be written.
+    Io(std::io::Error),
 }
 
 #[derive(Clone, Copy)]
 enum Signal {
-    Hup,
     Term,
     Kill,
 }
 
-/// Signals every process in the session led by `sid`.
+/// Sends SIGHUP to the shell process only.
 ///
-/// `ps` is available on every Unix we ship to (Linux and macOS), unlike a
-/// `/proc` walk. Process groups are signalled through their members because a
-/// session can contain several groups when the shell has job control. A
-/// process that called `setsid` has a different session id and is deliberately
-/// left alone. A `nohup` job stays in this session, ignores the HUP, and is
-/// still reached by TERM and KILL.
-fn signal_session(sid: i32, signal: Signal) {
+/// The shell is the PTY session leader and its process group id is its pid.
+fn signal_shell(pgid: i32) {
     #[cfg(unix)]
     {
-        let signal = match signal {
-            Signal::Hup => libc::SIGHUP,
-            Signal::Term => libc::SIGTERM,
-            Signal::Kill => libc::SIGKILL,
-        };
-        // The shell is usually the session and group leader; this also
-        // catches a just-forked job before `ps` can see it.
-        let _ = unsafe { libc::kill(-sid, signal) };
-        for pid in session_pids(sid) {
-            let _ = unsafe { libc::kill(pid, signal) };
-        }
+        let _ = unsafe { libc::kill(pgid, libc::SIGHUP) };
     }
     #[cfg(windows)]
     {
-        let _ = (sid, signal);
+        let _ = pgid;
     }
 }
 
-/// Process ids whose session id is `sid`.
-#[cfg(unix)]
-fn session_pids(sid: i32) -> Vec<i32> {
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=", "-o", "sess="])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
+/// Signals the shell's whole process group.
+fn signal_group(pgid: i32, signal: Signal) {
+    #[cfg(unix)]
+    {
+        let signal = match signal {
+            Signal::Term => libc::SIGTERM,
+            Signal::Kill => libc::SIGKILL,
+        };
+        // Negative pid signals the whole group; ignore ESRCH after a clean exit.
+        let _ = unsafe { libc::kill(-pgid, signal) };
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid: i32 = fields.next()?.parse().ok()?;
-            let session: i32 = fields.next()?.parse().ok()?;
-            (pid > 0 && session == sid).then_some(pid)
-        })
-        .collect()
-}
-
-/// Sends a viewer the current answer-terminal-queries permission.
-fn notify_responder_viewer(viewer: &Viewer, terminal_id: &TerminalId, answers_queries: bool) {
-    let frame = h4rn_protocol::ServerFrame::TerminalResponder {
-        event: TerminalResponderNotice {
-            terminal_id: terminal_id.clone(),
-            answers_queries,
-        },
-    };
-    if let Ok(text) = serde_json::to_string(&frame) {
-        let _ = viewer.tx.try_send(Outbound::Text(text));
+    #[cfg(windows)]
+    {
+        let _ = (pgid, signal);
     }
 }
 

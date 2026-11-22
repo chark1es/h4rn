@@ -136,13 +136,18 @@ bound, ack-based backpressure of 8 chunks / 64 KiB per stream, smallest-viewer-w
 client xterm), which can diverge; the snapshot-plus-sequence handshake, and raw replay as a cold
 fallback, keep divergence bounded to one reconnect.
 
-Closing a terminal signals the whole PTY session, not just the shell's process group: SIGHUP first
-so the shell runs its hangup path and background jobs hear it, then SIGTERM, then SIGKILL for what
-ignored both. A job that called `setsid` has left the session and survives. Attached viewers share
-one PTY, so only the most recently attached viewer answers terminal queries; the daemon tells the
-others to drop xterm's automatic DA, DSR and colour replies, and hands the role to the next viewer
-when the responder detaches. The client never gives up reconnecting: after the fast backoff it
-retries at the capped interval, and an online, focus or visibility event retries at once.
+Closing a terminal sends SIGHUP to the shell only, just before the existing grace period, then does
+what it always did: SIGTERM to the shell's process group, then SIGKILL after `child.kill()`. An
+interactive shell forwards SIGHUP to its jobs and skips `nohup`'d and `disown`'d ones, so background
+jobs end without special-casing `nohup`, and a job that called `setsid` has left the session and
+survives. Walking `ps` for session members is deliberately not done: `sess` is not portable and
+signalling every member reaches jobs the user detached. Attached viewers share one PTY, so the UI
+marks xterm's answer to a query the program just asked (through parser hooks for DA, DSR, DECRQM,
+XTWINOPS and OSC colour queries) in the input frame's `seq` flag, and the daemon writes only the
+first attached viewer's marked answer; later or detached viewers' answers are dropped, while
+unmarked input is always written. Ownership lasts until that viewer detaches. The client never gives
+up reconnecting: after the fast backoff it retries at the capped interval, and an online, focus or
+visibility event retries at once, except during the very first connect, which is not yet a retry.
 
 ## ADR-008: Attachments are a content-addressed blob store
 

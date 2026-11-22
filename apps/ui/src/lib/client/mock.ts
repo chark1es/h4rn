@@ -2461,8 +2461,6 @@ class MockDaemon {
           terminal: terminal.info,
           snapshot: terminal.scrollback,
           start_seq: terminal.seq,
-          // The mock has one viewer, so it is the one that answers queries.
-          answers_queries: true,
         });
         return;
       }

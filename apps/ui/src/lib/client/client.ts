@@ -6,7 +6,6 @@ import type {
   ResponseBody,
   ServerFrame,
   TerminalExitNotice,
-  TerminalResponderNotice,
   TransportStatus,
 } from "@/gen";
 
@@ -295,7 +294,6 @@ export class H4rnClient {
   private readonly eventListeners = new Set<(event: EventEnvelope) => void>();
   private readonly binaryListeners = new Set<(data: ArrayBuffer) => void>();
   private readonly terminalListeners = new Set<(notice: TerminalExitNotice) => void>();
-  private readonly responderListeners = new Set<(notice: TerminalResponderNotice) => void>();
   private readonly readyListeners = new Set<(info: ReadyInfo) => void>();
   private readonly pending = new Map<number, Pending>();
 
@@ -425,17 +423,6 @@ export class H4rnClient {
   onTerminalEvent(listener: (notice: TerminalExitNotice) => void): () => void {
     this.terminalListeners.add(listener);
     return () => this.terminalListeners.delete(listener);
-  }
-
-  /**
-   * Subscribes to changes in which viewer answers terminal queries.
-   *
-   * The daemon sends this when another viewer attaches or the responder
-   * detaches, so only the elected viewer forwards xterm's automatic replies.
-   */
-  onTerminalResponder(listener: (notice: TerminalResponderNotice) => void): () => void {
-    this.responderListeners.add(listener);
-    return () => this.responderListeners.delete(listener);
   }
 
   /** Sends one binary frame, such as PTY input or a blob chunk. */
@@ -789,11 +776,6 @@ export class H4rnClient {
       return;
     }
 
-    if (frame.kind === "terminal_responder") {
-      for (const listener of this.responderListeners) listener(frame.event);
-      return;
-    }
-
     // Usage ticks and proxy changes are ephemeral by design: they have no
     // sequence number, so they never advance `lastSeq` or enter the replay.
     if (frame.kind === "usage_event") {
@@ -886,6 +868,11 @@ export class H4rnClient {
   /** Retries now and resets the backoff after a browser wake signal. */
   private retryImmediately(): void {
     if (this.stopped || this.fatal || this.socketOpen) return;
+    // A wake during the very first connect is not a retry: nothing has failed
+    // yet, and turning `connecting` into `degraded` would flash the reconnect
+    // banner while the first socket is still opening. Once the client has
+    // been ready, or a retry is already under way, wakes retry at once.
+    if (!this.everReady && this.snapshot.status === "connecting") return;
     // Deterministic offline scenarios opt out of retries entirely.
     if ((this.options.reconnect?.maxAttempts ?? 12) === 0) return;
     this.clearReconnect();

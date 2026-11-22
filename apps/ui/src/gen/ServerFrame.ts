@@ -5,7 +5,6 @@ import type { ProtoError } from "./ProtoError";
 import type { ProxyEvent } from "./ProxyEvent";
 import type { ResponseBody } from "./ResponseBody";
 import type { TerminalExitNotice } from "./TerminalExitNotice";
-import type { TerminalResponderNotice } from "./TerminalResponderNotice";
 import type { UsageStreamEvent } from "./UsageStreamEvent";
 
 /**
@@ -34,11 +33,7 @@ event: Event, } | { "kind": "terminal_event",
 /**
  * The terminal that changed.
  */
-event: TerminalExitNotice, } | { "kind": "terminal_responder", 
-/**
- * The terminal and the new permission.
- */
-event: TerminalResponderNotice, } | { "kind": "proxy_event", 
+event: TerminalExitNotice, } | { "kind": "proxy_event", 
 /**
  * The change.
  */

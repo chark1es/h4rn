@@ -150,15 +150,7 @@ snapshot: string,
 /**
  * Last output sequence already contained in `snapshot`.
  */
-start_seq: number, 
-/**
- * Whether this viewer answers terminal queries.
- *
- * Only one attached viewer may reply to DA, DSR and colour queries.
- * A viewer that attaches later becomes the responder and gets a
- * `terminal_responder` notice when it loses the role.
- */
-answers_queries: boolean, } | { "type": "terminals", 
+start_seq: number, } | { "type": "terminals", 
 /**
  * Matching terminals.
  */

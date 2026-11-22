@@ -193,19 +193,6 @@ impl Client {
         }
     }
 
-    async fn next_responder(&mut self, terminal_id: &TerminalId) -> bool {
-        loop {
-            while let Some(frame) = self.texts.pop_front() {
-                if let ServerFrame::TerminalResponder { event } = frame
-                    && &event.terminal_id == terminal_id
-                {
-                    return event.answers_queries;
-                }
-            }
-            self.pump().await;
-        }
-    }
-
     async fn open(
         &mut self,
         host: HostId,
@@ -247,12 +234,10 @@ impl Client {
                 terminal,
                 snapshot,
                 start_seq,
-                answers_queries,
             } => AttachedView {
                 terminal,
                 snapshot,
                 start_seq,
-                answers_queries,
             },
             other => panic!("unexpected attach response: {other:?}"),
         }
@@ -263,7 +248,6 @@ struct AttachedView {
     terminal: TerminalInfo,
     snapshot: String,
     start_seq: u64,
-    answers_queries: bool,
 }
 
 fn device() -> DeviceInfo {
@@ -609,56 +593,154 @@ async fn pty_input_needs_hello_and_an_attached_viewer() {
     daemon.stop().await;
 }
 
-/// Only the elected viewer answers queries; the role moves to the newest
-/// attached viewer and back when it detaches.
-#[tokio::test]
-async fn one_viewer_answers_terminal_queries_and_hands_over() {
-    let daemon = boot().await;
-    let host = host_id_for(&daemon).await;
-    let cwd = tempfile::tempdir().unwrap();
-    let cwd = cwd.path().to_string_lossy().to_string();
-
-    let mut desktop = Client::connect(&daemon).await;
-    desktop.hello().await;
-    let terminal = desktop
-        .open(host, &cwd, Some("/bin/sh"), Vec::new(), 80, 24)
-        .await;
-    let first = desktop.attach(&terminal.terminal_id, 80, 24).await;
-    assert!(
-        first.answers_queries,
-        "the first attached viewer answers queries"
-    );
-
-    let mut phone = Client::connect(&daemon).await;
-    phone.hello().await;
-    let second = phone.attach(&terminal.terminal_id, 60, 20).await;
-    assert!(
-        second.answers_queries,
-        "the most recently attached viewer becomes the responder"
-    );
-    assert!(
-        !desktop.next_responder(&terminal.terminal_id).await,
-        "the previous responder must stop answering"
-    );
-
-    // Closing the responder's socket hands the role to the remaining viewer.
-    drop(phone);
-    assert!(
-        desktop.next_responder(&terminal.terminal_id).await,
-        "the remaining viewer must take over"
-    );
-
-    desktop
-        .request(ClientRequest::TerminalClose {
-            terminal_id: terminal.terminal_id,
-        })
-        .await
-        .expect("close terminal");
-    daemon.stop().await;
+/// Reads one viewer's output until `done` accepts it, acknowledging chunks.
+async fn read_until(
+    rx: &mut mpsc::Receiver<Outbound>,
+    manager: &TerminalManager,
+    terminal_id: &TerminalId,
+    viewer_id: u64,
+    mut done: impl FnMut(&str) -> bool,
+) -> String {
+    let mut output = String::new();
+    loop {
+        let Ok(Some(message)) = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await
+        else {
+            panic!("terminal output timed out; got {output:?}");
+        };
+        let Outbound::Binary(bytes) = message else {
+            continue;
+        };
+        let frame = BinaryFrame::decode(&bytes).expect("decode output");
+        manager
+            .ack(terminal_id, viewer_id, frame.seq)
+            .expect("ack output");
+        if matches!(frame.kind, BinaryKind::PtyOutput | BinaryKind::PtySnapshot) {
+            output.push_str(&String::from_utf8_lossy(&frame.payload));
+            if done(&output) {
+                return output;
+            }
+        }
+    }
 }
 
-/// Closing a terminal ends its background jobs, including ones the shell put
-/// in their own process group, while a job in another session survives.
+/// The first viewer to send a marked reply owns query replies until it
+/// detaches; another viewer's marked reply is dropped, while its typed input
+/// is always written.
+#[tokio::test]
+async fn one_viewer_answers_terminal_queries() {
+    let manager = Arc::new(TerminalManager::new(
+        HostId::new("host_test"),
+        Arc::new(TracingAudit),
+    ));
+    let cwd = tempfile::tempdir().unwrap();
+    let terminal = manager
+        .open(
+            OpenSpec {
+                thread_id: None,
+                host: HostId::new("host_test"),
+                cwd: cwd.path().to_string_lossy().to_string(),
+                shell: Some("/bin/sh".into()),
+                // Raw, echo-free: the test counts the bytes `cat` writes, not
+                // the PTY's caret-notation echo of them.
+                args: vec!["-c".into(), "stty raw -echo; exec cat".into()],
+                cols: 80,
+                rows: 24,
+            },
+            &device(),
+        )
+        .await
+        .expect("open");
+
+    let first_id = manager.next_viewer_id();
+    let (first_tx, _first_rx) = mpsc::channel::<Outbound>(4);
+    let first = manager
+        .attach(
+            &terminal.terminal_id,
+            first_id,
+            first_tx,
+            Some(80),
+            Some(24),
+        )
+        .expect("attach first");
+
+    let second_id = manager.next_viewer_id();
+    let (second_tx, mut second_rx) = mpsc::channel::<Outbound>(4);
+    let second = manager
+        .attach(
+            &terminal.terminal_id,
+            second_id,
+            second_tx,
+            Some(80),
+            Some(24),
+        )
+        .expect("attach second");
+    tokio::spawn(run_viewer(
+        Arc::clone(&second.session),
+        second_id,
+        Arc::clone(&second.viewer),
+        second.output,
+        second.snapshot.seq,
+    ));
+
+    // Let the shell switch the PTY to raw, echo-free mode before writing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A mode report every viewer's xterm would answer identically.
+    let mode_reply: &[u8] = b"\x1b[?12;2$y";
+    let written = "\u{1b}[?12;2$y";
+    manager
+        .input_by_stream(terminal.stream_id, first_id, mode_reply, true)
+        .expect("first reply");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, mode_reply, true)
+        .expect("second reply is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", false)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(written).count(),
+        1,
+        "two viewers' replies must reach the shell once: {output:?}"
+    );
+
+    // Detaching the owner frees the role; the remaining viewer's next marked
+    // reply is accepted.
+    manager.detach_viewer(first_id);
+    manager
+        .input_by_stream(terminal.stream_id, second_id, mode_reply, true)
+        .expect("reply after hand-over");
+    // This read starts empty, so one more written reply is the whole count.
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.matches(written).count() >= 1,
+    )
+    .await;
+    assert_eq!(
+        output.matches(written).count(),
+        1,
+        "the surviving viewer must take over replies: {output:?}"
+    );
+
+    drop(first);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+}
+
+/// Closing a terminal hangs up the shell, which forwards SIGHUP to its jobs.
+/// A job that put itself in another session survives, and so does one whose
+/// `nohup` explicitly ignores the hangup.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn closing_a_terminal_ends_background_jobs() {
@@ -721,25 +803,28 @@ async fn closing_a_terminal_ends_background_jobs() {
     // Let the prompt settle before typing.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // `set -m` gives the job its own process group, the case the old
-    // group-only signal missed. The subshell form leaves the job one level
-    // deeper; both are still in the terminal's session.
+    // `set -m` gives the job its own process group, the case a group-only
+    // signal misses; the shell's SIGHUP forwarding reaches it anyway.
     client
         .send_input(
             terminal.stream_id,
             b"set -m; sleep 1000 & echo $! > bg.pid\n",
         )
         .await;
-    client
-        .send_input(terminal.stream_id, b"( sleep 1000 & echo $! > sub.pid )\n")
-        .await;
     let bg = read_pid(&cwd_path.join("bg.pid")).await;
-    let sub = read_pid(&cwd_path.join("sub.pid")).await;
     assert!(process_running(bg), "background job did not start");
-    assert!(process_running(sub), "subshell job did not start");
 
-    // A job that moved itself into another session is not the terminal's
-    // anymore and must not be killed.
+    // `nohup` ignores the hangup, so only the person may end it.
+    client
+        .send_input(
+            terminal.stream_id,
+            b"nohup sleep 1000 >/dev/null 2>&1 & echo $! > nohup.pid\n",
+        )
+        .await;
+    let nohup_job = read_pid(&cwd_path.join("nohup.pid")).await;
+    assert!(process_running(nohup_job), "nohup job did not start");
+
+    // A job that moved itself into another session has left the terminal.
     let has_setsid = std::process::Command::new("setsid")
         .arg("--version")
         .output()
@@ -764,16 +849,15 @@ async fn closing_a_terminal_ends_background_jobs() {
         .expect("close terminal");
 
     wait_until_gone(bg).await;
-    wait_until_gone(sub).await;
-    if let Some(detached) = detached {
+    for survivor in [Some(nohup_job), detached].into_iter().flatten() {
         assert!(
-            process_running(detached),
-            "a job in its own session must survive the terminal"
+            process_running(survivor),
+            "a job that ignored or left the hangup must survive the terminal"
         );
         let _ = std::process::Command::new("kill")
-            .args(["-9", &detached.to_string()])
+            .args(["-9", &survivor.to_string()])
             .status();
-        wait_until_gone(detached).await;
+        wait_until_gone(survivor).await;
     }
     daemon.stop().await;
 }

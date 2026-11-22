@@ -65,8 +65,6 @@ pub struct Attached {
     pub viewer: Arc<Viewer>,
     /// Session the viewer belongs to.
     pub session: Arc<Session>,
-    /// Whether this viewer is the one answering terminal queries.
-    pub answers_queries: bool,
 }
 
 /// Terminal failures that map onto [`ProtoError`].
@@ -239,7 +237,7 @@ impl TerminalManager {
 
         let output = session.subscribe();
         let viewer = Arc::new(Viewer::new(tx));
-        let answers_queries = session.add_viewer(viewer_id, cols, rows, Arc::clone(&viewer));
+        session.add_viewer(viewer_id, cols, rows, Arc::clone(&viewer));
         let snapshot = session.snapshot();
         // The snapshot replaces everything older, so the window starts empty.
         viewer.reset_credit();
@@ -250,7 +248,6 @@ impl TerminalManager {
             output,
             viewer,
             session,
-            answers_queries,
         })
     }
 
@@ -279,28 +276,26 @@ impl TerminalManager {
     /// id alone is not a capability: ids are sequential and guessable, so a
     /// connection that never attached (or is not allowed to) is refused with
     /// the same error as an unknown stream.
+    ///
+    /// A marked `reply` is xterm's answer to a terminal query. At most one
+    /// attached viewer may answer, so replies from the others are dropped.
     pub fn input_by_stream(
         &self,
         stream_id: u32,
         viewer_id: ViewerId,
         data: &[u8],
+        reply: bool,
     ) -> Result<(), TerminalError> {
         let terminal_id = lock(&self.stream_ids).get(&stream_id).cloned();
         let not_found = || TerminalError::NotFound(TerminalId::new(format!("stream {stream_id}")));
         let terminal_id = terminal_id.ok_or_else(not_found)?;
         let session = self.session(&terminal_id)?;
-        if !session.has_viewer(viewer_id) {
-            return Err(not_found());
-        }
-        self.input(&terminal_id, data)
-    }
-
-    /// Writes raw input to one terminal.
-    pub fn input(&self, terminal_id: &TerminalId, data: &[u8]) -> Result<(), TerminalError> {
-        let session = self.session(terminal_id)?;
         session
-            .write_input(data)
-            .map_err(|error| TerminalError::Input(error.to_string()))
+            .write_viewer_input(viewer_id, data, reply)
+            .map_err(|error| match error {
+                session::ViewerInputError::NotAttached => not_found(),
+                session::ViewerInputError::Io(error) => TerminalError::Input(error.to_string()),
+            })
     }
 
     /// Frees viewer credit through `up_to_chunk`.

@@ -9,12 +9,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
-  terminal now hangs up the whole PTY session, then terminates it, then kills what ignored both; a
-  job that moved itself into another session with `setsid` is left alone.
+  terminal now sends SIGHUP to the shell, which forwards it to its jobs, and only then falls back to
+  SIGTERM and SIGKILL on the shell's process group. A `nohup` job and one that moved itself into
+  another session with `setsid` are left alone.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
-  replies. The daemon now elects the most recently attached viewer, tells the others to drop their
-  automatic answers, and hands the role to the next viewer when the responder detaches.
+  replies. The UI now marks xterm's own answers to just-asked queries, and the daemon writes the
+  first attached viewer's answer only; every other answer is dropped, while keystrokes and paste go
+  through from every viewer. The role passes to the next viewer when the owner detaches.
 - **The client keeps reconnecting.** After the fast backoff it used to stop after twelve attempts
   and stay offline until the user pressed Reconnect. It now keeps retrying at the capped interval
   and retries immediately when the browser comes back online, the window regains focus or the

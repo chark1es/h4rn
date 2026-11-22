@@ -410,6 +410,37 @@ describe("H4rnClient", () => {
     }
   });
 
+  it("does not turn the first connect into a reconnect on wake signals", async () => {
+    const windowStub = new EventTarget();
+    const documentStub = new EventTarget() as EventTarget & {
+      visibilityState: DocumentVisibilityState;
+    };
+    documentStub.visibilityState = "visible";
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    Object.defineProperty(globalThis, "document", {
+      value: documentStub,
+      configurable: true,
+    });
+    try {
+      // Hello never answers, so the first socket is still connecting.
+      const { client, transports } = harness(() => new FakeTransport(() => true));
+      client.start();
+      expect(client.getSnapshot().status).toBe("connecting");
+
+      windowStub.dispatchEvent(new Event("online"));
+      windowStub.dispatchEvent(new Event("focus"));
+      documentStub.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+
+      expect(transports.length).toBe(1);
+      expect(client.getSnapshot().status).toBe("connecting");
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
+      Reflect.deleteProperty(globalThis, "document");
+    }
+  });
+
   it("retries at once when the document becomes visible", async () => {
     vi.useFakeTimers();
     const documentStub = new EventTarget() as EventTarget & {

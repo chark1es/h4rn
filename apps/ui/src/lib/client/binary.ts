@@ -29,6 +29,15 @@ export const BinaryKind = {
 
 export type BinaryKindValue = (typeof BinaryKind)[keyof typeof BinaryKind];
 
+/**
+ * Flag in the `seq` field of a `PtyInput` frame.
+ *
+ * Input frames have no sequence, so `seq` carries flags. Bit 0 marks xterm's
+ * own answer to a terminal query; an older daemon ignores `seq` for input and
+ * writes the answer as ordinary input, exactly as every viewer used to.
+ */
+export const PTY_INPUT_REPLY = 1;
+
 export type BinaryFrame = {
   kind: BinaryKindValue;
   streamId: number;

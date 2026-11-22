@@ -49,6 +49,7 @@ mod usage;
 
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
+    PTY_INPUT_REPLY,
 };
 pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, UploadTicket};
 pub use client::{ClientFrame, ClientRequest};
@@ -96,7 +97,6 @@ pub use subagents::{
 };
 pub use terminal::{
     CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,
-    TerminalResponderNotice,
 };
 pub use transport::{
     TransportPathKind, TransportPathState, TransportPathStatus, TransportSessionState,
