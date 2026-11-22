@@ -158,11 +158,12 @@ pub struct ViewerEntry {
     pub cols: u16,
     /// Requested rows.
     pub rows: u16,
-    /// Whether this viewer has answered a query on this terminal.
+    /// Whether this viewer owns replies from clients that name no position.
     ///
-    /// At most one attached viewer owns replies at a time. The owner keeps
-    /// the role until it detaches; the next marked reply after that is
-    /// accepted from whichever viewer sends it.
+    /// Only replies from an older client lack a position. Such a reply keeps
+    /// the old single-owner rule: the first viewer to send one owns them until
+    /// it detaches. Positioned replies bypass this entirely and are decided by
+    /// [`AnsweredQueries`].
     pub answers_queries: bool,
 }
 
@@ -177,6 +178,7 @@ pub struct Session {
     screen: Mutex<Screen>,
     output: broadcast::Sender<Arc<OutputChunk>>,
     viewers: Mutex<HashMap<ViewerId, ViewerEntry>>,
+    answers: Mutex<AnsweredQueries>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     pty: Mutex<Box<dyn MasterPty + Send>>,
@@ -233,6 +235,7 @@ impl Session {
             }),
             output,
             viewers: Mutex::new(HashMap::new()),
+            answers: Mutex::new(AnsweredQueries::default()),
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(child),
             pty: Mutex::new(master),
@@ -374,8 +377,9 @@ impl Session {
     /// Adds a viewer and recomputes the effective size.
     ///
     /// Attaching twice on one connection replaces the old viewer entry; the
-    /// previous task is closed so it cannot outlive its successor. The reply
-    /// owner is decided lazily by [`Session::write_viewer_input`], so a new
+    /// previous task is closed so it cannot outlive its successor. Positioned
+    /// replies need no per-viewer role, and the legacy owner for unpositioned
+    /// replies is claimed lazily by [`Session::write_viewer_input`], so a new
     /// attach never has to be told about or granted the role.
     pub fn add_viewer(&self, id: ViewerId, cols: u16, rows: u16, viewer: Arc<Viewer>) {
         let previous = {
@@ -423,8 +427,8 @@ impl Session {
             if !matches {
                 return;
             }
-            // Dropping the entry also drops reply ownership, so the next
-            // marked reply from another viewer is accepted.
+            // Dropping the entry also drops the legacy owner for replies with
+            // no position, so another old client can take over.
             viewers.remove(&id)
         };
         let Some(removed) = removed else {
@@ -495,27 +499,41 @@ impl Session {
 
     /// Writes one attached viewer's input to the PTY.
     ///
-    /// A marked `reply` is xterm's own answer to a terminal query, not typed
-    /// input. Viewers share one PTY, so only the reply owner's answer is
-    /// written; a marked reply from any other viewer is dropped. The first
-    /// viewer to send a marked reply owns the role until it detaches.
-    /// Membership and ownership are decided under one lock, but the lock is
-    /// released before the PTY write: a reply is accepted when the viewer is
-    /// the owner at that check, even if the viewer detaches while the write
-    /// is in flight.
+    /// Viewers share one PTY, so a query must be answered once. A marked reply
+    /// that names the output position which carried the query is written by
+    /// the first viewer to send it, from any viewer; a later reply naming the
+    /// same position, or an older one, is dropped. A stalled viewer therefore
+    /// never blocks another viewer's answer. Membership and the decision are
+    /// taken under lock, but the lock is released before the PTY write: a
+    /// reply is accepted when it wins at that check, even if the viewer
+    /// detaches while the write is in flight.
     pub fn write_viewer_input(
         &self,
         viewer_id: ViewerId,
         data: &[u8],
-        reply: bool,
+        reply: QueryReply,
     ) -> Result<(), ViewerInputError> {
         {
             let mut viewers = lock(&self.viewers);
             if !viewers.contains_key(&viewer_id) {
                 return Err(ViewerInputError::NotAttached);
             }
-            if reply && !accepts_query_reply(&mut viewers, viewer_id) {
-                return Ok(());
+            match reply {
+                QueryReply::No => {}
+                QueryReply::Unpositioned => {
+                    // An old client names no position, so keep the previous
+                    // single-owner rule for its replies.
+                    if !accepts_unpositioned_reply(&mut viewers, viewer_id) {
+                        return Ok(());
+                    }
+                }
+                QueryReply::At(position) => {
+                    let mut answers = lock(&self.answers);
+                    if position <= answers.through {
+                        return Ok(());
+                    }
+                    answers.through = position;
+                }
             }
         }
         self.write_bytes(data).map_err(ViewerInputError::Io)
@@ -577,9 +595,14 @@ impl Session {
     }
 }
 
-/// Whether `viewer_id` may write this marked reply, claiming the role when it
-/// is free. The caller holds the viewers lock, so claiming is one decision.
-fn accepts_query_reply(viewers: &mut HashMap<ViewerId, ViewerEntry>, viewer_id: ViewerId) -> bool {
+/// Whether `viewer_id` may write a reply that names no output position,
+/// claiming the legacy role when it is free.
+///
+/// The caller holds the viewers lock, so claiming is one decision.
+fn accepts_unpositioned_reply(
+    viewers: &mut HashMap<ViewerId, ViewerEntry>,
+    viewer_id: ViewerId,
+) -> bool {
     if let Some((owner_id, _)) = viewers.iter().find(|(_, entry)| entry.answers_queries) {
         return *owner_id == viewer_id;
     }
@@ -590,6 +613,27 @@ fn accepts_query_reply(viewers: &mut HashMap<ViewerId, ViewerEntry>, viewer_id: 
         }
         None => false,
     }
+}
+
+/// Which query a reply answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryReply {
+    /// Typed input, not a reply.
+    No,
+    /// A reply from a client that does not name the output position.
+    Unpositioned,
+    /// A reply to the query in this output chunk.
+    At(u64),
+}
+
+/// The highest query position already answered on one terminal.
+///
+/// Output positions only increase, so a high-water mark is all that is needed:
+/// any reply naming it or an older position is a duplicate. Memory stays
+/// constant no matter how many queries the program asks.
+#[derive(Debug, Default)]
+struct AnsweredQueries {
+    through: u64,
 }
 
 /// Why a viewer's input was not written.

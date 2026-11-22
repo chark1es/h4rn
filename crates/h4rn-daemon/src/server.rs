@@ -47,7 +47,7 @@ use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
 use crate::mcp::McpService;
 use crate::remote::{RemoteAudit, SessionOrigin};
-use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
+use crate::terminal::{Attached, OpenSpec, QueryReply, TerminalManager, run_viewer};
 use crate::threads::ThreadManager;
 
 mod forward;
@@ -1465,9 +1465,18 @@ impl Connection {
                     return Some(Outbound::Text(binary_error_frame(seq, error)));
                 }
                 // `seq` is a flag word for input: bit 0 marks xterm's own
-                // answer to a terminal query. Older daemons ignored `seq` and
-                // wrote the frame as ordinary input, which still works.
-                let reply = frame.seq & h4rn_protocol::PTY_INPUT_REPLY != 0;
+                // answer to a terminal query and the higher bits name the
+                // output chunk that carried the query. An old client sends
+                // only bit 0; an old daemon ignored `seq` altogether and wrote
+                // the frame as ordinary input, which still works.
+                let reply = if frame.seq & h4rn_protocol::PTY_INPUT_REPLY == 0 {
+                    QueryReply::No
+                } else {
+                    match h4rn_protocol::pty_input_reply_position(frame.seq) {
+                        Some(position) => QueryReply::At(position),
+                        None => QueryReply::Unpositioned,
+                    }
+                };
                 match self.state.terminals.input_by_stream(
                     frame.stream_id,
                     self.viewer_id,

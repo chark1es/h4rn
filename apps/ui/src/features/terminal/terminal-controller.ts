@@ -12,6 +12,7 @@ import {
   decodeBinaryFrame,
   encodeBinaryFrame,
   PTY_INPUT_REPLY,
+  ptyInputReplySeq,
 } from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 import { H4rnRequestError } from "@/lib/client/errors";
@@ -187,18 +188,26 @@ export class TerminalController {
   /**
    * Sends raw text as PTY input (used by the phone key row and tests).
    *
-   * `reply` marks xterm's own answer to a terminal query; the daemon writes
-   * only one attached viewer's answers.
+   * `replyPosition` is the output sequence of the frame that carried the
+   * query xterm is answering, or null for typed input. The daemon writes one
+   * answer per position; a position of 0 falls back to the old unpositioned
+   * reply flag, which only happens before any output has arrived.
    */
-  send(data: string, reply = false): void {
+  send(data: string, replyPosition: number | null = null): void {
     if (!this.client || this.streamId === 0) return;
     const payload = new TextEncoder().encode(data);
+    const seq =
+      replyPosition === null
+        ? 0
+        : replyPosition > 0
+          ? ptyInputReplySeq(replyPosition)
+          : PTY_INPUT_REPLY;
     try {
       this.client.sendBinary(
         encodeBinaryFrame({
           kind: BinaryKind.PtyInput,
           streamId: this.streamId,
-          seq: reply ? PTY_INPUT_REPLY : 0,
+          seq,
           payload,
         }),
       );
@@ -260,7 +269,7 @@ export class TerminalController {
     }
     this.track(
       term.onData((data) => {
-        this.send(data, this.queryTracker.take(data));
+        this.send(data, this.queryTracker.takeReply(data));
       }),
     );
     this.track(
@@ -398,10 +407,14 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       // Queries in this chunk are only answerable while it is being parsed:
       // once xterm is done, anything it did not answer has missed its chance
-      // and a later answer-shaped paste must stay input.
+      // and a later answer-shaped paste must stay input. The tracker also
+      // remembers which chunk is being parsed, so an answer names the output
+      // position the daemon uses to keep one answer per query.
       const mark = this.queryTracker.mark();
+      this.queryTracker.beginChunk(frame.seq);
       term.write(frame.payload, () => {
         this.queryTracker.settle(mark);
+        this.queryTracker.endChunk();
         this.tracker?.applied(frame.seq);
         this.scheduleAck();
       });
@@ -412,7 +425,11 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       term.reset();
       this.tracker.reset(frame.seq);
-      term.write(new TextDecoder().decode(frame.payload), () => this.scheduleAck());
+      this.queryTracker.beginChunk(frame.seq);
+      term.write(new TextDecoder().decode(frame.payload), () => {
+        this.queryTracker.endChunk();
+        this.scheduleAck();
+      });
     }
   }
 

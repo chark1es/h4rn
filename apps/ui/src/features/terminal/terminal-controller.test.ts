@@ -4,6 +4,7 @@ import {
   BinaryKind,
   decodeBinaryFrame,
   encodeBinaryFrame,
+  ptyInputReplySeq,
 } from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 
@@ -250,13 +251,44 @@ describe("terminal controller query replies", () => {
     expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([[0, "\x1b[8;24;80t"]]);
 
     // An answer that arrives while its own chunk is still being parsed is
-    // still marked, and the chunk's end does not double-count it.
+    // still marked with that chunk's position, and the chunk's end does not
+    // double-count it.
     pushOutput(binary, 2, "\x1b[18t");
     expect(term.query({ final: "t" }, [18])).toBe(false);
     term.input("\x1b[8;24;80t");
     term.finishWrite();
-    expect(sent.map((frame) => frame.seq)).toEqual([0, 1]);
+    expect(sent.map((frame) => frame.seq)).toEqual([0, ptyInputReplySeq(2)]);
 
+    controller.dispose();
+  });
+
+  it("sends the output position of the frame that carried the query", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent);
+
+    pushOutput(binary, 41, "\x1b[?12;2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+
+    expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(41), "\x1b[?12;2$y"],
+    ]);
+    controller.dispose();
+  });
+
+  it("names the chunk where a query split across frames ends", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent);
+
+    // The query starts in chunk 7 and its final byte arrives in chunk 8.
+    pushOutput(binary, 7, "\x1b[?12");
+    term.finishWrite();
+    pushOutput(binary, 8, ";2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+    term.finishWrite();
+
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(8)]);
     controller.dispose();
   });
 });

@@ -18,9 +18,10 @@
 //! `seq` is the stream sequence, not the JSON event sequence. A PTY snapshot
 //! carries the sequence it replaces in `seq`, so a reconnecting client can
 //! discard replayed history and resume from the snapshot. A PTY input frame
-//! has no sequence and uses `seq` for flags instead (see [`PTY_INPUT_REPLY`]).
-//! Payload length is implied by the WebSocket message length; there is no
-//! separate length field.
+//! has no sequence and uses `seq` for flags instead (see [`PTY_INPUT_REPLY`]);
+//! bit 0 marks a query reply and the remaining bits name the output position
+//! that carried the query (see [`pty_input_reply_seq`]). Payload length is
+//! implied by the WebSocket message length; there is no separate length field.
 
 use thiserror::Error;
 
@@ -41,6 +42,35 @@ pub const BINARY_VERSION: u8 = 1;
 /// input. An older daemon ignores `seq` for input and writes the frame as
 /// ordinary input, which is what every viewer did before the flag existed.
 pub const PTY_INPUT_REPLY: u64 = 1;
+
+/// Shift of the output position in a reply input frame's `seq` flag word.
+///
+/// Bit 0 remains [`PTY_INPUT_REPLY`]; bits 1 and above carry the sequence of
+/// the output chunk that contained the query.
+pub const PTY_INPUT_POSITION_SHIFT: u32 = 1;
+
+/// Packs a marked reply's output position into an input frame's `seq` field.
+///
+/// `position` is the sequence of the output chunk whose bytes xterm was
+/// parsing when it saw the query; a query split across chunks uses the chunk
+/// that contained its end. An old daemon still sees bit 0 and writes the frame
+/// as ordinary input; an old client sends a bare flag word and names no
+/// position.
+pub const fn pty_input_reply_seq(position: u64) -> u64 {
+    (position << PTY_INPUT_POSITION_SHIFT) | PTY_INPUT_REPLY
+}
+
+/// The output position a marked reply names, or `None` when it names none.
+///
+/// `None` covers both typed input (no reply flag) and a reply from an older
+/// client that sent the bare [`PTY_INPUT_REPLY`] flag without a position.
+pub const fn pty_input_reply_position(seq: u64) -> Option<u64> {
+    if seq & PTY_INPUT_REPLY == 0 {
+        return None;
+    }
+    let position = seq >> PTY_INPUT_POSITION_SHIFT;
+    if position == 0 { None } else { Some(position) }
+}
 
 /// What a binary frame carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -204,6 +234,24 @@ mod tests {
     fn empty_payload_round_trips() {
         let frame = BinaryFrame::new(BinaryKind::Ack, 1, 0);
         assert_eq!(BinaryFrame::decode(&frame.encode()).unwrap(), frame);
+    }
+
+    #[test]
+    fn reply_positions_round_trip_in_the_flag_word() {
+        for position in [1_u64, 2, 42, 9_007_199_254_740_992] {
+            let seq = pty_input_reply_seq(position);
+            assert_ne!(seq & PTY_INPUT_REPLY, 0);
+            assert_eq!(pty_input_reply_position(seq), Some(position));
+        }
+    }
+
+    #[test]
+    fn a_bare_reply_flag_names_no_position() {
+        // An old client sends only the flag; typed input sends neither.
+        assert_eq!(pty_input_reply_position(PTY_INPUT_REPLY), None);
+        assert_eq!(pty_input_reply_position(0), None);
+        // Higher bits without bit 0 are not a reply at all.
+        assert_eq!(pty_input_reply_position(pty_input_reply_seq(7) & !1), None);
     }
 
     #[test]

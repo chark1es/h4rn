@@ -171,6 +171,30 @@ describe("terminal query replies", () => {
     }
   });
 
+  it("records the output chunk that carried each query", () => {
+    const tracker = new TerminalQueryTracker();
+
+    tracker.beginChunk(5);
+    tracker.expect(/pattern/);
+    expect(tracker.takeReply("pattern")).toBe(5);
+    tracker.endChunk();
+
+    // Two queued chunks: a query is attributed to the one being parsed.
+    tracker.beginChunk(6);
+    tracker.beginChunk(7);
+    tracker.expect(/first/);
+    expect(tracker.takeReply("first")).toBe(6);
+    tracker.endChunk();
+    tracker.expect(/second/);
+    expect(tracker.takeReply("second")).toBe(7);
+    tracker.endChunk();
+
+    // A query seen before any output names no position (old-client shape).
+    tracker.expect(/bare/);
+    expect(tracker.takeReply("bare")).toBe(0);
+    expect(tracker.takeReply("nothing")).toBeNull();
+  });
+
   it("forgets a query xterm did not answer when its chunk is done", async () => {
     // Enable window reports so xterm's parser lets the window-size query
     // through to the hook.

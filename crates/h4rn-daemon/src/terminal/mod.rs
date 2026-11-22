@@ -28,7 +28,8 @@ use tokio::sync::broadcast;
 
 pub use audit::{AuditEntry, AuditSink, FileAudit, TracingAudit};
 pub use session::{
-    OUTPUT_CHUNK_BYTES, OUTPUT_RING_CAPACITY, OutputChunk, Snapshot, Viewer, ViewerId, run_viewer,
+    OUTPUT_CHUNK_BYTES, OUTPUT_RING_CAPACITY, OutputChunk, QueryReply, Snapshot, Viewer, ViewerId,
+    run_viewer,
 };
 
 use crate::server::Outbound;
@@ -277,15 +278,16 @@ impl TerminalManager {
     /// connection that never attached (or is not allowed to) is refused with
     /// the same error as an unknown stream.
     ///
-    /// A marked `reply` is xterm's answer to a terminal query. At most one
-    /// attached viewer may answer, so replies from the others are dropped; the
-    /// role passes to another viewer when the owner detaches.
+    /// A marked reply is xterm's answer to a terminal query. When it names the
+    /// output position that carried the query, the first viewer to answer that
+    /// position is written and later answers are dropped. A reply from an
+    /// older client names no position and keeps the previous single-owner rule.
     pub fn input_by_stream(
         &self,
         stream_id: u32,
         viewer_id: ViewerId,
         data: &[u8],
-        reply: bool,
+        reply: QueryReply,
     ) -> Result<(), TerminalError> {
         let terminal_id = lock(&self.stream_ids).get(&stream_id).cloned();
         let not_found = || TerminalError::NotFound(TerminalId::new(format!("stream {stream_id}")));

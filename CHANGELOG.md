@@ -16,9 +16,11 @@ All notable changes to h4rn are recorded here. The format follows
   `nohup` job and one that moved itself into another session with `setsid` are left alone.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
-  replies. The UI now marks xterm's own answers to just-asked queries, and the daemon writes the
-  reply owner's answer only; every other answer is dropped, while keystrokes and paste go through
-  from every viewer. The first viewer to answer owns the role until it detaches.
+  replies. The UI now marks xterm's own answers to just-asked queries with the output position that
+  carried the query, and the daemon writes the first answer naming that position from any viewer;
+  later answers for the same or an older position are dropped, while keystrokes and paste go through
+  from every viewer. A stalled or backgrounded viewer no longer holds an owner role that blocks the
+  others, and an older client's answer without a position keeps the previous single-owner rule.
 - **A batched colour query marks every answer it earns.** The query tracker kept at most 32 pending
   answers, so an `OSC 4` palette query with more entries left its tail looking like typed input. It
   now tracks the whole batch.

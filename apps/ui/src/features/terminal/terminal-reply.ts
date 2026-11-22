@@ -61,6 +61,8 @@ type Expectation = {
   /** Monotonic position, so a finished chunk can settle only its own queries. */
   mark: number;
   pattern: RegExp;
+  /** Output chunk whose bytes were being parsed when the query was seen. */
+  position: number;
 };
 
 /**
@@ -80,11 +82,27 @@ type Expectation = {
  */
 export class TerminalQueryTracker {
   private readonly expected: Expectation[] = [];
+  /** Output chunks waiting to be parsed, oldest first. */
+  private readonly chunks: number[] = [];
   private nextMark = 0;
+
+  /** Records that output chunk `seq` is about to be parsed by xterm. */
+  beginChunk(seq: number): void {
+    this.chunks.push(seq);
+  }
+
+  /** Records that xterm finished parsing the oldest outstanding chunk. */
+  endChunk(): void {
+    this.chunks.shift();
+  }
 
   /** Records that xterm is about to send one `pattern`-shaped answer. */
   expect(pattern: RegExp): void {
-    this.expected.push({ mark: ++this.nextMark, pattern });
+    this.expected.push({
+      mark: ++this.nextMark,
+      pattern,
+      position: this.chunks[0] ?? 0,
+    });
   }
 
   /** The position to settle from once xterm finishes the chunk being written. */
@@ -107,17 +125,27 @@ export class TerminalQueryTracker {
   }
 
   /**
+   * The output position of the query `data` answers, or null for input.
+   *
+   * Consumes the expectation. Returns null for every other chunk, including
+   * answer-shaped sequences the person typed or pasted.
+   */
+  takeReply(data: string): number | null {
+    if (this.expected.length === 0) return null;
+    const index = this.expected.findIndex((entry) => entry.pattern.test(data));
+    if (index === -1) return null;
+    const [entry] = this.expected.splice(index, 1);
+    return entry?.position ?? 0;
+  }
+
+  /**
    * Whether `data` is xterm's answer to a pending query, consuming it.
    *
    * Returns false for every other chunk, including answer-shaped sequences
    * the person typed or pasted.
    */
   take(data: string): boolean {
-    if (this.expected.length === 0) return false;
-    const index = this.expected.findIndex((entry) => entry.pattern.test(data));
-    if (index === -1) return false;
-    this.expected.splice(index, 1);
-    return true;
+    return this.takeReply(data) !== null;
   }
 }
 

@@ -38,6 +38,19 @@ export type BinaryKindValue = (typeof BinaryKind)[keyof typeof BinaryKind];
  */
 export const PTY_INPUT_REPLY = 1;
 
+/** Shift of the output position in a reply input frame's `seq` flag word. */
+export const PTY_INPUT_POSITION_SHIFT = 1;
+
+/**
+ * Packs a marked reply's output position into an input frame's `seq` field.
+ *
+ * `position` is the output chunk whose bytes xterm was parsing when it saw the
+ * query; a query split across chunks uses the chunk that contained its end.
+ */
+export function ptyInputReplySeq(position: number): number {
+  return position * 2 ** PTY_INPUT_POSITION_SHIFT + PTY_INPUT_REPLY;
+}
+
 export type BinaryFrame = {
   kind: BinaryKindValue;
   streamId: number;

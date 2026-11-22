@@ -13,10 +13,10 @@ use h4rn_daemon::auth::TokenStore;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
 use h4rn_daemon::server::Outbound;
-use h4rn_daemon::terminal::{OpenSpec, TerminalManager, TracingAudit, run_viewer};
+use h4rn_daemon::terminal::{OpenSpec, QueryReply, TerminalManager, TracingAudit, run_viewer};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
-    HostId, PTY_INPUT_REPLY, ResponseBody, ServerFrame, TerminalId, TerminalInfo,
+    HostId, ResponseBody, ServerFrame, TerminalId, TerminalInfo, pty_input_reply_seq,
 };
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -597,11 +597,10 @@ async fn pty_input_needs_hello_and_an_attached_viewer() {
     daemon.stop().await;
 }
 
-/// Two viewers' marked replies carry `PTY_INPUT_REPLY` in the binary frame's
-/// flag word. Only the owner's answer is written to the PTY; typed input is
-/// always written.
+/// Two viewers answer the same output position. The first marked reply is
+/// written to the PTY and the second is dropped; typed input is always written.
 #[tokio::test]
-async fn only_one_marked_reply_reaches_the_pty() {
+async fn only_one_marked_reply_per_position_reaches_the_pty() {
     let daemon = boot().await;
     let host = host_id_for(&daemon).await;
     let work = tempfile::tempdir().unwrap();
@@ -631,11 +630,12 @@ async fn only_one_marked_reply_reaches_the_pty() {
     // A mode report both viewers' xterm would answer identically.
     let mode_reply: &[u8] = b"\x1b[?12;2$y";
     let written = "\u{1b}[?12;2$y";
+    let position = pty_input_reply_seq(3);
     first
-        .send_input_frame(terminal.stream_id, PTY_INPUT_REPLY, mode_reply)
+        .send_input_frame(terminal.stream_id, position, mode_reply)
         .await;
     second
-        .send_input_frame(terminal.stream_id, PTY_INPUT_REPLY, mode_reply)
+        .send_input_frame(terminal.stream_id, position, mode_reply)
         .await;
     second
         .send_input_frame(terminal.stream_id, 0, b"iHELLO")
@@ -687,11 +687,9 @@ async fn read_until(
     }
 }
 
-/// The first viewer to send a marked reply owns query replies until it
-/// detaches; another viewer's marked reply is dropped, while its typed input
-/// is always written.
-#[tokio::test]
-async fn one_viewer_answers_terminal_queries() {
+/// A raw, echo-free `cat` terminal: the test counts the reply bytes `cat`
+/// writes, not the PTY's caret-notation echo of them.
+async fn raw_cat_terminal() -> (Arc<TerminalManager>, TerminalInfo, tempfile::TempDir) {
     let manager = Arc::new(TerminalManager::new(
         HostId::new("host_test"),
         Arc::new(TracingAudit),
@@ -704,8 +702,6 @@ async fn one_viewer_answers_terminal_queries() {
                 host: HostId::new("host_test"),
                 cwd: cwd.path().to_string_lossy().to_string(),
                 shell: Some("/bin/sh".into()),
-                // Raw, echo-free: the test counts the bytes `cat` writes, not
-                // the PTY's caret-notation echo of them.
                 args: vec!["-c".into(), "stty raw -echo; exec cat".into()],
                 cols: 80,
                 rows: 24,
@@ -714,52 +710,58 @@ async fn one_viewer_answers_terminal_queries() {
         )
         .await
         .expect("open");
-
-    let first_id = manager.next_viewer_id();
-    let (first_tx, _first_rx) = mpsc::channel::<Outbound>(4);
-    let first = manager
-        .attach(
-            &terminal.terminal_id,
-            first_id,
-            first_tx,
-            Some(80),
-            Some(24),
-        )
-        .expect("attach first");
-
-    let second_id = manager.next_viewer_id();
-    let (second_tx, mut second_rx) = mpsc::channel::<Outbound>(4);
-    let second = manager
-        .attach(
-            &terminal.terminal_id,
-            second_id,
-            second_tx,
-            Some(80),
-            Some(24),
-        )
-        .expect("attach second");
-    tokio::spawn(run_viewer(
-        Arc::clone(&second.session),
-        second_id,
-        Arc::clone(&second.viewer),
-        second.output,
-        second.snapshot.seq,
-    ));
-
     // Let the shell switch the PTY to raw, echo-free mode before writing.
     tokio::time::sleep(Duration::from_millis(300)).await;
+    (manager, terminal, cwd)
+}
 
-    // A mode report every viewer's xterm would answer identically.
-    let mode_reply: &[u8] = b"\x1b[?12;2$y";
-    let written = "\u{1b}[?12;2$y";
+/// Attaches a viewer and returns its id, the output receiver and the handle
+/// that keeps it alive. The viewer task is started only by callers that read.
+fn attach_viewer(
+    manager: &Arc<TerminalManager>,
+    terminal: &TerminalInfo,
+    read: bool,
+) -> (
+    u64,
+    mpsc::Receiver<Outbound>,
+    h4rn_daemon::terminal::Attached,
+) {
+    let viewer_id = manager.next_viewer_id();
+    let (tx, rx) = mpsc::channel::<Outbound>(4);
+    let attached = manager
+        .attach(&terminal.terminal_id, viewer_id, tx, Some(80), Some(24))
+        .expect("attach viewer");
+    if read {
+        tokio::spawn(run_viewer(
+            Arc::clone(&attached.session),
+            viewer_id,
+            Arc::clone(&attached.viewer),
+            attached.output.resubscribe(),
+            attached.snapshot.seq,
+        ));
+    }
+    (viewer_id, rx, attached)
+}
+
+const MODE_REPLY: &[u8] = b"\x1b[?12;2$y";
+const WRITTEN_MODE_REPLY: &str = "\u{1b}[?12;2$y";
+
+/// Two viewers answer the same query position: the first reply is written and
+/// the second is dropped, while typed input still goes through.
+#[tokio::test]
+async fn two_viewers_answering_the_same_position_write_once() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+
     manager
-        .input_by_stream(terminal.stream_id, first_id, mode_reply, true)
+        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, QueryReply::At(3))
         .expect("first reply");
     manager
-        .input_by_stream(terminal.stream_id, second_id, mode_reply, true)
-        .expect("second reply is dropped");
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(3))
+        .expect("duplicate reply is dropped");
     manager
-        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", false)
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
         .expect("typed input");
 
     let output = read_until(
@@ -771,35 +773,168 @@ async fn one_viewer_answers_terminal_queries() {
     )
     .await;
     assert_eq!(
-        output.matches(written).count(),
+        output.matches(WRITTEN_MODE_REPLY).count(),
         1,
-        "two viewers' replies must reach the shell once: {output:?}"
+        "two viewers' replies for one position must reach the shell once: {output:?}"
     );
 
-    // Detaching the owner frees the role; the remaining viewer's next marked
-    // reply is accepted.
-    manager.detach_viewer(first_id);
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A viewer that receives a query but never answers blocks nobody: another
+/// viewer's reply for that position is written.
+#[tokio::test]
+async fn a_stalled_viewer_does_not_block_the_reply() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (_first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+
+    // The first viewer stays silent, as a backgrounded tab would.
     manager
-        .input_by_stream(terminal.stream_id, second_id, mode_reply, true)
-        .expect("reply after hand-over");
-    // This read starts empty, so one more written reply is the whole count.
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(4))
+        .expect("reply from the second viewer");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
     let output = read_until(
         &mut second_rx,
         &manager,
         &terminal.terminal_id,
         second_id,
-        |output| output.matches(written).count() >= 1,
+        |output| output.contains("iHELLO"),
     )
     .await;
     assert_eq!(
-        output.matches(written).count(),
+        output.matches(WRITTEN_MODE_REPLY).count(),
         1,
-        "the surviving viewer must take over replies: {output:?}"
+        "the silent viewer must not leave the query unanswered: {output:?}"
     );
 
     drop(first);
+    drop(second);
     manager.close(&terminal.terminal_id).await.expect("close");
     manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A reply for an already answered position, or for an older one, is dropped
+/// even when it comes from another viewer.
+#[tokio::test]
+async fn replies_for_answered_or_older_positions_are_dropped() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+
+    manager
+        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, QueryReply::At(6))
+        .expect("reply for the newest position");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(6))
+        .expect("duplicate position is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(5))
+        .expect("older position is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "only the first reply for the newest position may be written: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A reply with no position comes from an older client and keeps the previous
+/// single-owner rule: the first viewer owns replies until it detaches.
+#[tokio::test]
+async fn an_unpositioned_reply_keeps_the_old_single_owner_rule() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            first_id,
+            MODE_REPLY,
+            QueryReply::Unpositioned,
+        )
+        .expect("first reply");
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            second_id,
+            MODE_REPLY,
+            QueryReply::Unpositioned,
+        )
+        .expect("second reply is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "an old client's replies must keep one owner: {output:?}"
+    );
+
+    // Detaching the owner frees the role for the remaining viewer.
+    manager.detach_viewer(first_id);
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            second_id,
+            MODE_REPLY,
+            QueryReply::Unpositioned,
+        )
+        .expect("reply after hand-over");
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.matches(WRITTEN_MODE_REPLY).count() >= 1,
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "the surviving viewer must take over unpositioned replies: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
 }
 
 /// Closing a terminal hangs up the shell, which forwards SIGHUP to its jobs.
