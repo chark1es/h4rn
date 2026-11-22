@@ -16,9 +16,11 @@ All notable changes to h4rn are recorded here. The format follows
   `target/debug` or a temp directory unless `--force`, and mentions
   `loginctl enable-linger` on Linux when lingering is off. Reinstalling an
   unchanged launch agent that is already running leaves it alone. On Windows the
-  task is named per account (`h4rn-<user>`) and runs `h4rnd --recover-only`
-  before the daemon, so it still starts after an interrupted update and takes
-  the updater's installation lock. A task that an older release registered under
+  task is named per account (`h4rn-<user>`) and uses an inline launcher that
+  waits up to 30 seconds for the updater's installation lock and repairs a
+  missing `h4rnd.exe` itself before starting the daemon, so it starts after an
+  interrupted update even when the binary there is an older image without
+  `--recover-only`. A task that an older release registered under
   the machine-wide `h4rn` name is removed by the next install or uninstall. The
   systemd unit keeps a `$` in the executable path literal (systemd does not
   expand variables there) while still escaping `$$` in arguments.
@@ -42,13 +44,18 @@ All notable changes to h4rn are recorded here. The format follows
   is restored by the next start (or by the scheduled task's recovery step).
 - **A backup and its checksum are published together.** The rollback copy no
   longer goes straight to `h4rnd.previous`: it is copied into a unique temp file
-  beside it, fsynced and renamed over the backup. The old checksum sidecar is
-  deleted before the new backup appears, and the new one is written through its
-  own temp file, fsynced and renamed; a failure while writing it fails the update
-  before the installed binary is touched, and the two files can never describe
-  different copies. `--rollback` refuses a backup that is missing, empty, not
-  executable on Unix or does not match that record, so an interrupted copy can
-  never replace the installed binary.
+  beside it, and its sidecar is staged the same way. Only after both are ready
+  are they renamed into place, so a failed publication leaves the previous
+  backup and its checksum untouched and still rollbackable. `--rollback` and
+  startup recovery both refuse a backup that is missing, empty, not executable
+  on Unix or does not match that record, so an interrupted copy can never replace
+  the installed binary; recovery leaves the files in place and says what to do.
+  On Windows `h4rnd update` rewrites the registered task's launcher before it
+  renames anything, and the launcher waits for the installation lock and repairs
+  a missing binary itself, so an interrupted update or rollback comes back up
+  even from a task registered by an older release. The update releases the lock
+  before it dispatches the restart, so the launcher never waits for the update
+  that started it.
 - **A turn that starts during the final step is not cut off.** The idle check is
   repeated after the new binary is in place and immediately before the restart.
   If a turn started, the binary stays installed, the restart is skipped, and the
@@ -58,18 +65,24 @@ All notable changes to h4rn are recorded here. The format follows
   On Windows a failed `/End` when the task is not running is harmless and only
   the start step must succeed.
 - **`h4rnd update` probes the daemon it will actually restart.** The guard
-  resolves the registered unit, plist or task first and reads that service's own
-  `H4RN_BIND` (systemd drop-ins and `%h` included), not the updater's `--bind`,
-  so an idle second daemon on the CLI's port cannot make a busy service look
-  safe. If the service's executable or endpoint cannot be read, the update and
-  `--rollback` refuse unless `--force` is passed. The guard is checked again
+  resolves the registered unit, plist or task first and uses that service's own
+  endpoint, in the daemon's order: a `--bind` in the registered command line,
+  then `H4RN_BIND` from its environment (systemd `Environment=`,
+  `EnvironmentFile=` and the user manager; launchd `EnvironmentVariables`; or
+  the account-wide Windows environment), then the compiled default. The
+  updater's own `--bind` is never used, so an idle second daemon on the CLI's
+  port cannot make a busy service look safe. A source that cannot be read (the
+  systemd user manager environment or the account-wide Windows environment)
+  leaves the service unverified, and the update and `--rollback` refuse unless
+  `--force` is passed. The guard is checked again
   right before the binary is replaced and again just before the restart, and it
   fails closed: a daemon that is active or listening but does not answer
   `/healthz` blocks the update, as does a health response without `active_turns`.
   The update only restarts the service when that unit/plist/task runs the binary
   being replaced; a failed restart is a warning, not a failed update. The Linux
-  restart decision reads the effective `ExecStart` (fragment plus drop-ins, with
-  `%h` expanded) instead of the base unit text.
+  command line comes from `systemctl --user show -p ExecStart --value`, which
+  includes runtime drop-ins, and the unit files (with reset-and-override
+  drop-ins and `%h`) are read only when systemctl cannot answer.
 - **Windows service reporting has two limits.** `h4rnd service status` reports
   `enabled: unknown` there, because Task Scheduler's states do not map cleanly to
   "starts at logon", and `h4rnd service logs` prints guidance instead of following

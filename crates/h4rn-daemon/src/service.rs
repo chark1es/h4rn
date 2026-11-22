@@ -380,17 +380,50 @@ pub fn installed_service() -> InstalledService {
     }
 }
 
+/// One external command's result, reduced to what the resolvers need.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CommandOutput {
+    /// Whether the command exited successfully.
+    pub success: bool,
+    /// Standard output.
+    pub stdout: Vec<u8>,
+}
+
+impl CommandOutput {
+    fn from_process(output: Output) -> Self {
+        Self {
+            success: output.status.success(),
+            stdout: output.stdout,
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+}
+
+/// Runs one external command, so a test can answer like systemctl/PowerShell
+/// without running the real service manager.
+pub(crate) type CommandRunner<'a> = &'a dyn Fn(&CommandSpec) -> Result<CommandOutput>;
+
 /// Resolves the registered service and the health endpoint its daemon uses.
 ///
-/// The endpoint comes from the service's own configuration (`H4RN_BIND` in the
-/// unit, plist or task), falling back to the daemon's compiled default when the
-/// service names none. It is deliberately independent of the current process's
-/// `--bind`/`H4RN_BIND`, which may describe a different daemon.
+/// The endpoint follows the daemon's own precedence: the `--bind` argument in
+/// the registered command line first, then `H4RN_BIND` from the service's
+/// environment (systemd `Environment=`/`EnvironmentFile=` and the user manager
+/// environment, launchd `EnvironmentVariables`, or the account-wide Windows
+/// environment), then the compiled default. h4rnd has no config file, so there
+/// is no config-file step. It is deliberately independent of the current
+/// process's `--bind`/`H4RN_BIND`, which may describe a different daemon.
 pub fn registered_target() -> RegisteredTarget {
+    registered_target_with(&|spec| run_capture_allow_failure(spec).map(CommandOutput::from_process))
+}
+
+fn registered_target_with(run: CommandRunner<'_>) -> RegisteredTarget {
     match ServicePlatform::current() {
-        ServicePlatform::Systemd => systemd_registered_target(),
+        ServicePlatform::Systemd => systemd_registered_target(run),
         ServicePlatform::Launchd => launchd_registered_target(),
-        ServicePlatform::Windows => windows_registered_target(),
+        ServicePlatform::Windows => windows_registered_target(run),
     }
 }
 
@@ -507,26 +540,162 @@ impl SystemdUnitText {
         variables
     }
 
+    /// The `EnvironmentFile=` files, in order, with whether a missing file is
+    /// tolerated (`-/path`).
+    ///
+    /// A relative path is resolved against the unit's directory, which is where
+    /// a user unit keeps its files.
+    pub fn environment_files(&self, home: &Path) -> Vec<(PathBuf, bool)> {
+        let mut files = Vec::new();
+        for text in std::iter::once(&self.fragment).chain(self.dropins.iter()) {
+            for line in text.lines() {
+                let Some(value) = line.trim().strip_prefix("EnvironmentFile=") else {
+                    continue;
+                };
+                for word in parse_systemd_words(value) {
+                    let (path, optional) = match word.strip_prefix('-') {
+                        Some(path) => (path, true),
+                        None => (word.as_str(), false),
+                    };
+                    let path = expand_systemd_specifiers(path, home);
+                    if !path.is_empty() {
+                        files.push((PathBuf::from(path), optional));
+                    }
+                }
+            }
+        }
+        files
+    }
+
+    /// The unit's environment after `EnvironmentFile=` files are applied.
+    ///
+    /// systemd applies the files in order and they override `Environment=`, so
+    /// a later file wins over both an earlier file and an inline assignment.
+    pub fn effective_environment(
+        &self,
+        home: &Path,
+        unit_dir: &Path,
+    ) -> std::result::Result<Vec<(String, String)>, String> {
+        let mut variables = self.environment(home);
+        for (path, optional) in self.environment_files(home) {
+            let path = if path.is_absolute() {
+                path
+            } else {
+                unit_dir.join(path)
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "EnvironmentFile {} could not be read: {error}",
+                        path.display()
+                    ));
+                }
+            };
+            for (key, value) in parse_environment_file(&text) {
+                let key = expand_systemd_specifiers(&key, home);
+                let value = expand_systemd_specifiers(&value, home);
+                match variables.iter_mut().find(|(existing, _)| *existing == key) {
+                    Some(existing) => existing.1 = value,
+                    None => variables.push((key, value)),
+                }
+            }
+        }
+        Ok(variables)
+    }
+
     /// The `H4RN_BIND` the unit sets, if any.
-    pub fn bind(&self, home: &Path) -> Option<String> {
-        self.environment(home)
+    pub fn bind(
+        &self,
+        home: &Path,
+        unit_dir: &Path,
+    ) -> std::result::Result<Option<String>, String> {
+        Ok(self
+            .effective_environment(home, unit_dir)?
             .into_iter()
             .find(|(key, _)| key == "H4RN_BIND")
-            .map(|(_, value)| value)
+            .map(|(_, value)| value))
     }
 
     /// The health endpoint the service's daemon uses.
     ///
     /// A unit that names no bind uses the daemon's compiled default, so this is
     /// still the service's own address and not the updater's.
-    pub fn health_endpoint(&self, home: &Path) -> std::result::Result<SocketAddr, String> {
-        match self.bind(home) {
-            None => Ok(default_health_endpoint()),
-            Some(value) => crate::config::parse_addr(&value).map_err(|error| {
-                format!("H4RN_BIND={value:?} in the service unit is not a listen address: {error}")
-            }),
+    pub fn health_endpoint(
+        &self,
+        home: &Path,
+        unit_dir: &Path,
+    ) -> std::result::Result<SocketAddr, String> {
+        let bind = self.bind(home, unit_dir)?;
+        health_endpoint_for(bind.as_deref(), "the service unit")
+    }
+}
+
+/// `KEY=VALUE` lines of a systemd `EnvironmentFile=`.
+///
+/// Blank lines and comments are skipped, and one layer of single or double
+/// quotes is removed, as systemd does for a plain assignment.
+fn parse_environment_file(text: &str) -> Vec<(String, String)> {
+    let mut variables = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let value = match value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+            Some(unquoted) => unquoted.to_owned(),
+            None => match value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
+                Some(unquoted) => unquoted.to_owned(),
+                None => value.to_owned(),
+            },
+        };
+        variables.push((key.trim().to_owned(), value));
+    }
+    variables
+}
+
+/// The health endpoint for a bind a service names, or the compiled default.
+fn health_endpoint_for(
+    bind: Option<&str>,
+    source: &str,
+) -> std::result::Result<SocketAddr, String> {
+    match bind {
+        None => Ok(default_health_endpoint()),
+        Some(value) => crate::config::parse_addr(value).map_err(|error| {
+            format!("H4RN_BIND={value:?} in {source} is not a listen address: {error}")
+        }),
+    }
+}
+
+/// The value after `--bind` or `--bind=` in an argument list.
+///
+/// The last occurrence wins, as a later flag overrides an earlier one.
+pub fn bind_argument<I, S>(arguments: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut arguments = arguments.into_iter();
+    let mut bind = None;
+    while let Some(argument) = arguments.next() {
+        let argument = argument.as_ref();
+        if argument == "--bind" {
+            if let Some(value) = arguments.next() {
+                bind = Some(value.as_ref().to_owned());
+            }
+        } else if let Some(value) = argument.strip_prefix("--bind=") {
+            bind = Some(value.to_owned());
         }
     }
+    bind
 }
 
 /// The daemon's compiled default health endpoint.
@@ -564,6 +733,17 @@ fn expand_systemd_specifiers(value: &str, home: &Path) -> String {
 /// Splits `Environment=` words the way systemd does, honouring quotes and
 /// backslash escapes.
 fn parse_systemd_assignments(value: &str) -> Vec<(String, String)> {
+    parse_systemd_words(value)
+        .into_iter()
+        .filter_map(|word| {
+            let (key, value) = word.split_once('=')?;
+            (!key.is_empty()).then(|| (key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+/// Splits a unit directive's value into words, honouring quotes and escapes.
+fn parse_systemd_words(value: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut chars = value.trim().chars().peekable();
@@ -599,12 +779,6 @@ fn parse_systemd_assignments(value: &str) -> Vec<(String, String)> {
         words.push(word);
     }
     words
-        .into_iter()
-        .filter_map(|word| {
-            let (key, value) = word.split_once('=')?;
-            (!key.is_empty()).then(|| (key.to_owned(), value.to_owned()))
-        })
-        .collect()
 }
 
 /// Every drop-in file systemd applies to a unit, in application order.
@@ -648,12 +822,11 @@ pub fn systemd_dropin_files(fragment: &Path) -> Vec<PathBuf> {
 }
 
 /// The unit file systemd actually loaded, which may not be at the default path.
-fn systemd_fragment_path() -> Option<PathBuf> {
-    if command_available("systemctl")
-        && let Ok(output) = run_capture_allow_failure(&systemd_fragment_path_command())
-        && output.status.success()
+fn systemd_fragment_path_with(run: CommandRunner<'_>) -> Option<PathBuf> {
+    if let Ok(output) = run(&systemd_fragment_path_command())
+        && output.success
     {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let path = output.text().trim().to_owned();
         if !path.is_empty() {
             return Some(PathBuf::from(path));
         }
@@ -661,15 +834,12 @@ fn systemd_fragment_path() -> Option<PathBuf> {
     systemd_unit_path().ok()
 }
 
-fn systemd_registered_target() -> RegisteredTarget {
-    let Some(fragment) = systemd_fragment_path() else {
+fn systemd_registered_target(run: CommandRunner<'_>) -> RegisteredTarget {
+    let Some(fragment) = systemd_fragment_path_with(run) else {
         return RegisteredTarget::Unverified {
             reason: "the systemd user unit path could not be resolved".to_owned(),
         };
     };
-    if !fragment.exists() {
-        return RegisteredTarget::NotInstalled;
-    }
     let home = match home_dir() {
         Ok(home) => home,
         Err(error) => {
@@ -678,7 +848,24 @@ fn systemd_registered_target() -> RegisteredTarget {
             };
         }
     };
-    let text = match SystemdUnitText::read(&fragment) {
+    systemd_target_from(&fragment, &home, run)
+}
+
+/// Resolves a systemd unit at an explicit path.
+///
+/// The loaded unit is the source of truth: `systemctl show` reports the
+/// effective `ExecStart` including runtime drop-ins. The files are read only for
+/// the environment and when systemctl cannot answer (it is unavailable, or the
+/// unit is on disk but not loaded yet).
+pub(crate) fn systemd_target_from(
+    fragment: &Path,
+    home: &Path,
+    run: CommandRunner<'_>,
+) -> RegisteredTarget {
+    if !fragment.exists() {
+        return RegisteredTarget::NotInstalled;
+    }
+    let text = match SystemdUnitText::read(fragment) {
         Ok(text) => text,
         Err(error) => {
             return RegisteredTarget::Unverified {
@@ -686,16 +873,47 @@ fn systemd_registered_target() -> RegisteredTarget {
             };
         }
     };
-    let Some(program) = text
-        .exec_start(&home)
-        .as_deref()
-        .and_then(systemd_exec_program)
-    else {
+    let manager_argv = match run(&systemd_exec_start_command()) {
+        Ok(output) if output.success => systemd_show_exec_argv(&output.text()),
+        _ => None,
+    };
+    let argv = match manager_argv {
+        Some(argv) if !argv.is_empty() => argv,
+        _ => match text.exec_start(home) {
+            Some(value) => systemd_exec_argv(&value),
+            None => Vec::new(),
+        },
+    };
+    let Some(program) = argv.first() else {
         return RegisteredTarget::Unverified {
             reason: format!("{} has no readable ExecStart", fragment.display()),
         };
     };
-    match text.health_endpoint(&home) {
+    let unit_dir = fragment.parent().unwrap_or(home);
+    let mut bind = bind_argument(argv.iter().skip(1));
+    if bind.is_none() {
+        match text.bind(home, unit_dir) {
+            Ok(from_unit) => bind = from_unit,
+            Err(reason) => return RegisteredTarget::Unverified { reason },
+        }
+    }
+    if bind.is_none() {
+        // The unit inherits H4RN_BIND from the user manager unless it names its
+        // own, so an unreadable manager environment leaves the endpoint unknown.
+        match run(&systemd_show_environment_command()) {
+            Ok(output) if output.success => {
+                bind = parse_show_environment(&output.text(), "H4RN_BIND");
+            }
+            _ => {
+                return RegisteredTarget::Unverified {
+                    reason: "the systemd user manager environment (`systemctl --user \
+                             show-environment`) could not be read"
+                        .to_owned(),
+                };
+            }
+        }
+    }
+    match health_endpoint_for(bind.as_deref(), "the service unit") {
         Ok(health) => RegisteredTarget::Runs {
             binary: PathBuf::from(program),
             health,
@@ -717,6 +935,29 @@ pub fn systemd_fragment_path_command() -> CommandSpec {
             "--no-pager",
         ],
     )
+}
+
+/// The command that prints the unit's effective `ExecStart=`.
+///
+/// `systemctl show` applies runtime drop-ins, so this is what systemd would run
+/// even when the files on disk have been changed since the last daemon-reload.
+pub fn systemd_exec_start_command() -> CommandSpec {
+    CommandSpec::new(
+        "systemctl",
+        [
+            "--user",
+            "show",
+            UNIT_NAME,
+            "--property=ExecStart",
+            "--value",
+            "--no-pager",
+        ],
+    )
+}
+
+/// The command that prints the user manager's environment.
+pub fn systemd_show_environment_command() -> CommandSpec {
+    CommandSpec::new("systemctl", ["--user", "show-environment"])
 }
 
 /// The systemd user unit path.
@@ -867,35 +1108,47 @@ pub fn systemd_unit_program(unit: &str) -> Option<String> {
     })
 }
 
-/// The program from one `ExecStart=` value (which may carry `-@!+:` prefixes).
-pub fn systemd_exec_program(value: &str) -> Option<String> {
+/// The argv of one `ExecStart=` value, with systemd quoting undone.
+///
+/// The value may carry the `-@!+:` prefixes systemd allows before the program.
+pub fn systemd_exec_argv(value: &str) -> Vec<String> {
     let value = value
         .trim()
         .trim_start_matches(['-', '+', '!', '@', ':'])
         .trim_start();
     if value.is_empty() {
-        return None;
+        return Vec::new();
     }
-    if let Some(rest) = value.strip_prefix('"') {
-        let mut program = String::new();
-        let mut chars = rest.chars();
-        while let Some(ch) = chars.next() {
-            match ch {
-                '"' => return Some(systemd_unescape(&program)),
-                '\\' => match chars.next()? {
-                    'n' => program.push('\n'),
-                    'r' => program.push('\r'),
-                    't' => program.push('\t'),
-                    's' => program.push(' '),
-                    other => program.push(other),
-                },
-                other => program.push(other),
-            }
-        }
-        None
-    } else {
-        value.split_whitespace().next().map(systemd_unescape)
-    }
+    parse_systemd_words(value)
+        .into_iter()
+        .map(|word| systemd_unescape(&word))
+        .collect()
+}
+
+/// The program from one `ExecStart=` value (which may carry `-@!+:` prefixes).
+pub fn systemd_exec_program(value: &str) -> Option<String> {
+    systemd_exec_argv(value).into_iter().next()
+}
+
+/// The argv of the last `ExecStart=` in `systemctl show -p ExecStart --value`.
+///
+/// The property prints one `{ path=… ; argv[]=… ; … }` block per command, and
+/// the last block is the one whose argv ends the list.
+pub fn systemd_show_exec_argv(output: &str) -> Option<Vec<String>> {
+    let argv = output
+        .lines()
+        .flat_map(|line| line.split("argv[]=").skip(1))
+        .last()?;
+    let argv = argv.split(" ; ").next().unwrap_or(argv).trim();
+    (!argv.is_empty()).then(|| systemd_exec_argv(argv))
+}
+
+/// One `KEY=VALUE` line of `systemctl --user show-environment`.
+pub fn parse_show_environment(output: &str, key: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (name, value) = line.trim().split_once('=')?;
+        (name == key).then(|| value.to_owned())
+    })
 }
 
 /// Undoes the `%` and `$` doubling that keeps a literal in a unit.
@@ -1067,20 +1320,38 @@ fn launchd_registered_target() -> RegisteredTarget {
             reason: "the launch agent path could not be resolved".to_owned(),
         };
     };
+    launchd_target_from(&path)
+}
+
+/// Resolves a launch agent at an explicit path.
+pub(crate) fn launchd_target_from(path: &Path) -> RegisteredTarget {
     if !path.exists() {
         return RegisteredTarget::NotInstalled;
     }
-    let Ok(plist) = std::fs::read_to_string(&path) else {
+    let Ok(plist) = std::fs::read_to_string(path) else {
         return RegisteredTarget::Unverified {
             reason: format!("{} could not be read", path.display()),
         };
     };
-    let Some(program) = launchd_program(&plist) else {
+    let Some(arguments) = launchd_program_arguments(&plist) else {
         return RegisteredTarget::Unverified {
             reason: format!("{} has no ProgramArguments", path.display()),
         };
     };
-    match launchd_health_endpoint(&plist) {
+    let Some(program) = arguments.first() else {
+        return RegisteredTarget::Unverified {
+            reason: format!("{} has no ProgramArguments", path.display()),
+        };
+    };
+    // A `--bind` in ProgramArguments wins over EnvironmentVariables, which wins
+    // over the daemon's compiled default.
+    let bind = bind_argument(arguments.iter().skip(1)).or_else(|| {
+        launchd_environment(&plist)
+            .into_iter()
+            .find(|(key, _)| key == "H4RN_BIND")
+            .map(|(_, value)| value)
+    });
+    match health_endpoint_for(bind.as_deref(), "the launch agent") {
         Ok(health) => RegisteredTarget::Runs {
             binary: PathBuf::from(program),
             health,
@@ -1091,15 +1362,11 @@ fn launchd_registered_target() -> RegisteredTarget {
 
 /// The health endpoint named in a launch agent's `EnvironmentVariables`.
 pub fn launchd_health_endpoint(plist: &str) -> std::result::Result<SocketAddr, String> {
-    match launchd_environment(plist)
+    let bind = launchd_environment(plist)
         .into_iter()
         .find(|(key, _)| key == "H4RN_BIND")
-    {
-        None => Ok(default_health_endpoint()),
-        Some((_, value)) => crate::config::parse_addr(&value).map_err(|error| {
-            format!("H4RN_BIND={value:?} in the launch agent is not a listen address: {error}")
-        }),
-    }
+        .map(|(_, value)| value);
+    health_endpoint_for(bind.as_deref(), "the launch agent")
 }
 
 /// The `EnvironmentVariables` dictionary of a launch agent.
@@ -1262,16 +1529,26 @@ fn xml_unescape(value: &str) -> String {
 
 /// The program a launch agent starts, from its `ProgramArguments` array.
 pub fn launchd_program(plist: &str) -> Option<String> {
+    launchd_program_arguments(plist)?.into_iter().next()
+}
+
+/// The `ProgramArguments` array of a launch agent, in order.
+pub fn launchd_program_arguments(plist: &str) -> Option<Vec<String>> {
     let key = plist.find("<key>ProgramArguments</key>")?;
     let rest = &plist[key..];
     let array = rest.find("<array>")?;
     let rest = &rest[array + "<array>".len()..];
     let end = rest.find("</array>")?;
-    let array = &rest[..end];
-    let start = array.find("<string>")?;
-    let rest = &array[start + "<string>".len()..];
-    let end = rest.find("</string>")?;
-    Some(xml_unescape(rest[..end].trim()))
+    let body = &rest[..end];
+    let mut arguments = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("<string>") {
+        let after = &rest[start + "<string>".len()..];
+        let end = after.find("</string>")?;
+        arguments.push(xml_unescape(after[..end].trim()));
+        rest = &after[end + "</string>".len()..];
+    }
+    (!arguments.is_empty()).then_some(arguments)
 }
 
 /// Every command a launchd install runs, in order.
@@ -1421,33 +1698,92 @@ fn windows_installed_task() -> Option<String> {
     None
 }
 
-fn windows_registered_target() -> RegisteredTarget {
+fn windows_registered_target(run: CommandRunner<'_>) -> RegisteredTarget {
     if !command_available("powershell") {
         return RegisteredTarget::NotInstalled;
     }
     let Some(task) = windows_installed_task() else {
         return RegisteredTarget::NotInstalled;
     };
-    let Ok(output) = run_capture_allow_failure(&windows_task_executable_command(&task)) else {
+    let Ok(output) = run(&windows_task_executable_command(&task)) else {
         return RegisteredTarget::Unverified {
             reason: format!("the action of scheduled task {task} could not be read"),
         };
     };
-    if !output.status.success() {
+    if !output.success {
         return RegisteredTarget::NotInstalled;
     }
-    match windows_installed_binary(&String::from_utf8_lossy(&output.stdout)) {
-        InstalledService::NotInstalled => RegisteredTarget::NotInstalled,
-        InstalledService::Unknown => RegisteredTarget::Unverified {
-            reason: format!("the action of scheduled task {task} could not be parsed"),
-        },
-        InstalledService::Runs(binary) => RegisteredTarget::Runs {
-            binary,
-            // The task starts `serve` without `--bind`, so the daemon uses its
-            // compiled default; an account-wide H4RN_BIND is not visible here.
-            health: default_health_endpoint(),
-        },
+    let stdout = output.text();
+    let Some(action) = windows_task_action(&stdout) else {
+        return match windows_installed_binary(&stdout) {
+            InstalledService::NotInstalled => RegisteredTarget::NotInstalled,
+            _ => RegisteredTarget::Unverified {
+                reason: format!("the action of scheduled task {task} could not be parsed"),
+            },
+        };
+    };
+    windows_target_from_action(&action, || match run(&windows_bind_env_command()) {
+        Ok(output) if output.success => Ok(parse_windows_bind_env(&output.text())),
+        _ => Err(format!(
+            "the account-wide H4RN_BIND used by scheduled task {task} could not be read"
+        )),
+    })
+}
+
+/// Resolves one task action and the account environment it inherits.
+///
+/// A `--bind` in the registered action wins over the account-wide
+/// `H4RN_BIND`, which wins over the daemon's compiled default. The environment
+/// is only read when the action names no bind.
+fn windows_target_from_action<F>(action: &TaskAction, account_bind: F) -> RegisteredTarget
+where
+    F: FnOnce() -> std::result::Result<Option<String>, String>,
+{
+    let binary =
+        inline_task_binary(&action.arguments).unwrap_or_else(|| PathBuf::from(&action.execute));
+    let mut bind = bind_argument(action.arguments.split_whitespace());
+    if bind.is_none() {
+        // Task Scheduler starts the daemon from the account environment. If
+        // that cannot be read, the endpoint cannot be verified, so the update
+        // must ask for `--force`.
+        match account_bind() {
+            Ok(from_environment) => bind = from_environment,
+            Err(reason) => return RegisteredTarget::Unverified { reason },
+        }
     }
+    match health_endpoint_for(bind.as_deref(), "the scheduled task") {
+        Ok(health) => RegisteredTarget::Runs { binary, health },
+        Err(reason) => RegisteredTarget::Unverified { reason },
+    }
+}
+
+/// Prepares an installation for a Windows replace or rollback.
+///
+/// Both move the running `h4rnd.exe` aside, so the registered task must already
+/// be able to recover a missing install path. The stable launcher
+/// (which waits for the update lock and repairs the install path itself) is
+/// written before any rename, so a crash mid-update leaves a task that can still
+/// start, even when the binary at the install path is an older image that does
+/// not understand `--recover-only`.
+pub fn prepare_replace(current: &Path, data_dir: &Path) -> Result<()> {
+    if ServicePlatform::current() != ServicePlatform::Windows {
+        return Ok(());
+    }
+    if windows_installed_task().is_none() {
+        return Ok(());
+    }
+    ensure_available("powershell")?;
+    let task = windows_task_name();
+    let script = PrivateScript::create("install-scheduled-task.ps1", WINDOWS_INSTALL_SCRIPT)?;
+    run_checked(&windows_prepare_command(
+        script.path(),
+        current,
+        data_dir,
+        &task,
+    ))?;
+    drop(script);
+    println!("Updated scheduled task {task} with the recovery launcher.");
+    Ok(())
 }
 
 fn install_windows(binary: &Path, data_dir: &Path) -> Result<()> {
@@ -1563,25 +1899,47 @@ pub fn windows_install_command(
     data_dir: &Path,
     task: &str,
 ) -> CommandSpec {
-    CommandSpec::new(
-        "powershell",
-        [
-            "-NoProfile".to_owned(),
-            "-NonInteractive".to_owned(),
-            "-ExecutionPolicy".to_owned(),
-            "Bypass".to_owned(),
-            "-File".to_owned(),
-            script.to_string_lossy().into_owned(),
-            "-Binary".to_owned(),
-            binary.to_string_lossy().into_owned(),
-            "-DataDir".to_owned(),
-            data_dir.to_string_lossy().into_owned(),
-            "-TaskName".to_owned(),
-            task.to_owned(),
-            "-LegacyTaskName".to_owned(),
-            LEGACY_WINDOWS_TASK.to_owned(),
-        ],
-    )
+    windows_task_script_command(script, binary, data_dir, task, &[])
+}
+
+/// The command that rewrites the task's launcher before a Windows update.
+///
+/// It passes `-NoStart` because the daemon must keep running until the binary
+/// has been replaced; the update restarts the task afterwards.
+pub fn windows_prepare_command(
+    script: &Path,
+    binary: &Path,
+    data_dir: &Path,
+    task: &str,
+) -> CommandSpec {
+    windows_task_script_command(script, binary, data_dir, task, &["-NoStart"])
+}
+
+fn windows_task_script_command(
+    script: &Path,
+    binary: &Path,
+    data_dir: &Path,
+    task: &str,
+    extra: &[&str],
+) -> CommandSpec {
+    let mut args = vec![
+        "-NoProfile".to_owned(),
+        "-NonInteractive".to_owned(),
+        "-ExecutionPolicy".to_owned(),
+        "Bypass".to_owned(),
+        "-File".to_owned(),
+        script.to_string_lossy().into_owned(),
+        "-Binary".to_owned(),
+        binary.to_string_lossy().into_owned(),
+        "-DataDir".to_owned(),
+        data_dir.to_string_lossy().into_owned(),
+        "-TaskName".to_owned(),
+        task.to_owned(),
+        "-LegacyTaskName".to_owned(),
+        LEGACY_WINDOWS_TASK.to_owned(),
+    ];
+    args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+    CommandSpec::new("powershell", args)
 }
 
 /// The command that runs the shipped uninstall script.
@@ -1699,6 +2057,35 @@ pub fn inline_task_binary(arguments: &str) -> Option<PathBuf> {
     None
 }
 
+/// One action of a scheduled task: its executable and its arguments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskAction {
+    /// The action's `Execute` value.
+    pub execute: String,
+    /// The action's `Arguments` value (`""` when it has none).
+    pub arguments: String,
+}
+
+/// The first action of a task that names a binary, from `Execute<TAB>Arguments`
+/// lines printed by [`windows_task_executable_command`].
+pub fn windows_task_action(output: &str) -> Option<TaskAction> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find_map(|line| {
+            let (execute, arguments) = match line.split_once('\t') {
+                Some((execute, arguments)) => (execute.trim(), arguments.trim()),
+                None => (line, ""),
+            };
+            let named = !execute.is_empty() || inline_task_binary(arguments).is_some();
+            named.then(|| TaskAction {
+                execute: execute.to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        })
+}
+
 /// The binary a task's actions run, from `Execute<TAB>Arguments` lines.
 ///
 /// `h4rnd service install` registers an inline recovery step (the task recovers
@@ -1728,6 +2115,40 @@ pub fn windows_installed_binary(output: &str) -> InstalledService {
     } else {
         InstalledService::NotInstalled
     }
+}
+
+/// The command that prints the account-wide `H4RN_BIND` the task inherits.
+///
+/// The user value wins over the machine value, as it does for the process
+/// environment. `Unset` means neither scope names one.
+pub fn windows_bind_env_command() -> CommandSpec {
+    CommandSpec::new(
+        "powershell",
+        [
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-ExecutionPolicy".to_owned(),
+            "Bypass".to_owned(),
+            "-Command".to_owned(),
+            "$u=[Environment]::GetEnvironmentVariable('H4RN_BIND','User'); \
+             $m=[Environment]::GetEnvironmentVariable('H4RN_BIND','Machine'); \
+             if ($u) { 'User=' + $u } elseif ($m) { 'Machine=' + $m } else { 'Unset' }"
+                .to_owned(),
+        ],
+    )
+}
+
+/// Parses the output of [`windows_bind_env_command`].
+pub fn parse_windows_bind_env(output: &str) -> Option<String> {
+    let value = output.trim();
+    if value == "Unset" {
+        return None;
+    }
+    value
+        .strip_prefix("User=")
+        .or_else(|| value.strip_prefix("Machine="))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// Parses the `State=...` line printed by [`windows_status_command`].
@@ -2380,7 +2801,8 @@ mod tests {
             "%h is expanded the way systemd expands it"
         );
         assert_eq!(
-            unit.health_endpoint(home).unwrap(),
+            unit.health_endpoint(home, Path::new("/nonexistent"))
+                .unwrap(),
             "127.0.0.1:47901".parse::<SocketAddr>().unwrap()
         );
 
@@ -2400,7 +2822,9 @@ mod tests {
             Some("/opt/other/h4rnd".to_owned())
         );
         assert_eq!(
-            with_dropin.health_endpoint(home).unwrap(),
+            with_dropin
+                .health_endpoint(home, Path::new("/nonexistent"))
+                .unwrap(),
             "127.0.0.1:47902".parse::<SocketAddr>().unwrap()
         );
 
@@ -2411,7 +2835,9 @@ mod tests {
             dropins: Vec::new(),
         };
         assert_eq!(
-            default.health_endpoint(home).unwrap(),
+            default
+                .health_endpoint(home, Path::new("/nonexistent"))
+                .unwrap(),
             crate::config::DEFAULT_BIND.parse::<SocketAddr>().unwrap()
         );
     }
@@ -2446,7 +2872,8 @@ mod tests {
             "drop-ins are applied in file-name order"
         );
         assert_eq!(
-            text.health_endpoint(Path::new("/home/a")).unwrap(),
+            text.health_endpoint(Path::new("/home/a"), Path::new("/nonexistent"))
+                .unwrap(),
             "127.0.0.1:47903".parse::<SocketAddr>().unwrap()
         );
     }
@@ -2629,21 +3056,61 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_windows_install_script_registers_the_recovery_step() {
+    fn the_shipped_windows_install_script_registers_the_recovery_launcher() {
         assert!(WINDOWS_INSTALL_SCRIPT.contains("$format = '$b = {0}"));
-        // Recovery is the daemon's own lock-protected entry point, not a
-        // PowerShell copy of it.
-        assert!(WINDOWS_INSTALL_SCRIPT.contains("--recover-only"));
-        assert!(!WINDOWS_INSTALL_SCRIPT.contains("Copy-Item"));
-        assert!(!WINDOWS_INSTALL_SCRIPT.contains("Move-Item"));
-        assert!(WINDOWS_INSTALL_SCRIPT.contains("& $b --data-dir $d serve"));
-        // Recovery runs before the daemon starts.
+        // Recovery belongs to the launcher so it also works with an older image
+        // that does not understand the daemon's `--recover-only` flag.
+        let launcher = &WINDOWS_INSTALL_SCRIPT[WINDOWS_INSTALL_SCRIPT.find("$format = ").unwrap()
+            ..WINDOWS_INSTALL_SCRIPT.find("$values = ").unwrap()];
+        assert!(!launcher.contains("--recover-only"));
+        // The launcher takes the updater's own lock file, waiting bounded.
+        assert!(WINDOWS_INSTALL_SCRIPT.contains(r#".update" + $binaryExt + ".lock"#));
+        assert!(WINDOWS_INSTALL_SCRIPT.contains("AddSeconds(30)"));
         assert!(
-            WINDOWS_INSTALL_SCRIPT.find("--recover-only").unwrap()
+            WINDOWS_INSTALL_SCRIPT
+                .contains(r#"[IO.File]::Open($l, "OpenOrCreate", "ReadWrite", "None")"#)
+        );
+        // The lock is taken before any recovery step runs.
+        assert!(
+            launcher.find("[IO.File]::Open").unwrap()
+                < launcher.find("Test-Path -LiteralPath $o").unwrap()
+        );
+        // A moved-aside binary is renamed back; a rollback copy is copied to a
+        // staging file and then renamed, never copied straight over h4rnd.exe.
+        assert!(
+            WINDOWS_INSTALL_SCRIPT.contains("Move-Item -LiteralPath $o -Destination $b -Force")
+        );
+        assert!(
+            WINDOWS_INSTALL_SCRIPT.contains("Move-Item -LiteralPath $x -Destination $b -Force")
+        );
+        assert!(
+            WINDOWS_INSTALL_SCRIPT.contains("Copy-Item -LiteralPath $p -Destination $t -Force")
+        );
+        assert!(
+            WINDOWS_INSTALL_SCRIPT.contains("Move-Item -LiteralPath $t -Destination $b -Force")
+        );
+        // The branch order matches startup recovery: interrupted update, then
+        // interrupted rollback, then the rollback copy.
+        assert!(
+            launcher.find("Test-Path -LiteralPath $o").unwrap()
+                < launcher.find("Test-Path -LiteralPath $x").unwrap()
+        );
+        assert!(
+            launcher.find("Test-Path -LiteralPath $x").unwrap()
+                < launcher.find("Test-Path -LiteralPath $p").unwrap()
+        );
+        // Its staging name matches the updater's (`is_staging_name`).
+        assert!(WINDOWS_INSTALL_SCRIPT.contains(r#"$f + ".update-" + $PID + "-0-""#));
+        // The lock is released before the daemon starts.
+        assert!(
+            WINDOWS_INSTALL_SCRIPT.find("$lock.Dispose()").unwrap()
                 < WINDOWS_INSTALL_SCRIPT
                     .find("& $b --data-dir $d serve")
                     .unwrap()
         );
+        assert!(WINDOWS_INSTALL_SCRIPT.contains("& $b --data-dir $d serve"));
+        // A rewrite before an update must not bounce the running daemon.
+        assert!(WINDOWS_INSTALL_SCRIPT.contains("$NoStart"));
         // The step is inline, so there is no script file to leave behind.
         assert!(!WINDOWS_INSTALL_SCRIPT.contains("h4rnd-launch"));
         // Both scripts migrate the machine-wide task older releases used.
@@ -2693,5 +3160,257 @@ mod tests {
         }
         assert!(same_binary(&real, &real));
         assert!(!same_binary(&real, &dir.path().join("missing")));
+    }
+
+    /// A runner that answers systemctl commands from a fixed table.
+    fn systemd_runner(
+        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        exec_start: std::result::Result<&'static str, &'static str>,
+        environment: std::result::Result<&'static str, &'static str>,
+    ) -> impl Fn(&CommandSpec) -> Result<CommandOutput> {
+        move |spec: &CommandSpec| {
+            calls.borrow_mut().push(spec.display());
+            if spec.args.iter().any(|arg| arg == "--property=ExecStart") {
+                return match exec_start {
+                    Ok(stdout) => Ok(CommandOutput {
+                        success: true,
+                        stdout: stdout.as_bytes().to_vec(),
+                    }),
+                    Err(error) => Err(anyhow::anyhow!("{error}")),
+                };
+            }
+            if spec.args.iter().any(|arg| arg == "show-environment") {
+                return match environment {
+                    Ok(stdout) => Ok(CommandOutput {
+                        success: true,
+                        stdout: stdout.as_bytes().to_vec(),
+                    }),
+                    Err(error) => Err(anyhow::anyhow!("{error}")),
+                };
+            }
+            Ok(CommandOutput::default())
+        }
+    }
+
+    #[test]
+    fn a_service_bind_argument_wins_over_the_unit_and_manager_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = dir.path().join("h4rnd.service");
+        std::fs::write(
+            &fragment,
+            "ExecStart=/opt/h4rnd/h4rnd serve\nEnvironment=H4RN_BIND=127.0.0.1:48002\n",
+        )
+        .unwrap();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let run = systemd_runner(
+            calls.clone(),
+            Ok(
+                "{ path=/opt/h4rnd/h4rnd ; argv[]=/opt/h4rnd/h4rnd serve --bind 127.0.0.1:48001 ; ignore_errors=no }",
+            ),
+            Ok("H4RN_BIND=127.0.0.1:48003\nPATH=/usr/bin\n"),
+        );
+
+        match systemd_target_from(&fragment, Path::new("/home/a"), &run) {
+            RegisteredTarget::Runs { binary, health } => {
+                assert_eq!(binary, PathBuf::from("/opt/h4rnd/h4rnd"));
+                assert_eq!(health, "127.0.0.1:48001".parse::<SocketAddr>().unwrap());
+            }
+            other => panic!("expected a resolved service, got {other:?}"),
+        }
+        assert!(
+            !calls
+                .borrow()
+                .iter()
+                .any(|call| call.contains("show-environment")),
+            "the manager environment is irrelevant when the command line names a bind"
+        );
+    }
+
+    #[test]
+    fn an_environment_file_names_the_service_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = dir.path().join("h4rnd.service");
+        let environment = dir.path().join("bind.env");
+        std::fs::write(
+            &environment,
+            "# bind for this host\nH4RN_BIND='127.0.0.1:48004'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &fragment,
+            format!(
+                "ExecStart=/opt/h4rnd/h4rnd serve\n\
+                 Environment=H4RN_BIND=127.0.0.1:48002\n\
+                 EnvironmentFile={}\n",
+                environment.display()
+            ),
+        )
+        .unwrap();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        // systemctl is unavailable, so the unit and its environment files are
+        // the source of truth.
+        let run = systemd_runner(calls, Err("systemctl not found"), Err("no manager"));
+
+        match systemd_target_from(&fragment, Path::new("/home/a"), &run) {
+            RegisteredTarget::Runs { health, .. } => {
+                assert_eq!(
+                    health,
+                    "127.0.0.1:48004".parse::<SocketAddr>().unwrap(),
+                    "EnvironmentFile overrides Environment=, as systemd does"
+                );
+            }
+            other => panic!("expected a resolved service, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dropin_can_reset_and_override_the_units_exec_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = dir.path().join("h4rnd.service");
+        std::fs::write(&fragment, "ExecStart=/usr/bin/base serve\n").unwrap();
+        let dropins = dir.path().join("h4rnd.service.d");
+        std::fs::create_dir(&dropins).unwrap();
+        std::fs::write(dropins.join("10-reset.conf"), "ExecStart=\n").unwrap();
+        std::fs::write(
+            dropins.join("20-replace.conf"),
+            "ExecStart=/opt/other/h4rnd serve\nEnvironment=H4RN_BIND=127.0.0.1:48005\n",
+        )
+        .unwrap();
+
+        // No systemctl: the files are read, honouring the empty reset.
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let run = systemd_runner(calls, Err("systemctl not found"), Err("no manager"));
+        match systemd_target_from(&fragment, Path::new("/home/a"), &run) {
+            RegisteredTarget::Runs { binary, health } => {
+                assert_eq!(binary, PathBuf::from("/opt/other/h4rnd"));
+                assert_eq!(health, "127.0.0.1:48005".parse::<SocketAddr>().unwrap());
+            }
+            other => panic!("expected a resolved service, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_user_manager_environment_leaves_the_service_unverified() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = dir.path().join("h4rnd.service");
+        std::fs::write(&fragment, "ExecStart=/opt/h4rnd/h4rnd serve\n").unwrap();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let run = systemd_runner(
+            calls,
+            Ok("{ path=/opt/h4rnd/h4rnd ; argv[]=/opt/h4rnd/h4rnd serve ; ignore_errors=no }"),
+            Err("Failed to connect to bus"),
+        );
+        match systemd_target_from(&fragment, Path::new("/home/a"), &run) {
+            RegisteredTarget::Unverified { reason } => {
+                assert!(reason.contains("show-environment"), "{reason}");
+            }
+            other => panic!("an unreadable source must fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_windows_prepare_step_rewrites_the_action_without_starting_it() {
+        let script = Path::new(r"C:\Users\a\AppData\Local\Temp\h4rn-service-1\install.ps1");
+        let binary = Path::new(r"C:\Program Files\h4rn\h4rnd.exe");
+        let data = Path::new(r"C:\Users\a\AppData\Local\h4rn");
+        let install = windows_install_command(script, binary, data, "h4rn-alice");
+        assert!(!install.args.iter().any(|arg| arg == "-NoStart"));
+        let prepare = windows_prepare_command(script, binary, data, "h4rn-alice");
+        assert_eq!(prepare.args.last().map(String::as_str), Some("-NoStart"));
+        assert_eq!(
+            &prepare.args[..install.args.len()],
+            &install.args[..],
+            "the prepare step is the install action plus -NoStart"
+        );
+    }
+
+    #[test]
+    fn a_launchd_bind_argument_wins_over_its_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let plist = dir.path().join("dev.h4rn.h4rnd.plist");
+        std::fs::write(
+            &plist,
+            format!(
+                "<dict>\n\
+                 <key>ProgramArguments</key>\n<array>\n\
+                 <string>/opt/h4rnd/h4rnd</string>\n\
+                 <string>serve</string>\n\
+                 <string>--bind</string>\n\
+                 <string>127.0.0.1:48007</string>\n\
+                 </array>\n\
+                 <key>EnvironmentVariables</key>\n<dict>\n\
+                 <key>H4RN_BIND</key>\n<string>127.0.0.1:48008</string>\n\
+                 </dict>\n</dict>\n{}",
+                crate::service::LAUNCHD_LABEL
+            ),
+        )
+        .unwrap();
+        match launchd_target_from(&plist) {
+            RegisteredTarget::Runs { binary, health } => {
+                assert_eq!(binary, PathBuf::from("/opt/h4rnd/h4rnd"));
+                assert_eq!(health, "127.0.0.1:48007".parse::<SocketAddr>().unwrap());
+            }
+            other => panic!("expected a resolved service, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_windows_action_bind_wins_over_the_account_environment() {
+        let action = windows_task_action(
+            "C:\\h4rn\\h4rnd.exe\t--bind 127.0.0.1:48011 --data-dir C:\\d serve\n",
+        )
+        .expect("the action names its binary");
+        assert_eq!(
+            bind_argument(action.arguments.split_whitespace()),
+            Some("127.0.0.1:48011".to_owned())
+        );
+        assert_eq!(
+            parse_windows_bind_env("User=127.0.0.1:48012\n"),
+            Some("127.0.0.1:48012".to_owned())
+        );
+        assert_eq!(
+            parse_windows_bind_env("Machine=127.0.0.1:48013\n"),
+            Some("127.0.0.1:48013".to_owned())
+        );
+        assert_eq!(parse_windows_bind_env("Unset\n"), None);
+        assert_eq!(
+            bind_argument(
+                ["--bind=127.0.0.1:48014", "--bind", "127.0.0.1:48015"].map(String::from)
+            ),
+            Some("127.0.0.1:48015".to_owned()),
+            "the last flag wins"
+        );
+        assert_eq!(bind_argument(["serve"].map(String::from)), None);
+
+        // The account environment is the next source when the action has no
+        // `--bind`, and an unreadable one leaves the target unverified.
+        let launcher = TaskAction {
+            execute: "powershell.exe".to_owned(),
+            arguments: "-NoProfile -Command $b = 'C:\\h4rn\\h4rnd.exe'; & $b serve".to_owned(),
+        };
+        match windows_target_from_action(&launcher, || Ok(Some("127.0.0.1:48016".to_owned()))) {
+            RegisteredTarget::Runs { binary, health } => {
+                assert_eq!(binary, PathBuf::from(r"C:\h4rn\h4rnd.exe"));
+                assert_eq!(health, "127.0.0.1:48016".parse::<SocketAddr>().unwrap());
+            }
+            other => panic!("expected a resolved service, got {other:?}"),
+        }
+        match windows_target_from_action(&launcher, || Err("access denied".to_owned())) {
+            RegisteredTarget::Unverified { reason } => {
+                assert!(reason.contains("access denied"), "{reason}");
+            }
+            other => panic!("an unreadable environment must fail closed, got {other:?}"),
+        }
+        // A `--bind` in the action is used without consulting the environment.
+        let direct = TaskAction {
+            execute: r"C:\h4rn\h4rnd.exe".to_owned(),
+            arguments: "--bind 127.0.0.1:48017 serve".to_owned(),
+        };
+        match windows_target_from_action(&direct, || panic!("must not read the environment")) {
+            RegisteredTarget::Runs { health, .. } => {
+                assert_eq!(health, "127.0.0.1:48017".parse::<SocketAddr>().unwrap());
+            }
+            other => panic!("expected a resolved service, got {other:?}"),
+        }
     }
 }

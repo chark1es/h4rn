@@ -768,23 +768,40 @@ fn previous_checksum_path(previous: &Path) -> PathBuf {
 /// inject a publication failure inside the real backup copy instead of
 /// fabricating a file state.
 trait ChecksumPublisher {
-    /// Writes `contents` to `path` atomically.
-    fn publish(&self, path: &Path, staging_base: &Path, contents: &str) -> Result<()>;
+    /// Stages `contents` under a unique temp name and returns its path.
+    ///
+    /// Nothing visible changes until [`Self::commit`] runs, so a failure here
+    /// leaves the previous backup and its sidecar untouched.
+    fn stage(&self, path: &Path, staging_base: &Path, contents: &str) -> Result<PathBuf>;
+    /// Renames a staged sidecar over `path`.
+    fn commit(&self, staged: &Path, path: &Path) -> Result<()>;
 }
 
 struct AtomicChecksum;
 
 impl ChecksumPublisher for AtomicChecksum {
-    fn publish(&self, path: &Path, staging_base: &Path, contents: &str) -> Result<()> {
-        write_checksum_atomically(path, staging_base, contents)
+    fn stage(&self, path: &Path, staging_base: &Path, contents: &str) -> Result<PathBuf> {
+        stage_checksum(path, staging_base, contents)
+    }
+
+    fn commit(&self, staged: &Path, path: &Path) -> Result<()> {
+        if let Err(error) = std::fs::rename(staged, path) {
+            let _ = std::fs::remove_file(staged);
+            return Err(error)
+                .with_context(|| format!("move the backup checksum into {}", path.display()));
+        }
+        if let Some(parent) = path.parent() {
+            fsync_dir(parent);
+        }
+        Ok(())
     }
 }
 
-/// Writes the sidecar through a unique temp file, fsyncs it, and renames it.
+/// Writes the sidecar to a new, unique temp file beside its final name.
 ///
-/// The old sidecar is removed before the backup is published, so a crash can
-/// never leave a checksum that describes a different backup.
-fn write_checksum_atomically(path: &Path, staging_base: &Path, contents: &str) -> Result<()> {
+/// The temp file is fsynced but not renamed, so the old sidecar stays valid
+/// until the caller has also staged the backup it describes.
+fn stage_checksum(path: &Path, staging_base: &Path, contents: &str) -> Result<PathBuf> {
     let parent = path
         .parent()
         .context("the backup checksum has no parent directory")?;
@@ -814,13 +831,7 @@ fn write_checksum_atomically(path: &Path, staging_base: &Path, contents: &str) -
             return Err(error);
         }
         drop(file);
-        if let Err(error) = std::fs::rename(&temp, path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error)
-                .with_context(|| format!("move the backup checksum into {}", path.display()));
-        }
-        fsync_dir(parent);
-        return Ok(());
+        return Ok(temp);
     }
     Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
         anyhow::anyhow!(
@@ -830,27 +841,16 @@ fn write_checksum_atomically(path: &Path, staging_base: &Path, contents: &str) -
     }))
 }
 
-/// Removes a checksum sidecar left by an earlier backup.
-fn remove_stale_checksum(previous: &Path) -> Result<()> {
-    let path = previous_checksum_path(previous);
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error)
-            .with_context(|| format!("remove the stale backup checksum {}", path.display())),
-    }
-}
-
 /// Copies `current` to a uniquely named temp file, fsyncs it, and renames it
 /// over `previous`.
 ///
 /// The backup is never written straight to `h4rnd.previous`: an interrupted
 /// copy leaves the previous backup (or no backup) in place, never a truncated
-/// file that `--rollback` could install. Any old checksum sidecar is deleted
-/// before the new backup is published, and the new sidecar is written through a
-/// temp file and fsynced, so a crash cannot leave the two describing different
-/// files. A sidecar failure fails the update: the installed binary is not
-/// touched yet.
+/// file that `--rollback` could install. The new backup and its checksum sidecar
+/// are both staged first, so a failure while writing either one leaves the
+/// previous backup and its sidecar exactly as they were; only then are the two
+/// renamed into place. A sidecar failure fails the update before the installed
+/// binary is touched or the old backup is replaced.
 fn write_backup<P: ChecksumPublisher>(from: &Path, to: &Path, publisher: &P) -> Result<()> {
     let parent = from
         .parent()
@@ -903,23 +903,25 @@ fn write_backup<P: ChecksumPublisher>(from: &Path, to: &Path, publisher: &P) -> 
             }
         }
         drop(file);
-        // The old sidecar described the previous backup. Remove it before the
-        // new backup becomes visible so the pair is never inconsistent.
-        if let Err(error) = remove_stale_checksum(to) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error);
-        }
+        let checksum_path = previous_checksum_path(to);
+        let checksum = format!("{} {}\n", hex::encode(hasher.finalize()), metadata.len());
+        // Stage the sidecar first: if this fails, the old backup and its
+        // sidecar are still the valid pair. Only then replace the backup, and
+        // commit the staged sidecar last.
+        let staged_checksum = match publisher.stage(&checksum_path, from, &checksum) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error);
+            }
+        };
         if let Err(error) = std::fs::rename(&temp, to) {
             let _ = std::fs::remove_file(&temp);
+            let _ = std::fs::remove_file(&staged_checksum);
             return Err(error).with_context(|| format!("move the backup into {}", to.display()));
         }
         fsync_dir(parent);
-        publisher.publish(
-            &previous_checksum_path(to),
-            from,
-            &format!("{} {}\n", hex::encode(hasher.finalize()), metadata.len()),
-        )?;
-        return Ok(());
+        return publisher.commit(&staged_checksum, &checksum_path);
     }
     Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
         anyhow::anyhow!("could not create a backup file next to {}", from.display())
@@ -1128,6 +1130,8 @@ pub struct RecoveryReport {
     pub removed_staging: usize,
     /// Whether another run held the lock, so recovery was skipped.
     pub skipped_locked: bool,
+    /// Whether the rollback copy was refused because it failed validation.
+    pub refused_previous: bool,
 }
 
 /// The install path a running image belongs to.
@@ -1206,11 +1210,36 @@ fn recover(current: &Path, report: &mut RecoveryReport) {
     }
     if !current.exists() {
         // A replace that lost both moved-aside names still has the rollback
-        // copy. Publish it atomically (temp beside the target, fsync, rename),
-        // never with a plain copy that a crash could truncate.
+        // copy. Validate it the way `--rollback` does before publishing it: an
+        // empty, non-executable or truncated copy must never become the
+        // installed binary. Publish it atomically (temp beside the target,
+        // fsync, rename), never with a plain copy a crash could truncate.
         let previous = previous_binary_path(current);
-        if previous.exists() && copy_file_atomic(&previous, current).is_ok() {
-            report.restored = true;
+        if previous.exists() {
+            match check_previous_binary(&previous) {
+                Ok(()) => match copy_file_atomic(&previous, current) {
+                    Ok(()) => report.restored = true,
+                    Err(error) => eprintln!(
+                        "Could not recover {} from {}: {error}",
+                        current.display(),
+                        previous.display()
+                    ),
+                },
+                Err(error) => {
+                    // Leave every file for a person to inspect: the backup may
+                    // be the only copy of a previous installation.
+                    report.refused_previous = true;
+                    eprintln!(
+                        "Cannot recover {} from {}: {error}",
+                        current.display(),
+                        previous.display()
+                    );
+                    eprintln!(
+                        "The files were left in place. Run `h4rnd update` again or reinstall h4rn."
+                    );
+                    return;
+                }
+            }
         }
     }
     if !current.exists() {
@@ -1297,6 +1326,14 @@ pub fn recover_only_for(executable: &Path) -> Result<RecoveryReport> {
             "another h4rnd update, rollback or recovery is running for {}; not starting the \
              daemon yet",
             install_path_for(executable).display()
+        );
+    }
+    let current = install_path_for(executable);
+    if !current.exists() {
+        bail!(
+            "{} is missing and could not be recovered; run `h4rnd update` again or reinstall \
+             h4rn",
+            current.display()
         );
     }
     Ok(report)
@@ -1526,7 +1563,11 @@ impl UpdateTarget {
 }
 
 /// Checks the daemon that this update would have to restart.
-async fn check_target_idle(target: &UpdateTarget, force: bool) -> Result<()> {
+async fn check_target_idle(
+    target: &UpdateTarget,
+    force: bool,
+    service_active: &dyn Fn() -> bool,
+) -> Result<()> {
     match &target.registered {
         crate::service::RegisteredTarget::Unverified { reason } => {
             let problem = unverified_refusal(reason);
@@ -1540,13 +1581,17 @@ async fn check_target_idle(target: &UpdateTarget, force: bool) -> Result<()> {
             check_daemon_idle(target.standalone_health, false, force).await
         }
         crate::service::RegisteredTarget::Runs { health, .. } => {
-            check_daemon_idle(*health, crate::service::is_active(), force).await
+            check_daemon_idle(*health, service_active(), force).await
         }
     }
 }
 
 /// Why the restart must be skipped after the binary was already replaced.
-async fn target_restart_skip_reason(target: &UpdateTarget, force: bool) -> Option<String> {
+async fn target_restart_skip_reason(
+    target: &UpdateTarget,
+    force: bool,
+    service_active: &dyn Fn() -> bool,
+) -> Option<String> {
     if force {
         return None;
     }
@@ -1557,7 +1602,7 @@ async fn target_restart_skip_reason(target: &UpdateTarget, force: bool) -> Optio
             restart_skip_reason(&state, false)
         }
         crate::service::RegisteredTarget::Runs { health, .. } => {
-            let state = daemon_state(*health, crate::service::is_active()).await;
+            let state = daemon_state(*health, service_active()).await;
             restart_skip_reason(&state, false)
         }
     }
@@ -1569,6 +1614,10 @@ fn unverified_refusal(reason: &str) -> String {
          would restart could not be checked"
     )
 }
+
+/// What a rollback tells the user when a turn keeps the restart from running.
+pub(crate) const ROLLBACK_RESTART_SKIP: &str =
+    "binary restored; restart h4rnd when the turn finishes (`h4rnd service restart`)";
 
 /// Everything one update run needs, so the whole flow can be tested without
 /// reaching GitHub or touching the real service manager.
@@ -1583,6 +1632,11 @@ pub(crate) struct UpdateDeps {
     pub public_key: Option<String>,
     /// Restarts the service; a test records whether it ran.
     pub restart: Box<dyn Fn(&Path) -> crate::service::RestartOutcome>,
+    /// Whether the service manager reports the service as active.
+    pub service_active: Box<dyn Fn() -> bool>,
+    /// Prepares the installation before the replace (Windows migrates the
+    /// scheduled task's launcher so it can recover a missing binary).
+    pub prepare_replace: Box<dyn Fn() -> Result<()>>,
 }
 
 /// Runs one `h4rnd update`.
@@ -1606,6 +1660,8 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
     } else {
         UpdateTarget::resolve(config)
     };
+    let data_dir = config.data_dir.clone();
+    let prepare_current = current.clone();
     run_with(
         options,
         UpdateDeps {
@@ -1614,9 +1670,22 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
             client,
             public_key: configured_public_key().map(str::to_owned),
             restart: Box::new(crate::service::restart_after_update),
+            service_active: Box::new(crate::service::is_active),
+            prepare_replace: Box::new(move || {
+                crate::service::prepare_replace(&prepare_current, &data_dir)
+            }),
         },
     )
     .await
+}
+
+/// Takes the installation lock, unless `--check` only reads metadata.
+fn acquire_lock(current: &Path, check: bool) -> Result<Option<UpdateLock>> {
+    if check {
+        Ok(None)
+    } else {
+        Ok(Some(UpdateLock::acquire(current)?))
+    }
 }
 
 /// The update flow, with its external effects injected.
@@ -1627,24 +1696,34 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
         client,
         public_key,
         restart,
+        service_active,
+        prepare_replace,
     } = deps;
 
     if options.rollback {
         // One update at a time, and the same fail-closed guard as an update:
         // rolling back while a turn runs would interrupt it just as badly.
-        let _lock = UpdateLock::acquire(&current)?;
-        check_target_idle(&target, options.force).await?;
+        let lock = acquire_lock(&current, false)?;
+        check_target_idle(&target, options.force, service_active.as_ref()).await?;
+        // A Windows rollback also moves the install path aside, so the task must
+        // be able to recover it first.
+        prepare_replace()?;
         rollback_binary(&current)?;
-        println!("Restored the previous h4rnd binary.");
+        println!("Restored the previous h4rn binary.");
         // A turn can start between the guard and the restart; the restored
         // binary is already in place, so leave the daemon alone.
-        if let Some(problem) = target_restart_skip_reason(&target, options.force).await {
-            println!("The binary was restored, but {problem}.");
-            println!(
-                "binary updated; restart h4rnd when the turn finishes (`h4rnd service restart`)"
-            );
+        if let Some(problem) =
+            target_restart_skip_reason(&target, options.force, service_active.as_ref()).await
+        {
+            for line in rollback_skip_lines(&problem) {
+                println!("{line}");
+            }
             return Ok(());
         }
+        // Release the lock before the service starts again: on Windows the
+        // task's launcher waits for it, and reporting success while the daemon
+        // cannot take it would be a lie.
+        drop(lock);
         restart_or_explain(&current, &restart);
         return Ok(());
     }
@@ -1652,11 +1731,7 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
     // One `h4rnd update` at a time for this installation. `--check` only reads
     // release metadata, so it does not need the lock (or a writable install
     // directory).
-    let _lock = if options.check {
-        None
-    } else {
-        Some(UpdateLock::acquire(&current)?)
-    };
+    let lock = acquire_lock(&current, options.check)?;
 
     let client = client.context("an update needs a release client")?;
     let repository = client.repository().clone();
@@ -1695,7 +1770,7 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
 
     // Fail before downloading anything when the daemon that would restart is
     // busy, using the service's endpoint rather than this process's bind.
-    check_target_idle(&target, options.force).await?;
+    check_target_idle(&target, options.force, service_active.as_ref()).await?;
 
     let asset_name = archive_name(&release.version, TARGET_TRIPLE);
     let archive = client.download(release.asset(&asset_name)?).await?;
@@ -1708,8 +1783,11 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
 
     // A turn that started while the download ran must not be cut off by the
     // restart below.
-    check_target_idle(&target, options.force).await?;
+    check_target_idle(&target, options.force, service_active.as_ref()).await?;
 
+    // On Windows the registered task must be able to recover a missing install
+    // path before the running binary is moved aside.
+    prepare_replace()?;
     replace_binary(&current, &binary)?;
     println!(
         "Installed h4rnd {} at {}.",
@@ -1719,11 +1797,17 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
     // A turn can start between the guard above and the restart. The new binary
     // is already installed, so keep it and let the user restart when the turn
     // finishes instead of interrupting the work.
-    if let Some(problem) = target_restart_skip_reason(&target, options.force).await {
+    if let Some(problem) =
+        target_restart_skip_reason(&target, options.force, service_active.as_ref()).await
+    {
         println!("The binary was updated, but {problem}.");
         println!("binary updated; restart h4rnd when the turn finishes (`h4rnd service restart`)");
         return Ok(());
     }
+    // The replace is complete, so release the installation lock before the
+    // service starts: the Windows launcher waits for this lock, and a restart
+    // while it is held would make the task fail or stall.
+    drop(lock);
     restart_or_explain(&current, &restart);
     Ok(())
 }
@@ -1738,6 +1822,14 @@ fn report_versions(release: &ReleaseInfo) {
     } else {
         println!("The installed version is newer than the latest release.");
     }
+}
+
+/// The two lines printed when a rollback skipped the restart.
+fn rollback_skip_lines(problem: &str) -> [String; 2] {
+    [
+        format!("The binary was restored, but {problem}."),
+        ROLLBACK_RESTART_SKIP.to_owned(),
+    ]
 }
 
 /// Restarts the service only when it runs the binary that was just replaced.
@@ -1976,8 +2068,12 @@ mod tests {
     struct FailingChecksum;
 
     impl ChecksumPublisher for FailingChecksum {
-        fn publish(&self, _path: &Path, _base: &Path, _contents: &str) -> Result<()> {
+        fn stage(&self, _path: &Path, _base: &Path, _contents: &str) -> Result<PathBuf> {
             Err(anyhow::anyhow!("injected checksum publication failure"))
+        }
+
+        fn commit(&self, _staged: &Path, _path: &Path) -> Result<()> {
+            unreachable!("the checksum is never staged when staging fails")
         }
     }
 
@@ -2638,15 +2734,16 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_checksum_publication_fails_the_update_without_a_stale_sidecar() {
+    fn a_failed_checksum_publication_keeps_the_previous_backup_rollbackable() {
         let (_dir, current) = install_dir();
+        // The installation has been upgraded once: `.previous` is "old" and
+        // `.previous.sha256` describes it.
         replace_binary(&current, b"first").unwrap();
         let previous = previous_binary_path(&current);
-        // The sidecar describes the current backup.
         assert!(previous_checksum_path(&previous).exists());
 
-        // The real copy and rename of `.previous` run; only the publication of
-        // its checksum fails, as an I/O error would.
+        // A B→C upgrade stages the new backup and sidecar but fails to publish
+        // the sidecar. Neither A nor its sidecar may be touched.
         let error = replace_binary_with(&current, b"second", &FailingChecksum).unwrap_err();
         assert!(
             error
@@ -2661,13 +2758,16 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(&previous).unwrap(),
-            b"first",
-            "the new backup was copied before the checksum failed"
+            b"old",
+            "the previous backup must survive a failed publication"
         );
         assert!(
-            !previous_checksum_path(&previous).exists(),
-            "no stale checksum may describe the new backup"
+            check_previous_binary(&previous).is_ok(),
+            "the surviving backup still matches its sidecar"
         );
+        // The old backup is still what `--rollback` installs.
+        rollback_binary(&current).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
         // No staging or checksum temp file is left behind.
         assert_eq!(remove_staging_files(&current), 0);
     }
@@ -2706,7 +2806,10 @@ mod tests {
         let client = ReleaseClient::with_timeouts(
             test_repository(),
             "http://127.0.0.1:9",
-            Duration::from_secs(5),
+            // The total (metadata) deadline is below the transfer's 600 ms. A
+            // download that inherited it would fail, which is exactly what this
+            // regression test must catch.
+            Duration::from_millis(200),
             Duration::from_millis(250),
         )
         .unwrap();
@@ -2714,7 +2817,7 @@ mod tests {
         let bytes = client
             .download(&url)
             .await
-            .expect("a transfer longer than the idle timeout still succeeds");
+            .expect("a transfer longer than the injectable total deadline still succeeds");
         assert_eq!(bytes, b"hello world!...........");
         server.abort();
     }
@@ -2742,6 +2845,8 @@ mod tests {
                 client: Some(client),
                 public_key: Some(public_key),
                 restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Ok(())),
             },
         )
         .await
@@ -2782,6 +2887,8 @@ mod tests {
                 client: None,
                 public_key: None,
                 restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Ok(())),
             },
         )
         .await
@@ -2817,6 +2924,8 @@ mod tests {
                 client: Some(client),
                 public_key: Some(public_key),
                 restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Ok(())),
             },
         )
         .await
@@ -2862,6 +2971,8 @@ mod tests {
                 client: None,
                 public_key: None,
                 restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Ok(())),
             },
         )
         .await
@@ -2894,6 +3005,8 @@ mod tests {
                 client: None,
                 public_key: None,
                 restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Ok(())),
             },
         )
         .await
@@ -2915,6 +3028,11 @@ mod tests {
         // Only the rollback backup exists: a replace that lost both the
         // install path and the moved-aside name.
         std::fs::write(&previous, b"previous binary").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&previous, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         std::fs::remove_file(&current).unwrap();
 
         let report = recover_only_for(&previous).unwrap();
@@ -3003,5 +3121,200 @@ mod tests {
             "expected an idle timeout, got: {message}"
         );
         server.abort();
+    }
+
+    /// Whether the installation lock is free right now.
+    ///
+    /// `flock()` can briefly report a just-released lock as held on some
+    /// kernels (WSL2 in particular), so this retries briefly. Before the fix the
+    /// update holds the lock for the whole synchronous dispatch, so the retry
+    /// still fails deterministically.
+    fn lock_is_free(current: &Path) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match UpdateLock::try_acquire(current) {
+                Ok(Some(lock)) => {
+                    drop(lock);
+                    return true;
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_update_releases_the_lock_before_dispatching_the_restart() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+        let dispatched_free = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = dispatched_free.clone();
+        let prepared_while_old = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prepared = prepared_while_old.clone();
+        let prepare_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = prepare_calls.clone();
+        let prepare_path = current.clone();
+
+        run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: Box::new(move |path| {
+                    flag.store(lock_is_free(path), std::sync::atomic::Ordering::SeqCst);
+                    crate::service::RestartOutcome::Restarted
+                }),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(move || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // Preparation must happen before the binary is replaced.
+                    prepared.store(
+                        std::fs::read(&prepare_path)
+                            .map(|bytes| bytes == b"old")
+                            .unwrap_or(false),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Ok(())
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            prepare_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the Windows launcher is prepared once, before the replace"
+        );
+        assert!(
+            dispatched_free.load(std::sync::atomic::Ordering::SeqCst),
+            "an immediate dispatch must find the installation lock released"
+        );
+        assert!(
+            prepared_while_old.load(std::sync::atomic::Ordering::SeqCst),
+            "the launcher is prepared while the old binary is still installed"
+        );
+        assert_eq!(std::fs::read(&current).unwrap(), b"new binary");
+    }
+
+    #[tokio::test]
+    async fn the_rollback_releases_the_lock_before_dispatching_the_restart() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        replace_binary(&current, b"new binary").unwrap();
+        let dispatched_free = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = dispatched_free.clone();
+        let prepared_while_new = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prepared = prepared_while_new.clone();
+        let prepare_path = current.clone();
+
+        run_with(
+            UpdateOptions {
+                rollback: true,
+                ..UpdateOptions::default()
+            },
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: None,
+                public_key: None,
+                restart: Box::new(move |path| {
+                    flag.store(lock_is_free(path), std::sync::atomic::Ordering::SeqCst);
+                    crate::service::RestartOutcome::Restarted
+                }),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(move || {
+                    prepared.store(
+                        std::fs::read(&prepare_path)
+                            .map(|bytes| bytes == b"new binary")
+                            .unwrap_or(false),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Ok(())
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert!(
+            prepared_while_new.load(std::sync::atomic::Ordering::SeqCst),
+            "the Windows launcher is prepared before the rollback moves the binary"
+        );
+        assert!(
+            dispatched_free.load(std::sync::atomic::Ordering::SeqCst),
+            "an immediate dispatch after a rollback must find the lock released"
+        );
+    }
+
+    #[test]
+    fn recovery_refuses_an_invalid_previous_copy() {
+        let (_dir, current) = install_dir();
+        let previous = previous_binary_path(&current);
+        // The install path is gone and the only rollback copy is empty.
+        std::fs::remove_file(&current).unwrap();
+        std::fs::write(&previous, b"").unwrap();
+
+        let report = startup_recovery_for(&current);
+        assert!(report.refused_previous);
+        assert!(!report.restored);
+        assert!(!current.exists(), "an empty backup is never published");
+        assert!(previous.exists(), "the refused backup is left in place");
+
+        let error = recover_only_for(&current).unwrap_err();
+        assert!(
+            error.to_string().contains("could not be recovered"),
+            "{error}"
+        );
+        assert!(!current.exists());
+        assert!(previous.exists());
+    }
+
+    #[test]
+    fn recovery_refuses_a_previous_copy_that_fails_its_checksum() {
+        let (_dir, current) = install_dir();
+        let previous = previous_binary_path(&current);
+        std::fs::remove_file(&current).unwrap();
+        std::fs::write(&previous, b"damaged").unwrap();
+        std::fs::write(
+            previous_checksum_path(&previous),
+            format!("{} 7\n", "0".repeat(64)),
+        )
+        .unwrap();
+
+        let report = startup_recovery_for(&current);
+        assert!(report.refused_previous);
+        assert!(!current.exists());
+        assert!(previous.exists());
+        assert!(previous_checksum_path(&previous).exists());
+    }
+
+    #[test]
+    fn the_rollback_skip_message_says_the_binary_was_restored() {
+        let lines = rollback_skip_lines("a turn is running");
+        assert_eq!(
+            lines[1],
+            "binary restored; restart h4rnd when the turn finishes (`h4rnd service restart`)"
+        );
+        assert!(lines[0].contains("a turn is running"));
     }
 }

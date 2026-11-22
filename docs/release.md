@@ -166,27 +166,39 @@ renamed over the install path in one step, and `--rollback` is also a single
 rename. A crash therefore leaves a runnable binary at the install path.
 
 The rollback copy is never written straight to `h4rnd.previous`: the old binary
-is copied into a unique temp file beside it, fsynced, and renamed over
-`h4rnd.previous`, with its size and SHA-256 recorded in a sidecar. `--rollback`
-refuses a backup that is missing, empty, not executable (on Unix) or does not
-match that record, so a copy interrupted by a crash or power loss can never
-replace the installed binary. The old sidecar is deleted before the new backup
-is published, and the new sidecar goes through its own unique temp file, fsync
-and rename, so the backup and its record can never describe different files; a
-sidecar failure fails the update before the installed binary is touched. On
-Windows a running executable cannot be replaced in place. The update keeps that
+is copied into a unique temp file beside it, fsynced, and staged. Its size and
+SHA-256 record is staged the same way, and only after both are ready are they
+renamed over `h4rnd.previous` and `h4rnd.previous.sha256`. A failure while
+writing either one therefore leaves the previous backup and its sidecar exactly
+as they were, so the last good release stays rollbackable. `--rollback` refuses a
+backup that is missing, empty, not executable (on Unix) or does not match that
+record, so a copy interrupted by a crash or power loss can never replace the
+installed binary. If the final sidecar rename fails, the new backup is refused by
+the old record rather than installed. On Windows a running executable cannot be
+replaced in place. The update keeps that
 copy at `h4rnd.previous.exe`, renames the running `h4rnd.exe` to
 `h4rnd.old.exe`, and moves the new binary in; if that is interrupted, the next
 start restores `h4rnd.old.exe` (or `h4rnd.previous.exe`) before doing anything
 else. Recovery derives the install path from the moved-aside name, so it works
 even though `h4rnd.exe` is missing, and it publishes a copy taken from
-`h4rnd.previous.exe` with a temp file and rename rather than a plain copy. The
-scheduled task installed by `h4rnd service install` runs `h4rnd --recover-only`
-before the daemon: that takes the same installation lock as an update, so the
-task and an update can never write the same files. Tasks registered by older
-releases under the machine-wide `h4rn` name are removed by the next install or
-uninstall. Without a service, run the moved-aside binary (for example
-`h4rnd.old.exe --version`) and it repairs the install path.
+`h4rnd.previous.exe` with a temp file and rename rather than a plain copy. It
+runs the same checks as `--rollback` on that copy first: an empty,
+non-executable or truncated `.previous` is left in place with an explanation
+instead of being published. The scheduled task installed by
+`h4rnd service install` uses an inline launcher that waits up to 30 seconds for
+the installation lock, then repairs a missing `h4rnd.exe` itself (from `.old`, a
+moved-aside `.failed`, or `.previous` through a staging file and rename) before
+starting the daemon. Because the launcher does that work rather than calling
+`--recover-only`, it also starts correctly when the binary at the install path is
+an older image that predates that flag. Before a Windows update or rollback
+renames anything, `h4rnd` rewrites the registered task's launcher with this
+version (the install script's `-NoStart` mode), so a legacy task that launched
+`h4rnd.exe` directly becomes recoverable too. The update releases the installation lock
+before it triggers the restart, so the launcher never has to wait for the process
+that started it. Tasks registered by older releases under the machine-wide
+`h4rn` name are removed by the next install or uninstall. Without a service, run
+the moved-aside binary (for example `h4rnd.old.exe --version`) and it repairs the
+install path.
 
 The update restarts the service only when the registered unit, plist or task
 runs the binary that was replaced. If it launches a different installation, the
@@ -198,9 +210,19 @@ running; only the start step must succeed.
 
 A running daemon that reports an active turn stops the update with an
 explanation unless `--force` is passed. The guard probes the daemon the
-registered unit, plist or task actually starts: it reads that service's own
-`H4RN_BIND` (including systemd drop-ins and `%h`) instead of the updater's
-`--bind`, so an idle daemon elsewhere on the machine cannot make a busy service
+registered unit, plist or task actually starts. It resolves that service's
+endpoint in the daemon's own order: a `--bind` argument in the registered
+command line, then `H4RN_BIND` from the service's environment (systemd
+`Environment=` and `EnvironmentFile=` plus the user manager environment, launchd
+`EnvironmentVariables`, or the account-wide Windows environment), then the
+compiled default. h4rnd has no config file, so there is no config-file step. A
+source the service may use that cannot be read (the systemd user manager
+environment, or the account-wide Windows environment) leaves the target
+unverified, so the update refuses unless `--force` is passed. On Linux the
+command line comes from `systemctl --user show -p ExecStart --value`, which
+includes runtime drop-ins; the unit files (with reset-and-override drop-ins and
+`%h`) are read only when systemctl cannot answer. The updater's own `--bind` is
+never used, so an idle daemon elsewhere on the machine cannot make a busy service
 look safe. If the registered service's executable or endpoint cannot be read,
 the update refuses unless `--force` is passed. The guard fails closed and is
 checked again immediately before the binary is replaced: a daemon that is
@@ -209,7 +231,8 @@ omits `active_turns`, also blocks the update unless `--force` is passed.
 `--rollback` uses the same guard. If a turn starts after the new binary is
 installed but before the restart, the update keeps the installed binary, skips
 the restart, and tells you to restart h4rnd when the turn finishes with
-`h4rnd service restart`, so the turn is never cut off. A build with no
+`h4rnd service restart`, so the turn is never cut off; a rollback says the same
+with "binary restored". A build with no
 `H4RN_UPDATER_PUBKEY` refuses to replace the binary and prints the manual
 download, verify and restart steps instead. A release needs the signed
 `SHA256SUMS` for its daemon to update itself.
