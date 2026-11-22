@@ -14,7 +14,9 @@ import {
  * can change the host or the folder at any time. This session keeps the box in
  * step with one slot: the host and folder whose draft it currently shows. The
  * box cannot be typed in until a host is bound, so there is no provisional
- * text to move around; a host change simply shows that host's slot.
+ * text to move around; a host change simply shows that host's slot. Typing may
+ * move the slot to the folder on screen, but only while that folder has no
+ * saved draft of its own: a keystroke never replaces another folder's draft.
  */
 
 export type NewThreadDraftSnapshot = {
@@ -112,6 +114,32 @@ export class NewThreadDraftSession {
     return this.snapshot();
   }
 
+  /**
+   * Show another folder's slot without committing it: the automatic first
+   * project, or a path typed in the field on its first keystroke. The slot
+   * moves so the text belongs to the folder on screen, but the folder is not
+   * remembered as the last one used.
+   */
+  showWorkspace(workspace: string): NewThreadDraftSnapshot {
+    const next = normalizeWorkspace(workspace) || DEFAULT_NEW_THREAD_WORKSPACE;
+    if (next !== this.workspace) {
+      this.workspace = next;
+      this.loadSlot();
+    }
+    return this.snapshot();
+  }
+
+  /**
+   * Whether a folder's slot has no saved text. A keystroke may move the
+   * session to a folder whose slot is empty (there is nothing to replace), but
+   * never into a slot that already holds a draft the person is not looking at.
+   */
+  slotIsEmpty(workspace: string): boolean {
+    if (!this.host) return true;
+    const next = normalizeWorkspace(workspace) || DEFAULT_NEW_THREAD_WORKSPACE;
+    return this.store.readNewThreadDraftEntry(this.host, next).text.length === 0;
+  }
+
   /** The user typed in the prompt box. */
   setText(text: string): void {
     this.text = text;
@@ -138,15 +166,16 @@ export class NewThreadDraftSession {
   /**
    * The thread started. Clear the text's own slot only while it still holds
    * the revision that was sent: if another tab saved newer text while Start
-   * waited, that text stays.
+   * waited, that text stays. Returns whether the slot was cleared, so the box
+   * is blanked only when the draft really went away.
    */
-  clearSubmitted(submission: NewThreadDraftSubmission): void {
+  clearSubmitted(submission: NewThreadDraftSubmission): boolean {
     const cleared = this.store.clearNewThreadDraftIfRevision(
       submission.host,
       submission.slotWorkspace,
       submission.revision,
     );
-    if (!cleared) return;
+    if (!cleared) return false;
     if (
       this.host === submission.host &&
       this.workspace === submission.slotWorkspace &&
@@ -155,6 +184,17 @@ export class NewThreadDraftSession {
       this.text = "";
       this.revision = null;
     }
+    return true;
+  }
+
+  /**
+   * Read the bound slot again. The New thread dialog can edit the same slot
+   * while it sits on top of the inbox, and another tab can change it too; the
+   * box shows what the slot holds now.
+   */
+  reloadSlot(): NewThreadDraftSnapshot {
+    this.loadSlot();
+    return this.snapshot();
   }
 
   private bind(host: HostId, rememberWorkspace: boolean): NewThreadDraftSnapshot {
@@ -164,7 +204,9 @@ export class NewThreadDraftSession {
       if (last.length > 0) this.workspace = normalizeWorkspace(last);
     }
     this.loadSlot();
-    this.store.writeLastWorkspace(host, this.workspace);
+    // Only a folder the user committed or started in is remembered. Merely
+    // showing the default (or an automatic first-project choice) must not
+    // become the folder the next open starts in.
     return this.snapshot();
   }
 

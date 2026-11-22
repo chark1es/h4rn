@@ -20,6 +20,7 @@ import type { H4rnClient } from "@/lib/client/client";
 import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
+import { drafts, moveLocalThreadDraft } from "@/lib/drafts";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
 import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
@@ -1059,6 +1060,9 @@ function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
         delete logs[consumed.tempId];
         if (optimisticLog) logs[summary.thread_id] = optimisticLog;
         pendingCreates = pendingCreates.filter((pending) => pending.tempId !== consumed.tempId);
+        // Text typed while the thread was still optimistic belongs to the
+        // real id now; the temp id is never written to storage.
+        moveLocalThreadDraft(summary.host, consumed.tempId, summary.thread_id);
         if (ui.route.kind === "thread" && ui.route.threadId === consumed.tempId) {
           ui = {
             ...ui,
@@ -1409,6 +1413,8 @@ function reconcileCreatedThread(
     : (existingLog ?? { ...createThreadLog(), loaded: true });
   const pendingCreates = state.pendingCreates.filter((pending) => pending.tempId !== tempId);
 
+  moveLocalThreadDraft(summary.host, tempId, threadId);
+
   let ui = state.ui;
   if (ui.route.kind === "thread" && ui.route.threadId === tempId) {
     ui = {
@@ -1494,6 +1500,10 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       logs: omitKey(current.logs, tempId),
       pendingCreates: current.pendingCreates.filter((pending) => pending.tempId !== tempId),
     });
+    // The optimistic thread never existed, so nothing will ever ask for its
+    // draft again. Drop the memory-only text typed into it rather than leaving
+    // it under a temporary id that another session could reuse.
+    drafts.clearThreadDraft(input.host, tempId);
     navigate({ kind: "inbox" });
     pushToast({
       variant: "error",

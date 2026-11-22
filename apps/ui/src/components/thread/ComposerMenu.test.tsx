@@ -123,6 +123,7 @@ function renderMenu(
     truncated?: boolean;
     rows?: ComposerMenuRow[];
     query?: string;
+    lineHeight?: number;
   } = {},
 ) {
   const view = render(
@@ -131,6 +132,7 @@ function renderMenu(
       rows={overrides.rows ?? rows}
       activeIndex={0}
       anchor={anchor}
+      {...(overrides.lineHeight === undefined ? {} : { lineHeight: overrides.lineHeight })}
       loading={false}
       error={null}
       workspaceName="repo"
@@ -168,9 +170,10 @@ describe("ComposerMenu placement wiring", () => {
     const { menu } = renderMenu({ left: 900, bottom: 80 });
 
     await waitFor(() => expect(menu.style.left).toBe("772px"));
+    // Geometry, not a test-only attribute: the popover hangs above the
+    // composer's bottom edge and has no top offset.
     expect(menu.style.bottom).toBe("80px");
     expect(menu.style.top).toBe("");
-    expect(menu.getAttribute("data-flipped")).toBeNull();
     expect(screen.getByRole("listbox", { name: "Files" })).toBeTruthy();
   });
 
@@ -186,9 +189,26 @@ describe("ComposerMenu placement wiring", () => {
     const { menu } = renderMenu({ left: 100, bottom: 80 });
 
     await waitFor(() => expect(menu.style.top).toBe("47px"));
+    // Flipped means it was placed from the top edge instead: below the caret
+    // line (22 px) plus the 21 px line height and a 4 px gap.
+    expect(Number.parseFloat(menu.style.top)).toBeGreaterThan(22);
     expect(menu.style.bottom).toBe("");
     expect(menu.style.left).toBe("100px");
-    expect(menu.getAttribute("data-flipped")).toBe("below");
+  });
+
+  it("places the flip-below top using the measured line height", async () => {
+    vi.spyOn(window, "innerWidth", "get").mockReturnValue(1_200);
+    vi.spyOn(window, "innerHeight", "get").mockReturnValue(800);
+    stubLayout({
+      width: 300,
+      height: 320,
+      parent: { left: 0, top: 0, width: 500, height: 96 },
+    });
+
+    // The caret line is 40 px tall, not the 21 px default.
+    const { menu } = renderMenu({ left: 100, bottom: 80 }, { lineHeight: 40 });
+
+    await waitFor(() => expect(menu.style.top).toBe("66px"));
   });
 });
 
@@ -225,7 +245,6 @@ describe("ComposerMenu phone sheet height", () => {
     const sheet = menu.getBoundingClientRect();
     expect(sheet.bottom).toBe(532);
     expect(sheet.top).toBe(8);
-    expect(menu.getAttribute("data-covers")).toBeNull();
     const done = within(menu).getByRole("button", { name: "Done" }).getBoundingClientRect();
     expect(done.top).toBeGreaterThanOrEqual(0);
     expect(done.bottom).toBeLessThanOrEqual(540);
@@ -244,10 +263,15 @@ describe("ComposerMenu phone sheet height", () => {
     await waitFor(() => expect(menu.style.bottom).toBe("-435px"));
     expect(menu.style.maxHeight).toBe("540px");
 
+    // Covering the composer means the sheet span is exactly the visible
+    // viewport; its height and both edges are the geometry that matters.
     const sheet = menu.getBoundingClientRect();
     expect(sheet.top).toBe(0);
     expect(sheet.bottom).toBe(540);
-    expect(menu.getAttribute("data-covers")).toBe("composer");
+    expect(sheet.height).toBe(540);
+    expect(within(menu).getByRole("listbox").getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      sheet.top,
+    );
     const done = within(menu).getByRole("button", { name: "Done" }).getBoundingClientRect();
     expect(done.top).toBeGreaterThanOrEqual(0);
     expect(done.bottom).toBeLessThanOrEqual(540);

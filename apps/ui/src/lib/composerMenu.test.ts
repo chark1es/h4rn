@@ -44,6 +44,15 @@ describe("@ file trigger", () => {
     expect(detectComposerTrigger("café @src", 9)?.kind).toBe("file");
   });
 
+  it("does not open after a decomposed accent", () => {
+    // "e" + U+0301 is one letter to a reader even though it is two code
+    // points; the combining mark keeps the @ inside the word.
+    const decomposed = "e\u0301@src";
+    expect(detectComposerTrigger(decomposed, decomposed.length)).toBeNull();
+    const spaced = "e\u0301 @src";
+    expect(detectComposerTrigger(spaced, spaced.length)?.kind).toBe("file");
+  });
+
   it("does not open inside a word after another @", () => {
     expect(detectComposerTrigger("foo@bar", 7)).toBeNull();
   });
@@ -343,6 +352,26 @@ describe("popover placement", () => {
     expect(placement.bottom).toBeNull();
     expect(placement.top).toBeGreaterThan(0);
     expect(placement.flipped).toBe(true);
+  });
+
+  it("uses the measured line height when flipping below the caret", () => {
+    const size = { width: 300, height: 320 };
+    const parentBox = { left: 16, top: 0, width: 500, height: 96 };
+    const compact = placePopover({
+      anchor: { left: 20, bottom: 80 },
+      size,
+      parent: parentBox,
+      viewport,
+      lineHeight: 14,
+    });
+    const roomy = placePopover({
+      anchor: { left: 20, bottom: 80 },
+      size,
+      parent: parentBox,
+      viewport,
+      lineHeight: 40,
+    });
+    expect(roomy.top).toBeGreaterThan(compact.top ?? 0);
   });
 });
 

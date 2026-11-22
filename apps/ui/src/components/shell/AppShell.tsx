@@ -6,7 +6,7 @@ import {
   FolderPlusIcon,
   PaperclipIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
@@ -52,9 +52,16 @@ import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
+import {
+  DEFAULT_NEW_THREAD_WORKSPACE,
+  drafts,
+  normalizeWorkspace,
+  subscribeDraftChanges,
+} from "@/lib/drafts";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { projectName } from "@/lib/grouping";
 import { titleWithShortcut } from "@/lib/keybindings";
+import { NewThreadDraftSession } from "@/lib/newThreadDraft";
 import {
   closeLinkPullRequest,
   createThread,
@@ -76,7 +83,7 @@ const START_MODELS: Record<HarnessKind, string> = {
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
-function InboxDetailEmpty() {
+export function InboxDetailEmpty() {
   const hosts = useApp((state) => state.hosts);
   const localHostId = useApp((state) => state.localHostId);
   const connection = useApp((state) => state.connection.status);
@@ -101,13 +108,67 @@ function InboxDetailEmpty() {
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  /** The Start composer: focus that stays inside it is still the person's. */
+  const composerRef = useRef<HTMLFieldSetElement | null>(null);
+  /**
+   * The inbox box remembers text per host and folder, exactly like the New
+   * thread dialog: it is the same start-a-thread slot, just always on screen.
+   */
+  const sessionRef = useRef<NewThreadDraftSession | null>(null);
+  const draftSession = useCallback(
+    () => (sessionRef.current ??= new NewThreadDraftSession(drafts)),
+    [],
+  );
+  /** Start is being pressed: its blur must not swap the text before it submits. */
+  const startPressed = useRef(false);
+  const startButtonRef = useRef<HTMLButtonElement | null>(null);
+  /** The dialog was open on the previous render; closing it re-reads the slot. */
+  const dialogWasOpen = useRef(false);
   useProxyCatalog();
   useProxy((state) => state.profiles);
+  const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
 
   useEffect(() => {
     if (host || onlineHosts.length === 0) return;
-    setHost(defaultThreadHostId(onlineHosts, localHostId) ?? "");
-  }, [host, onlineHosts, localHostId]);
+    const first = defaultThreadHostId(onlineHosts, localHostId) ?? "";
+    if (!first) return;
+    // The dialog's session: no folder option, so a folder the person used on
+    // this host before is restored here with its draft.
+    const draft = draftSession().adoptHost(first);
+    setHost(first);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
+  }, [host, onlineHosts, localHostId, draftSession]);
+
+  // Another tab (or the New thread dialog in this one) can write the same
+  // slot. Show what the slot holds; a queued edit of this box is the newer
+  // intent and the store already returns it.
+  useEffect(() => {
+    return subscribeDraftChanges((change) => {
+      if (change.scope !== "new-thread") return;
+      const shown = draftSession().snapshot();
+      if (change.host !== shown.host || change.target !== shown.workspace) return;
+      setPrompt(draftSession().reloadSlot().text);
+    });
+  }, [draftSession]);
+
+  // The dialog edits the same slot while it sits on top: when it closes, read
+  // the slot again so its text (or its clear) shows in the inbox.
+  useEffect(() => {
+    if (dialogWasOpen.current && !newThreadOpen) {
+      setPrompt(draftSession().reloadSlot().text);
+    }
+    dialogWasOpen.current = newThreadOpen;
+  }, [newThreadOpen, draftSession]);
+
+  const commitWorkspace = useCallback(
+    (path: string) => {
+      const draft = draftSession().commitWorkspace(path);
+      setWorkspace(draft.workspace);
+      setPrompt(draft.text);
+    },
+    [draftSession],
+  );
 
   const selectedHost = hosts[host];
   // Registered projects first, then folders that only have threads so far.
@@ -127,12 +188,22 @@ function InboxDetailEmpty() {
     return choices;
   }, [projects, threads, host]);
   const selectedFolder = folderChoices.find((choice) => choice.path === workspace);
-  // Start in the first project once the list arrives, unless a path was typed.
+  // Start in the first project once the list arrives, unless a path was typed,
+  // the person has a folder remembered on this host, or the box holds unsent
+  // text. This is a convenience choice, not one to commit: it shows that
+  // folder's draft but does not become the folder the next open remembers.
   useEffect(() => {
     if (customFolder || selectedFolder) return;
     const first = folderChoices[0];
-    if (first && workspace === "~/code") setWorkspace(first.path);
-  }, [customFolder, selectedFolder, folderChoices, workspace]);
+    if (!first || workspace !== DEFAULT_NEW_THREAD_WORKSPACE) return;
+    if (prompt.length > 0) return;
+    if (host && drafts.readLastWorkspace(host) !== "") return;
+    // The choice is view-only: its slot's draft is shown, but the folder is
+    // not remembered as the last one used.
+    const draft = draftSession().showWorkspace(first.path);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
+  }, [customFolder, selectedFolder, folderChoices, workspace, prompt, host, draftSession]);
   const harnessChoices = (
     selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES
   ).filter(
@@ -148,25 +219,59 @@ function InboxDetailEmpty() {
     enabled: writable,
     disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
   });
-  const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, writable && !newThreadOpen);
 
+  const updatePrompt = (value: string) => {
+    const session = draftSession();
+    // The shown folder can be one the session has not committed yet: the
+    // automatic first project, or a path typed in the field. Text typed while
+    // that folder is on screen belongs to it, so the slot moves with the first
+    // keystroke — but only while that folder's slot is empty. A typed folder
+    // that already holds a saved draft is somebody else's unsent text: the
+    // keystroke stays with the slot on screen instead of replacing it. That is
+    // still not a folder choice to remember. Clearing the box is not text for
+    // the shown folder either: it empties the slot the cleared text came from.
+    const target = normalizeWorkspace(workspace) || DEFAULT_NEW_THREAD_WORKSPACE;
+    if (
+      value.length > 0 &&
+      target !== session.snapshot().workspace &&
+      session.slotIsEmpty(target)
+    ) {
+      session.showWorkspace(target);
+    }
+    session.setText(value);
+    setPrompt(value);
+  };
+
   const submit = async () => {
+    // A press is over by the time Start runs; its flag must not outlive it.
+    startPressed.current = false;
     if (!writable || starting || attachments.blockedReason) return;
     if (!prompt.trim() && attachments.attachments.length === 0) return;
+    const draft = draftSession().submission(workspace);
+    if (!draft) return;
     setStarting(true);
     const ok = await createThread({
-      host,
+      host: draft.host,
       harness,
-      workspacePath: workspace.trim() || "~/code",
+      workspacePath: draft.workspace,
       model,
-      prompt: prompt.trim(),
+      prompt: draft.text.trim(),
       attachments: attachments.attachments,
       runtimeMode: "approval_required",
     });
     setStarting(false);
     if (ok) {
-      setPrompt("");
+      // Clear only the slot whose revision was sent; newer text from another
+      // tab survives, like a thread composer's draft.
+      const cleared = draftSession().clearSubmitted(draft);
+      drafts.writeLastWorkspace(draft.host, draft.workspace);
+      // The folder can change while Start waits, and the box then shows that
+      // folder's draft. Blanking it would lose text this send never saw; show
+      // what the slot on screen holds now.
+      const shown = draftSession().snapshot();
+      const stillOnSentSlot = shown.host === draft.host && shown.workspace === draft.slotWorkspace;
+      setPrompt(cleared && stillOnSentSlot ? "" : draftSession().reloadSlot().text);
       attachments.clear();
     }
   };
@@ -175,7 +280,7 @@ function InboxDetailEmpty() {
     const element = textareaRef.current;
     if (!element || !writable) return;
     const start = element.selectionStart ?? prompt.length;
-    setPrompt(`${prompt.slice(0, start)}@${prompt.slice(start)}`);
+    updatePrompt(`${prompt.slice(0, start)}@${prompt.slice(start)}`);
     requestAnimationFrame(() => {
       element.focus();
       element.setSelectionRange(start + 1, start + 1);
@@ -183,7 +288,10 @@ function InboxDetailEmpty() {
   };
 
   const pickHost = (nextHostId: string) => {
+    const draft = draftSession().selectHost(nextHostId);
     setHost(nextHostId);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
     // Never default to the bare ACP kind: it is not startable without an
     // instance id, which this quick start does not choose.
     const nextHarness = hosts[nextHostId]?.harnesses.find((kind) => kind !== "acp");
@@ -315,6 +423,22 @@ function InboxDetailEmpty() {
                 <input
                   value={workspace}
                   onChange={(event) => setWorkspace(event.target.value)}
+                  onBlur={(event) => {
+                    // Pressing Start blurs this field on the way to the
+                    // button, with a mouse or by tabbing to it. Start sends
+                    // what is on screen to the folder as typed; the blur must
+                    // not swap the box to that folder's draft.
+                    if (startPressed.current || event.relatedTarget === startButtonRef.current) {
+                      return;
+                    }
+                    commitWorkspace(workspace);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      commitWorkspace(workspace);
+                    }
+                  }}
                   placeholder="~/code/api"
                   spellCheck={false}
                 />
@@ -347,7 +471,7 @@ function InboxDetailEmpty() {
                       key={choice.path}
                       onSelect={() => {
                         setCustomFolder(false);
-                        setWorkspace(choice.path);
+                        commitWorkspace(choice.path);
                       }}
                     >
                       <span className="min-w-0 flex-1 truncate">{choice.name}</span>
@@ -370,6 +494,7 @@ function InboxDetailEmpty() {
           </div>
 
           <fieldset
+            ref={composerRef}
             aria-label="Start a thread composer"
             className="q-composer"
             style={{ margin: 0, minWidth: 0, width: "100%", position: "relative" }}
@@ -394,7 +519,7 @@ function InboxDetailEmpty() {
               placeholder={`Describe the task for ${harnessLabel(harness)} on ${hostName}`}
               value={prompt}
               disabled={!writable}
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => updatePrompt(event.target.value)}
               onPaste={(event) => {
                 if (!writable) return;
                 const files = Array.from(event.clipboardData.files);
@@ -471,9 +596,48 @@ function InboxDetailEmpty() {
               </DropdownMenu>
 
               <button
+                ref={startButtonRef}
                 type="button"
                 className={`q-send${canSend ? " ready" : ""}`}
                 disabled={!canSend}
+                onPointerDown={() => {
+                  startPressed.current = true;
+                }}
+                onPointerUp={() => {
+                  startPressed.current = false;
+                }}
+                onPointerCancel={() => {
+                  startPressed.current = false;
+                }}
+                onPointerLeave={() => {
+                  startPressed.current = false;
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") startPressed.current = true;
+                }}
+                onKeyUp={() => {
+                  startPressed.current = false;
+                }}
+                onBlur={(event) => {
+                  const pressed = startPressed.current;
+                  startPressed.current = false;
+                  if (pressed) return;
+                  // Tabbing from the folder field to Start skips that field's
+                  // blur commit so Start sends the folder as typed. That skip
+                  // lasts only while the press is happening: when Start loses
+                  // focus without being pressed, the typed folder is committed
+                  // here, so the session and the box agree again and a later
+                  // keystroke cannot land in the wrong folder's slot.
+                  const next = event.relatedTarget as Node | null;
+                  // Focus that stays inside the composer is still the person
+                  // writing here (the box, an attach button, the model menu):
+                  // swapping the box under their next keystroke is the loss
+                  // this commit exists to prevent.
+                  if (next && composerRef.current?.contains(next)) return;
+                  if (workspace !== draftSession().snapshot().workspace) {
+                    commitWorkspace(workspace);
+                  }
+                }}
                 onClick={() => void submit()}
                 title={
                   attachments.blockedReason ??
