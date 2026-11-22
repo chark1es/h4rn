@@ -15,6 +15,7 @@ import type {
   TurnId,
 } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
+import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
 import { getClient } from "@/lib/store/appStore";
 import { conflictFromWrite, keepMineBaseEtag } from "./conflict";
 import {
@@ -256,6 +257,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           host: target.host,
           workspace: target.path,
           path,
+          bytes_base64: false,
         });
         if (response.type !== "fs_file") return;
         const file = response.file;
@@ -669,19 +671,8 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       applyState({ ...initialState(), workspaceKey });
       void loadListing("");
     }
-    void getClient()
-      .request({
-        type: "fs_watch",
-        host: workspaceHost,
-        workspace: workspacePath,
-        paths: [],
-      })
-      .catch(() => undefined);
-    return () => {
-      void getClient()
-        .request({ type: "fs_unwatch", workspace: workspacePath })
-        .catch(() => undefined);
-    };
+    const release = retainWorkspaceWatch(workspaceHost, workspacePath);
+    return release;
   }, [workspaceKey, workspacePath, workspaceHost, loadListing]);
 
   useEffect(() => {
@@ -753,6 +744,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
             host: target.host,
             workspace: target.path,
             path,
+            bytes_base64: false,
           });
           if (response.type !== "fs_file") continue;
           if (response.file.content === null && !response.file.binary && !response.file.truncated) {

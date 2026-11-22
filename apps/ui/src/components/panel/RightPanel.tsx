@@ -1,12 +1,13 @@
 import { XIcon } from "lucide-react";
 
 import { Resizer } from "@/components/shell/Resizer";
+import { PreviewPanel } from "@/features/preview/PreviewPanel";
 import { SubagentsPanel } from "@/features/subagents/SubagentsPanel";
 import { useSubagentCount } from "@/features/subagents/subagentStore";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { titleWithShortcut } from "@/lib/keybindings";
-import { setPanelTab, setPanelWidth, togglePanel, useApp } from "@/lib/store/appStore";
+import { openPreview, setPanelTab, setPanelWidth, togglePanel, useApp } from "@/lib/store/appStore";
 import { ChangesSection } from "./ChangesSection";
 import { usePanelChanges } from "./usePanelChanges";
 import { WorkspaceFiles } from "./WorkspaceFiles";
@@ -15,7 +16,7 @@ function workspaceName(path: string): string {
   return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
-/** The one right panel: Changes, Files and Subagents for the active thread. */
+/** The one right panel: Changes, Files, Preview and Subagents for the active thread. */
 export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide?: boolean }) {
   const tab = useApp((state) => state.ui.layout.panelTab);
   const width = useApp((state) => state.ui.layout.panelWidth);
@@ -24,6 +25,8 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
   const changeCount = changes.changes?.files.length ?? 0;
   const subagents = useSubagentCount(thread.thread_id);
   const subagentTotal = subagents.total;
+  const preview = useApp((state) => state.ui.preview);
+  const previewPath = preview?.threadId === thread.thread_id ? preview.path : null;
 
   return (
     <aside
@@ -49,6 +52,16 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
           onClick={() => setPanelTab("files")}
         >
           Files
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "preview"}
+          className="q-rp-tab"
+          title={previewPath ?? "Preview an HTML file"}
+          onClick={() => setPanelTab("preview")}
+        >
+          Preview
         </button>
         <button
           type="button"
@@ -85,6 +98,13 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
           onOpenAgentChanges={() => setPanelTab("changes")}
           activePath={ide ? ideActivePath : null}
           agentChangesLabel={ide ? `${thread.title} · ${harnessLabel(thread.harness)}` : null}
+          onOpenPreview={(path) => openPreview(path, thread.thread_id)}
+        />
+      ) : tab === "preview" ? (
+        <PreviewPanel
+          key={`${thread.thread_id}:${previewPath ?? "empty"}`}
+          thread={thread}
+          path={previewPath}
         />
       ) : (
         <SubagentsPanel thread={thread} />
