@@ -54,8 +54,8 @@ All notable changes to h4rn are recorded here. The format follows
   place, with its sidecar when that is still present; one after it leaves a
   backup that `--rollback` still accepts after its size and executable checks.
   The new backup can therefore never sit next to the old backup's checksum, so
-  the last good release stays rollbackable. `--rollback`
-  and startup recovery refuse a backup that is missing, empty, not executable
+  the last good release stays rollbackable. `--rollback` and startup recovery
+  refuse a backup that is missing, empty, not executable
   on Unix or, when a record is present, does not match it; recovery leaves the
   files in place and says what to do. On Windows `h4rnd update` rewrites the
   registered task's launcher before it renames anything. If that task exists but
