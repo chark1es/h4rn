@@ -112,6 +112,21 @@ export class NewThreadDraftSession {
     return this.snapshot();
   }
 
+  /**
+   * Show another folder's slot without committing it: the automatic first
+   * project, or a path typed in the field on its first keystroke. The slot
+   * moves so the text belongs to the folder on screen, but the folder is not
+   * remembered as the last one used.
+   */
+  showWorkspace(workspace: string): NewThreadDraftSnapshot {
+    const next = normalizeWorkspace(workspace) || DEFAULT_NEW_THREAD_WORKSPACE;
+    if (next !== this.workspace) {
+      this.workspace = next;
+      this.loadSlot();
+    }
+    return this.snapshot();
+  }
+
   /** The user typed in the prompt box. */
   setText(text: string): void {
     this.text = text;

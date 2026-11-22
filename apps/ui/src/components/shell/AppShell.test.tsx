@@ -248,7 +248,95 @@ describe("inbox start composer drafts", () => {
     expect(drafts.readLastWorkspace("host_ui")).toBe("~/code/web");
   });
 
-  it("shows the first project without remembering it or switching the slot", async () => {
+  it("keeps text typed while the automatic first project is shown with that project", async () => {
+    mock.state.projects = [
+      { host: "host_ui", path: "~/code/api", name: "api" },
+      { host: "host_ui", path: "~/code/web", name: "web" },
+    ];
+    const first = render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Project: api" })).toBeTruthy());
+
+    // The chip shows "api"; the text belongs to that folder's slot, even
+    // though nobody picked it and it is not remembered as the last folder.
+    fireEvent.change(taskBox(), { target: { value: "api task" } });
+    flushDrafts();
+
+    first.unmount();
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Project: api" })).toBeTruthy());
+
+    expect(taskBox().value).toBe("api task");
+    expect(drafts.readLastWorkspace("host_ui")).toBe("");
+
+    fireEvent.click(screen.getByRole("button", { name: "Start thread" }));
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+    expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
+      host: "host_ui",
+      workspacePath: "~/code/api",
+      prompt: "api task",
+    });
+  });
+
+  it("keeps the remembered default folder when the box already holds text", async () => {
+    mock.state.projects = [
+      { host: "host_ui", path: "~/code/api", name: "api" },
+      { host: "host_ui", path: "~/code/web", name: "web" },
+    ];
+    writeNewThreadDraft("host_ui", "~/code", "work in progress");
+    flushDrafts();
+
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    expect(taskBox().value).toBe("work in progress");
+    expect(screen.getByRole("button", { name: "Project: ~/code" })).toBeTruthy();
+    expect(drafts.readLastWorkspace("host_ui")).toBe("");
+  });
+
+  it("keeps the task when Tab moves focus from the folder field to Start", async () => {
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    fireEvent.change(taskBox(), { target: { value: "visible task" } });
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+
+    const start = screen.getByRole("button", { name: "Start thread" });
+    // Tabbing to Start blurs the folder field with the button as the related
+    // target; no pointer press sets the flag first.
+    fireEvent.blur(folderField(), { relatedTarget: start });
+    fireEvent.focus(start);
+
+    // The blur must not swap the box to the typed folder's (empty) draft.
+    expect(taskBox().value).toBe("visible task");
+
+    fireEvent.click(start);
+
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+    expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
+      host: "host_ui",
+      workspacePath: "~/code/api",
+      prompt: "visible task",
+    });
+  });
+
+  it("writes text typed under a typed folder to that folder's slot", async () => {
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    // The field shows a folder nobody committed yet; text typed now belongs
+    // to that folder, not to the default slot the session started on.
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+    fireEvent.change(taskBox(), { target: { value: "api task" } });
+    flushDrafts();
+
+    expect(readNewThreadDraft("host_ui", "~/code/api")).toBe("api task");
+    expect(readNewThreadDraft("host_ui", "~/code")).toBe("");
+    expect(drafts.readLastWorkspace("host_ui")).toBe("");
+  });
+
+  it("shows the first project without remembering it", async () => {
     mock.state.projects = [
       { host: "host_ui", path: "~/code/api", name: "api" },
       { host: "host_ui", path: "~/code/web", name: "web" },

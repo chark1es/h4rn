@@ -177,17 +177,19 @@ All notable changes to h4rn are recorded here. The format follows
   host and folder like the New thread dialog. The file walk checks its ignore list before the
   depth cap, so a deep `node_modules` no longer marks the index truncated; `@` stays closed after
   a decomposed accent (`e` + U+0301); switching workspaces clears the picker instead of flashing
-  the previous workspace's files; and the flip-below fallback uses the caret line's measured
-  height. The dead single-blob draft migration was removed: no released build wrote that format.
-- **The empty-inbox Start box starts from what is on screen.** Pressing Start blurs the folder
-  field on the way to the button, and that blur used to swap the task box to the typed folder's
-  draft before the send; Start now carries the visible task to the folder as typed. The box also
-  restores the folder and draft last used on the host, instead of always opening on `~/code` and
-  ignoring them. The automatic first-project choice is only a view: it is not committed to the
-  box's slot, is not remembered as the last folder, and is skipped while the box holds unsent
-  text. The box is blanked only when the draft it sent was actually cleared, and it re-reads the
-  slot when the New thread dialog closes or another tab writes it, so the dialog's text appears in
-  the inbox. In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
+  the previous workspace's files or claiming the new one is empty before its index lands; and the
+  flip-below fallback uses the caret line's measured height. The dead single-blob draft migration
+  was removed: no released build wrote that format.
+- **The empty-inbox Start box starts from what is on screen.** Pressing Start — clicked or
+  reached with Tab — blurs the folder field on the way to the button, and that blur used to swap
+  the task box to the typed folder's draft before the send; Start now carries the visible task to
+  the folder as typed. The box also restores the folder and draft last used on the host, instead
+  of always opening on `~/code` and ignoring them. The automatic first-project choice is not
+  remembered as the last folder; it shows that folder's draft, and text typed while it is on
+  screen is saved with that folder, so a reload brings back the same folder and text. It is
+  skipped while the box holds unsent text. The box is blanked only when the draft it sent was
+  actually cleared, and it re-reads the slot when the New thread dialog closes or another tab
+  writes it, so the dialog's text appears in the inbox. In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
   (and keeps the text when nothing matches), and a recall made while a recalled prompt is sending
   stays on screen instead of the draft recall had preserved.
 - **A first connect no longer calls its own handshake history.** `since_seq: null` makes the daemon

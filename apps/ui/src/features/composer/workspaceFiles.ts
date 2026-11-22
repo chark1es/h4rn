@@ -265,5 +265,10 @@ export function useWorkspaceFiles(target: WorkspaceTarget, enabled: boolean): Wo
     };
   }, [host, workspace, targetKey, enabled, injected]);
 
-  return state.key === targetKey ? state.value : EMPTY;
+  // A render for another target has no index yet. While the picker is open it
+  // must read as loading, not as an empty workspace, until the effect's walk
+  // lands: otherwise the first frame says "No files in …" for a folder that
+  // simply has not been read.
+  if (state.key !== targetKey) return { ...EMPTY, loading: enabled };
+  return state.value;
 }

@@ -105,6 +105,7 @@ export function InboxDetailEmpty() {
   );
   /** Start is being pressed: its blur must not swap the text before it submits. */
   const startPressed = useRef(false);
+  const startButtonRef = useRef<HTMLButtonElement | null>(null);
   /** The dialog was open on the previous render; closing it re-reads the slot. */
   const dialogWasOpen = useRef(false);
   useProxyCatalog();
@@ -181,8 +182,12 @@ export function InboxDetailEmpty() {
     if (!first || workspace !== DEFAULT_NEW_THREAD_WORKSPACE) return;
     if (prompt.length > 0) return;
     if (host && drafts.readLastWorkspace(host) !== "") return;
-    setWorkspace(first.path);
-  }, [customFolder, selectedFolder, folderChoices, workspace, prompt, host]);
+    // The choice is view-only: its slot's draft is shown, but the folder is
+    // not remembered as the last one used.
+    const draft = draftSession().showWorkspace(first.path);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
+  }, [customFolder, selectedFolder, folderChoices, workspace, prompt, host, draftSession]);
   const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
   const hostName = selectedHost?.name ?? "a host";
   const offline = connection !== "online";
@@ -195,8 +200,14 @@ export function InboxDetailEmpty() {
   useAttachShortcut(attachments.openPicker, writable && !newThreadOpen);
 
   const updatePrompt = (value: string) => {
+    const session = draftSession();
+    // The shown folder can be one the session has not committed yet: the
+    // automatic first project, or a path typed in the field. Text typed while
+    // that folder is on screen belongs to it, so the slot moves with the first
+    // keystroke. That is still not a folder choice to remember.
+    if (workspace !== session.snapshot().workspace) session.showWorkspace(workspace);
+    session.setText(value);
     setPrompt(value);
-    draftSession().setText(value);
   };
 
   const submit = async () => {
@@ -373,11 +384,14 @@ export function InboxDetailEmpty() {
                 <input
                   value={workspace}
                   onChange={(event) => setWorkspace(event.target.value)}
-                  onBlur={() => {
+                  onBlur={(event) => {
                     // Pressing Start blurs this field on the way to the
-                    // button. Start sends what is on screen to the folder as
-                    // typed; it must not swap the box to that folder's draft.
-                    if (startPressed.current) return;
+                    // button, with a mouse or by tabbing to it. Start sends
+                    // what is on screen to the folder as typed; the blur must
+                    // not swap the box to that folder's draft.
+                    if (startPressed.current || event.relatedTarget === startButtonRef.current) {
+                      return;
+                    }
                     commitWorkspace(workspace);
                   }}
                   onKeyDown={(event) => {
@@ -542,6 +556,7 @@ export function InboxDetailEmpty() {
               </DropdownMenu>
 
               <button
+                ref={startButtonRef}
                 type="button"
                 className={`q-send${canSend ? " ready" : ""}`}
                 disabled={!canSend}

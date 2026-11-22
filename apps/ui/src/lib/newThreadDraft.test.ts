@@ -138,6 +138,27 @@ describe("NewThreadDraftSession", () => {
     expect(store.readLastWorkspace("host_a")).toBe("");
   });
 
+  it("shows a folder's slot without committing or remembering it", () => {
+    const store = makeStore(memoryStorage());
+    store.writeNewThreadDraft("host_a", "~/code/api", "api draft");
+    store.flush();
+    const session = new NewThreadDraftSession(store);
+    session.adoptHost("host_a");
+
+    const snapshot = session.showWorkspace("~/code/api");
+
+    expect(snapshot).toEqual({
+      host: "host_a",
+      workspace: "~/code/api",
+      text: "api draft",
+    });
+    expect(store.readLastWorkspace("host_a")).toBe("");
+
+    session.setText("typed here");
+    expect(store.readNewThreadDraft("host_a", "~/code/api")).toBe("typed here");
+    expect(store.readLastWorkspace("host_a")).toBe("");
+  });
+
   it("remembers the last folder per host across sessions", () => {
     const storage = memoryStorage();
     const store = makeStore(storage);

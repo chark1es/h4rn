@@ -146,9 +146,9 @@ function isNewerRevision(a: DraftRevision, b: DraftRevision | null): boolean {
 
 /**
  * Whether `a` is definitely later than `b`. Two revisions written in the same
- * millisecond by different tabs have no order, so neither one wins by
- * comparison; a queued write is allowed to overwrite a tie rather than being
- * dropped, which keeps both tabs' edits from vanishing together.
+ * millisecond by different tabs have no order, so neither wins by comparison;
+ * on a tie the flush that runs later lands and the other tab re-renders to it.
+ * Both edits do not survive.
  */
 function isStrictlyNewerRevision(a: DraftRevision, b: DraftRevision): boolean {
   return a.updatedAt > b.updatedAt;

@@ -272,4 +272,36 @@ describe("workspace file hook", () => {
     expect(result.current.files).toEqual([]);
     await waitFor(() => expect(result.current.files).toEqual(["only-in-two.ts"]));
   });
+
+  it("reads as loading, not an empty workspace, on the first render for a new target", async () => {
+    const lister = async ({ workspace, path }: { workspace: string; path: string }) =>
+      path === ""
+        ? listing(
+            path,
+            workspace.endsWith("/one") ? [file("only-in-one.ts")] : [file("only-in-two.ts")],
+          )
+        : listing(path, []);
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(WorkspaceFilesContext.Provider, { value: lister }, children);
+    const states: Array<{ files: string[]; loading: boolean; error: string | null }> = [];
+    const { result, rerender } = renderHook(
+      ({ workspace }: { workspace: string }) => {
+        const state = useWorkspaceFiles({ host: "host_1", workspace }, true);
+        states.push(state);
+        return state;
+      },
+      { initialProps: { workspace: "/work/one" }, wrapper },
+    );
+    await waitFor(() => expect(result.current.files).toEqual(["only-in-one.ts"]));
+
+    const firstNewRender = states.length;
+    rerender({ workspace: "/work/two" });
+
+    // The frame before the new walk answers has no files yet, but it is a
+    // workspace being read, not an empty one: the picker must not say
+    // "No files in …".
+    expect(states[firstNewRender]).toMatchObject({ files: [], loading: true, error: null });
+    await waitFor(() => expect(result.current.files).toEqual(["only-in-two.ts"]));
+    expect(result.current.loading).toBe(false);
+  });
 });
