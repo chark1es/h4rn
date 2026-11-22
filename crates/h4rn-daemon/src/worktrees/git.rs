@@ -1515,6 +1515,9 @@ pub fn index_matches(admin: &Path, treeish: &str, limit: Duration) -> Result<boo
             "diff-index",
             "--cached",
             "--quiet",
+            // A staged submodule update counts even when the submodule is
+            // configured `ignore = all`.
+            "--ignore-submodules=none",
             treeish,
             "--",
         ],
@@ -1760,7 +1763,14 @@ fn probe_mode_support(admin: &Path) -> (Option<bool>, Option<bool>) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
     let file = admin.join(format!("h4rn-mode-probe-{stamp}"));
-    let wrote_file = std::fs::write(&file, b"").is_ok();
+    // `create_new`: a stale entry of the same name (a crashed probe whose pid
+    // was reused) is never truncated or followed; it makes the probe
+    // inconclusive instead.
+    let wrote_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .is_ok();
     let exec = wrote_file
         .then(|| -> std::io::Result<bool> {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))?;
@@ -1788,11 +1798,14 @@ fn probe_mode_support(admin: &Path) -> (Option<bool>, Option<bool>) {
 
 /// The errors a filesystem without symlink support returns from `symlink(2)`.
 #[cfg(unix)]
+///
+/// `EPERM` is deliberately not among them: a filesystem without symlinks can
+/// return it, but so can a security policy denying `symlinkat` on one that
+/// stores symlinks fine, and treating that as "unsupported" would switch the
+/// symlink comparison off. It is inconclusive (forced, not cached), so on a
+/// FAT-like filesystem a repository that tracks symlinks needs "Remove anyway".
 fn symlinks_unsupported(error: &std::io::Error) -> bool {
-    const EPERM: i32 = 1;
-    const ENOSYS: i32 = 38;
-    const EOPNOTSUPP: i32 = 95;
-    matches!(error.raw_os_error(), Some(EPERM | ENOSYS | EOPNOTSUPP))
+    matches!(error.raw_os_error(), Some(code) if code == libc::ENOSYS || code == libc::EOPNOTSUPP)
         || error.kind() == std::io::ErrorKind::Unsupported
 }
 

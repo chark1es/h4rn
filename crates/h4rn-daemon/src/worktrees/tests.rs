@@ -4196,7 +4196,10 @@ fn a_fifo_registration_head_is_never_opened() {
         .arg(&head)
         .status()
         .expect("run mkfifo");
-    assert!(status.success());
+    if !status.success() {
+        // FIFOs cannot exist on this filesystem (e.g. WSL drvfs).
+        return;
+    }
 
     let repo = fixture.repo.clone();
     let data_dir = fixture.data_dir();
@@ -4257,7 +4260,10 @@ fn rebase_and_bisect_files_that_are_not_regular_count_as_in_progress() {
         .arg(&bisect)
         .status()
         .expect("run mkfifo");
-    assert!(status.success());
+    if !status.success() {
+        // FIFOs cannot exist on this filesystem (e.g. WSL drvfs).
+        return;
+    }
     let (done, finished) = std::sync::mpsc::channel();
     let repo = fixture.repo.clone();
     std::thread::spawn(move || {
@@ -4619,7 +4625,10 @@ fn metadata_reads_follow_symlinks_only_where_git_does() {
         .arg(&fifo)
         .status()
         .expect("run mkfifo");
-    assert!(status.success());
+    if !status.success() {
+        // FIFOs cannot exist on this filesystem (e.g. WSL drvfs).
+        return;
+    }
     let to_fifo = dir.path().join("to-fifo");
     std::os::unix::fs::symlink(&fifo, &to_fifo).expect("symlink");
     let (done, finished) = std::sync::mpsc::channel();
@@ -5810,6 +5819,10 @@ fn an_executable_bit_change_is_kept_where_the_filesystem_supports_it() {
     let linked = fixture.add_worktree("wt-own-fs", "own-fs-branch");
     run(&linked, &["config", "core.fileMode", "false"]);
     chmod_x(&linked.join("README.md"));
+    if !executable_bits_stick(&linked.join("README.md")) {
+        // A filesystem that ignores chmod (WSL drvfs, FAT): nothing to keep.
+        return;
+    }
     let target = entry(&linked, &fixture.repo, Some("own-fs-branch"), false);
     assert_eq!(
         clear_one(&target, false, &fixture.data_dir())
@@ -5955,27 +5968,124 @@ fn a_filesystem_that_ignores_chmod_keeps_gits_file_mode() {
         !config.contains(&"core.fileMode=true"),
         "a synthesised 0777 is not executable-bit support: {config:?}"
     );
-    assert!(config.contains(&"core.symlinks=true"), "{config:?}");
+    if symlinks_work(fixture.root.path()) {
+        assert!(config.contains(&"core.symlinks=true"), "{config:?}");
+    }
+}
+
+/// Whether a `chmod +x` on `file` actually stuck (and restores it).
+#[cfg(unix)]
+fn executable_bits_stick(file: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(file)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    let probe = file.with_extension("h4rn-exec-probe");
+    std::fs::write(&probe, b"").expect("probe");
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let off = std::fs::metadata(&probe)
+        .expect("probe")
+        .permissions()
+        .mode()
+        & 0o111
+        == 0;
+    let _ = std::fs::remove_file(&probe);
+    off && mode & 0o111 != 0
+}
+
+/// Whether symlinks can be created under `dir`.
+#[cfg(unix)]
+fn symlinks_work(dir: &Path) -> bool {
+    let link = dir.join("h4rn-symlink-check");
+    let works = std::os::unix::fs::symlink("target", &link).is_ok();
+    let _ = std::fs::remove_file(&link);
+    works
 }
 
 #[cfg(unix)]
 #[test]
 fn only_a_definite_symlink_refusal_counts_as_unsupported_and_is_cached() {
-    const ENOSPC: i32 = 28;
-    const EPERM: i32 = 1;
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-symlink-errno", "symlink-errno-branch");
-    // A transient error after the scratch file was written: inconclusive, so
-    // the comparison is forced and nothing is cached.
-    git::FORCE_SYMLINK_ERRNO.with(|errno| errno.set(Some(ENOSPC)));
-    let transient = git::mode_config(&linked).to_vec();
-    // The definite refusal a filesystem without symlinks gives: unsupported.
-    // That it takes effect now proves the transient answer was not cached.
-    git::FORCE_SYMLINK_ERRNO.with(|errno| errno.set(Some(EPERM)));
-    let refused = git::mode_config(&linked).to_vec();
-    git::FORCE_SYMLINK_ERRNO.with(|errno| errno.set(None));
+    let config_with = |errno: i32| {
+        git::FORCE_SYMLINK_ERRNO.with(|forced| forced.set(Some(errno)));
+        let config = git::mode_config(&linked).to_vec();
+        git::FORCE_SYMLINK_ERRNO.with(|forced| forced.set(None));
+        config
+    };
+    // A transient error after the scratch file was written, and `EPERM`
+    // (which a security policy denying symlinks also returns): inconclusive,
+    // so the comparison is forced and nothing is cached.
+    let transient = config_with(libc::ENOSPC);
+    let denied = config_with(libc::EPERM);
+    // The definite refusal of a filesystem without symlinks: unsupported. That
+    // it takes effect now proves neither earlier answer was cached.
+    let refused = config_with(libc::EOPNOTSUPP);
     assert!(transient.contains(&"core.symlinks=true"), "{transient:?}");
+    assert!(denied.contains(&"core.symlinks=true"), "{denied:?}");
     assert!(!refused.contains(&"core.symlinks=true"), "{refused:?}");
     // The conclusive answer is cached for this admin dir.
     assert_eq!(git::mode_config(&linked), refused.as_slice());
+}
+
+#[test]
+fn a_staged_submodule_update_counts_even_when_the_submodule_is_ignored() {
+    let fixture = Fixture::new();
+    let upstream = fixture.root.path().join("upstream-staged-sub");
+    init_repo(&upstream);
+    let host = fixture.add_worktree("wt-staged-sub", "staged-sub-branch");
+    run(
+        &host,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &upstream.to_string_lossy(),
+            "sub",
+        ],
+    );
+    run(&host, &["commit", "-q", "-m", "add a submodule"]);
+    // A new submodule commit, staged in the superproject.
+    let sub = host.join("sub");
+    std::fs::write(sub.join("more.txt"), "more\n").expect("sub file");
+    run(&sub, &["add", "more.txt"]);
+    run(
+        &sub,
+        &[
+            "-c",
+            "user.email=wt@h4rn.invalid",
+            "-c",
+            "user.name=wt",
+            "commit",
+            "-q",
+            "-m",
+            "sub work",
+        ],
+    );
+    run(&host, &["add", "sub"]);
+    run(&host, &["config", "submodule.sub.ignore", "all"]);
+    let plain = std::process::Command::new("git")
+        .args(["diff-index", "--cached", "--quiet", "HEAD", "--"])
+        .current_dir(&host)
+        .status()
+        .expect("plain diff-index");
+    assert!(
+        plain.success(),
+        "with ignore = all plain git misses the staged update"
+    );
+
+    let admin =
+        PathBuf::from(git::run(&host, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    assert!(
+        !git::index_matches(
+            &admin,
+            "refs/heads/staged-sub-branch",
+            Duration::from_secs(30)
+        )
+        .expect("index check"),
+        "the staged submodule update is staged work"
+    );
 }

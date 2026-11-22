@@ -526,11 +526,15 @@ selection does no filesystem work at all.
   must actually toggle (off at `0644`, on at `0755`): a filesystem that ignores
   `chmod` and reports a synthesised `0777` (WSL drvfs without `metadata`, FAT)
   lacks executable bits. Symlinks count as unsupported only when the scratch
-  file could be written and `symlink(2)` then failed with `EPERM`, `ENOSYS` or
+  file could be written and `symlink(2)` then failed with `ENOSYS` or
   `EOPNOTSUPP`; anything inconclusive (a read-only admin dir, a full disk, a
-  quota, a failed metadata read) forces the comparison and is not cached, so a
-  transient failure never becomes a lasting "unsupported" (over-reporting
-  skips). A filesystem that genuinely lacks the feature keeps git's
+  quota, a failed metadata read, or `EPERM`, which a security policy denying
+  symlinks returns as well as a filesystem without them) forces the comparison
+  and is not cached, so a transient failure never becomes a lasting
+  "unsupported" (over-reporting skips). The cost: on a FAT-like filesystem a
+  repository that tracks symlinks needs "Remove anyway". Probe files are
+  created with `create_new`, so a stale entry of the same name is never
+  truncated or followed. A filesystem that genuinely lacks the feature keeps git's
   `false`, so ordinary clears still work there. On Windows there is no stable
   volume id, so `core.symlinks=true` is always forced and `core.fileMode` keeps
   git's probe (Windows filesystems have no executable bits).
@@ -608,7 +612,9 @@ selection does no filesystem work at all.
   `has staged changes` (forceable) when its registration's index holds staged
   work. Git skips its own cleanliness check for a missing checkout and deletes
   the admin dir, index included, so `git -C <admin dir> --git-dir=. diff-index
-  --cached --quiet <tree-ish> --` (bounded, trace and location variables
+  --cached --quiet --ignore-submodules=none <tree-ish> --` (a staged
+  submodule update counts even when the submodule is configured
+  `ignore = all`) (bounded, trace and location variables
   stripped) compares
   the index with the registration's `HEAD`: its detached commit, or its
   branch's current tip (`refs/heads/<b>`). Exit 0 is clean and exit 1 is
