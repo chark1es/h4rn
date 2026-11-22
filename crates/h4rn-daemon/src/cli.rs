@@ -51,9 +51,13 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIRECTIVE", env = "H4RN_LOG")]
     pub log_level: Option<String>,
 
+    /// Finish an interrupted update and exit (used by the Windows logon task).
+    #[arg(long, hide = true)]
+    pub recover_only: bool,
+
     /// What to do.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// Daemon subcommands.
@@ -98,6 +102,28 @@ pub enum Command {
         /// files` or `--scope admin` to widen it.
         #[arg(long = "scope", value_name = "SCOPE", value_parser = parse_scope)]
         scopes: Vec<h4rn_protocol::PairScope>,
+    },
+    /// Run h4rnd as a per-user background service.
+    Service {
+        /// What to do with the service.
+        #[command(subcommand)]
+        command: crate::service::ServiceCommand,
+    },
+    /// Install the latest signed release, or roll back the last update.
+    Update {
+        /// Print the current and latest versions without changing anything.
+        #[arg(long)]
+        check: bool,
+        /// Install this exact version instead of the latest release.
+        #[arg(long, value_name = "X.Y.Z")]
+        version: Option<String>,
+        /// Restore the binary saved as h4rnd.previous by the last update.
+        #[arg(long)]
+        rollback: bool,
+        /// Update even while a turn is active or a running daemon cannot be
+        /// reached or report its turns. Also applies to --rollback.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -148,7 +174,10 @@ impl Cli {
         if let Some(log_level) = self.log_level {
             config.log_level = log_level;
         }
-        Ok((config, self.command))
+        let command = self
+            .command
+            .ok_or_else(|| anyhow::anyhow!("a subcommand is required (try `h4rnd --help`)"))?;
+        Ok((config, command))
     }
 }
 
@@ -206,6 +235,50 @@ mod tests {
                 .unwrap()
                 .into_parts()
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn service_and_update_subcommands_parse() {
+        let cli = Cli::try_parse_from(["h4rnd", "service", "install", "--force"]).unwrap();
+        assert!(matches!(
+            cli.into_parts().unwrap().1,
+            Command::Service {
+                command: crate::service::ServiceCommand::Install { force: true }
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            "h4rnd",
+            "update",
+            "--check",
+            "--version",
+            "1.2.3",
+            "--force",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.into_parts().unwrap().1,
+            Command::Update {
+                check: true,
+                version: Some(version),
+                rollback: false,
+                force: true,
+            } if version == "1.2.3"
+        ));
+    }
+
+    #[test]
+    fn recover_only_is_a_hidden_top_level_flag() {
+        let cli = Cli::try_parse_from(["h4rnd", "--recover-only"]).unwrap();
+        assert!(cli.recover_only);
+        assert!(cli.command.is_none());
+        let help = Cli::try_parse_from(["h4rnd", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !help.contains("recover-only"),
+            "the internal flag stays out of help output"
         );
     }
 }

@@ -46,6 +46,91 @@ All notable changes to h4rn are recorded here. The format follows
   forgets the key and its fields on Cancel and after saving, a Test no longer blocks other requests
   on the same connection, and OpenAI-compatible requests send no `max_tokens` (OpenAI's own API
   gets `max_completion_tokens`).
+- **The daemon can run as a per-user service.** `h4rnd service install` writes the
+  shipped systemd user unit (or launch agent, or Windows scheduled task) with the
+  running binary's absolute path and current data directory, then enables and
+  starts it. `status` reports installed/active/enabled, `restart` and `logs` work
+  on every platform, and `uninstall` stops and removes the service without touching
+  the data directory. Installation is idempotent, refuses a binary under
+  `target/debug` or a temp directory unless `--force`, and mentions
+  `loginctl enable-linger` on Linux when lingering is off. Reinstalling an
+  unchanged launch agent that is already running leaves it alone. On Windows the
+  task is named per account (`h4rn-<user>`) and uses an inline launcher that
+  waits up to 30 seconds for the updater's installation lock and repairs a
+  missing `h4rnd.exe` itself before starting the daemon, so it starts after an
+  interrupted update even when the binary there is an older image without
+  `--recover-only`. A task that an older release registered under
+  the machine-wide `h4rn` name is removed by the next install or uninstall. The
+  systemd unit keeps a `$` in the executable path literal (systemd does not
+  expand variables there) while still escaping `$$` in arguments.
+- **`h4rnd update` installs signed daemon releases.** It finds the latest GitHub
+  release for the repository baked in at build time, downloads the archive for
+  this target triple and `SHA256SUMS`, verifies the hash and a minisign signature
+  over `SHA256SUMS` against the compiled `H4RN_UPDATER_PUBKEY`, and replaces the
+  binary atomically. The previous binary is kept for `h4rnd update --rollback`; a
+  running service is restarted, and an active turn stops the update unless
+  `--force`. Builds without a public key refuse to self-update and print manual
+  steps instead. Release builds with the signing key now publish
+  `SHA256SUMS.sig`; an archive signature alone is not accepted.
+- **The updater secrets are a pair.** `H4RN_UPDATER_PUBKEY` gives a build the key
+  it verifies with, and `TAURI_SIGNING_PRIVATE_KEY` produces `SHA256SUMS.sig`. A
+  release with the public key but no private key now fails in the release
+  workflow instead of publishing archives every daemon refuses to install.
+- **Updates are one-at-a-time and interruption-safe.** An advisory lock beside the
+  binary serializes updates, rollbacks and startup recovery, and staging files are
+  created exclusively with unique names. On Unix the replace and the rollback are
+  each a single `rename` over the install path; on Windows the moved-aside binary
+  is restored by the next start (or by the scheduled task's recovery step).
+- **A backup and its checksum are published together.** The rollback copy no
+  longer goes straight to `h4rnd.previous`: it is copied into a unique temp file
+  beside it, and its sidecar is staged the same way. Only after both are ready
+  are they renamed into place, so a failed publication leaves the previous
+  backup and its checksum untouched and still rollbackable. `--rollback` and
+  startup recovery both refuse a backup that is missing, empty, not executable
+  on Unix or does not match that record, so an interrupted copy can never replace
+  the installed binary; recovery leaves the files in place and says what to do.
+  On Windows `h4rnd update` rewrites the registered task's launcher before it
+  renames anything, and the launcher waits for the installation lock and repairs
+  a missing binary itself, so an interrupted update or rollback comes back up
+  even from a task registered by an older release. The update releases the lock
+  before it dispatches the restart, so the launcher never waits for the update
+  that started it.
+- **A turn that starts during the final step is not cut off.** The idle check is
+  repeated after the new binary is in place and immediately before the restart.
+  If a turn started, the binary stays installed, the restart is skipped, and the
+  update says to run `h4rnd service restart` when the turn finishes. Release
+  metadata requests keep a short total timeout; asset downloads use a 30 s
+  idle timeout and no total limit, so a large archive on a slow link can finish.
+  On Windows a failed `/End` when the task is not running is harmless and only
+  the start step must succeed.
+- **`h4rnd update` probes the daemon it will actually restart.** The guard
+  resolves the registered unit, plist or task first and uses that service's own
+  endpoint, in the daemon's order: a `--bind` in the registered command line,
+  then `H4RN_BIND` from its environment (systemd `Environment=`,
+  `EnvironmentFile=` and the user manager; launchd `EnvironmentVariables`; or
+  the account-wide Windows environment), then the compiled default. The
+  updater's own `--bind` is never used, so an idle second daemon on the CLI's
+  port cannot make a busy service look safe. A source that cannot be read (the
+  systemd user manager environment or the account-wide Windows environment)
+  leaves the service unverified, and the update and `--rollback` refuse unless
+  `--force` is passed. The guard is checked again
+  right before the binary is replaced and again just before the restart, and it
+  fails closed: a daemon that is active or listening but does not answer
+  `/healthz` blocks the update, as does a health response without `active_turns`.
+  The update only restarts the service when that unit/plist/task runs the binary
+  being replaced; a failed restart is a warning, not a failed update. The Linux
+  command line comes from `systemctl --user show -p ExecStart --value`, which
+  includes runtime drop-ins, and the unit files (with reset-and-override
+  drop-ins and `%h`) are read only when systemctl cannot answer.
+- **Windows service reporting has two limits.** `h4rnd service status` reports
+  `enabled: unknown` there, because Task Scheduler's states do not map cleanly to
+  "starts at logon", and `h4rnd service logs` prints guidance instead of following
+  a file because the task runs without a console and the daemon writes no log
+  file. Task names are per account, and a task installed by an older release
+  (which started `h4rnd.exe` directly) keeps working and is migrated the next
+  time `h4rnd service install` runs. macOS service status reports
+  `enabled: unknown` unless `launchctl print-disabled` could be read, instead of
+  assuming the agent is enabled.
 - **Preview HTML files in the right panel.** A report, chart or mockup the agent wrote can be
   opened from the Files tab's new action on `.html`/`.htm` rows, or from a relative HTML link in
   an agent message. The Preview tab reads the file through the daemon, inlines its relative CSS,

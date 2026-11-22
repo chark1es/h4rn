@@ -78,6 +78,43 @@ bun run desktop                  # tauri dev against apps/ui
 bun run web                      # copy the UI build into apps/web/dist
 ```
 
+## Background daemon
+
+Build and install `h4rnd` outside the build directory, then let it manage its
+own per-user service and updates:
+
+```sh
+cargo build --release -p h4rn-daemon
+install -m 0755 target/release/h4rnd ~/.local/bin/h4rnd   # Linux/macOS
+
+h4rnd service install      # log-in service; idempotent
+h4rnd service status       # installed / active / enabled
+h4rnd service restart
+h4rnd service logs
+h4rnd service uninstall    # keeps the data directory
+
+h4rnd update --check       # current vs latest release
+h4rnd update               # signed update; restarts the service
+```
+
+The service runs as your user, not root, because the agents it supervises need
+your credentials. On Linux, `service status` says when lingering is off and
+prints the `loginctl enable-linger` command to keep the daemon running after
+logout. On Windows the task is named per account (`h4rn-<user>`), `status`
+reports `enabled: unknown`, and `logs` prints guidance because the task has no
+console. Development builds have no updater key, so `h4rnd update` refuses to
+self-update and prints the manual steps; release builds require a minisign
+signature over `SHA256SUMS` before replacing the binary, hold a per-installation
+lock while they do it, and refuse while a turn is running (or while a daemon
+cannot be checked) unless you pass `--force`. The busy check follows the
+registered service's own endpoint, starting with a `--bind` in its command line
+and then its `H4RN_BIND`, not the `--bind` of the update command.
+A rollback backup is staged and renamed into place with its checksum, so a
+failed publication leaves the previous one usable, and `--rollback` refuses a
+backup that is missing, empty or damaged. If a turn starts
+after the new binary is installed but before the restart, the update keeps the
+binary and asks you to run `h4rnd service restart` when the turn finishes.
+
 ## Protocol bindings
 
 `h4rn-protocol` is the single source of truth. TypeScript under `apps/ui/src/gen/` is generated,
