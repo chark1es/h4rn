@@ -2191,6 +2191,24 @@ impl ThreadManager {
         false
     }
 
+    /// How many threads have a turn in flight.
+    ///
+    /// `h4rnd update` reads this from `/healthz` and refuses to replace the
+    /// binary while a turn would be interrupted.
+    pub async fn active_turn_count(&self) -> usize {
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.inner.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        let mut active = 0;
+        for handle in handles {
+            if handle.lock().await.active.is_some() {
+                active += 1;
+            }
+        }
+        active
+    }
+
     /// Drops the live harness session of every thread on one of `harnesses`,
     /// so its next message starts a session with the current proxy routing.
     ///

@@ -176,10 +176,12 @@ async fn secure_mcp_handler(State(state): State<AppState>, ws: WebSocketUpgrade)
 /// Unauthenticated liveness response.
 pub async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     let threads = state.manager.list_threads(&Default::default()).await.len();
+    let active_turns = state.manager.active_turn_count().await;
     Json(json!({
         "status": "ok",
         "version": crate::version(),
         "threads": threads,
+        "active_turns": active_turns,
         "uptime_ms": state.started.elapsed().as_millis() as u64,
     }))
 }

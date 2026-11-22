@@ -52,11 +52,14 @@ Run the daemon in the foreground:
 
     ./h4rnd serve
 
-Install as a background service (see contrib/ and docs/self-hosting.md):
+Install and manage the per-user background service:
 
-    Linux   systemd --user:  ~/.config/systemd/user/h4rnd.service
-    macOS   launchd:         ~/Library/LaunchAgents/dev.h4rn.h4rnd.plist
-    Windows scheduled task:  contrib/install-scheduled-task.ps1
+    ./h4rnd service install
+    ./h4rnd service status
+    ./h4rnd service logs
+
+The same unit/plist/task is in contrib/ if you prefer to install it by hand.
+Update a release build with `./h4rnd update` (it refuses an unsigned build).
 
 The data directory defaults to the platform application-data directory; use
 --data-dir or H4RN_DATA_DIR to override it.
