@@ -7,6 +7,46 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Thread titles are written by a model.** A new thread still appears immediately with the first
+  line of your first prompt, then a title of at most 60 characters replaces it through the normal
+  thread update. Settings → Threads → Title model picks Off, Claude Code (run once in an empty
+  folder with no tools) or a text generator you configure under Settings → Providers → Text
+  generators: an OpenAI-compatible chat API (OpenAI, OpenRouter, Ollama, LM Studio) or Anthropic.
+  Codex is not offered as a title agent: its flags remove nothing model-visible, so a Codex thread
+  keeps its first-line title, or uses a text generator. Generators have a Test button that sends a
+  tiny prompt and shows the provider's own error; keys are stored on the host like forge tokens and
+  are never returned to a client. Plain `http` base URLs are accepted only on loopback; everything
+  else must be `https`. Only the first prompt text and the workspace folder name are sent. A
+  failed, timed-out or empty answer keeps the first-line title and logs once. Renaming a thread
+  yourself saves the name in the thread menu, and no generated title ever replaces it. Subagent
+  threads keep the title their task gave them. With no agent picked, the default mode uses Claude
+  Code for a Claude Code thread and keeps the first line for every other harness, so a prompt is
+  never handed to another provider unasked. See [docs/text-generation.md](docs/text-generation.md).
+- **Title generation keeps keys and prompts where they belong.** No redirect is followed, so a
+  `3xx` from a generator cannot forward the key or the prompt to another host. Claude Code runs
+  with no tools, no MCP servers and no user configuration in an empty folder under the system temp
+  directory — never in the data directory beside `keys/` — and one 30-second deadline covers
+  version discovery, the run and cleanup. It gets exactly `--tools ""`, `--strict-mcp-config`,
+  `--setting-sources ""`, `--disable-slash-commands`, `--permission-mode dontAsk` and the title
+  instruction as its system prompt, so it has no shell, no MCP servers, no hooks and no plugins.
+  When it fails, the daemon quotes the last line of stderr (the error) instead of the banner before
+  it. Any spelling of `</untrusted_request` in the prompt or folder name is escaped, so untrusted
+  text cannot close the delimited block early, and the untrusted prompt is never repeated or
+  mistaken for instructions.
+  A stored key is scrubbed from provider text, Test results, logs and errors before truncation, and
+  a reply that echoes the key is discarded. A generator's endpoint, kind and key are read as one
+  snapshot so a title job can never pair an old key with a new URL, and a new configuration is
+  published only after it is on disk. Key presence is cached, so listing generators never calls the
+  keychain, and keychain reads and writes needed by a save or a job run off the async worker. Both
+  files are written atomically under one lock, so concurrent saves lose nothing. The Coding-agent
+  picker defaults to **Follow the thread's agent** (no agent picked); choosing Claude Code hands
+  every thread's title to it. Turning titles Off starts no job and logs nothing per thread. Removing
+  the selected generator turns titles Off rather than borrowing a coding agent, a generated title
+  that beats the create reply is kept, the rename dialog keeps your draft, the add-generator form
+  forgets the key and its fields on Cancel and after saving, a Test spinner always clears (including
+  on an unexpected response) and a Test no longer blocks other requests on the same connection, and
+  OpenAI-compatible requests send no `max_tokens` (OpenAI's own API gets
+  `max_completion_tokens`).
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and

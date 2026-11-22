@@ -44,6 +44,7 @@ pub mod service;
 pub mod subagents;
 pub mod supervisor;
 pub mod terminal;
+pub mod text_generation;
 pub mod threads;
 pub mod update;
 pub mod worktrees;

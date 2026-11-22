@@ -20,6 +20,38 @@ use h4rn_protocol::{
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 
+/// Where a thread's current title came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TitleSource {
+    /// The first prompt line, or the workspace folder name.
+    #[default]
+    Prompt,
+    /// Written by the configured title model.
+    Generated,
+    /// Typed by the person; never replaced automatically.
+    Renamed,
+}
+
+impl TitleSource {
+    /// The stored spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Generated => "generated",
+            Self::Renamed => "renamed",
+        }
+    }
+
+    /// Reads a stored spelling, defaulting to the prompt-derived title.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "generated" => Self::Generated,
+            "renamed" => Self::Renamed,
+            _ => Self::Prompt,
+        }
+    }
+}
+
 /// Everything the daemon needs to rebuild a thread row without replaying it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadMeta {
@@ -37,6 +69,11 @@ pub struct ThreadMeta {
     pub agent_id: Option<String>,
     /// Human title, derived from the first prompt.
     pub title: String,
+    /// Where the current title came from.
+    ///
+    /// A generated title only replaces a prompt-derived one, never a name the
+    /// person typed, and the origin survives a daemon restart.
+    pub title_source: TitleSource,
     /// Absolute workspace path.
     pub workspace_path: String,
     /// Model slug.
@@ -205,6 +242,7 @@ impl SqliteJournal {
                 host           TEXT NOT NULL,
                 harness        TEXT NOT NULL,
                 title          TEXT NOT NULL,
+                title_source   TEXT NOT NULL DEFAULT 'prompt',
                 workspace_path TEXT NOT NULL,
                 model          TEXT NOT NULL,
                 created_at     TEXT NOT NULL,
@@ -242,6 +280,12 @@ impl SqliteJournal {
             .await?;
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
             .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "title_source",
+            "TEXT NOT NULL DEFAULT 'prompt'",
+        )
+        .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS daemon_wire_events (
@@ -302,12 +346,13 @@ async fn upsert_thread_on(
     let parked_json = serde_json::to_string(&meta.parked)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
             title = excluded.title,
+            title_source = excluded.title_source,
             workspace_path = excluded.workspace_path,
             model = excluded.model,
             usage_json = excluded.usage_json,
@@ -324,6 +369,7 @@ async fn upsert_thread_on(
     .bind(meta.host.as_str())
     .bind(harness)
     .bind(&meta.title)
+    .bind(meta.title_source.as_str())
     .bind(&meta.workspace_path)
     .bind(&meta.model)
     .bind(meta.created_at.to_rfc3339())
@@ -373,7 +419,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -404,6 +450,10 @@ impl Journal for SqliteJournal {
                     .unwrap_or(HarnessKind::ClaudeCode),
                 agent_id: row.try_get("agent_id")?,
                 title: row.try_get("title")?,
+                title_source: TitleSource::parse(
+                    &row.try_get::<String, _>("title_source")
+                        .unwrap_or_else(|_| "prompt".to_owned()),
+                ),
                 workspace_path: row.try_get("workspace_path")?,
                 model: row.try_get("model")?,
                 runtime_mode: serde_json::from_str(&format!("\"{runtime_mode}\""))
@@ -536,6 +586,7 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "harness": meta.harness,
         "agent_id": meta.agent_id,
         "title": meta.title,
+        "title_source": meta.title_source.as_str(),
         "workspace_path": meta.workspace_path,
         "model": meta.model,
         "created_at": meta.created_at,
@@ -562,6 +613,7 @@ mod tests {
             harness: HarnessKind::ClaudeCode,
             agent_id: None,
             title: "first prompt".into(),
+            title_source: TitleSource::Prompt,
             workspace_path: "/tmp/work".into(),
             model: "test-model".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,

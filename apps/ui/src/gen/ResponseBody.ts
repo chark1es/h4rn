@@ -59,6 +59,9 @@ import type { SkillSyncStatus } from "./SkillSyncStatus";
 import type { SkippedWorktree } from "./SkippedWorktree";
 import type { SubagentView } from "./SubagentView";
 import type { TerminalInfo } from "./TerminalInfo";
+import type { TextGenerationSettings } from "./TextGenerationSettings";
+import type { TextGenerator } from "./TextGenerator";
+import type { TextGeneratorTestReport } from "./TextGeneratorTestReport";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { TrackedWorktree } from "./TrackedWorktree";
@@ -512,7 +515,27 @@ project: Project, } | { "type": "directories",
 /**
  * The listing.
  */
-listing: DirectoryListing, } | { "type": "subscribed", 
+listing: DirectoryListing, } | { "type": "text_generators", 
+/**
+ * Generators, oldest first.
+ */
+generators: Array<TextGenerator>, } | { "type": "text_generator", 
+/**
+ * The generator.
+ */
+generator: TextGenerator, } | { "type": "text_generator_tested", 
+/**
+ * What the tiny prompt did.
+ */
+report: TextGeneratorTestReport, } | { "type": "text_generation_settings", 
+/**
+ * Current settings.
+ */
+settings: TextGenerationSettings, } | { "type": "thread_renamed", 
+/**
+ * The thread with its new title.
+ */
+summary: ThreadSummary, } | { "type": "subscribed", 
 /**
  * Journal head at the moment the subscription was served.
  */

@@ -96,6 +96,8 @@ async fn boot(catalog: Arc<StaticHarnessCatalog>) -> Daemon {
         clock: None,
     };
     let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_catalog(catalog)
         .with_lifecycle(options)
         .build()
