@@ -41,7 +41,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::blobs::{AttachmentResolver, BlobError};
-use crate::journal::{Journal, ThreadMeta, WireEvent};
+use crate::journal::{Journal, ParkedAttachment, ParkedPrompt, ThreadMeta, WireEvent};
 
 /// Capacity of the live event broadcast. A subscriber that falls further behind
 /// than this is dropped with a resume hint rather than slowing other clients.
@@ -279,6 +279,12 @@ struct Inner {
     meter: std::sync::OnceLock<Arc<MeterHub>>,
     /// Throttles the due-schedule scan to about once a second.
     last_schedule_check: std::sync::Mutex<Option<DateTime<Utc>>>,
+    /// Set when the startup ledger resync could not read the ledger.
+    ///
+    /// A schedule that restored no id can never be fired (the record does not
+    /// name it), so the resync is retried on the next ticks until both reads
+    /// succeed instead of leaving every restored pause `Unnamed` forever.
+    resync_pending: AtomicBool,
     /// The clock every lifecycle decision reads.
     clock: Arc<dyn Clock>,
     /// Pauses a restart between inspecting a thread and detaching its session.
@@ -287,6 +293,21 @@ struct Inner {
     /// race the restart's detach must re-check under its own lock.
     #[cfg(test)]
     restart_pause: std::sync::Mutex<Option<Arc<RestartPause>>>,
+    /// Pauses a due-schedule fire between claiming its attempt and acting on
+    /// the record.
+    ///
+    /// Test-only: a newer limit can replace the schedule in that window, and
+    /// the old fire must not act on a pause that is no longer its own.
+    #[cfg(test)]
+    fire_pause: std::sync::Mutex<Option<Arc<FirePause>>>,
+}
+
+/// A test's hold on the fire's claim-to-act window.
+#[cfg(test)]
+#[derive(Default)]
+struct FirePause {
+    claimed: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 /// A test's hold on the restart's inspect-to-detach window.
@@ -376,6 +397,14 @@ struct ThreadRecord {
     context_window: Option<u64>,
     /// Git branch of the workspace, cached for the thread header.
     branch: Option<String>,
+    /// Whether the active turn was rebuilt from the journal at startup.
+    ///
+    /// Such a turn is the prompt a pause was holding when the daemon stopped.
+    /// The metering ledger is attached after the journal is restored, so this
+    /// record's pause is only known once `resync_meter_state` runs: that call
+    /// either binds the pause to this turn or, when no schedule survived,
+    /// releases the turn for delivery.
+    restored_parked: bool,
     closed: bool,
 }
 
@@ -391,15 +420,18 @@ struct ActiveTurn {
     /// The turn's one dispatch record, shared with every would-be writer and
     /// with Stop.
     dispatch: Arc<TurnDispatch>,
-    /// The reset this turn already armed a schedule for, when it armed one.
+    /// The reset this turn already armed a schedule for, when it armed one,
+    /// together with the session generation that reported it.
     ///
     /// This belongs to the turn, not to `scheduled_limit`: a person can cancel
     /// the resume while a dead transport's exit report is still arriving, and
     /// that report repeats the same reset. Reading the live schedule would find
     /// it empty after the cancellation and arm the pause again; the turn's own
-    /// record still knows the reset was already applied. A different reset is a
-    /// newer pause and may still arm.
-    applied_limit_reset: Option<Option<DateTime<Utc>>>,
+    /// record still knows the reset was already applied. The generation is part
+    /// of the marker: a report from a different (older) generation is not this
+    /// turn's report even when it names the same reset, so it must not consume
+    /// the live generation's own first report.
+    applied_limit_reset: Option<(u64, Option<DateTime<Utc>>)>,
 }
 
 /// The thread's harness session, or the fact that one is being started.
@@ -419,6 +451,13 @@ enum SessionSlot {
     Live {
         generation: u64,
         session: SharedSession,
+        /// The reset this session's typed limit already armed a schedule for.
+        ///
+        /// Kept on the live slot so a death between turns can carry it into
+        /// its dying entry: the bridge can report `LimitHit` and only then
+        /// `Exit` with the same reset, and if the person cancels the resume in
+        /// between, the exit report must not arm that pause again.
+        applied_limit_reset: Option<DateTime<Utc>>,
     },
 }
 
@@ -867,6 +906,47 @@ impl TurnDispatch {
 struct ScheduledLimit {
     reset_at: Option<DateTime<Utc>>,
     auto_resume: bool,
+    /// The session generation whose report armed this schedule.
+    ///
+    /// A thread can have several dead generations waiting for their exit
+    /// reports. A report from an older generation must not replace a newer
+    /// generation's pause: its reset may be earlier and the thread would
+    /// resume before the newer provider reset.
+    generation: Option<u64>,
+    /// The ledger schedule this record describes, when it was armed here.
+    ///
+    /// A fire claims its attempt and then acts on the record under a second
+    /// lock. A newer limit in that window replaces the schedule, and the old
+    /// fire must not clear the newer pause or deliver on its behalf. A record
+    /// with no identity never matches a claimed fire, and a schedule restored
+    /// from the ledger carries the id it was stored with.
+    schedule_id: Option<String>,
+    /// The dispatch this pause parked, when it was armed to hold a prompt a
+    /// failed write put back.
+    ///
+    /// Only that turn waits for the schedule. A pause armed by a dying session
+    /// says nothing about a different prompt a Send is starting, so that
+    /// prompt is delivered exactly as it would be with no pause at all.
+    parked_turn: Option<TurnId>,
+}
+
+/// One armed schedule read back from the ledger at startup.
+///
+/// The id is kept so the record describes the exact attempt a fire may claim;
+/// without it a fire for a schedule the record does not name must do nothing.
+struct RestoredSchedule {
+    resume_at: DateTime<Utc>,
+    reset_at: Option<DateTime<Utc>>,
+    schedule_id: String,
+}
+
+/// One limit observation: which session generation reported it and what the
+/// adapter asked for.
+#[derive(Clone, Copy, Debug)]
+struct LimitObservation {
+    generation: Option<u64>,
+    reset_at: Option<DateTime<Utc>>,
+    auto_resume: bool,
 }
 
 struct PendingApproval {
@@ -1054,6 +1134,7 @@ impl ThreadRecord {
         let SessionSlot::Live {
             generation: current,
             session,
+            applied_limit_reset,
         } = std::mem::replace(&mut self.session, SessionSlot::None)
         else {
             return;
@@ -1063,6 +1144,7 @@ impl ThreadRecord {
             self.session = SessionSlot::Live {
                 generation: current,
                 session,
+                applied_limit_reset,
             };
             return;
         }
@@ -1071,7 +1153,7 @@ impl ThreadRecord {
             DyingSession {
                 session,
                 report: None,
-                applied_reset: None,
+                applied_reset: applied_limit_reset,
             },
         );
         self.pump = None;
@@ -1204,6 +1286,162 @@ impl ThreadRecord {
         true
     }
 
+    /// Whether a newer session generation already armed this thread's schedule.
+    ///
+    /// A thread can have several dead generations waiting for their exit
+    /// reports. Only the newest one names the pause: an older generation's
+    /// earlier reset must not pull the resume forward. A schedule with no known
+    /// generation is treated as the newest, because there is nothing to prove
+    /// the reporting generation is newer than it.
+    fn newer_generation_armed_schedule(&self, generation: u64) -> bool {
+        self.scheduled_limit.as_ref().is_some_and(|scheduled| {
+            scheduled.auto_resume && scheduled.generation.is_none_or(|armed| armed > generation)
+        })
+    }
+
+    /// Records a newer generation as the owner of a pause that already exists.
+    ///
+    /// A newer generation that confirms the same provider reset is the same
+    /// pause, so it keeps the attempt and jitter already chosen; it now owns
+    /// the schedule, though, so a delayed report from an older generation
+    /// cannot replace it. Returns `true` when the armed schedule already covers
+    /// this reset and nothing new must be armed.
+    fn adopt_schedule_generation(
+        &mut self,
+        generation: Option<u64>,
+        reset_at: Option<DateTime<Utc>>,
+    ) -> bool {
+        let Some(scheduled) = self.scheduled_limit.as_mut() else {
+            return false;
+        };
+        if !scheduled.auto_resume || scheduled.reset_at != reset_at {
+            return false;
+        }
+        // An unknown reset is a backoff attempt, not a provider pause two
+        // generations can confirm, so only a named reset transfers ownership.
+        if reset_at.is_some()
+            && let Some(reporting) = generation
+            && scheduled.generation.is_none_or(|armed| reporting > armed)
+        {
+            scheduled.generation = Some(reporting);
+        }
+        true
+    }
+
+    /// Whether the active turn's prompt is still waiting for a session.
+    fn pending_turn(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.dispatch.state() == DispatchState::Pending)
+    }
+
+    /// Whether this thread's pause was armed to hold `turn_id`.
+    ///
+    /// A pause armed for a requeued write owns that one dispatch. Any other
+    /// prompt (a Send that started a replacement while an old agent's exit
+    /// report armed a pause) is delivered as it would be with no pause.
+    fn pause_parks_turn(&self, turn_id: &TurnId) -> bool {
+        self.scheduled_limit
+            .as_ref()
+            .is_some_and(|scheduled| scheduled.parked_turn.as_ref() == Some(turn_id))
+    }
+
+    /// Whether the active, still-pending turn is the one the pause parks.
+    ///
+    /// A fire may only release the prompt its own schedule was armed for. A
+    /// turn a Send started while an old agent's exit armed a pause is pending
+    /// too, but that pause does not name it, so the fire must leave it alone
+    /// and spend no attempt on it.
+    fn parks_active_turn(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.dispatch.state() == DispatchState::Pending
+                && self.pause_parks_turn(&active.turn_id)
+        })
+    }
+
+    /// Whether the thread's pause is the schedule with this ledger id.
+    ///
+    /// A fire claims an attempt in the ledger before it acts on the record, so
+    /// the record has to name the attempt first. A record with no pause (a
+    /// restarted daemon before the ledger resync) names nothing, and claiming
+    /// on its behalf would consume the attempt without delivering a turn.
+    fn names_schedule(&self, schedule_id: &str) -> bool {
+        self.scheduled_limit
+            .as_ref()
+            .and_then(|scheduled| scheduled.schedule_id.as_deref())
+            == Some(schedule_id)
+    }
+
+    /// The prompt a replacement schedule must keep parking, if any.
+    ///
+    /// A newer reset can replace the pause a failed write armed while that
+    /// write's prompt is still the active, pending dispatch. The replacement
+    /// has to name that prompt too, or a pump-end `advance_queue` would deliver
+    /// it into the provider the newer reset paused.
+    fn parked_turn_to_keep(&self) -> Option<TurnId> {
+        let active = self.active.as_ref()?;
+        if active.dispatch.state() != DispatchState::Pending {
+            return None;
+        }
+        let named = self.pause_parks_turn(&active.turn_id)
+            || self
+                .meta
+                .parked
+                .as_ref()
+                .is_some_and(|parked| parked.turn_id == active.turn_id);
+        named.then(|| active.turn_id.clone())
+    }
+
+    /// The session generation whose prompt the active turn is.
+    ///
+    /// A startup records the generation it started for the turn; a turn
+    /// delivered on an already-live session belongs to that session. A report
+    /// from any other generation describes a different session, so it must not
+    /// touch this turn's applied-reset marker.
+    fn active_turn_generation(&self) -> Option<u64> {
+        let active = self.active.as_ref()?;
+        active
+            .dispatch
+            .started_generation()
+            .or_else(|| self.session.generation())
+    }
+
+    /// Records that `generation`'s report already applied `reset_at`.
+    ///
+    /// The marker lives on the turn (so a cancelled schedule does not hide it)
+    /// and on the live slot (so a death between turns carries it into its
+    /// dying entry). Both name the generation, so an older generation's late
+    /// report can never consume a newer one's own first report. The turn's
+    /// marker is only written by the generation that owns the turn: a dying
+    /// session's delayed report must not overwrite a newer turn's marker and
+    /// make that turn's own completion arm the pause again after a cancel.
+    fn note_applied_reset(&mut self, generation: Option<u64>, reset_at: Option<DateTime<Utc>>) {
+        let Some(generation) = generation else {
+            return;
+        };
+        if self.active.is_some() && self.active_turn_generation() == Some(generation) {
+            if let Some(active) = self.active.as_mut() {
+                active.applied_limit_reset = Some((generation, reset_at));
+            }
+        }
+        if reset_at.is_some()
+            && self.session.generation() == Some(generation)
+            && let SessionSlot::Live {
+                applied_limit_reset,
+                ..
+            } = &mut self.session
+        {
+            *applied_limit_reset = reset_at;
+        }
+    }
+
+    /// Clears the thread's pause and any prompt it was holding for delivery.
+    fn clear_pause(&mut self) {
+        self.scheduled_limit = None;
+        self.resume_at = None;
+        self.meta.parked = None;
+    }
+
     /// The live session, when there is one.
     fn live_session(&self) -> Option<&SharedSession> {
         self.session.live()
@@ -1257,9 +1495,12 @@ impl ThreadManager {
                 mcp: std::sync::OnceLock::new(),
                 meter: std::sync::OnceLock::new(),
                 last_schedule_check: std::sync::Mutex::new(None),
+                resync_pending: AtomicBool::new(false),
                 clock,
                 #[cfg(test)]
                 restart_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                fire_pause: std::sync::Mutex::new(None),
             }),
         };
         manager.inner.restore().await?;
@@ -1293,8 +1534,10 @@ impl ThreadManager {
 
     /// Attaches durable metering, limits and auto-resume (ADR-024).
     ///
-    /// Called once during daemon assembly. The ticker keeps running before this
-    /// so a slow ledger open never delays restarted thread projections.
+    /// Called once during daemon assembly, before the ticker starts: a fire
+    /// only claims a schedule the thread's record names, and the record learns
+    /// its schedule in [`Self::resync_meter_state`]. Callers must resync before
+    /// starting the ticker.
     pub fn set_meter(&self, meter: Arc<MeterHub>) {
         let _ = self.inner.meter.set(meter);
     }
@@ -1309,79 +1552,10 @@ impl ThreadManager {
     /// Schedules and limit history outlive the thread journal, so a restarted
     /// daemon re-reads them once the hub is attached. Without this the inbox
     /// would show a scheduled thread as merely rate-limited until its next
-    /// tick writes a fresh projection.
+    /// tick writes a fresh projection. A read that fails is retried by the
+    /// ticker (see [`Inner::resync_meter_state`]).
     pub async fn resync_meter_state(&self) {
-        let Some(meter) = self.meter() else {
-            return;
-        };
-        let schedules = match meter.schedules().await {
-            Ok(schedules) => schedules,
-            Err(error) => {
-                tracing::warn!(%error, "could not re-read auto-resume schedules");
-                return;
-            }
-        };
-        let limits = match meter.limits_report().await {
-            Ok(report) => report.limits,
-            Err(error) => {
-                tracing::warn!(%error, "could not re-read the usage limit history");
-                return;
-            }
-        };
-
-        let mut armed: HashMap<String, (DateTime<Utc>, Option<DateTime<Utc>>)> = HashMap::new();
-        for schedule in schedules {
-            if matches!(
-                schedule.state,
-                ResumeState::Scheduled | ResumeState::Waiting
-            ) {
-                let reset_at = limits
-                    .iter()
-                    .find(|limit| limit.thread_id.as_ref() == Some(&schedule.thread_id))
-                    .and_then(|limit| limit.reset_at);
-                armed
-                    .entry(schedule.thread_id.as_str().to_owned())
-                    .or_insert((schedule.resume_at, reset_at));
-            }
-        }
-        let mut latest: HashMap<String, LimitBrief> = HashMap::new();
-        for limit in limits {
-            let Some(thread_id) = &limit.thread_id else {
-                continue;
-            };
-            latest
-                .entry(thread_id.as_str().to_owned())
-                .or_insert(LimitBrief {
-                    harness: limit.harness,
-                    reset_at: limit.reset_at,
-                    message: limit.message,
-                });
-        }
-
-        let handles: Vec<ThreadHandle> = {
-            let threads = self.inner.threads.lock().await;
-            threads.values().cloned().collect()
-        };
-        for handle in handles {
-            let mut record = handle.lock().await;
-            let key = record.meta.thread_id.as_str().to_owned();
-            if let Some((resume_at, reset_at)) = armed.remove(&key) {
-                record.resume_at = Some(resume_at);
-                record.scheduled_limit = Some(ScheduledLimit {
-                    reset_at,
-                    auto_resume: true,
-                });
-            }
-            // Only show a limit on a thread the limit still explains.
-            record.limit = if record.state.phase == h4rn_core::Phase::RateLimited
-                || record.scheduled_limit.is_some()
-            {
-                latest.remove(&key)
-            } else {
-                None
-            };
-            record.last_signature = None;
-        }
+        self.inner.resync_meter_state().await;
     }
 
     /// Durable metadata for one thread, cloned for callers outside the manager.
@@ -1680,6 +1854,7 @@ impl ThreadManager {
             usage: Usage::default(),
             resume_id: None,
             agent_fingerprint: None,
+            parked: None,
         };
 
         let mut record = ThreadRecord {
@@ -1704,6 +1879,7 @@ impl ThreadManager {
             ttft_ms: None,
             context_window: None,
             branch: None,
+            restored_parked: false,
             closed: false,
         };
         let dispatch = record.begin_turn(
@@ -1787,19 +1963,36 @@ impl ThreadManager {
             // stays Working. `MessageReceived` records the user activity. Any
             // armed resume is now stale (the new message is the next turn), so
             // cancel it rather than let it fire a duplicate prompt.
-            if record.scheduled_limit.take().is_some()
-                && let Some(meter) = self.inner.meter.get()
-            {
+            let stale_schedule = record.scheduled_limit.take().is_some();
+            if stale_schedule {
+                // The new message is the next turn, so no resume target
+                // describes the thread any more.
+                record.resume_at = None;
+            }
+            if stale_schedule && let Some(meter) = self.inner.meter.get() {
                 let _ = meter.cancel_schedule(thread_id).await;
             }
+            // A Send overrides a pause that was holding a requeued prompt: the
+            // parked turn is delivered now and the new message queues behind
+            // it. Leaving it pending here would strand it, because the schedule
+            // that would have delivered it is gone.
+            let release_pending = stale_schedule && record.pending_turn();
             record.queued.push_back(UserInput {
                 text: text.clone(),
                 attachments: harness_attachments,
             });
-            let domain = vec![ThreadEvent::MessageReceived {
+            let mut domain = vec![ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
                 at: now,
             }];
+            if release_pending {
+                // The release is the person's action, so the thread is running
+                // that prompt now: leave the paused phase and drop the limit
+                // that explained it. The turn itself was already counted.
+                domain.push(ThreadEvent::LimitResumeReleased { at: now });
+                record.meta.parked = None;
+                record.limit = None;
+            }
             let wire = vec![Event::ItemCompleted {
                 thread_id: thread_id.clone(),
                 turn_id: active_turn_id.clone(),
@@ -1810,7 +2003,15 @@ impl ThreadManager {
                     attachments: resolved_attachments,
                 },
             }];
-            let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+            let emitted = self.inner.emit(&mut record, domain, wire).await;
+            drop(record);
+            if release_pending {
+                // The delivery owner must exist even when the journal write
+                // failed: the schedule is already cancelled, so without this
+                // the parked turn would stay Pending forever.
+                self.inner.spawn_advance(handle);
+            }
+            let (_, seq) = emitted?;
             return Ok(AcceptedMessage {
                 thread_id: thread_id.clone(),
                 turn_id: active_turn_id,
@@ -2427,21 +2628,42 @@ impl ThreadManager {
             .cancel_schedule(thread_id)
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        let mut release_pending = false;
         if let Some(record) = record.as_mut() {
-            record.scheduled_limit = None;
+            let was_paused = record.scheduled_limit.take().is_some();
             record.resume_at = None;
-            if record.state.phase == h4rn_core::Phase::RateLimited {
-                self.inner
-                    .emit(
-                        record,
-                        vec![ThreadEvent::LimitAutoResumeSet {
-                            auto_resume: false,
-                            at: self.now(),
-                        }],
-                        Vec::new(),
-                    )
-                    .await?;
+            release_pending = was_paused && record.pending_turn();
+            if release_pending {
+                // The person's cancellation releases the parked prompt: the
+                // thread runs it now, so it is no longer paused and the limit
+                // no longer explains a wait.
+                record.meta.parked = None;
+                record.limit = None;
             }
+            if record.state.phase == h4rn_core::Phase::RateLimited || release_pending {
+                let event = if release_pending {
+                    ThreadEvent::LimitResumeReleased { at: self.now() }
+                } else {
+                    ThreadEvent::LimitAutoResumeSet {
+                        auto_resume: false,
+                        at: self.now(),
+                    }
+                };
+                if let Err(error) = self.inner.emit(record, vec![event], Vec::new()).await {
+                    // The cancellation and the release still stand in memory;
+                    // the projection catches up on the next tick. Giving up
+                    // here would leave the released turn with no owner.
+                    tracing::error!(%error, "could not record the cancelled resume");
+                }
+            }
+        }
+        drop(record);
+        if release_pending && let Some(handle) = handle {
+            // The person's cancellation overrides the pause. A prompt a failed
+            // write put back is waiting for the schedule that no longer exists,
+            // so deliver it now: without this it stays pending with nothing to
+            // start it.
+            self.inner.spawn_advance(handle);
         }
         Ok(schedule)
     }
@@ -2626,7 +2848,15 @@ impl ThreadManager {
             let (thread_id, sessions) = {
                 let mut record = handle.lock().await;
                 record.closed = true;
-                if let Some(turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
+                // A prompt parked behind an armed schedule is already durable
+                // on the thread row, and the schedule that will deliver it is
+                // in the ledger. Settling it here would erase `parked_json` and
+                // leave the restarted daemon firing the policy's prompt instead
+                // of the person's, so that one turn is left exactly as it is.
+                if !record.parks_active_turn()
+                    && let Some(turn_id) =
+                        record.active.as_ref().map(|active| active.turn_id.clone())
+                {
                     let _ = self
                         .inner
                         .settle_turn_locked(
@@ -2671,6 +2901,136 @@ impl Inner {
 
     fn local_host_is(&self, host: &HostId) -> bool {
         &self.local_host == host
+    }
+
+    /// Restores summary-visible schedule and limit state from the ledger.
+    ///
+    /// The schedule ids are restored independently of the limit history: a
+    /// failed limit read only costs the reset time shown on the pause, while a
+    /// lost schedule id would leave every restored record `Unnamed`, and no
+    /// due attempt could ever be fired for it. Either failed read marks the
+    /// resync pending so [`Self::tick`] retries it, rather than leaving the
+    /// schedule unnamed until the next restart.
+    async fn resync_meter_state(self: &Arc<Self>) {
+        let Some(meter) = self.meter.get().cloned() else {
+            return;
+        };
+        let schedules = match meter.schedules().await {
+            Ok(schedules) => schedules,
+            Err(error) => {
+                tracing::warn!(%error, "could not re-read auto-resume schedules");
+                self.resync_pending.store(true, Ordering::Relaxed);
+                return;
+            }
+        };
+        let mut limits_failed = false;
+        let limits = match meter.limits_report().await {
+            Ok(report) => report.limits,
+            Err(error) => {
+                tracing::warn!(%error, "could not re-read the usage limit history");
+                self.resync_pending.store(true, Ordering::Relaxed);
+                limits_failed = true;
+                // The schedule ids are the pause's delivery owner, so restore
+                // them now; the retry above fills in the reset times.
+                Vec::new()
+            }
+        };
+
+        let mut armed: HashMap<String, RestoredSchedule> = HashMap::new();
+        for schedule in schedules {
+            if matches!(
+                schedule.state,
+                ResumeState::Scheduled | ResumeState::Waiting
+            ) {
+                let reset_at = limits
+                    .iter()
+                    .find(|limit| limit.thread_id.as_ref() == Some(&schedule.thread_id))
+                    .and_then(|limit| limit.reset_at);
+                armed
+                    .entry(schedule.thread_id.as_str().to_owned())
+                    .or_insert(RestoredSchedule {
+                        resume_at: schedule.resume_at,
+                        reset_at,
+                        schedule_id: schedule.schedule_id,
+                    });
+            }
+        }
+        let mut latest: HashMap<String, LimitBrief> = HashMap::new();
+        for limit in limits {
+            let Some(thread_id) = &limit.thread_id else {
+                continue;
+            };
+            latest
+                .entry(thread_id.as_str().to_owned())
+                .or_insert(LimitBrief {
+                    harness: limit.harness,
+                    reset_at: limit.reset_at,
+                    message: limit.message,
+                });
+        }
+
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        let mut release: Vec<ThreadHandle> = Vec::new();
+        for handle in handles {
+            let mut record = handle.lock().await;
+            let key = record.meta.thread_id.as_str().to_owned();
+            let restored_parked = std::mem::take(&mut record.restored_parked);
+            let parked_turn = restored_parked
+                .then(|| record.active.as_ref().map(|active| active.turn_id.clone()))
+                .flatten()
+                // A retry of the resync must keep the prompt the first pass
+                // already bound to this pause; the journal flag was spent then.
+                .or_else(|| record.parked_turn_to_keep());
+            if let Some(restored) = armed.remove(&key) {
+                record.resume_at = Some(restored.resume_at);
+                record.scheduled_limit = Some(ScheduledLimit {
+                    reset_at: restored.reset_at,
+                    auto_resume: true,
+                    generation: None,
+                    // The ledger id is the pause's identity: a fire claimed for
+                    // this attempt must match it before it acts.
+                    schedule_id: Some(restored.schedule_id),
+                    // A prompt restored from the journal is what this pause was
+                    // holding; no other turn may be parked by it.
+                    parked_turn,
+                });
+            } else if restored_parked && record.pending_turn() {
+                // The pause did not survive (it was cancelled before the
+                // restart), so nothing would deliver the restored prompt.
+                // Release it exactly as a cancel, a Send or a fire does: the
+                // prompt runs now, so the thread leaves the paused phase and
+                // the limit no longer explains a wait.
+                record.meta.parked = None;
+                record.limit = None;
+                let released = vec![ThreadEvent::LimitResumeReleased { at: self.now() }];
+                if let Err(error) = self.emit(&mut record, released, Vec::new()).await {
+                    // The release still stands in memory; the projection
+                    // catches up on the next tick, and the prompt below must
+                    // not be left without an owner.
+                    tracing::error!(%error, "could not record the released parked prompt");
+                }
+                release.push(handle.clone());
+            }
+            // Only show a limit on a thread the limit still explains.
+            record.limit = if record.state.phase == h4rn_core::Phase::RateLimited
+                || record.scheduled_limit.is_some()
+            {
+                latest.remove(&key)
+            } else {
+                None
+            };
+            record.last_signature = None;
+        }
+        for handle in release {
+            self.spawn_advance(handle);
+        }
+        // Both reads landed: the ticker need not try again.
+        if !limits_failed {
+            self.resync_pending.store(false, Ordering::Relaxed);
+        }
     }
 
     /// Resolves upload ids to committed blob metadata and materialises the
@@ -2762,7 +3122,10 @@ impl Inner {
         }
         let summary = record.summary(&self.options.settings, self.now());
         wire.push(Event::ThreadUpserted(summary.clone()));
-        record.last_signature = Some(SummarySignature::of(&summary));
+        // The signature is cached only after the append succeeds. A failed
+        // write leaves the release (or any other change) in memory but not in
+        // the journal, so the next tick must see the difference and publish it
+        // instead of trusting a cache that is already ahead of storage.
 
         let _guard = self.emit_lock.lock().await;
         let seqs = self
@@ -2771,6 +3134,7 @@ impl Inner {
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
         self.broadcast(&record.meta.thread_id, &wire, &seqs);
+        record.last_signature = Some(SummarySignature::of(&summary));
         let seq = seqs.last().copied().unwrap_or(0);
         Ok((summary, seq))
     }
@@ -2822,6 +3186,7 @@ impl Inner {
                 ttft_ms: None,
                 context_window: None,
                 branch,
+                restored_parked: false,
                 closed: false,
             };
 
@@ -2840,6 +3205,28 @@ impl Inner {
                     wire,
                 )
                 .await?;
+            } else if record.state.phase == h4rn_core::Phase::RateLimited
+                && let Some(parked) = record.meta.parked.clone()
+            {
+                // A pause was holding this prompt when the daemon stopped. The
+                // prompt is already in the journal and its turn is the paused
+                // one, so restore the dispatch: the schedule's firing (or the
+                // person's Send or cancel) then delivers it instead of the
+                // policy's "continue". The ledger is attached later, which is
+                // when the record learns whether the schedule survived.
+                record.active = Some(ActiveTurn {
+                    turn_id: parked.turn_id.clone(),
+                    item_id: assistant_item_id(&parked.turn_id),
+                    text: String::new(),
+                    usage: Usage::default(),
+                    meter: TurnMeter::new(self.now()),
+                    tools: HashMap::new(),
+                    last_tick: None,
+                    dispatch: Arc::new(TurnDispatch::new(parked.turn_id.clone(), parked.input())),
+                    applied_limit_reset: None,
+                });
+                record.last_turn_id = Some(parked.turn_id);
+                record.restored_parked = true;
             }
 
             record.last_signature = Some(record.signature(&self.options.settings, self.now()));
@@ -2959,6 +3346,10 @@ impl Inner {
             }
         }
         record.active = None;
+        // The pause, if any, was holding that turn's prompt. A settled turn has
+        // nothing left for a schedule to deliver, and the row must not restore
+        // a prompt that already ended.
+        record.meta.parked = None;
         domain.push(ThreadEvent::TurnCompleted { status, at: now });
         // Events that must survive the completion (a usage limit that keeps the
         // thread scheduled) are applied after it, exactly as the lifecycle
@@ -3151,6 +3542,7 @@ impl Inner {
             record.session = SessionSlot::Live {
                 generation,
                 session: Arc::clone(&session),
+                applied_limit_reset: None,
             };
             // This session was started for the captured turn: the pump can
             // tell its death from the end of a previous turn's agent.
@@ -3173,7 +3565,7 @@ impl Inner {
         // moves on instead.
         let still_active = {
             let record = handle.lock().await;
-            record.dispatch_for(&turn.turn_id).is_some()
+            record.dispatch_for(&turn.turn_id).is_some() && !record.pause_parks_turn(&turn.turn_id)
         };
         if still_active {
             self.deliver(handle.clone(), turn, Arc::clone(&session))
@@ -3250,14 +3642,36 @@ impl Inner {
     /// settles the turn, and arming the schedule under the same record lock
     /// keeps the settlement from promoting queued work past it. Returns the
     /// row to publish when arming fails.
+    ///
+    /// `generation` names the session whose report carries the limit. A dying
+    /// generation's late report may only arm a pause when no newer generation
+    /// has armed one already: its reset can be earlier, and replacing the newer
+    /// schedule would resume the thread before the provider it is waiting on.
+    /// Once the thread has a pause, the reset is only ever applied to the live
+    /// session that reported it: an older generation's late report must not
+    /// mark the replacement's own reset as applied.
     async fn apply_limit_hit(
         &self,
         record: &mut ThreadRecord,
+        generation: Option<u64>,
         reset_at: Option<DateTime<Utc>>,
         auto_resume: bool,
         now: DateTime<Utc>,
     ) -> Option<Event> {
         let thread_id = record.meta.thread_id.clone();
+        if auto_resume
+            && generation.is_some_and(|reporting| record.newer_generation_armed_schedule(reporting))
+        {
+            // A newer generation already named this thread's pause. Keep its
+            // schedule (and jitter) instead of replacing it with an older
+            // generation's earlier reset.
+            tracing::debug!(
+                thread_id = %thread_id,
+                ?generation,
+                "kept a newer session generation's auto-resume schedule"
+            );
+            return None;
+        }
         record.limit = Some(LimitBrief {
             harness: Some(record.meta.harness),
             reset_at,
@@ -3284,7 +3698,21 @@ impl Inner {
         if !auto_resume {
             return None;
         }
+        if record.adopt_schedule_generation(generation, reset_at) {
+            // A later generation confirmed the pause that is already armed.
+            // It keeps the attempt and jitter it was given; only its owner
+            // changed, so a delayed older report cannot replace it. Record the
+            // reset on this generation too: if the person cancels the resume,
+            // this generation's own exit report repeating it must not arm the
+            // pause again.
+            record.note_applied_reset(generation, reset_at);
+            return None;
+        }
         let prompt = meter.policy().prompt;
+        // A replacement keeps the prompt the pause was holding: the requeued
+        // turn is still the active, pending dispatch, and a pump-end advance
+        // must not deliver it into the provider this newer reset named.
+        let parked_turn = record.parked_turn_to_keep();
         match meter
             .arm_schedule(&thread_id, reset_at, prompt, None, now)
             .await
@@ -3294,13 +3722,11 @@ impl Inner {
                 record.scheduled_limit = Some(ScheduledLimit {
                     reset_at,
                     auto_resume,
+                    generation,
+                    schedule_id: Some(schedule.schedule_id),
+                    parked_turn,
                 });
-                if let Some(active) = record.active.as_mut() {
-                    // The completing turn remembers what it applied, even if
-                    // the person cancels the schedule before the exit report
-                    // repeats it.
-                    active.applied_limit_reset = Some(reset_at);
-                }
+                record.note_applied_reset(generation, reset_at);
                 None
             }
             Err(error) => Some(Event::Error {
@@ -3330,6 +3756,7 @@ impl Inner {
         self: &Arc<Self>,
         handle: ThreadHandle,
         turn_id: &TurnId,
+        claimed_generation: u64,
         session: &SharedSession,
         message: String,
         limit: Option<LimitSignal>,
@@ -3376,13 +3803,13 @@ impl Inner {
         // session could not take its cancel (it was already gone), so the
         // prompt must never be replayed on a fresh one. It settles interrupted
         // here, under the same lock that proves the turn is still ours.
-        let retarget = {
+        let (retarget, paused) = {
             let mut record = handle.lock().await;
             let Some(dispatch) = record.dispatch_for(turn_id) else {
                 return;
             };
             if record.session.is_live(session) {
-                None
+                (None, false)
             } else {
                 // Test-only interleaving point: the old scope read the record
                 // and then released the dispatch in a second step, so a Stop
@@ -3412,19 +3839,85 @@ impl Inner {
                         return;
                     }
                     RecoveryOutcome::Settled => return,
-                    RecoveryOutcome::Requeue => Some(match record.session {
-                        SessionSlot::None => DeliveryRetarget::Start,
-                        SessionSlot::Live { .. } => DeliveryRetarget::Live,
-                        SessionSlot::Starting(_) => DeliveryRetarget::Starting,
-                    }),
+                    RecoveryOutcome::Requeue => {
+                        // The failed write can still carry the adapter's typed
+                        // limit even though its prompt goes back for a retry.
+                        // Apply it here, under the same lock that decided the
+                        // requeue, so the retry cannot be delivered straight
+                        // into the paused provider: an armed schedule that
+                        // names this dispatch keeps the queue (this turn
+                        // included) held until it fires.
+                        if let Some(signal) = &limit {
+                            // The write claimed this generation before its
+                            // session was detached, so the pause belongs to it
+                            // even though the slot is empty now. A typed limit
+                            // without a reset time still backs off: an
+                            // immediate retry would run straight into the
+                            // provider that just refused it.
+                            let auto_resume = true;
+                            let now = self.now();
+                            let mut domain = Vec::new();
+                            let mut wire = Vec::new();
+                            self.note_limit_hit(
+                                &mut record,
+                                LimitObservation {
+                                    generation: Some(claimed_generation),
+                                    reset_at: signal.reset_at,
+                                    auto_resume,
+                                },
+                                now,
+                                &mut domain,
+                                &mut wire,
+                            )
+                            .await;
+                            // This pause exists to hold this one prompt, but
+                            // only when this report armed or adopted it. Name
+                            // the dispatch so the pause can never park a
+                            // different turn, and record the prompt on the
+                            // thread row so a restart restores it instead of
+                            // firing the policy's resume prompt. A pause a
+                            // newer generation armed is not this write's to
+                            // redirect; `pause_parks_turn` below decides
+                            // whether it holds this retry, exactly as
+                            // `advance_queue` does.
+                            let owns_pause =
+                                record.scheduled_limit.as_ref().is_some_and(|scheduled| {
+                                    scheduled.generation == Some(claimed_generation)
+                                });
+                            if owns_pause {
+                                if let Some(scheduled) = record.scheduled_limit.as_mut() {
+                                    scheduled.parked_turn = Some(turn_id.clone());
+                                }
+                                record.meta.parked =
+                                    Some(ParkedPrompt::of(turn_id, &dispatch.input()));
+                            }
+                            if let Err(error) = self.emit(&mut record, domain, wire).await {
+                                tracing::error!(%error, "failed to record a rate limit");
+                            }
+                        }
+                        // One predicate decides whether a pause holds this
+                        // retry, the same one `advance_queue` uses: a pause
+                        // armed by another generation does not hold a prompt
+                        // it does not name.
+                        let paused = record.pause_parks_turn(turn_id);
+                        (
+                            Some(match record.session {
+                                SessionSlot::None => DeliveryRetarget::Start,
+                                SessionSlot::Live { .. } => DeliveryRetarget::Live,
+                                SessionSlot::Starting(_) => DeliveryRetarget::Starting,
+                            }),
+                            paused,
+                        )
+                    }
                 }
             }
         };
         if let Some(retarget) = retarget {
             // `advance_queue` starts a session or takes the live one; it is
             // spawned through the type-erased task so this delivery path does
-            // not become recursive.
-            if !matches!(retarget, DeliveryRetarget::Starting) {
+            // not become recursive. A pause armed by this failed write owns
+            // the requeued turn: its schedule delivers it after the reset.
+            if !paused && !matches!(retarget, DeliveryRetarget::Starting) {
                 self.spawn_advance(handle);
             }
             return;
@@ -3451,7 +3944,13 @@ impl Inner {
             if let Some(signal) = limit {
                 let auto_resume = signal.reset_at.is_some();
                 if let Some(event) = self
-                    .apply_limit_hit(&mut record, signal.reset_at, auto_resume, now)
+                    .apply_limit_hit(
+                        &mut record,
+                        Some(claimed_generation),
+                        signal.reset_at,
+                        auto_resume,
+                        now,
+                    )
                     .await
                 {
                     end.wire.push(event);
@@ -3515,24 +4014,22 @@ impl Inner {
         dispatch: Arc<TurnDispatch>,
         session: SharedSession,
     ) {
-        if !self
-            .owns_attached_session(&handle, &dispatch, &session)
+        if self
+            .attached_generation(&handle, &dispatch, &session)
             .await
+            .is_none()
         {
             self.recover_delivery(&handle, &dispatch).await;
             return;
         }
         let mut guard = session.lock().await;
-        if !self
-            .owns_attached_session(&handle, &dispatch, &session)
-            .await
-        {
+        let Some(generation) = self.attached_generation(&handle, &dispatch, &session).await else {
             // The turn ended, or its session was replaced, while this waited
             // for the session lock.
             drop(guard);
             self.recover_delivery(&handle, &dispatch).await;
             return;
-        }
+        };
         if !dispatch.claim() {
             return;
         }
@@ -3544,20 +4041,33 @@ impl Inner {
             // transport text that happens to mention a limit (an HTTP 413
             // payload limit, say) is an ordinary failed turn.
             let limit = error.limit().cloned();
-            self.fail_prompt_write(handle, &turn_id, &session, error.to_string(), limit)
-                .await;
+            // The generation this write claimed is captured now: a later
+            // detach empties the slot, and a limit on the failed write still
+            // belongs to the session that reported it.
+            self.fail_prompt_write(
+                handle,
+                &turn_id,
+                generation,
+                &session,
+                error.to_string(),
+                limit,
+            )
+            .await;
         }
     }
 
-    /// Whether `dispatch` is still the active turn on `session`'s slot.
-    async fn owns_attached_session(
+    /// The generation of `session` when it is still the active turn's slot.
+    async fn attached_generation(
         &self,
         handle: &ThreadHandle,
         dispatch: &Arc<TurnDispatch>,
         session: &SharedSession,
-    ) -> bool {
+    ) -> Option<u64> {
         let record = handle.lock().await;
-        record.dispatch_for(&dispatch.turn_id).is_some() && record.session.is_live(session)
+        if record.dispatch_for(&dispatch.turn_id).is_none() || !record.session.is_live(session) {
+            return None;
+        }
+        record.session.generation()
     }
 
     /// Gets a still-pending turn onto a session after its delivery found the
@@ -3744,6 +4254,7 @@ impl Inner {
                 SessionSlot::Live {
                     generation: current,
                     session: current_session,
+                    ..
                 } if *current == generation && Arc::ptr_eq(current_session, &session)
             ) {
                 tracing::debug!(
@@ -3954,8 +4465,11 @@ impl Inner {
                 } => {
                     self.note_limit_hit(
                         &mut record,
-                        reset_at,
-                        auto_resume,
+                        LimitObservation {
+                            generation: Some(generation),
+                            reset_at,
+                            auto_resume,
+                        },
                         now,
                         &mut domain,
                         &mut wire,
@@ -4442,14 +4956,18 @@ impl Inner {
     async fn note_limit_hit(
         &self,
         record: &mut ThreadRecord,
-        reset_at: Option<DateTime<Utc>>,
-        auto_resume: bool,
+        limit: LimitObservation,
         now: DateTime<Utc>,
         domain: &mut Vec<ThreadEvent>,
         wire: &mut Vec<Event>,
     ) {
+        let LimitObservation {
+            generation,
+            reset_at,
+            auto_resume,
+        } = limit;
         if let Some(event) = self
-            .apply_limit_hit(record, reset_at, auto_resume, now)
+            .apply_limit_hit(record, generation, reset_at, auto_resume, now)
             .await
         {
             let _ = self.emit(record, Vec::new(), vec![event]).await;
@@ -4627,28 +5145,34 @@ impl Inner {
             && record
                 .active
                 .as_ref()
-                .is_some_and(|active| active.applied_limit_reset == Some(reset_at))
+                .is_some_and(|active| active.applied_limit_reset == Some((generation, reset_at)))
         {
-            // The turn already applied this exact reset (the typed limit that
-            // arrived before its completion). The person may have cancelled
-            // the resume while this report was still on its way: arming the
-            // same reset again would undo that cancellation. The turn's record
-            // knows what it applied; the live schedule does not survive a
-            // cancellation, so it cannot be the guard here.
+            // This exact generation already applied this exact reset (the
+            // typed limit that arrived before its completion). The person may
+            // have cancelled the resume while this report was still on its
+            // way: arming the same reset again would undo that cancellation.
+            // The turn's record knows what it applied; the live schedule does
+            // not survive a cancellation, so it cannot be the guard here.
+            record.adopt_schedule_generation(Some(generation), reset_at);
             return;
         }
-        if let Some(scheduled) = &record.scheduled_limit
-            && scheduled.auto_resume
-            && scheduled.reset_at == reset_at
-        {
+        if record.adopt_schedule_generation(Some(generation), reset_at) {
+            // A later generation confirmed the pause that is already armed.
+            // It keeps its attempt and jitter, and now owns the schedule. The
+            // reset belongs to this generation too, so its own exit-only
+            // repeat after a cancellation cannot arm the pause again.
+            record.note_applied_reset(Some(generation), reset_at);
             return;
         }
         let mut domain = Vec::new();
         let mut wire = Vec::new();
         self.note_limit_hit(
             &mut record,
-            reset_at,
-            auto_resume,
+            LimitObservation {
+                generation: Some(generation),
+                reset_at,
+                auto_resume,
+            },
             now,
             &mut domain,
             &mut wire,
@@ -4714,6 +5238,12 @@ impl Inner {
                 if !record.is_dying_session(generation) {
                     return true;
                 }
+                if record.newer_generation_armed_schedule(generation) {
+                    // The newer generation's pause is the thread's; this
+                    // report's reset must not replace it. The death still
+                    // publishes its own row when its exit report arrives.
+                    return false;
+                }
                 if let (true, Some(reset_at)) = (auto_resume, reset_at)
                     && !record.note_idle_reset_applied(generation, reset_at)
                 {
@@ -4724,8 +5254,11 @@ impl Inner {
                 let mut wire = Vec::new();
                 self.note_limit_hit(
                     &mut record,
-                    reset_at,
-                    auto_resume,
+                    LimitObservation {
+                        generation: Some(generation),
+                        reset_at,
+                        auto_resume,
+                    },
                     now,
                     &mut domain,
                     &mut wire,
@@ -4816,21 +5349,36 @@ impl Inner {
         generation: u64,
         reset_at: DateTime<Utc>,
     ) {
+        if record.newer_generation_armed_schedule(generation) {
+            // A newer generation's pause already names this thread's wait.
+            // This death keeps its own row, but its earlier reset must not
+            // replace that schedule.
+            return;
+        }
         if !record.note_idle_reset_applied(generation, reset_at) {
             return;
         }
-        if record
-            .scheduled_limit
-            .as_ref()
-            .is_some_and(|scheduled| scheduled.auto_resume && scheduled.reset_at == Some(reset_at))
-        {
+        if record.adopt_schedule_generation(Some(generation), Some(reset_at)) {
+            // A newer generation confirmed the pause that is already armed.
+            // It keeps the attempt and jitter it was given, but it now owns
+            // the schedule so this older death cannot replace it later.
             return;
         }
         let now = self.now();
         let mut domain = Vec::new();
         let mut wire = Vec::new();
-        self.note_limit_hit(record, Some(reset_at), true, now, &mut domain, &mut wire)
-            .await;
+        self.note_limit_hit(
+            record,
+            LimitObservation {
+                generation: Some(generation),
+                reset_at: Some(reset_at),
+                auto_resume: true,
+            },
+            now,
+            &mut domain,
+            &mut wire,
+        )
+        .await;
         if let Err(error) = self.emit(record, domain, wire).await {
             tracing::error!(%error, "failed to record a rate limit");
         }
@@ -4847,6 +5395,18 @@ impl Inner {
         let needs_session = {
             let record = handle.lock().await;
             if record.closed || record.active.is_none() {
+                return;
+            }
+            let parks_active = record
+                .active
+                .as_ref()
+                .is_some_and(|active| record.pause_parks_turn(&active.turn_id));
+            if parks_active {
+                // An armed auto-resume owns this turn's next attempt: the
+                // requeued prompt waits for the schedule instead of running
+                // into the paused provider. The schedule delivers it when it
+                // fires. A pause armed for a different dispatch does not park
+                // this one (a Send's own replacement turn still starts).
                 return;
             }
             matches!(record.session, SessionSlot::None)
@@ -4951,7 +5511,7 @@ impl Inner {
         // proxy calls) or harness I/O (session shutdown), and holding the lock
         // across it would freeze GetThread and SendMessage for this thread for
         // as long as the proxy or the harness takes to answer.
-        let (harness, model, thread_id, closed, active) = {
+        let (harness, model, thread_id, closed, active, parks_active) = {
             let record = handle.lock().await;
             (
                 record.meta.harness,
@@ -4959,6 +5519,7 @@ impl Inner {
                 record.meta.thread_id.clone(),
                 record.closed,
                 record.active.is_some(),
+                record.parks_active_turn(),
             )
         };
         if closed {
@@ -4971,11 +5532,17 @@ impl Inner {
                 .await;
             return Ok(None);
         }
-        if active {
+        if active && !parks_active {
             // A turn is already running (a manual resume, or the limited turn
             // itself has not finished). Wait quietly: the schedule stays armed
             // and is re-checked on the next tick, and `send` cancels it when a
             // new turn supersedes it. Emitting here would repeat every second.
+            //
+            // A turn whose prompt is still pending is the exception, but only
+            // when this pause parks that exact turn: a failed write that lost
+            // its session put it back for a retry and a typed limit paused the
+            // thread. A Send's own pending startup is not this schedule's to
+            // release, so it is left alone without claiming the attempt.
             tracing::debug!(
                 thread_id = %thread_id,
                 "auto-resume due while the thread is active; waiting"
@@ -5006,62 +5573,47 @@ impl Inner {
             });
         }
 
-        // Whoever chose it (the policy at reset time, or a person through
-        // `FailOver`), a changed model needs a fresh session: the live one was
-        // started on the limited model. Claim the attempt first, under the
-        // thread lock and before any model change: `cancel_resume` takes the
-        // same lock before it writes `Cancelled`, so exactly one of the two
-        // wins. A cancellation that landed while the proxy was thinking makes
-        // the claim fail here and no turn runs.
-        enum Apply {
+        // Claim the attempt first, under the thread lock and before any model
+        // change: `cancel_resume` takes the same lock before it writes
+        // `Cancelled`, so exactly one of the two wins. A cancellation that
+        // landed while the proxy was thinking makes the claim fail here and no
+        // turn runs.
+        enum Claim {
             Closed,
             Active,
+            Unnamed,
             Stale,
-            Go(Option<SharedSession>),
+            Claimed,
         }
-        let apply = {
-            let mut record = handle.lock().await;
+        let claim = {
+            let record = handle.lock().await;
             if record.closed {
-                Apply::Closed
-            } else if record.active.is_some() {
-                Apply::Active
+                Claim::Closed
+            } else if record.active.is_some() && !record.parks_active_turn() {
+                // The only active turn a fire may release is the pending one
+                // this pause parks. Anything else (a manual Send's startup, or
+                // a running turn) is left alone, and the attempt stays
+                // unclaimed for the tick that can act on it.
+                Claim::Active
+            } else if !record.names_schedule(&schedule.schedule_id) {
+                // The record has to name the attempt before the ledger claim:
+                // a fire that consumed an attempt the thread never showed is
+                // an attempt the schedule can never deliver. A restarted
+                // daemon knows its paused prompts from the journal, but only
+                // `resync_meter_state` binds them to the ledger schedule.
+                Claim::Unnamed
             } else if !meter
                 .claim_schedule(&schedule)
                 .await
                 .map_err(|error| error.to_string())?
             {
-                Apply::Stale
-            } else if let Some(failover) = &schedule.failover {
-                if record.meta.model == failover.model {
-                    Apply::Go(None)
-                } else {
-                    record.meta.model = failover.model.clone();
-                    // A startup already booting the limited model is superseded
-                    // too: clearing its generation makes it discard the session
-                    // it makes (Invariant 1), and the resume below starts a new
-                    // one on the new model. A live session is detached by the
-                    // generation this schedule inspected; a newer generation is
-                    // never this schedule's to drop.
-                    let session = if let SessionSlot::Starting(_) = record.session {
-                        // A startup that has not finished is already nobody's:
-                        // its generation check discards the session it makes.
-                        record.session = SessionSlot::None;
-                        None
-                    } else {
-                        // `detach_session` stops this session's pump itself.
-                        record
-                            .session
-                            .generation()
-                            .and_then(|generation| record.detach_session(generation))
-                    };
-                    Apply::Go(session)
-                }
+                Claim::Stale
             } else {
-                Apply::Go(None)
+                Claim::Claimed
             }
         };
-        match apply {
-            Apply::Closed => {
+        match claim {
+            Claim::Closed => {
                 let _ = meter
                     .finish_schedule(
                         schedule,
@@ -5071,14 +5623,22 @@ impl Inner {
                     .await;
                 return Ok(None);
             }
-            Apply::Active => {
+            Claim::Active => {
                 tracing::debug!(
                     thread_id = %thread_id,
                     "auto-resume due while the thread is active; waiting"
                 );
                 return Ok(None);
             }
-            Apply::Stale => {
+            Claim::Unnamed => {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    schedule = %schedule.schedule_id,
+                    "the record does not name this schedule; not claiming it"
+                );
+                return Ok(None);
+            }
+            Claim::Stale => {
                 tracing::debug!(
                     thread_id = %thread_id,
                     schedule = %schedule.schedule_id,
@@ -5086,19 +5646,28 @@ impl Inner {
                 );
                 return Ok(None);
             }
-            Apply::Go(session) => {
-                if let Some(session) = session {
-                    let mut session = session.lock().await;
-                    if let Err(error) = session.shutdown().await {
-                        tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
-                    }
-                }
+            Claim::Claimed => {}
+        }
+
+        // A test can hold the fire here, after its attempt was claimed, while
+        // another path replaces the schedule.
+        #[cfg(test)]
+        {
+            let pause = self
+                .fire_pause
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(pause) = pause {
+                pause.claimed.notify_one();
+                pause.resume.notified().await;
             }
         }
 
         // Re-take the lock after the unlocked I/O and check that nothing
         // replaced this schedule meanwhile: `send` may have started a turn
-        // (which cancels the schedule) or the daemon may have closed the thread.
+        // (which cancels the schedule), a newer limit may have replaced it, or
+        // the daemon may have closed the thread.
         let mut record = handle.lock().await;
         if record.closed {
             drop(record);
@@ -5111,18 +5680,116 @@ impl Inner {
                 .await;
             return Ok(None);
         }
-        if record.active.is_some() {
+        // The schedule this fire claimed may have been replaced by a newer
+        // limit while the record lock was free. Clearing or dispatching on its
+        // behalf would drop the newer pause and hand off a delivery it never
+        // owned. The record must name this exact schedule: a missing pause or
+        // an unknown identity is not a match, because neither proves the
+        // attempt this fire claimed is the one the thread is waiting on. The
+        // same holds for the turn being released: only the pending prompt this
+        // pause parks may be delivered.
+        let owns_schedule = record.names_schedule(&schedule.schedule_id);
+        let parks_active = record.parks_active_turn();
+        if !owns_schedule || (record.active.is_some() && !parks_active) {
             drop(record);
             tracing::debug!(
                 thread_id = %thread_id,
-                "auto-resume due while the thread is active; waiting"
+                schedule = %schedule.schedule_id,
+                "the record no longer names this schedule; not acting on it"
             );
+            // The attempt was already claimed, and the ledger marks it Fired.
+            // Record that it will not deliver; `finish_schedule` is a no-op
+            // when a newer row replaced this attempt, so the newer pause is
+            // never cancelled on its behalf.
+            let _ = meter
+                .finish_schedule(
+                    schedule,
+                    ResumeState::Cancelled,
+                    Some("superseded before delivery".to_owned()),
+                )
+                .await;
             return Ok(None);
+        }
+        let pending_turn = parks_active;
+        // Whoever chose it (the policy at reset time, or a person through
+        // `FailOver`), a changed model needs a fresh session: the live one was
+        // started on the limited model. This happens only after the schedule
+        // identity matched, so a fire that lost its pause never changes the
+        // model or drops a session.
+        let mut detached: Option<SharedSession> = None;
+        if let Some(failover) = &schedule.failover
+            && record.meta.model != failover.model
+        {
+            record.meta.model = failover.model.clone();
+            // A startup already booting the limited model is superseded too:
+            // clearing its generation makes it discard the session it makes
+            // (Invariant 1), and the resume below starts a new one on the new
+            // model. A live session is detached by the generation this
+            // schedule inspected; a newer generation is never this schedule's
+            // to drop.
+            detached = if let SessionSlot::Starting(_) = record.session {
+                record.session = SessionSlot::None;
+                None
+            } else {
+                // `detach_session` stops this session's pump itself.
+                record
+                    .session
+                    .generation()
+                    .and_then(|generation| record.detach_session(generation))
+            };
+        }
+        if pending_turn {
+            // The pause was armed by a failed write that put its prompt back.
+            // That requeued turn is the attempt this reset was waiting for, so
+            // deliver it instead of starting the policy's resume prompt. The
+            // queue was held while the schedule was armed, so nothing else can
+            // own the slot's delivery.
+            let now = self.now();
+            record.clear_pause();
+            record.limit = None;
+            // The thread is running that prompt again; leave the paused phase
+            // and drop the limit that explained it. The turn itself was
+            // already recorded and counted when the person sent it.
+            let domain = vec![ThreadEvent::LimitResumeReleased { at: now }];
+            if let Err(error) = self.emit(&mut record, domain, Vec::new()).await {
+                // The pause is cleared and the prompt is about to be written;
+                // a failed projection write must not strand it. The next tick
+                // rewrites the summary.
+                tracing::error!(%error, "could not record the released turn");
+            }
+            let needs_session = matches!(record.session, SessionSlot::None);
+            drop(record);
+            // The attempt is already claimed, so the ledger cannot fire it
+            // again: whether or not the outcome write lands, the prompt has one
+            // delivery owner now.
+            let fired = match meter
+                .finish_schedule(schedule, ResumeState::Fired, None)
+                .await
+            {
+                Ok(fired) => fired,
+                Err(error) => {
+                    tracing::error!(%error, "could not mark the resume schedule fired");
+                    None
+                }
+            };
+            if let Some(session) = detached {
+                let mut session = session.lock().await;
+                if let Err(error) = session.shutdown().await {
+                    tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
+                }
+            }
+            if needs_session {
+                self.spawn_session(handle);
+            } else {
+                self.schedule_active(&handle).await;
+            }
+            return Ok(fired);
         }
 
         let prompt = schedule.prompt.clone();
         let now = self.now();
-        record.scheduled_limit = None;
+        record.clear_pause();
+        record.limit = None;
         let dispatch = record.begin_turn(
             now,
             UserInput {
@@ -5157,19 +5824,30 @@ impl Inner {
             },
         ];
         if let Err(error) = self.emit(&mut record, domain, wire).await {
-            let schedule = meter
-                .finish_schedule(schedule, ResumeState::Waiting, Some(error.to_string()))
-                .await
-                .map_err(|error| error.to_string())?;
-            return Ok(schedule);
+            // The turn is begun and its pause is gone; the prompt still needs
+            // an owner. The ledger records the failure so the schedule can be
+            // re-checked, but the delivery below is not conditional on it.
+            tracing::error!(%error, "could not record the auto-resume turn");
         }
         let needs_session = matches!(record.session, SessionSlot::None);
         drop(record);
 
-        let fired = meter
+        let fired = match meter
             .finish_schedule(schedule, ResumeState::Fired, None)
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            Ok(fired) => fired,
+            Err(error) => {
+                tracing::error!(%error, "could not mark the resume schedule fired");
+                None
+            }
+        };
+        if let Some(session) = detached {
+            let mut session = session.lock().await;
+            if let Err(error) = session.shutdown().await {
+                tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
+            }
+        }
         if needs_session {
             self.spawn_session(handle);
         } else {
@@ -5183,6 +5861,11 @@ impl Inner {
     }
 
     async fn tick(self: &Arc<Self>) {
+        if self.resync_pending.load(Ordering::Relaxed) {
+            // The startup read failed; retry before firing anything that would
+            // depend on the ledger ids it could not attach.
+            self.resync_meter_state().await;
+        }
         let handles: Vec<ThreadHandle> = {
             let threads = self.threads.lock().await;
             threads.values().cloned().collect()
@@ -5198,16 +5881,21 @@ impl Inner {
             if record.last_signature.as_ref() == Some(&signature) {
                 continue;
             }
-            record.last_signature = Some(signature);
 
             let wire = vec![Event::ThreadUpserted(summary)];
             let _guard = self.emit_lock.lock().await;
+            // The signature is cached only once the projection is durable and
+            // published: a failed append must be retried on the next tick
+            // instead of being hidden by a cache that already moved on.
             match self
                 .journal
                 .append_wire(&record.meta.thread_id, &wire)
                 .await
             {
-                Ok(seqs) => self.broadcast(&record.meta.thread_id, &wire, &seqs),
+                Ok(seqs) => {
+                    self.broadcast(&record.meta.thread_id, &wire, &seqs);
+                    record.last_signature = Some(signature);
+                }
                 Err(error) => tracing::warn!(%error, "failed to append derived tab change"),
             }
         }
@@ -5255,6 +5943,41 @@ fn harness_refs(attachments: &[Attachment]) -> Vec<AttachmentRef> {
             media_type: attachment.mime.clone(),
         })
         .collect()
+}
+
+impl ParkedPrompt {
+    /// The durable form of a prompt a pause is holding.
+    fn of(turn_id: &TurnId, input: &UserInput) -> Self {
+        Self {
+            turn_id: turn_id.clone(),
+            text: input.text.clone(),
+            attachments: input
+                .attachments
+                .iter()
+                .map(|attachment| ParkedAttachment {
+                    id: attachment.id.clone(),
+                    path: attachment.path.display().to_string(),
+                    media_type: attachment.media_type.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The delivery form of the restored prompt.
+    fn input(&self) -> UserInput {
+        UserInput {
+            text: self.text.clone(),
+            attachments: self
+                .attachments
+                .iter()
+                .map(|attachment| AttachmentRef {
+                    id: attachment.id.clone(),
+                    path: std::path::PathBuf::from(&attachment.path),
+                    media_type: attachment.media_type.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 fn assistant_item_id(turn_id: &TurnId) -> String {
@@ -5497,8 +6220,18 @@ mod tests {
     }
 
     async fn open_test_manager(harness: FakeHarness, host: HostId) -> ThreadManager {
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        open_test_manager_with_journal(harness, host, journal).await
+    }
+
+    async fn open_test_manager_with_journal(
+        harness: FakeHarness,
+        host: HostId,
+        journal: Arc<dyn Journal>,
+    ) -> ThreadManager {
         ThreadManager::open(
-            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            journal,
             Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
             host,
             ThreadManagerOptions {
@@ -5510,6 +6243,93 @@ mod tests {
         )
         .await
         .expect("manager")
+    }
+
+    /// A journal whose next `append` calls fail on demand.
+    ///
+    /// A delivery that gives up when the journal cannot record its release
+    /// leaves the released prompt with no owner, so the failure path needs a
+    /// deterministic test. Everything except `append` is delegated.
+    struct FlakyJournal {
+        inner: Arc<dyn Journal>,
+        fail_next_appends: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FlakyJournal {
+        async fn in_memory() -> Arc<Self> {
+            Arc::new(Self {
+                inner: Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+                fail_next_appends: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        /// Makes the next `count` journal appends fail.
+        fn fail_next_appends(&self, count: usize) {
+            self.fail_next_appends.store(count, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Journal for FlakyJournal {
+        async fn upsert_thread(
+            &self,
+            meta: &ThreadMeta,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.upsert_thread(meta).await
+        }
+
+        async fn list_threads(&self) -> Result<Vec<ThreadMeta>, crate::journal::JournalError> {
+            self.inner.list_threads().await
+        }
+
+        async fn append(
+            &self,
+            meta: &ThreadMeta,
+            domain: &[ThreadEvent],
+            wire: &[Event],
+        ) -> Result<Vec<u64>, crate::journal::JournalError> {
+            if self.fail_next_appends.load(Ordering::SeqCst) > 0 {
+                self.fail_next_appends.fetch_sub(1, Ordering::SeqCst);
+                return Err(crate::journal::JournalError::Io(std::io::Error::other(
+                    "injected journal write failure",
+                )));
+            }
+            self.inner.append(meta, domain, wire).await
+        }
+
+        async fn append_wire(
+            &self,
+            thread_id: &ThreadId,
+            wire: &[Event],
+        ) -> Result<Vec<u64>, crate::journal::JournalError> {
+            self.inner.append_wire(thread_id, wire).await
+        }
+
+        async fn read_wire_since(
+            &self,
+            thread_id: &ThreadId,
+            after: u64,
+        ) -> Result<Vec<WireEvent>, crate::journal::JournalError> {
+            self.inner.read_wire_since(thread_id, after).await
+        }
+
+        async fn read_wire_since_global(
+            &self,
+            after: u64,
+        ) -> Result<Vec<WireEvent>, crate::journal::JournalError> {
+            self.inner.read_wire_since_global(after).await
+        }
+
+        async fn head(&self) -> Result<u64, crate::journal::JournalError> {
+            self.inner.head().await
+        }
+
+        async fn read_domain(
+            &self,
+            thread_id: &ThreadId,
+        ) -> Result<Vec<ThreadEvent>, crate::journal::JournalError> {
+            self.inner.read_domain(thread_id).await
+        }
     }
 
     fn new_thread(host: HostId, workspace: &std::path::Path, prompt: &str) -> NewThread {
@@ -5526,6 +6346,171 @@ mod tests {
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
             worktree: None,
+        }
+    }
+
+    /// A thread whose second prompt a failed write put back behind a typed
+    /// limit, with no session and the schedule armed.
+    struct ParkedRequeue {
+        /// Keeps the workspace alive for the whole test.
+        _workspace: tempfile::TempDir,
+        manager: ThreadManager,
+        meter: Arc<h4rn_meter::MeterHub>,
+        events: broadcast::Receiver<WireEvent>,
+        handle: ThreadHandle,
+        thread_id: ThreadId,
+        second: AcceptedMessage,
+        sessions: h4rn_harness::SessionCount,
+        sends: h4rn_harness::SendCount,
+        /// Holds startups from the index given to the helper on; `None` when the
+        /// setup gates none.
+        start_gate: Option<h4rn_harness::Gate>,
+    }
+
+    /// Parks a requeued turn behind a typed limit on a lost write.
+    ///
+    /// The write claims its prompt, a restart detaches its session, and the
+    /// adapter's typed limit arrives on the failure. `reset_at` is `None` for a
+    /// limit that never named its reset. The helper returns once the limit row
+    /// is published and the pause owns the Pending turn.
+    async fn park_requeued_turn(reset_at: Option<DateTime<Utc>>) -> ParkedRequeue {
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        park_requeued_turn_on(reset_at, journal, meter, None).await
+    }
+
+    /// [`park_requeued_turn`] whose startups from `start_gate_after` on are held
+    /// by a gate the caller releases.
+    async fn park_requeued_turn_gated(
+        reset_at: Option<DateTime<Utc>>,
+        start_gate_after: usize,
+    ) -> ParkedRequeue {
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        park_requeued_turn_on(reset_at, journal, meter, Some(start_gate_after)).await
+    }
+
+    /// [`park_requeued_turn`] with the caller's durable journal and ledger, so a
+    /// test can restart the daemon on them.
+    async fn park_requeued_turn_on(
+        reset_at: Option<DateTime<Utc>>,
+        journal: Arc<dyn Journal>,
+        meter: Arc<h4rn_meter::MeterHub>,
+        start_gate_after: Option<usize>,
+    ) -> ParkedRequeue {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let harness = harness.with_limit_failure_after(1, "provider usage limit reached", reset_at);
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, start_gate) = match start_gate_after {
+            Some(after) => {
+                let (harness, gate) = harness.with_start_gate_after(after);
+                (harness, Some(gate))
+            }
+            None => (harness, None),
+        };
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The second prompt is claimed and blocks in the write. While it is on
+        // the wire, a restart detaches its session.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let detached = {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live generation");
+            record.detach_session(generation)
+        };
+        assert!(
+            detached.is_some(),
+            "the writing session was detached under the claimed turn"
+        );
+
+        // The parked write now fails with the typed limit. The prompt goes back
+        // and the limit pauses the thread before anything delivers it.
+        gate.release();
+        loop {
+            let wire = tokio::time::timeout(Duration::from_secs(10), next_event(&mut events))
+                .await
+                .expect("a limit row arrived");
+            if matches!(wire.event, Event::UsageLimitHit { .. }) {
+                break;
+            }
+        }
+        {
+            let record = handle.lock().await;
+            assert!(
+                record.pending_turn(),
+                "the failed write put its prompt back"
+            );
+            assert!(
+                record.scheduled_limit.is_some(),
+                "the typed limit paused the thread"
+            );
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.generation),
+                Some(1),
+                "the pause belongs to the session that claimed the write"
+            );
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.parked_turn.clone()),
+                Some(second.turn_id.clone()),
+                "the pause names the one dispatch it parks"
+            );
+            assert_eq!(
+                record
+                    .meta
+                    .parked
+                    .as_ref()
+                    .map(|parked| parked.turn_id.clone()),
+                Some(second.turn_id.clone()),
+                "the parked prompt is recorded on the thread row"
+            );
+            assert!(
+                matches!(record.session, SessionSlot::None),
+                "the requeued turn has no session"
+            );
+        }
+        assert_eq!(
+            sends.get(),
+            2,
+            "the parked prompt has not been written again"
+        );
+        ParkedRequeue {
+            _workspace: workspace,
+            manager,
+            meter,
+            events,
+            handle,
+            thread_id: created.thread_id,
+            second,
+            sessions,
+            sends,
+            start_gate,
         }
     }
 
@@ -6985,6 +7970,9 @@ mod tests {
             )
             .await
             .expect("arm schedule");
+        // The record learns the schedule from the ledger (as it does after a
+        // restart), which is also what gives the fire its identity to match.
+        manager.resync_meter_state().await;
         manager
             .inner
             .fire_schedule(schedule)
@@ -9594,6 +10582,11 @@ mod tests {
             .await
             .expect("thread handle");
         let dying_notify = handle.lock().await.dying_notify.clone();
+        // Both exit reports arrive by hand. Hold the mocked clock for the whole
+        // test: a fallback deadline that auto-advanced would publish the first
+        // death before the second one's report, which is exactly the ordering
+        // this test must not depend on.
+        let mut clock = HeldClock::hold();
 
         // G dies idle. Nothing is published until its exit report arrives.
         harness_events.emit(HarnessEvent::TransportClosed {
@@ -9680,6 +10673,122 @@ mod tests {
             schedules[0].attempt, 1,
             "the second pause is a new attempt, not the first one re-armed"
         );
+        clock.release();
+    }
+
+    /// An older dead generation's exit report must not replace a newer one's
+    /// schedule when the two arrive out of order.
+    ///
+    /// G+1 can report a later reset (13 minutes) before G's delayed report
+    /// delivers an earlier one (6 minutes). Both deaths publish their own row,
+    /// but the thread must keep waiting on G+1's reset; G's earlier report may
+    /// not pull the resume forward.
+    #[tokio::test]
+    async fn an_older_death_does_not_replace_a_newer_generations_schedule() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let first_reset = chrono::Utc::now() + chrono::Duration::minutes(6);
+        let second_reset = chrono::Utc::now() + chrono::Duration::minutes(13);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dying_notify = handle.lock().await.dying_notify.clone();
+        // Both exit reports are delivered by hand, older generation last.
+        let mut clock = HeldClock::hold();
+
+        // G dies idle and waits for its exit report.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // A Send starts G+1; its turn completes and G+1 dies idle too.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        assert_eq!(sessions.get(), 2, "the Send replaced the dead session");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the fresh session ran the turn");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed again".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // The newer generation's report arrives first and arms its reset.
+        harness_events.emit_to(
+            1,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 9): the second agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(second_reset),
+            },
+        );
+        let row = tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the newer death's exit report publishes its row");
+        assert!(
+            row.contains("the second agent ended"),
+            "the newer death has its own row: {row:?}"
+        );
+
+        // The older generation's delayed report now arrives with an earlier
+        // reset. It is still its own row, but not the thread's pause.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): the first agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(first_reset),
+            },
+        );
+        let row = tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the older death's exit report still publishes its row");
+        assert!(
+            row.contains("the first agent ended"),
+            "the older death keeps its own row: {row:?}"
+        );
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "one thread keeps one schedule");
+        assert!(
+            schedules[0].resume_at >= second_reset,
+            "the older report pulled the resume before the newer reset: {:?}",
+            schedules[0].resume_at
+        );
+        assert_eq!(
+            schedules[0].attempt, 0,
+            "the older report re-armed the newer generation's pause"
+        );
+        clock.release();
     }
 
     /// A duplicate reset on an idle exit report must not undo a cancelled
@@ -9776,6 +10885,98 @@ mod tests {
                     ResumeState::Scheduled | ResumeState::Waiting
                 )),
             "the duplicated exit reset re-armed a resume the person cancelled"
+        );
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_ne!(
+            summary.agent_state,
+            AgentState::Scheduled,
+            "the cancelled resume left the thread scheduled"
+        );
+    }
+
+    /// A cancelled resume stays cancelled even when the idle exit report is the
+    /// first death report after the limit.
+    ///
+    /// The bridge sends its typed limit and then the exit with the same reset,
+    /// with no EOF or read error before them. The session is still live when
+    /// the limit arms, so only the live slot can remember what that generation
+    /// applied; the exit then opens the dying entry and must inherit it instead
+    /// of arming the pause the person cancelled in the window.
+    #[tokio::test]
+    async fn a_cancelled_resume_stays_cancelled_when_only_the_exit_repeats_the_reset() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The typed limit arms while the session is still live and idle.
+        harness_events.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        });
+        loop {
+            let wire = tokio::time::timeout(Duration::from_secs(10), next_event(&mut events))
+                .await
+                .expect("the limit row arrived");
+            if matches!(wire.event, Event::UsageLimitHit { .. }) {
+                break;
+            }
+        }
+        assert!(
+            meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the typed limit armed the resume"
+        );
+        manager
+            .cancel_resume(&created.thread_id)
+            .await
+            .expect("cancel the armed resume");
+
+        // The exit report repeats the same reset with no EOF before it. The
+        // dying entry must carry the live slot's applied reset.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "agy exited (exit status: 7): agy: the session ended".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
+            reset_at: Some(reset_at),
+        });
+        let row = tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the exit report publishes the idle death's row");
+        assert!(
+            row.contains("agy exited (exit status: 7): agy: the session ended"),
+            "the row is the exit report with its stderr: {row:?}"
+        );
+        assert!(
+            !meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the exit-only report re-armed a resume the person cancelled"
         );
         let summary = manager
             .thread_summary(&created.thread_id)
@@ -10068,5 +11269,2264 @@ mod tests {
         );
         let _ = third;
         manager.shutdown().await;
+    }
+
+    /// A typed limit on a failed write whose session was lost pauses the retry.
+    ///
+    /// The write claims its prompt, then a restart detaches its session; the
+    /// adapter's typed limit arrives on the failure. The prompt goes back for a
+    /// retry, and the limit must arm its schedule under the same lock: without
+    /// it the retry starts at once on a fresh session, straight into the paused
+    /// provider.
+    #[tokio::test]
+    async fn a_typed_limit_on_a_requeued_write_waits_for_the_schedule() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let harness =
+            harness.with_limit_failure_after(1, "provider usage limit reached", Some(reset_at));
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The second prompt is claimed and blocks in the write. While it is on
+        // the wire, a restart detaches its session.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let detached = {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live generation");
+            record.detach_session(generation)
+        };
+        assert!(
+            detached.is_some(),
+            "the writing session was detached under the claimed turn"
+        );
+
+        // The parked write now fails with the typed limit. The prompt is put
+        // back, but the limit must pause the thread instead of letting the
+        // retry run on a fresh session.
+        gate.release();
+        loop {
+            let wire = tokio::time::timeout(Duration::from_secs(10), next_event(&mut events))
+                .await
+                .expect("a limit row arrived");
+            match wire.event {
+                Event::UsageLimitHit {
+                    reset_at: hit_at, ..
+                } => {
+                    assert_eq!(hit_at, Some(reset_at));
+                    break;
+                }
+                Event::TurnCompleted { turn_id, .. } if turn_id == second.turn_id => {
+                    panic!("the retry ran into the paused provider");
+                }
+                _ => {}
+            }
+        }
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "the typed limit is persisted");
+        assert_eq!(schedules[0].state, h4rn_protocol::ResumeState::Scheduled);
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary.agent_state,
+            AgentState::Scheduled,
+            "the failed write paused the thread"
+        );
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the retry did not start behind the armed schedule"
+        );
+
+        // Nothing starts while the pause is armed.
+        tokio::time::pause();
+        let started = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnStarted { turn_id, .. } = wire.event {
+                    return turn_id;
+                }
+            }
+        })
+        .await;
+        tokio::time::resume();
+        assert!(
+            started.is_err(),
+            "the requeued prompt started behind the armed schedule: {started:?}"
+        );
+
+        // The schedule's firing delivers the requeued turn itself, not the
+        // policy's resume prompt.
+        manager
+            .resume_now(&created.thread_id)
+            .await
+            .expect("the armed schedule fires");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the requeued turn completed");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(
+            status,
+            TurnStatus::Completed,
+            "the requeued prompt ran on a fresh session"
+        );
+        assert_eq!(sessions.get(), 2, "a fresh session carried the retry");
+        assert!(
+            handle.lock().await.active.is_none(),
+            "the turn ended instead of staying Working"
+        );
+    }
+
+    /// A cancelled pause delivers the prompt the failed write put back.
+    ///
+    /// The requeued turn is Pending behind the schedule, so clearing the
+    /// schedule is the person's decision to run it now. Nothing else would
+    /// deliver it and the turn would stay Working forever. The replacement
+    /// startup is held by a gate so the test can see the release before (and
+    /// then after) its prompt is written, instead of polling a counter.
+    #[tokio::test]
+    async fn cancelling_a_pause_delivers_the_requeued_turn() {
+        let parked =
+            park_requeued_turn_gated(Some(chrono::Utc::now() + chrono::Duration::minutes(5)), 1)
+                .await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            meter,
+            mut events,
+            handle,
+            thread_id,
+            second,
+            sessions,
+            sends,
+            start_gate,
+        } = parked;
+        let start_gate = start_gate.expect("the setup gates the replacement startup");
+
+        manager
+            .cancel_resume(&thread_id)
+            .await
+            .expect("cancel the armed resume");
+
+        // The release is the person's action: the thread is running the parked
+        // prompt again, not left rate-limited or waiting for attention, and no
+        // resume time is shown.
+        let summary = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(
+            summary.tab,
+            ThreadTab::Working,
+            "the released turn is not Working"
+        );
+        assert_eq!(summary.agent_state, AgentState::Thinking);
+        assert!(!summary.needs_attention, "the release asked for attention");
+        assert_eq!(
+            summary.resume_at, None,
+            "the released thread shows a resume time"
+        );
+        {
+            let record = handle.lock().await;
+            assert!(record.scheduled_limit.is_none());
+            assert!(record.meta.parked.is_none());
+            assert!(
+                record.pending_turn(),
+                "the parked turn is still the next turn"
+            );
+        }
+        assert_eq!(
+            sends.get(),
+            2,
+            "the gated release wrote the parked prompt before the handoff"
+        );
+
+        start_gate.release();
+        tokio::time::timeout(Duration::from_secs(10), sessions.wait_for(2))
+            .await
+            .expect("the release never started a session");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the released prompt was never written");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the released requeued turn completed");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(
+            status,
+            TurnStatus::Completed,
+            "the cancelled pause's requeued prompt ran on a fresh session"
+        );
+        assert!(
+            !meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the cancellation left a schedule behind"
+        );
+    }
+
+    /// A Send over a pause runs the parked turn first, then the new message.
+    ///
+    /// The new message is the next turn, not a replacement for the one the
+    /// failed write put back. Cancelling the schedule to send it must release
+    /// that parked turn instead of stranding it Pending.
+    #[tokio::test]
+    async fn a_send_during_a_pause_runs_the_parked_turn_before_the_new_message() {
+        let parked =
+            park_requeued_turn(Some(chrono::Utc::now() + chrono::Duration::minutes(5))).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            meter,
+            mut events,
+            thread_id,
+            second,
+            ..
+        } = parked;
+
+        let third = manager
+            .send_message(&thread_id, "third".into(), Vec::new())
+            .await
+            .expect("send");
+        assert_eq!(
+            third.turn_id, second.turn_id,
+            "the new message queues behind the parked turn instead of replacing it"
+        );
+        let summary = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(
+            summary.tab,
+            ThreadTab::Working,
+            "the released turn is not Working"
+        );
+        assert_eq!(summary.agent_state, AgentState::Thinking);
+        assert!(!summary.needs_attention);
+        assert_eq!(
+            summary.resume_at, None,
+            "the released thread shows a resume time"
+        );
+        assert!(
+            !meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the Send left a schedule behind"
+        );
+
+        // The parked turn is delivered first.
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the parked turn was left with nothing to deliver it");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+
+        // The message that arrived during the pause is the next turn.
+        let next = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnStarted { turn_id, .. } = wire.event
+                    && turn_id != second.turn_id
+                {
+                    return turn_id;
+                }
+            }
+        })
+        .await
+        .expect("the queued message ran after the parked turn");
+        assert_ne!(next, second.turn_id);
+    }
+
+    /// An older death's late report must not mark the live replacement's reset
+    /// as applied.
+    ///
+    /// G's exit report arms a pause while G+1 is running. That says nothing
+    /// about G+1, so when the person cancels and G+1 later reports the same
+    /// reset on its first exit, that report must arm the pause again.
+    #[tokio::test]
+    async fn an_older_deaths_late_report_does_not_consume_the_newer_generations_reset() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dying_notify = handle.lock().await.dying_notify.clone();
+        let mut clock = HeldClock::hold();
+
+        // G dies idle and waits for its exit report.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // A Send starts G+1 and its turn completes.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        assert_eq!(sessions.get(), 2, "the Send replaced the dead session");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the fresh session ran the turn");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+
+        // G's delayed exit arms a pause while G+1 is live. It must not record
+        // that reset on G+1.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): the first agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        let row = tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the older death's exit report publishes its row");
+        assert!(
+            row.contains("the first agent ended"),
+            "the row is the older death's exit report: {row:?}"
+        );
+        assert!(
+            meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the older death armed its pause"
+        );
+
+        // The person cancels it. G+1's own first report of the same reset is a
+        // different generation's pause and must still arm.
+        manager
+            .cancel_resume(&created.thread_id)
+            .await
+            .expect("cancel the armed resume");
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed again".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+        harness_events.emit_to(
+            1,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 9): the second agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        let row = tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the newer death's exit report publishes its row");
+        assert!(
+            row.contains("the second agent ended"),
+            "the row is the newer death's exit report: {row:?}"
+        );
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert!(
+            schedules.iter().any(|schedule| {
+                matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                ) && schedule.resume_at >= reset_at
+            }),
+            "the older death had marked the newer generation's reset as applied: {schedules:?}"
+        );
+        clock.release();
+    }
+
+    /// A newer generation's confirmation of the same reset owns the pause.
+    ///
+    /// G1 arms 13 minutes and G3 confirms the same 13 minutes, keeping the
+    /// attempt and jitter. G2's delayed 6-minute report must not replace it;
+    /// without the ownership change G3's confirmation left the older generation
+    /// in charge, and G2's earlier reset would win.
+    #[tokio::test]
+    async fn an_equal_reset_transfers_the_pause_to_the_newer_generation() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let first_reset = chrono::Utc::now() + chrono::Duration::minutes(13);
+        let earlier_reset = chrono::Utc::now() + chrono::Duration::minutes(6);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dying_notify = handle.lock().await.dying_notify.clone();
+        let mut clock = HeldClock::hold();
+
+        // G1, G2 and G3 each die idle and wait for their own exit report.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the second generation ran the turn");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed again".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+        let third = manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(3).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the third generation ran the turn");
+        assert_eq!(turn, third.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed once more".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // G1's report arms the 13-minute pause.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): the first agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(first_reset),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the first death's exit report publishes its row");
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].attempt, 0, "the first report armed the pause");
+
+        // G3 confirms the same reset and must become its owner, keeping the
+        // attempt.
+        harness_events.emit_to(
+            2,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 11): the third agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(first_reset),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the third death's exit report publishes its row");
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(
+            schedules[0].attempt, 0,
+            "the confirmation replaced the pause instead of adopting it"
+        );
+
+        // G2's delayed earlier reset must not replace the pause G3 now owns.
+        harness_events.emit_to(
+            1,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 9): the second agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(earlier_reset),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the second death's exit report publishes its row");
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "one thread keeps one schedule");
+        assert!(
+            schedules[0].resume_at >= first_reset,
+            "an older generation's earlier reset replaced the newer pause: {schedules:?}"
+        );
+        assert_eq!(
+            schedules[0].attempt, 0,
+            "the older report re-armed the newer generation's pause"
+        );
+        let record = handle.lock().await;
+        assert_eq!(
+            record
+                .scheduled_limit
+                .as_ref()
+                .and_then(|scheduled| scheduled.generation),
+            Some(3),
+            "the confirmed pause is owned by the newest generation"
+        );
+        drop(record);
+        clock.release();
+    }
+
+    /// A fire that lost its schedule to a newer limit must not clear the newer
+    /// pause or hand off its delivery.
+    ///
+    /// The fire claims its attempt, then a newer limit replaces the schedule
+    /// while the record lock is free. Acting on the old attempt at that point
+    /// would drop the newer pause and start the parked turn it never owned.
+    #[tokio::test]
+    async fn a_fire_that_lost_its_schedule_leaves_the_newer_pause_alone() {
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let newer_reset = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let parked = park_requeued_turn(Some(reset_at)).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            meter,
+            events: _events,
+            handle,
+            thread_id,
+            sessions,
+            ..
+        } = parked;
+        let armed = meter.schedules().await.expect("read schedules");
+        assert_eq!(armed.len(), 1);
+        let armed_id = armed[0].schedule_id.clone();
+
+        // Hold the fire after it claimed its attempt.
+        let pause = Arc::new(FirePause::default());
+        *manager
+            .inner
+            .fire_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        let firing = {
+            let manager = manager.clone();
+            let thread_id = thread_id.clone();
+            tokio::spawn(async move { manager.resume_now(&thread_id).await })
+        };
+        pause.claimed.notified().await;
+
+        // A newer limit replaces the schedule while the fire waits.
+        {
+            let mut record = handle.lock().await;
+            let event = manager
+                .inner
+                .apply_limit_hit(&mut record, Some(2), Some(newer_reset), true, manager.now())
+                .await;
+            assert!(event.is_none(), "the newer pause armed");
+        }
+        let replaced = meter.schedules().await.expect("read schedules");
+        assert_eq!(replaced.len(), 1);
+        assert_ne!(
+            replaced[0].schedule_id, armed_id,
+            "the newer limit replaced the schedule"
+        );
+
+        pause.resume.notify_one();
+        let fired = firing
+            .await
+            .expect("the fire task")
+            .expect("the fire did not fail");
+        assert!(
+            fired.is_none(),
+            "the superseded fire acted on its old attempt: {fired:?}"
+        );
+
+        // The newer pause is intact and nothing was delivered for the old fire.
+        let record = handle.lock().await;
+        assert!(record.pending_turn(), "the parked turn is still waiting");
+        assert!(
+            matches!(record.session, SessionSlot::None),
+            "the superseded fire handed off a delivery"
+        );
+        let scheduled = record
+            .scheduled_limit
+            .as_ref()
+            .expect("the newer pause is still on the record");
+        assert_eq!(scheduled.reset_at, Some(newer_reset));
+        assert_eq!(
+            scheduled.schedule_id.as_ref(),
+            Some(&replaced[0].schedule_id),
+            "the record still describes the newer schedule"
+        );
+        drop(record);
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].schedule_id, replaced[0].schedule_id);
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Scheduled,
+            "the superseded fire finished the newer pause"
+        );
+        assert_eq!(
+            sessions.get(),
+            1,
+            "nothing started on the old fire's behalf"
+        );
+    }
+
+    /// A typed limit without a reset time still backs off on a requeued write.
+    ///
+    /// The adapter said "rate limited" but named no reset. The retry must wait
+    /// the meter's unknown-reset backoff instead of running straight back into
+    /// the paused provider.
+    #[tokio::test]
+    async fn a_typed_limit_without_a_reset_on_a_requeued_write_backs_off() {
+        let parked = park_requeued_turn(None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            meter,
+            mut events,
+            thread_id,
+            second,
+            sessions,
+            ..
+        } = parked;
+
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "the reset-less limit is persisted");
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Waiting,
+            "an unknown reset waits its backoff instead of retrying at once"
+        );
+        assert!(
+            schedules[0].reason.contains("did not report a reset time"),
+            "the backoff says the provider named no reset: {:?}",
+            schedules[0].reason
+        );
+        assert!(
+            schedules[0].resume_at >= schedules[0].scheduled_at + chrono::Duration::seconds(30),
+            "the first unknown-reset retry is not the initial backoff: {:?}",
+            schedules[0]
+        );
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the retry ran immediately instead of waiting the backoff"
+        );
+
+        // The backoff's firing delivers the parked turn itself.
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the armed backoff fires");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the requeued turn completed");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// A firing pause projects the parked turn as running.
+    ///
+    /// The schedule's attempt is spent and the prompt runs now, so the thread
+    /// must leave the paused phase and drop its resume time and limit without
+    /// counting a new turn.
+    #[tokio::test]
+    async fn firing_a_paused_turn_projects_it_as_running() {
+        let parked =
+            park_requeued_turn_gated(Some(chrono::Utc::now() + chrono::Duration::minutes(5)), 1)
+                .await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            mut events,
+            handle,
+            thread_id,
+            second,
+            sends,
+            start_gate,
+            ..
+        } = parked;
+        let start_gate = start_gate.expect("the setup gates the replacement startup");
+
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the armed schedule fires");
+
+        let summary = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(
+            summary.tab,
+            ThreadTab::Working,
+            "the fired turn is not Working"
+        );
+        assert_eq!(
+            summary.agent_state,
+            AgentState::Thinking,
+            "the thread is still projected as paused"
+        );
+        assert!(!summary.needs_attention);
+        assert_eq!(
+            summary.resume_at, None,
+            "the fired thread shows a resume time"
+        );
+        assert_eq!(
+            summary.limit, None,
+            "the fired thread still shows its limit"
+        );
+        {
+            let record = handle.lock().await;
+            assert!(record.scheduled_limit.is_none());
+            assert!(record.meta.parked.is_none());
+            assert!(
+                record.pending_turn(),
+                "the parked turn is still the next turn"
+            );
+        }
+        assert_eq!(sends.get(), 2, "the gated handoff wrote the prompt early");
+
+        start_gate.release();
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the fired prompt was never written");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the fired turn completed");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// The fire's parked-turn delivery survives a failing ledger write.
+    ///
+    /// The attempt is claimed before the pause is cleared, so a failure to
+    /// record the outcome cannot leave the released prompt without an owner:
+    /// the delivery is spawned regardless and the storage error is logged.
+    #[tokio::test]
+    async fn a_parked_turn_is_delivered_when_the_ledger_write_fails() {
+        let parked =
+            park_requeued_turn(Some(chrono::Utc::now() + chrono::Duration::minutes(5))).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            meter,
+            mut events,
+            thread_id,
+            second,
+            sessions,
+            sends,
+            ..
+        } = parked;
+
+        meter.store().fail_schedule_finish_for_tests();
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the fire runs even though its outcome write fails");
+
+        tokio::time::timeout(Duration::from_secs(10), sessions.wait_for(2))
+            .await
+            .expect("the release never started a session");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the released prompt was never written");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the released turn completed instead of being stranded");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// A release the journal could not record is published on the next tick.
+    ///
+    /// The paused thread leaves the paused phase in memory before its release
+    /// is appended. Caching that summary as already published would hide it
+    /// from the client forever, so a failed append must leave the previous
+    /// signature in place and the next tick writes the Running state.
+    #[tokio::test]
+    async fn a_release_the_journal_cannot_record_is_published_on_the_next_tick() {
+        let journal = FlakyJournal::in_memory().await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let parked = park_requeued_turn_on(
+            Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+            journal.clone(),
+            meter,
+            Some(1),
+        )
+        .await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            mut events,
+            thread_id,
+            start_gate,
+            ..
+        } = parked;
+        let start_gate = start_gate.expect("the setup gates the replacement startup");
+
+        journal.fail_next_appends(1);
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the armed schedule fires");
+        // The release's own projection never reached the journal or the wire.
+        while futures::FutureExt::now_or_never(events.recv()).is_some() {}
+        assert_eq!(
+            manager
+                .thread_summary(&thread_id)
+                .await
+                .expect("summary")
+                .agent_state,
+            AgentState::Thinking,
+            "the fire did not release the parked turn"
+        );
+
+        // The next tick publishes the Running state the failed append lost.
+        manager.inner.tick().await;
+        let summary = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::ThreadUpserted(summary) = wire.event
+                    && summary.tab == ThreadTab::Working
+                    && summary.agent_state == AgentState::Thinking
+                {
+                    return summary;
+                }
+            }
+        })
+        .await
+        .expect("the failed release was never published");
+        assert!(!summary.needs_attention);
+        start_gate.release();
+    }
+
+    /// A cancelled pause still releases the parked prompt when the journal
+    /// cannot record the release.
+    ///
+    /// The schedule is cleared first, so bailing out on the failed state write
+    /// would leave the Pending turn with nothing that could ever deliver it.
+    #[tokio::test]
+    async fn a_cancel_release_survives_a_failing_journal_write() {
+        let journal = FlakyJournal::in_memory().await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let parked = park_requeued_turn_on(
+            Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+            journal.clone(),
+            meter,
+            None,
+        )
+        .await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            mut events,
+            thread_id,
+            second,
+            sessions,
+            sends,
+            ..
+        } = parked;
+
+        journal.fail_next_appends(1);
+        manager
+            .cancel_resume(&thread_id)
+            .await
+            .expect("the cancellation is accepted");
+
+        tokio::time::timeout(Duration::from_secs(10), sessions.wait_for(2))
+            .await
+            .expect("the release never started a session");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the released prompt was never written");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the released turn completed instead of being stranded");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// A Send over a pause still releases the parked prompt when the journal
+    /// cannot record the new message.
+    #[tokio::test]
+    async fn a_send_release_survives_a_failing_journal_write() {
+        let journal = FlakyJournal::in_memory().await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let parked = park_requeued_turn_on(
+            Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+            journal.clone(),
+            meter,
+            None,
+        )
+        .await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            sessions,
+            sends,
+            ..
+        } = parked;
+
+        journal.fail_next_appends(1);
+        let refused = manager
+            .send_message(&thread_id, "third".into(), Vec::new())
+            .await;
+        assert!(refused.is_err(), "the journal rejected the new message");
+
+        // The new message was not recorded, but the parked turn was released:
+        // the schedule is gone, so it has no other delivery owner.
+        tokio::time::timeout(Duration::from_secs(10), sessions.wait_for(2))
+            .await
+            .expect("the release never started a session");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the released prompt was never written");
+    }
+
+    /// A fire only acts when the record still names the schedule it claimed.
+    ///
+    /// A missing pause is not a match: it proves nothing about which attempt
+    /// the thread is waiting on, so neither delivery branch may run.
+    #[tokio::test]
+    async fn a_fire_requires_the_schedule_the_record_names() {
+        let parked =
+            park_requeued_turn(Some(chrono::Utc::now() + chrono::Duration::minutes(5))).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            meter,
+            events: _events,
+            handle,
+            thread_id,
+            sessions,
+            sends,
+            ..
+        } = parked;
+
+        let pause = Arc::new(FirePause::default());
+        *manager
+            .inner
+            .fire_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        let firing = {
+            let manager = manager.clone();
+            let thread_id = thread_id.clone();
+            tokio::spawn(async move { manager.resume_now(&thread_id).await })
+        };
+        pause.claimed.notified().await;
+
+        // The record loses the pause while the claimed fire waits (a record
+        // rebuilt from a ledger without an identity looks like this).
+        handle.lock().await.scheduled_limit = None;
+
+        pause.resume.notify_one();
+        let fired = firing
+            .await
+            .expect("the fire task")
+            .expect("the fire did not fail");
+        assert!(
+            fired.is_none(),
+            "a fire without a matching schedule delivered anyway: {fired:?}"
+        );
+        let record = handle.lock().await;
+        assert!(record.pending_turn(), "the parked turn is still waiting");
+        assert!(
+            matches!(record.session, SessionSlot::None),
+            "the unmatched fire handed off a delivery"
+        );
+        drop(record);
+        assert_eq!(sessions.get(), 1, "the unmatched fire started a session");
+        assert_eq!(sends.get(), 2, "the unmatched fire wrote the parked prompt");
+        // The attempt was already claimed; the fire records that it did not
+        // deliver instead of leaving the row looking fired.
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Cancelled,
+            "the claimed fire was left as delivered: {:?}",
+            schedules[0]
+        );
+        assert_eq!(
+            schedules[0].last_error.as_deref(),
+            Some("superseded before delivery")
+        );
+    }
+
+    /// A pause only parks the prompt it was armed for.
+    ///
+    /// An old agent's exit report can arm a pause while a Send is starting a
+    /// replacement turn. That pause says nothing about the new prompt, so the
+    /// startup delivers it exactly as it does with no pause at all.
+    #[tokio::test]
+    async fn a_pause_does_not_park_a_replacement_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(6);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, start_gate) = harness.with_start_gate_after(1);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dying_notify = handle.lock().await.dying_notify.clone();
+        let mut clock = HeldClock::hold();
+
+        // The first agent dies between turns; its exit report is still to come.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // A Send starts the replacement, whose startup this test holds.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            handle.lock().await.pending_turn(),
+            "the replacement prompt waits for its startup"
+        );
+
+        // The dead agent's exit report arms a pause the replacement did not ask
+        // for.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): the first agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the death's exit report publishes its row");
+        {
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_some(),
+                "the death's reset armed a pause"
+            );
+            assert!(
+                !record.pause_parks_turn(&second.turn_id),
+                "the pause named a prompt it was not armed for"
+            );
+        }
+
+        // The startup delivers the replacement prompt as on main. The death's
+        // row is already published, so the clock can run: the waits below are
+        // then bounded instead of hanging on a regression.
+        clock.release();
+        start_gate.release();
+        tokio::time::timeout(Duration::from_secs(10), sessions.wait_for(2))
+            .await
+            .expect("the replacement startup never began");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(2))
+            .await
+            .expect("the replacement prompt was never written");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the replacement turn was parked by another turn's pause");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// A fire never releases a manual Send's pending startup.
+    ///
+    /// An old agent's exit arms a pause while a Send is starting a replacement
+    /// turn. That turn is pending, but the pause does not park it, so a due
+    /// fire must leave it alone and spend no attempt on it.
+    #[tokio::test]
+    async fn a_fire_leaves_a_pending_turn_the_pause_does_not_park() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(6);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, start_gate) = harness.with_start_gate_after(1);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dying_notify = handle.lock().await.dying_notify.clone();
+        let mut clock = HeldClock::hold();
+
+        // The first agent dies between turns; its exit report is still to come.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // A Send starts the replacement, whose startup this test holds.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            handle.lock().await.pending_turn(),
+            "the replacement prompt waits for its startup"
+        );
+
+        // The dead agent's exit report arms a pause the replacement did not ask
+        // for: it names no parked turn.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): the first agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the death's exit report publishes its row");
+        {
+            let record = handle.lock().await;
+            assert!(record.scheduled_limit.is_some(), "the death armed a pause");
+            assert!(
+                !record.pause_parks_turn(&second.turn_id),
+                "the pause named a prompt it was not armed for"
+            );
+        }
+
+        // The due fire leaves the Send's turn alone and spends no attempt.
+        let fired = manager
+            .resume_now(&created.thread_id)
+            .await
+            .expect("the due fire waits instead of failing");
+        assert!(
+            fired.is_none(),
+            "the fire released a prompt the pause did not park: {fired:?}"
+        );
+        {
+            let record = handle.lock().await;
+            assert!(record.pending_turn(), "the fire released the Send's prompt");
+            assert!(
+                matches!(record.session, SessionSlot::Starting(_)),
+                "the fire disturbed the Send's startup"
+            );
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.parked_turn.clone()),
+                None,
+                "the fire attached the Send's turn to the pause"
+            );
+        }
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "the fire left the pause armed");
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Scheduled,
+            "the fire spent the attempt on a turn it did not own"
+        );
+        assert_eq!(
+            schedules[0].attempt, 0,
+            "the fire spent the attempt on a turn it did not own"
+        );
+        assert_eq!(sends.get(), 1, "the fire wrote the Send's prompt early");
+
+        // The startup still delivers the Send's own prompt.
+        clock.release();
+        start_gate.release();
+        tokio::time::timeout(Duration::from_secs(10), sessions.wait_for(2))
+            .await
+            .expect("the replacement startup never began");
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(2))
+            .await
+            .expect("the replacement prompt was never written");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the replacement turn was stranded");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// A live session that adopts an equal reset records it for its own
+    /// generation, so a later exit-only repeat cannot re-arm a cancelled pause.
+    ///
+    /// G1's exit arms the pause; G2 confirms the same reset on its own stream
+    /// and takes ownership. If that transfer did not mark G2's generation, G2's
+    /// own exit report would arm the pause again after the person cancelled it.
+    #[tokio::test]
+    async fn a_live_session_adopting_the_pause_records_the_reset_for_its_generation() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(13);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dying_notify = handle.lock().await.dying_notify.clone();
+        let mut clock = HeldClock::hold();
+
+        // G1 dies idle and waits for its exit report.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // G2 runs the next turn and stays live.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sessions.wait_for(2).await;
+        sends.wait_for(2).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("G2 completed its turn");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+
+        // G1's exit report arms the pause for generation 1.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): the first agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the first death's exit report publishes its row");
+        assert_eq!(
+            handle
+                .lock()
+                .await
+                .scheduled_limit
+                .as_ref()
+                .and_then(|scheduled| scheduled.generation),
+            Some(1),
+            "G1's exit armed the pause"
+        );
+
+        // G2 confirms the same reset and takes ownership of it.
+        harness_events.emit_to(
+            1,
+            HarnessEvent::LimitHit {
+                reset_at: Some(reset_at),
+                auto_resume: true,
+            },
+        );
+        loop {
+            let wire = next_event(&mut events).await;
+            if matches!(wire.event, Event::UsageLimitHit { .. }) {
+                break;
+            }
+        }
+        {
+            let record = handle.lock().await;
+            let scheduled = record
+                .scheduled_limit
+                .as_ref()
+                .expect("the pause is still armed");
+            assert_eq!(scheduled.generation, Some(2), "G2 owns the pause");
+            assert_eq!(
+                meter.schedules().await.expect("read schedules")[0].attempt,
+                0,
+                "the confirmation re-armed the pause"
+            );
+        }
+
+        // The person cancels; nothing is pending, so only the state clears.
+        manager
+            .cancel_resume(&created.thread_id)
+            .await
+            .expect("cancel the resume");
+
+        // G2 dies and its exit report repeats the reset. It is the same reset
+        // G2 itself confirmed, so it must not arm the cancelled pause again.
+        harness_events.emit_to(
+            1,
+            HarnessEvent::TransportClosed {
+                message: "the ACP agent stdout closed".into(),
+                retryable: true,
+                kind: TransportCloseKind::Eof,
+                reset_at: None,
+            },
+        );
+        dying_notify.notified().await;
+        harness_events.emit_to(
+            1,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 9): the second agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the second death's exit report publishes its row");
+        assert!(
+            !meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the exit repeat re-armed the pause the person cancelled"
+        );
+        clock.release();
+    }
+
+    /// A parked prompt survives a daemon restart.
+    ///
+    /// The prompt and its turn are already in the journal when the failed write
+    /// arms the pause, so the restarted daemon restores the dispatch and the
+    /// schedule delivers that prompt, not the policy's "continue".
+    #[tokio::test]
+    async fn a_parked_prompt_survives_a_daemon_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+
+        // A graceful shutdown keeps the parked prompt and its schedule, so the
+        // restarted daemon restores the dispatch and delivers that prompt.
+        manager.shutdown().await;
+        drop(manager);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        manager.set_meter(Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        ));
+        manager.resync_meter_state().await;
+        let mut events = manager.subscribe();
+
+        // The restored thread shows its schedule and still owns the prompt.
+        let summary = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(summary.tab, ThreadTab::Working);
+        assert_eq!(summary.agent_state, AgentState::Scheduled);
+        let ledger = manager
+            .meter()
+            .expect("meter")
+            .schedules()
+            .await
+            .expect("read schedules");
+        assert_eq!(summary.resume_at, Some(ledger[0].resume_at));
+        let meta = manager.thread_meta(&thread_id).await.expect("thread meta");
+        assert_eq!(
+            meta.parked.as_ref().map(|parked| parked.turn_id.clone()),
+            Some(second.turn_id.clone()),
+            "the thread row does not remember the parked prompt"
+        );
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert_eq!(
+                record.active.as_ref().map(|active| active.turn_id.clone()),
+                Some(second.turn_id.clone()),
+                "the restart did not restore the parked dispatch"
+            );
+            assert!(record.pending_turn());
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.parked_turn.clone()),
+                Some(second.turn_id.clone()),
+                "the restored pause does not name the restored prompt"
+            );
+        }
+
+        // The schedule fires and delivers the restored prompt.
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the restored schedule fires");
+        let mut echoed = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the restored prompt completed instead of being lost");
+        assert_eq!(
+            turn, second.turn_id,
+            "the resume started a new turn instead of the parked one"
+        );
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(
+            echoed.contains("echo: second"),
+            "the policy's prompt ran instead of the parked one: {echoed:?}"
+        );
+        assert_eq!(sends.get(), 1);
+    }
+
+    /// A fire only claims an attempt the thread's record names.
+    ///
+    /// A restarted daemon restores the parked prompt from the journal before
+    /// the ledger is attached. A due schedule in that window must not be
+    /// claimed: the attempt would be consumed and its resumed prompt could
+    /// never run. Once the resync binds the schedule to the record, the same
+    /// due attempt fires and delivers the parked prompt.
+    #[tokio::test]
+    async fn a_fire_before_the_resync_leaves_the_due_schedule_unclaimed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        // The provider reset has already passed, so the armed schedule is due
+        // as soon as the ledger row exists.
+        let reset_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id: _,
+            second,
+            ..
+        } = parked;
+
+        // The crash leaves the journal and the due ledger schedule behind.
+        drop(manager);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        // A fire in the window before the resync: the record knows the parked
+        // prompt but not the schedule that names it.
+        *manager
+            .inner
+            .last_schedule_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        manager.inner.fire_due_schedules().await;
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "the arm is the only ledger row");
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Scheduled,
+            "the fire claimed an attempt the record did not name: {:?}",
+            schedules[0]
+        );
+        assert_eq!(
+            schedules[0].attempt, 0,
+            "the unmatched fire consumed an attempt"
+        );
+        assert_eq!(
+            sends.get(),
+            0,
+            "the unmatched fire delivered a prompt it never owned"
+        );
+
+        // The resync binds the schedule to the restored record, so the same
+        // due attempt now fires and delivers the parked prompt.
+        manager.resync_meter_state().await;
+        *manager
+            .inner
+            .last_schedule_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        manager.inner.fire_due_schedules().await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the resynced schedule delivered the restored prompt");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(sends.get(), 1);
+    }
+
+    /// A failed startup ledger read is retried, and the due schedule still
+    /// fires.
+    ///
+    /// The schedule ids are restored even when the limit history cannot be
+    /// read, and the ticker retries the resync so the pause learns its reset
+    /// and the due attempt is delivered instead of staying `Unnamed` forever.
+    #[tokio::test]
+    async fn a_failed_startup_ledger_read_is_retried_and_the_due_schedule_fires() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        // Already due: the schedule fires as soon as a tick sees it.
+        let reset_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        meter.store().fail_next_limit_reads_for_tests(1);
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        // The first resync cannot read the limit history, but the schedule id
+        // still binds to the restored prompt.
+        manager.resync_meter_state().await;
+        let armed = meter.schedules().await.expect("read schedules");
+        assert_eq!(armed.len(), 1, "the paused schedule survived the restart");
+        let schedule_id = armed[0].schedule_id.clone();
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            let scheduled = record
+                .scheduled_limit
+                .as_ref()
+                .expect("the failed limit read still restored the pause");
+            assert_eq!(
+                scheduled.schedule_id.as_ref(),
+                Some(&schedule_id),
+                "the failed limit read blocked the schedule-id restore"
+            );
+            assert_eq!(
+                scheduled.parked_turn.as_ref(),
+                Some(&second.turn_id),
+                "the restored pause lost the prompt it was holding"
+            );
+            assert_eq!(
+                scheduled.reset_at, None,
+                "the failed limit read somehow knew the reset"
+            );
+        }
+        assert_eq!(
+            meter.store().limit_reads_for_tests(),
+            1,
+            "the first resync read the limit history"
+        );
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the failed read did not schedule a retry"
+        );
+
+        // The next tick retries the resync (which now succeeds) and fires the
+        // due attempt for the restored prompt.
+        *manager
+            .inner
+            .last_schedule_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        manager.inner.tick().await;
+        assert_eq!(
+            meter.store().limit_reads_for_tests(),
+            2,
+            "the tick did not retry the failed ledger read"
+        );
+        assert!(
+            !manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the successful retry left a retry pending"
+        );
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the due schedule never delivered the restored prompt");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(sends.get(), 1);
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Fired,
+            "the retried resync left the due schedule unfired"
+        );
+    }
+
+    /// An older generation's report never overwrites a newer turn's marker.
+    ///
+    /// G+1 arms a pause for a reset, the person cancels it, G's delayed exit
+    /// report repeats the reset and is cancelled too, and G+1's own completion
+    /// repeats the reset one last time. The turn's marker still names G+1, so
+    /// the completion must not arm the pause the person cancelled twice.
+    #[tokio::test]
+    async fn an_older_generations_report_does_not_consume_a_newer_turns_marker() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let (harness, gate) = FakeHarness::new().with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+
+        // A restart starts generation 2, which runs the second turn: its
+        // completion is not gated because it is the session's first send.
+        {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live generation");
+            record.detach_session(generation);
+        }
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("generation 2 ran the second turn");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+
+        // The third turn runs on generation 2 as well, and its completion is
+        // held by the gate, so the turn stays active while the reports land.
+        manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(3).await;
+        let session = {
+            let record = handle.lock().await;
+            assert_eq!(
+                record.session.generation(),
+                Some(2),
+                "the active turn runs on generation 2"
+            );
+            assert!(
+                record.pending_turn() || record.active.is_some(),
+                "the third turn is still the active one"
+            );
+            assert_eq!(
+                record.active_turn_generation(),
+                Some(2),
+                "the active turn belongs to generation 2"
+            );
+            record.live_session().cloned().expect("a live generation 2")
+        };
+
+        // G+1 arms its pause and the turn records the reset as applied.
+        manager
+            .inner
+            .apply_completion_limit(&handle, 2, &session, Some(reset_at), true)
+            .await;
+        {
+            let record = handle.lock().await;
+            assert_eq!(
+                record
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.applied_limit_reset),
+                Some((2, Some(reset_at))),
+                "the completion did not record the applied reset on its own turn"
+            );
+        }
+        manager
+            .cancel_resume(&created.thread_id)
+            .await
+            .expect("cancel the first pause");
+
+        // G's delayed exit report repeats the same reset while G+1's turn is
+        // still the active one, and is cancelled as well.
+        {
+            let mut record = handle.lock().await;
+            let event = manager
+                .inner
+                .apply_limit_hit(&mut record, Some(1), Some(reset_at), true, manager.now())
+                .await;
+            assert!(event.is_none(), "the older generation armed a pause");
+            assert_eq!(
+                record
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.applied_limit_reset),
+                Some((2, Some(reset_at))),
+                "the older generation overwrote the newer turn's marker"
+            );
+        }
+        manager
+            .cancel_resume(&created.thread_id)
+            .await
+            .expect("cancel the older generation's pause");
+
+        // G+1's completion repeats the reset: the turn already applied it, so
+        // the cancelled pause must stay cancelled.
+        manager
+            .inner
+            .apply_completion_limit(&handle, 2, &session, Some(reset_at), true)
+            .await;
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert!(
+            !schedules.iter().any(|schedule| matches!(
+                schedule.state,
+                ResumeState::Scheduled | ResumeState::Waiting
+            )),
+            "the completion re-armed a pause the person cancelled: {schedules:?}"
+        );
+        assert!(
+            handle.lock().await.scheduled_limit.is_none(),
+            "the completion left a pause on the record"
+        );
+        gate.release();
+    }
+
+    /// A pause armed by another generation does not hold this retry.
+    ///
+    /// The failed write requeues its prompt, and a pause already names the
+    /// thread — but not this dispatch. `advance_queue` would not park the turn
+    /// for that pause, so the retry path must not skip the advance either:
+    /// otherwise the prompt waits for a schedule that never delivers it.
+    #[tokio::test]
+    async fn a_pause_armed_by_another_generation_does_not_hold_the_retried_write() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(9);
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let harness = harness.with_send_failure_after(1, "the harness rejected the message");
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+
+        // The second prompt's write is claimed on the live session and waits
+        // on the gate; the adapter rejects it once the gate opens.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+
+        // Another generation's pause names the thread but no dispatch.
+        {
+            let mut record = handle.lock().await;
+            let event = manager
+                .inner
+                .apply_limit_hit(&mut record, Some(9), Some(reset_at), true, manager.now())
+                .await;
+            assert!(event.is_none(), "the other generation armed its pause");
+            assert!(
+                !record.pause_parks_turn(&second.turn_id),
+                "the pause named a dispatch it was not armed for"
+            );
+        }
+        {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("the writing generation");
+            record.detach_session(generation);
+        }
+
+        // The write fails and requeues its prompt. The pause does not name it,
+        // so the retry must be delivered instead of waiting forever.
+        gate.release();
+        let (turn, _status) = tokio::time::timeout(Duration::from_secs(10), async {
+            next_turn_completion(&mut events).await
+        })
+        .await
+        .expect("the retried prompt waited on a pause that does not park it");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(sends.get(), 3, "the retry was never written");
+        assert_eq!(
+            sessions.get(),
+            2,
+            "the retry never started a replacement session"
+        );
+    }
+
+    /// A typed limit on a retried write does not attach to a newer pause.
+    ///
+    /// The write fails with the adapter's typed limit while a pause a newer
+    /// generation armed already names the thread. That pause is not this
+    /// write's to redirect, so the retry must run without becoming its parked
+    /// turn.
+    #[tokio::test]
+    async fn a_typed_limit_on_a_retried_write_does_not_attach_to_a_newer_pause() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(9);
+        let newer_reset = chrono::Utc::now() + chrono::Duration::minutes(19);
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let harness =
+            harness.with_limit_failure_after(1, "provider usage limit reached", Some(reset_at));
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+
+        // The second prompt's write is claimed on the live session and waits
+        // on the gate; the adapter reports a typed limit once it opens.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+
+        // Another generation's pause names the thread before the write fails.
+        {
+            let mut record = handle.lock().await;
+            let event = manager
+                .inner
+                .apply_limit_hit(&mut record, Some(9), Some(newer_reset), true, manager.now())
+                .await;
+            assert!(event.is_none(), "the other generation armed its pause");
+        }
+        let armed = meter.schedules().await.expect("read schedules");
+        assert_eq!(armed.len(), 1);
+        {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("the writing generation");
+            record.detach_session(generation);
+        }
+
+        // The write fails with its own typed limit. The newer generation's
+        // pause is not this write's, so the retry runs instead of waiting.
+        gate.release();
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the retried prompt waited on a pause that does not park it");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(sends.get(), 3, "the retry was never written");
+        assert_eq!(
+            sessions.get(),
+            2,
+            "the retry never started a replacement session"
+        );
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(
+            schedules[0].schedule_id, armed[0].schedule_id,
+            "the retry replaced the newer generation's pause"
+        );
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Scheduled,
+            "the retry spent the newer generation's attempt"
+        );
+        {
+            let record = handle.lock().await;
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.parked_turn.clone()),
+                None,
+                "the retry attached its prompt to the newer pause"
+            );
+        }
+    }
+
+    /// A replacement schedule keeps the prompt the pause was holding.
+    /// A replacement schedule keeps the prompt the pause was holding.
+    ///
+    /// A newer limit replaces the pause a failed write armed while its prompt
+    /// is still the active, pending dispatch. The replacement must name that
+    /// prompt too, or a pump-end advance would deliver it into the paused
+    /// provider.
+    #[tokio::test]
+    async fn a_replacement_schedule_keeps_the_parked_turn() {
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(4);
+        let newer_reset = chrono::Utc::now() + chrono::Duration::minutes(14);
+        let parked = park_requeued_turn(Some(reset_at)).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            meter,
+            mut events,
+            handle,
+            thread_id,
+            second,
+            sessions,
+            sends,
+            ..
+        } = parked;
+
+        // A newer generation's reset replaces the armed schedule.
+        {
+            let mut record = handle.lock().await;
+            let event = manager
+                .inner
+                .apply_limit_hit(&mut record, Some(2), Some(newer_reset), true, manager.now())
+                .await;
+            assert!(event.is_none(), "the newer pause armed");
+            let scheduled = record
+                .scheduled_limit
+                .as_ref()
+                .expect("the newer pause replaced the schedule");
+            assert_eq!(scheduled.reset_at, Some(newer_reset));
+            assert_eq!(
+                scheduled.parked_turn.as_ref(),
+                Some(&second.turn_id),
+                "the replacement stopped parking the requeued prompt"
+            );
+            assert!(
+                record.pause_parks_turn(&second.turn_id),
+                "the replacement pause no longer parks the prompt it replaced"
+            );
+        }
+
+        // A pump-end advance must not deliver the prompt into the pause.
+        manager.inner.advance_queue(handle.clone()).await;
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the advance started a session into the paused provider"
+        );
+        assert_eq!(sends.get(), 2, "the advance wrote the parked prompt");
+
+        // The replacement still delivers the prompt when it fires.
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the replacement fires");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the replacement delivered the parked prompt");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(sends.get(), 3);
+        assert_eq!(meter.schedules().await.expect("read schedules").len(), 1);
+    }
+
+    /// A parked prompt released by a restart that lost its schedule runs.
+    ///
+    /// The journal still has the paused row but the ledger has no armed
+    /// schedule. Nothing would deliver the restored prompt, so the resync
+    /// releases it exactly as a cancel does: the release is recorded, the
+    /// thread leaves the paused phase, and the prompt is delivered.
+    #[tokio::test]
+    async fn a_restart_without_the_schedule_releases_the_parked_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter.clone(), None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+        drop(manager);
+
+        // The schedule is gone before the restart: only the journal's parked
+        // row survives.
+        meter
+            .cancel_schedule(&thread_id)
+            .await
+            .expect("drop the schedule");
+        drop(meter);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sessions) = FakeHarness::new().with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        manager.set_meter(Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        ));
+        let mut events = manager.subscribe();
+        manager.resync_meter_state().await;
+
+        // The release is the same one a cancel records, so the journal holds
+        // it and the prompt is no longer explained by a paused phase.
+        let domain = manager
+            .inner
+            .journal
+            .read_domain(&thread_id)
+            .await
+            .expect("read the domain log");
+        assert!(
+            domain
+                .iter()
+                .any(|event| matches!(event, ThreadEvent::LimitResumeReleased { .. })),
+            "the restart released the prompt without recording the release"
+        );
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert_ne!(
+                record.state.phase,
+                h4rn_core::Phase::RateLimited,
+                "the released thread is still shown as paused"
+            );
+            assert!(
+                record.limit.is_none(),
+                "the released thread keeps the limit that explained the wait"
+            );
+            assert!(
+                record.meta.parked.is_none(),
+                "the parked row was not cleared"
+            );
+        }
+
+        // The released prompt is delivered instead of stranded.
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the released prompt was never delivered");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(sends.get(), 1);
+        assert_eq!(sessions.get(), 1);
     }
 }

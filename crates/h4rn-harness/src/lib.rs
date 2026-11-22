@@ -59,8 +59,8 @@ pub use codex::{
     detect_codex,
 };
 pub use fake::{
-    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionModels,
-    test_spec,
+    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionCount,
+    SessionModels, test_spec,
 };
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,

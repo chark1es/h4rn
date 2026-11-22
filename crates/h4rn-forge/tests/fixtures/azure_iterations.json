@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "description": "Initial iteration",
+    "author": {
+      "displayName": "Alice Example",
+      "uniqueName": "alice@example.test",
+      "id": "alice-guid"
+    },
+    "createdDate": "2024-05-01T09:00:00.000Z",
+    "updatedDate": "2024-05-01T09:00:00.000Z",
+    "reason": "create",
+    "sourceRefCommit": {
+      "commitId": "eeee1111ffff2222aaaa3333bbbb4444cccc5555"
+    },
+    "targetRefCommit": {
+      "commitId": "bbbb1111cccc2222dddd3333eeee4444ffff5555"
+    },
+    "commonRefCommit": {
+      "commitId": "bbbb1111cccc2222dddd3333eeee4444ffff5555"
+    }
+  },
+  {
+    "id": 2,
+    "description": "Push 1",
+    "author": {
+      "displayName": "Alice Example",
+      "uniqueName": "alice@example.test",
+      "id": "alice-guid"
+    },
+    "createdDate": "2024-05-01T11:00:00.000Z",
+    "updatedDate": "2024-05-01T11:00:00.000Z",
+    "reason": "push",
+    "sourceRefCommit": {
+      "commitId": "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
+    },
+    "targetRefCommit": {
+      "commitId": "bbbb1111cccc2222dddd3333eeee4444ffff5555"
+    },
+    "commonRefCommit": {
+      "commitId": "bbbb1111cccc2222dddd3333eeee4444ffff5555"
+    }
+  }
+]

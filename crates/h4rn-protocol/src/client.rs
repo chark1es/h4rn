@@ -714,6 +714,15 @@ pub enum ClientRequest {
         username: Option<String>,
         /// Where the token came from.
         source: crate::forge::ForgeCredentialSource,
+        /// Repository the token was granted for, when the client already knows
+        /// one (a detected workspace remote).
+        ///
+        /// Repository, project and workspace access tokens for Bitbucket Cloud
+        /// cannot call `/user` or `/user/workspaces`, so the daemon validates
+        /// them against this repository instead. `None` means no repository is
+        /// known; such tokens then need a detected repository to be added.
+        #[serde(default)]
+        repository: Option<crate::forge::ForgeRepoRef>,
     },
     /// Remove a forge account and its stored token.
     ForgeRemoveAccount {
@@ -1377,6 +1386,44 @@ mod tests {
         for (request, expected) in cases {
             assert_eq!(request.required_scope(), expected, "{request:?}");
         }
+    }
+
+    #[test]
+    fn forge_add_account_repository_hint_is_optional() {
+        let without = serde_json::json!({
+            "type": "forge_add_account",
+            "forge": "bitbucket",
+            "base_url": "https://bitbucket.org",
+            "token": "ATBB-token",
+            "username": null,
+            "source": "bitbucket_access_token",
+        });
+        let request: ClientRequest = serde_json::from_value(without).unwrap();
+        let ClientRequest::ForgeAddAccount { repository, .. } = &request else {
+            panic!("expected forge_add_account");
+        };
+        assert!(repository.is_none(), "the field defaults to no repository");
+
+        let repo = crate::forge::ForgeRepoRef {
+            forge: crate::forge::ForgeKind::Bitbucket,
+            base_url: "https://bitbucket.org".into(),
+            owner: "acme".into(),
+            repo: "widget".into(),
+        };
+        let with = serde_json::json!({
+            "type": "forge_add_account",
+            "forge": "bitbucket",
+            "base_url": "https://bitbucket.org",
+            "token": "ATBB-token",
+            "username": null,
+            "source": "bitbucket_access_token",
+            "repository": repo,
+        });
+        let request: ClientRequest = serde_json::from_value(with).unwrap();
+        let ClientRequest::ForgeAddAccount { repository, .. } = request else {
+            panic!("expected forge_add_account");
+        };
+        assert_eq!(repository, Some(repo));
     }
 
     #[test]

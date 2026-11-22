@@ -201,15 +201,24 @@ export class ForgeApi {
     return response.handoff;
   }
 
-  async addAccount(forge: ForgeKind, baseUrl: string, token: string): Promise<ForgeAccount> {
+  async addAccount(
+    forge: ForgeKind,
+    baseUrl: string,
+    token: string,
+    username: string | null = null,
+    repository: ForgeRepoRef | null = null,
+  ): Promise<ForgeAccount> {
     const response = await this.call(
       {
         type: "forge_add_account",
         forge,
         base_url: baseUrl,
         token,
-        username: null,
+        username,
         source: "pat",
+        // A repository-scoped Bitbucket access token cannot read `/user`; the
+        // daemon validates it against this detected repository instead.
+        repository,
       },
       "forge_account",
     );
@@ -296,6 +305,10 @@ export function forgeLabel(forge: ForgeKind): string {
       return "Gitea";
     case "forgejo":
       return "Forgejo";
+    case "bitbucket":
+      return "Bitbucket Cloud";
+    case "azure_devops":
+      return "Azure DevOps";
   }
 }
 

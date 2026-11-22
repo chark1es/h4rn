@@ -1,0 +1,123 @@
+{
+  "size": 3,
+  "page": 1,
+  "pagelen": 100,
+  "values": [
+    {
+      "type": "pullrequest_comment",
+      "id": 9001,
+      "created_on": "2024-05-01T10:00:00.123456+00:00",
+      "updated_on": "2024-05-01T10:00:00.123456+00:00",
+      "content": {
+        "type": "rendered",
+        "raw": "Looks good overall.",
+        "markup": "markdown",
+        "html": "<p>Looks good overall.</p>"
+      },
+      "user": {
+        "type": "user",
+        "display_name": "Carole",
+        "nickname": "carol",
+        "uuid": "{carol-uuid}",
+        "account_id": "557058:carol"
+      },
+      "deleted": false,
+      "pending": false,
+      "pullrequest": {
+        "type": "pullrequest",
+        "id": 42
+      },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/pull-requests/42#comment-9001"
+        }
+      }
+    },
+    {
+      "type": "pullrequest_comment",
+      "id": 9100,
+      "created_on": "2024-05-01T11:00:00.123456+00:00",
+      "updated_on": "2024-05-01T11:00:00.123456+00:00",
+      "content": {
+        "type": "rendered",
+        "raw": "This can panic.",
+        "markup": "markdown",
+        "html": "<p>This can panic.</p>"
+      },
+      "user": {
+        "type": "user",
+        "display_name": "Bob Reviewer",
+        "nickname": "bob",
+        "uuid": "{bob-uuid}",
+        "account_id": "557058:bob"
+      },
+      "deleted": false,
+      "pending": false,
+      "inline": {
+        "from": null,
+        "to": 12,
+        "start_from": null,
+        "start_to": null,
+        "path": "src/lib.rs"
+      },
+      "resolution": {
+        "type": "comment_resolution",
+        "user": {
+          "type": "user",
+          "display_name": "Alice Example",
+          "nickname": "alice",
+          "uuid": "{alice-uuid}",
+          "account_id": "557058:alice"
+        },
+        "created_on": "2024-05-01T11:30:00.123456+00:00"
+      },
+      "pullrequest": {
+        "type": "pullrequest",
+        "id": 42
+      },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/pull-requests/42#comment-9100"
+        }
+      }
+    },
+    {
+      "type": "pullrequest_comment",
+      "id": 9101,
+      "parent": { "id": 9100 },
+      "created_on": "2024-05-01T11:05:00.123456+00:00",
+      "updated_on": "2024-05-01T11:05:00.123456+00:00",
+      "content": {
+        "type": "rendered",
+        "raw": "Good catch, fixed.",
+        "markup": "markdown",
+        "html": "<p>Good catch, fixed.</p>"
+      },
+      "user": {
+        "type": "user",
+        "display_name": "Alice Example",
+        "nickname": "alice",
+        "uuid": "{alice-uuid}",
+        "account_id": "557058:alice"
+      },
+      "deleted": false,
+      "pending": false,
+      "inline": {
+        "from": null,
+        "to": 12,
+        "start_from": null,
+        "start_to": null,
+        "path": "src/lib.rs"
+      },
+      "pullrequest": {
+        "type": "pullrequest",
+        "id": 42
+      },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/pull-requests/42#comment-9101"
+        }
+      }
+    }
+  ]
+}
