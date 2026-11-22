@@ -268,7 +268,13 @@ pub struct Session {
     /// its own process handle (on Windows) or pid, so it works while that lock
     /// is busy.
     killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
-    pty: Mutex<Box<dyn MasterPty + Send>>,
+    /// The PTY master, dropped by the close path.
+    ///
+    /// On Windows a killed ConPTY client does not close the pseudoconsole: the
+    /// master keeps it open and the reader thread (which holds the session
+    /// alive) would block in `read` forever. Dropping the master closes the
+    /// console and releases the reader so `finish` can report the exit.
+    pty: Mutex<Option<Box<dyn MasterPty + Send>>>,
     /// The spawned shell's own pid, for the initial hangup.
     ///
     /// `process_group` comes from `tcgetpgrp`, which reports whatever holds
@@ -335,7 +341,7 @@ impl Session {
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(child),
             killer: Mutex::new(Some(killer)),
-            pty: Mutex::new(master),
+            pty: Mutex::new(Some(master)),
             shell_pid,
             process_group,
             exit: Mutex::new(None),
@@ -622,6 +628,10 @@ impl Session {
             (screen.vt.cols(), screen.vt.rows())
         };
         let pty = lock(&self.pty);
+        let Some(pty) = pty.as_ref() else {
+            // The close path already dropped the master.
+            return;
+        };
         if let Err(error) = pty.resize(PtySize {
             cols,
             rows,
@@ -731,6 +741,17 @@ impl Session {
         if let Some(pgid) = self.process_group {
             signal_group(pgid, Signal::Kill);
         }
+        // The master must go too. On Windows the killed ConPTY client leaves
+        // the pseudoconsole open, so the reader thread would stay in `read`
+        // and keep this session alive; closing the master ends the console and
+        // lets `finish` report the exit. On Unix it releases a blocked master
+        // read after the kill.
+        self.close_pty();
+    }
+
+    /// Drops the PTY master, which closes the console/pipes it owns.
+    fn close_pty(&self) {
+        drop(lock(&self.pty).take());
     }
 
     /// Waits until the shell exits, or `limit` passes.

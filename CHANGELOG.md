@@ -685,7 +685,10 @@ All notable changes to h4rn are recorded here. The format follows
   the session keeps a cloned child handle that terminates the shell even while the reader thread
   holds the child in `wait()`, which is the only way a Windows console ends when its handle is
   busy. A handle kill that fails falls back to the same cloned handle, so a console that refuses
-  the first termination still ends without the child lock.
+  the first termination still ends without the child lock. The close path also drops the PTY
+  master: a killed Windows ConPTY client leaves the pseudoconsole open, which would keep the
+  reader thread blocked and the session alive, so closing the master ends the console, releases
+  the reader, and lets the exit report run.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries with the output chunk that

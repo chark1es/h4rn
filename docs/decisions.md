@@ -159,7 +159,11 @@ duplicated process handle — so the close path can end the shell through that h
 reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
 the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
 falls back to the same cloned killer, so the shell still ends without the child lock. The killer is
-a separate mutex, so a busy reader thread cannot delay it.
+a separate mutex, so a busy reader thread cannot delay it. After the signals the close path also
+drops the PTY master: on Windows a killed ConPTY client does not close the pseudoconsole itself, so
+the master would keep the reader thread blocked in `read` and the session alive; dropping it closes
+the console, releases the reader, and lets the exit report run. On Unix it releases a master read
+that outlived the killed group.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's
