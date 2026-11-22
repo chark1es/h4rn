@@ -534,6 +534,77 @@ describe("H4rnClient", () => {
     }
   });
 
+  it("delivers live-edge frames untagged when an older daemon answers only with an ack", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // A first connect asks from the live edge and this daemon accepts the
+      // subscription with the protocol's plain `{type:"ack"}` reply. Nothing
+      // was replayed, so the held frame is news.
+      transport.emit(3, approvalEvent("ap_live"));
+      (answerSubscribe as Reply | null)?.({ type: "ack" });
+      await settle();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.replayed).toBeUndefined();
+      const live = events[0];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a resumed subscribe's held frames tagged when the daemon only acks", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        (context) =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            if (context.attempt === 0) {
+              reply({ type: "subscribed", replay_through: 0 });
+              return true;
+            }
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      transports[0]?.emit(2, approvalEvent("ap_seen"));
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+
+      // The reconnect asked for a replay (`since_seq` is no longer null). An
+      // ack names no boundary, so guessing those frames were live would
+      // announce history the client just missed.
+      transports[1]?.emit(3, approvalEvent("ap_replayed"));
+      (answerSubscribe as Reply | null)?.({ type: "ack" });
+      await settle();
+
+      expect(events.find((envelope) => envelope.seq === 3)?.replayed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports degraded while reconnecting and returns online", async () => {
     vi.useFakeTimers();
     try {

@@ -522,6 +522,7 @@ mod tests {
             branch: Some("h4rn/first-prompt".into()),
             model: "test-model".into(),
             tab: h4rn_protocol::ThreadTab::Working,
+            placed_by_user: false,
             pinned: false,
             snoozed_until: None,
             last_activity: Utc::now(),

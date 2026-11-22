@@ -56,6 +56,34 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A second launch hands its deep link to the running app.** Launching h4rn while it is already
+  running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that
+  started the second process. The single-instance plugin now has its `deep-link` feature, so it
+  passes the second launch's arguments to the deep-link plugin before the focus callback, and the
+  running window opens what the link names.
+- **The "Connected host is online" check matches by name.** The relay mints its own machine and
+  host ids when a machine registers, so its `MachineHost.id` never equals the id `hello` reports
+  for the local host. The notifier compared those ids, decided its own working host was offline,
+  and could announce a host the person was actively using. It now resolves `hello`'s local host to
+  its name through the daemon's host list (the same pairing the sidebar uses) and matches the
+  relay's host by name, ignoring case.
+- **A first-connect subscribe is replay-free whatever its success answer looks like.** An older
+  daemon may answer a live-edge subscribe with the protocol's plain `{type:"ack"}`, or with
+  `subscribed` and no boundary. Both are successful acceptances of `since_seq: null`, so the
+  approvals that arrived while the handshake was open are delivered as live news instead of being
+  tagged as history; a resumed subscribe that gets the same answer still treats its held frames as
+  replay.
+- **Another client's manual move to Done is not reported as "Finished".** The daemon's thread
+  summary now says whether the person placed the thread in its tab (`placed_by_user`). A notifier
+  that still remembers a live completion for the thread stays quiet when the Done summary it sees
+  came from a manual move on another client, and a local pin toggle no longer counts as a
+  placement.
+- **Approvals and finished turns no longer wait for the host-presence request.** A due approval or
+  finished-turn message is delivered as soon as the OS permission allows; the relay request that
+  re-checks a due host-offline alert runs beside it. A queued approval is taken out of the queue
+  only at delivery, so an answer that arrives while the message is waiting cancels it. If the
+  permission query throws, nothing is dropped: the same drafts are re-queued and retried after a
+  short delay instead of a tight timer loop.
 - **The linked-machine presence request is signed over its pathname.** Connect verifies the DPoP
   proof against `parts.uri.path()`, which excludes the query string, so signing
   `/v1/machines?linked=true` was rejected with 401 and took the whole account and machine refresh

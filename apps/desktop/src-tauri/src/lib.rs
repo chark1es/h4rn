@@ -36,6 +36,9 @@ pub fn run() {
         // daemon and window. On Linux the AppIndicator can exist without a
         // tray host ever showing it, so this is the guaranteed way back to a
         // hidden window; macOS dock clicks arrive as `RunEvent::Reopen` below.
+        // The plugin's `deep-link` feature hands the second launch's argv to
+        // the deep-link plugin first, so `h4rn://` links opened while h4rn
+        // runs reach the window that already exists.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             tray::show_main(app);
         }))

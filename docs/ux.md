@@ -257,6 +257,9 @@ subscribe without naming a boundary delivers those frames untagged, since nothin
 Finished and failed turns follow the
 daemon's thread summary but need a live `turn_completed` for the current turn: a thread moved to
 Done by another client, or a replayed completion followed by a live summary tick, stays quiet. A
+summary names a manual placement (`placed_by_user`), so a `Finished` message is only ever the
+daemon's own lifecycle transition: moving a thread into Done or Settled by hand, locally or from
+another client, is a placement and never notifies, and a pin toggle is not a placement at all. A
 live completion is spent on the one daemon transition it caused; a manual tab move by the person
 discards it, and re-seeding the baseline clears every remembered completion. The
 list is re-seeded into the notifier's baseline whenever the client becomes ready, so a list-healed
@@ -267,9 +270,16 @@ mirrored approval already covers it, and an approval that arrives before the chi
 withdrawn once that summary names the child. An answered approval cancels that thread's queued
 approval unless a newer one has already replaced it. Choices are stored per device.
 
+Approvals and finished turns never wait for the host-presence check: a due thread message is shown
+as soon as the OS permission allows, and the presence request for a host alert runs beside it. A
+queued approval stays cancellable until it is delivered, so an answer that arrives while the
+message is still waiting withdraws it. If the shell cannot answer the permission query, nothing
+leaves the queue and the same drafts are retried a few seconds later.
+
 Host offline uses the relay's presence for the machines this device is linked to: the live transport
-decides the host it is connected to (matched through `hello`'s local host even when no machine was
-picked), so a working connection is never announced as offline. Before a due alert is delivered,
+decides the host it is connected to (matched by the local host's name, because connect mints its
+own machine ids, even when no machine was picked), so a working connection is never announced as
+offline. Before a due alert is delivered,
 linked presence is fetched once more: the alert is dropped if the host came back, the fetch failed
 or this client disconnected. A direct-only
 session has no independent signal for other hosts, so Settings hides the Host offline row and says

@@ -806,8 +806,19 @@ export class H4rnClient {
       // not make the held frames older or newer than they are.
       if (frame.id === this.subscribeId) {
         this.subscribeId = null;
-        if ("Ok" in frame.result && frame.result.Ok.type === "subscribed") {
-          this.finishSubscribe(frame.result.Ok.replay_through ?? null, true);
+        if ("Ok" in frame.result) {
+          const answer = frame.result.Ok;
+          if (answer.type === "subscribed") {
+            this.finishSubscribe(answer.replay_through ?? null, true);
+          } else if (answer.type === "ack") {
+            // An older daemon acknowledges the subscribe without naming a
+            // boundary. A live-edge subscribe (`since_seq: null`) replayed
+            // nothing, so the held frames are news; a resumed one is history.
+            this.finishSubscribe(null, true);
+          } else {
+            // Any other successful answer is not a subscribe acceptance.
+            this.finishSubscribe(null, false);
+          }
         } else {
           // A refused subscribe has no boundary. Held frames cannot be the
           // gap replay the daemon declined to send, so treat them as history.

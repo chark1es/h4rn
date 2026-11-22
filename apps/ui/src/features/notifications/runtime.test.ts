@@ -3,7 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Event, MachineSummary, ThreadId, ThreadSummary } from "@/gen";
 import type { EventEnvelope } from "@/lib/client/types";
 
-import type { NotificationChannel, NotificationMessage } from "./channel";
+import type {
+  NotificationChannel,
+  NotificationMessage,
+  NotificationPermissionState,
+} from "./channel";
 import {
   NotificationRuntime,
   type NotificationRuntimeDeps,
@@ -42,6 +46,7 @@ function threadSummary(
     workspace_path: "/work/h4rn",
     model: "claude-sonnet",
     tab: "working",
+    placed_by_user: false,
     pinned: false,
     snoozed_until: null,
     last_activity: "2026-11-21T00:00:00Z",
@@ -90,6 +95,16 @@ function approvalRequested(threadId: ThreadId): Event {
   };
 }
 
+function approvalResolved(threadId: ThreadId, approvalId = "ap_1"): Event {
+  return {
+    type: "approval_resolved",
+    thread_id: threadId,
+    approval_id: approvalId,
+    option_id: null,
+    by_device: null,
+  };
+}
+
 function turnCompleted(
   threadId: ThreadId,
   status: "completed" | "interrupted" = "completed",
@@ -130,11 +145,12 @@ function harness(options: {
   remote?: Partial<RuntimeRemote>;
   client?: PresenceClient | null;
   connected?: boolean;
+  permission?: () => Promise<NotificationPermissionState>;
 }): Harness {
   const shown: NotificationMessage[] = [];
   const channel: NotificationChannel = {
     kind: "desktop",
-    permission: async () => "granted",
+    permission: options.permission ?? (async () => "granted"),
     requestPermission: async () => "granted",
     show: (message) => shown.push(message),
     onClick: () => () => undefined,
@@ -143,6 +159,7 @@ function harness(options: {
   let state: RuntimeState = {
     connection: connection(options.connected === false ? "degraded" : "online"),
     threads: options.threads ?? { [THREAD]: threadSummary() },
+    hosts: {},
     lastSyncAt: 1,
     localHostId: null,
   };
@@ -220,6 +237,11 @@ function harness(options: {
 afterEach(() => {
   vi.useRealTimers();
 });
+
+/** Lets the promise chain inside a flush reach its next await. */
+async function settle(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
 
 describe("notification runtime wiring", () => {
   it("delivers one message when the coalescing timer fires", async () => {
@@ -302,6 +324,25 @@ describe("notification runtime wiring", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(h.shown).toHaveLength(1);
     expect(h.shown[0]?.body).toBe("Finished: the turn is done.");
+  });
+
+  it("stays quiet for another client's manual move to Done", async () => {
+    vi.useFakeTimers();
+    const h = harness({});
+    h.runtime.start();
+
+    // This client saw its own turn complete, but the Done summary came from
+    // another client's SetThreadTab; the daemon names the placement, so the
+    // remembered completion must not turn it into "Finished".
+    h.emit(turnCompleted(THREAD));
+    h.emit(
+      threadUpserted(
+        threadSummary(THREAD, { tab: "done", agent_state: "done", placed_by_user: true }),
+      ),
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.shown).toHaveLength(0);
   });
 
   it("withdraws an approval queued before its thread is named a child", async () => {
@@ -394,5 +435,100 @@ describe("host offline delivery", () => {
       title: "atlas",
       body: "Host offline: h4rn can no longer reach it.",
     });
+  });
+});
+
+describe("delivery beside a pending fetch", () => {
+  const online = machine("m_atlas", "atlas", true);
+  const offline = machine("m_atlas", "atlas", false);
+
+  /** A presence call that stays pending until the test answers it. */
+  function pendingPresence() {
+    let release: (list: MachineSummary[]) => void = () => undefined;
+    const machines = vi.fn(
+      () =>
+        new Promise<MachineSummary[]>((resolve) => {
+          release = resolve;
+        }),
+    );
+    return { machines, release: (list: MachineSummary[]) => release(list) };
+  }
+
+  function withHostAlert(client: PresenceClient | null) {
+    const h = harness({
+      settings: { hostOffline: true },
+      remote: { linkedMachines: [online] },
+      client,
+    });
+    h.runtime.start();
+    h.updateRemote({ linkedMachines: [offline] });
+    return h;
+  }
+
+  it("shows a due approval without waiting for the host presence fetch", async () => {
+    vi.useFakeTimers();
+    const presence = pendingPresence();
+    const h = withHostAlert({ machines: presence.machines });
+    h.emit(approvalRequested(THREAD));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // The relay request is still in flight, but the approval is not hostage
+    // to it.
+    expect(presence.machines).toHaveBeenCalledTimes(1);
+    expect(h.shown.map((message) => message.key)).toEqual([`thread:${THREAD}`]);
+
+    presence.release([offline]);
+    await settle();
+    expect(h.shown.map((message) => message.key)).toEqual([`thread:${THREAD}`, "host:m_atlas"]);
+  });
+
+  it("cancels a due approval answered while the permission query is pending", async () => {
+    vi.useFakeTimers();
+    let answer: (state: NotificationPermissionState) => void = () => undefined;
+    const h = harness({
+      permission: () =>
+        new Promise<NotificationPermissionState>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    h.runtime.start();
+    h.emit(approvalRequested(THREAD));
+
+    // The flush has the draft in hand but has not delivered it yet.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(0);
+
+    h.emit(approvalResolved(THREAD));
+    answer("granted");
+    await settle();
+    expect(h.shown).toHaveLength(0);
+  });
+
+  it("keeps a draft queued when the permission query throws", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const h = harness({
+      permission: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("the shell cannot answer yet");
+        return "granted";
+      },
+    });
+    h.runtime.start();
+    h.emit(approvalRequested(THREAD));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls).toBe(1);
+    expect(h.shown).toHaveLength(0);
+
+    // The retry is delayed instead of spinning on a deadline that already
+    // passed, and the approval is still there when the shell answers.
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toBe(2);
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0]?.key).toBe(`thread:${THREAD}`);
   });
 });

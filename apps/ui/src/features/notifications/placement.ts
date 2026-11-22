@@ -11,9 +11,20 @@
  * (which reads the store) and create a cycle.
  */
 
-import type { ThreadId } from "@/gen";
+import type { ThreadId, ThreadTab } from "@/gen";
 
 const listeners = new Set<(threadId: ThreadId) => void>();
+
+/**
+ * Whether a tab move is a manual placement the notifier should hear about.
+ *
+ * Done and Settled are where a person puts a thread. Working is reached by a
+ * pin toggle on the way to nothing, and by the daemon starting a turn, so it
+ * is not treated as a placement.
+ */
+export function isPlacementMove(tab: ThreadTab): boolean {
+  return tab === "done" || tab === "settled";
+}
 
 /** Subscribes to manual placements; returns the unsubscribe. */
 export function onManualPlacement(listener: (threadId: ThreadId) => void): () => void {

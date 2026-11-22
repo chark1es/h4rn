@@ -203,6 +203,13 @@ export function finishedDraft(
     announcedFailure?: boolean;
     /** A live (not replayed) `turn_completed` for the current turn was seen. */
     liveCompletion?: boolean;
+    /**
+     * The summary says the person just placed the thread in this tab.
+     *
+     * Another client's manual move arrives as a plain summary and is not the
+     * end of a turn, even when this client still remembers a live completion.
+     */
+    placedByUser?: boolean;
   },
 ): NotificationDraft | null {
   // A child thread finishes with its subagent, and the parent's mirrored
@@ -210,6 +217,7 @@ export function finishedDraft(
   if (next.parent_thread_id) return null;
   const transition = finishedTransition(previous, next);
   if (!transition) return null;
+  if (options.placedByUser) return null;
   if (!options.settings.finishedTurns) return null;
   // The summary moving to Done is not news by itself: a different client may
   // have moved the thread, or the list may have healed a gap after a failed
@@ -289,9 +297,13 @@ export function dueNotifications(
 }
 
 /** The earliest deadline in the queue, or `null` when it is empty. */
-export function nextDeadline(queue: NotificationQueue): number | null {
+export function nextDeadline(
+  queue: NotificationQueue,
+  skip?: (pending: PendingNotification) => boolean,
+): number | null {
   let earliest: number | null = null;
   for (const pending of Object.values(queue)) {
+    if (skip?.(pending)) continue;
     if (earliest === null || pending.dueAt < earliest) earliest = pending.dueAt;
   }
   return earliest;
@@ -311,8 +323,16 @@ export type PresenceSource = {
    */
   machines: MachineSummary[];
   activeMachineId: string | null;
-  /** Host id of the daemon this client is connected to (hello's local host). */
-  localHostId: string | null;
+  /**
+   * Name of the host this client is connected to (`hello`'s local host id
+   * resolved through the daemon's host list).
+   *
+   * It cannot be the id: connect mints its own machine and host ids when a
+   * machine registers, so the relay's `MachineHost.id` never equals the id
+   * `hello` reports. The name is the one field both lists agree on, and it is
+   * how the sidebar pairs them (`localByName`).
+   */
+  localHostName: string | null;
 };
 
 /**
@@ -329,6 +349,7 @@ export type PresenceSource = {
 export function hostPresence(source: PresenceSource): Record<string, HostState> | null {
   if (source.connection !== "online") return null;
   if (!source.signedIn || source.machines.length === 0) return null;
+  const localHostName = source.localHostName?.toLowerCase() ?? null;
   const next: Record<string, HostState> = {};
 
   for (const machine of source.machines) {
@@ -336,7 +357,7 @@ export function hostPresence(source: PresenceSource): Record<string, HostState> 
       machine.hosts.length > 0 ? machine.hosts : [{ id: machine.id, name: machine.name }];
     const connected =
       machine.id === source.activeMachineId ||
-      (source.localHostId !== null && hosts.some((host) => host.id === source.localHostId));
+      (localHostName !== null && hosts.some((host) => host.name.toLowerCase() === localHostName));
     for (const host of hosts) {
       next[host.id] = { name: host.name, online: connected ? true : machine.online };
     }

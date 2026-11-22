@@ -499,7 +499,7 @@ describe("host offline", () => {
       signedIn: true,
       machines: [machine("m_atlas", "atlas", false), machine("m_buildbox", "buildbox", true)],
       activeMachineId: "m_atlas",
-      localHostId: null,
+      localHostName: null,
       ...patch,
     };
   }
@@ -511,17 +511,32 @@ describe("host offline", () => {
     expect(next?.m_atlas).toEqual({ name: "atlas", online: true });
   });
 
-  it("trusts the host named by hello even when no machine was picked", () => {
-    // A direct connection through a relay has no `activeMachineId`, but
-    // `hello.local_host` names the machine the transport is talking to.
+  it("trusts the local host's name even when no machine was picked", () => {
+    // A direct connection through a relay has no `activeMachineId`. Connect
+    // mints its own machine and host ids when a machine registers, so the
+    // relay's id never equals `hello`'s local host id; the name is the only
+    // field both lists agree on.
+    const relayId = "0b5f2b1e-9f3a-4a44-9a5e-71f0a2f7c9d1";
     const next = hostPresence(
       source({
         activeMachineId: null,
-        localHostId: "m_atlas",
-        machines: [machine("m_atlas", "atlas", false)],
+        localHostName: "atlas",
+        machines: [machine(relayId, "atlas", false)],
       }),
     );
-    expect(next?.m_atlas).toEqual({ name: "atlas", online: true });
+    expect(next?.[relayId]).toEqual({ name: "atlas", online: true });
+  });
+
+  it("matches the local host name without regard to case", () => {
+    const relayId = "0b5f2b1e-9f3a-4a44-9a5e-71f0a2f7c9d1";
+    const next = hostPresence(
+      source({
+        activeMachineId: null,
+        localHostName: "Atlas",
+        machines: [machine(relayId, "atlas", false)],
+      }),
+    );
+    expect(next?.[relayId]?.online).toBe(true);
   });
 
   it("has no presence for a direct-only session", () => {

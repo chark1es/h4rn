@@ -502,6 +502,7 @@ function summary(input: {
     ...(input.branch ? { branch: input.branch } : {}),
     model: input.model,
     tab: input.tab,
+    placed_by_user: false,
     pinned: input.pinned ?? false,
     snoozed_until: input.snoozedMs ? iso(input.snoozedMs) : null,
     // A small buffer keeps `relativeAge` rounding to the seeded minute even
@@ -2293,6 +2294,7 @@ class MockDaemon {
           workspace_path: body.workspace_path,
           model: body.model,
           tab: "working",
+          placed_by_user: false,
           pinned: false,
           snoozed_until: null,
           last_activity: new Date(now).toISOString(),

@@ -935,6 +935,14 @@ impl ThreadRecord {
             branch: self.branch.clone(),
             model: self.meta.model.clone(),
             tab,
+            // The manual override sticks until the next turn starts, so this
+            // is true exactly for the placement it caused: a lifecycle
+            // transition to Done after a new turn reports false.
+            placed_by_user: self
+                .state
+                .manual
+                .as_ref()
+                .is_some_and(|manual| manual.tab == tab),
             pinned: self.state.pinned(),
             snoozed_until: is_snoozed(&self.state, now)
                 .then_some(self.state.snoozed_until)

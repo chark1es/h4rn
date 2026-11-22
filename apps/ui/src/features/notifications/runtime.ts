@@ -44,6 +44,7 @@ import {
   type NotificationQueue,
   nextDeadline,
   offlineTransitions,
+  type PendingNotification,
   stillOffline,
 } from "./logic";
 import { NotificationMemory } from "./memory";
@@ -53,8 +54,19 @@ import { getNotificationSettings, type NotificationSettings } from "./settings";
 /** How often connect's machine list is re-read for host presence. */
 const HOST_POLL_MS = 30_000;
 
+/**
+ * How long to wait before retrying a flush whose permission query threw.
+ *
+ * The drafts stay in the queue; without a delay the already-due deadline would
+ * arm a zero-millisecond timer and the shell would be asked in a hot loop.
+ */
+const PERMISSION_RETRY_MS = 5_000;
+
 /** The bits of app state the notifier reads. */
-export type RuntimeState = Pick<AppState, "connection" | "threads" | "lastSyncAt" | "localHostId">;
+export type RuntimeState = Pick<
+  AppState,
+  "connection" | "threads" | "hosts" | "lastSyncAt" | "localHostId"
+>;
 
 /** The bits of remote state the notifier reads. */
 export type RuntimeRemote = Pick<RemoteState, "user" | "linkedMachines" | "activeMachineId">;
@@ -97,7 +109,10 @@ export class NotificationRuntime {
   private readonly now: () => number;
   private queue: NotificationQueue = {};
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** True while a flush is asking permission or showing its drafts. */
   private flushing = false;
+  /** True while due host alerts are waiting on their own presence re-check. */
+  private hostFetching = false;
   /** `null` until the first presence snapshot establishes a baseline. */
   private hosts: Record<string, HostState> | null = null;
   /** The last polled connect machine list, while signed in. */
@@ -180,71 +195,148 @@ export class NotificationRuntime {
     this.evaluateHosts();
   }
 
-  private schedule(): void {
+  private schedule(notBefore: number | null = null): void {
     if (this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const deadline = nextDeadline(this.queue);
+    // Host alerts waiting on their own presence request are left out: that
+    // request re-checks them when it answers, and scheduling them now would
+    // arm a zero-millisecond timer that cannot deliver anything.
+    const deadline = nextDeadline(
+      this.queue,
+      (pending) => this.hostFetching && pending.kind === "host_offline",
+    );
     if (deadline === null) return;
+    const at = notBefore === null ? deadline : Math.max(deadline, notBefore);
     this.timer = setTimeout(
       () => {
         this.timer = null;
         void this.flush();
       },
-      Math.max(0, deadline - this.now()),
+      Math.max(0, at - this.now()),
     );
   }
 
-  /** Shows everything due, then re-arms the timer for what is left. */
+  /**
+   * Shows everything due, then re-arms the timer for what is left.
+   *
+   * Permission is asked before anything leaves the queue, so a shell that
+   * cannot answer keeps its drafts for the next attempt. Approved thread
+   * drafts are shown right away; a due host alert re-checks presence on its
+   * own (`flushHosts`), because a relay request must not hold an approval or a
+   * finished turn back.
+   */
   private async flush(): Promise<void> {
     if (this.flushing) return;
     this.flushing = true;
+    let retryAt: number | null = null;
     try {
-      const { ready, queue: remaining } = dueNotifications(this.queue, this.now());
-      this.queue = remaining;
+      const { ready } = dueNotifications(this.queue, this.now());
       if (ready.length === 0) return;
+
       let permission: NotificationPermissionState;
       try {
         permission = await this.deps.channel.permission();
       } catch {
-        // A shell that cannot answer is treated like one without permission.
+        // The queue was not touched: the same drafts are retried, not lost.
+        retryAt = this.now() + PERMISSION_RETRY_MS;
         return;
       }
-      if (permission !== "granted" && permission !== "unknown") return;
-
-      // A host alert waits out the quiet period, so its snapshot must be read
-      // again right before delivery: one relay request for the whole batch.
-      let presence: Record<string, HostState> | null = null;
-      let connection: ConnectionStatus = this.deps.state().connection.status;
-      if (ready.some((draft) => draft.kind === "host_offline")) {
-        const fresh = await this.freshPresence();
-        presence = fresh.presence;
-        connection = fresh.connection;
+      if (permission !== "granted" && permission !== "unknown") {
+        for (const draft of ready) this.takeQueued(draft);
+        return;
       }
 
       const settings = this.deps.settings();
       const focus = this.deps.focus();
+      let hasHostDrafts = false;
       for (const draft of ready) {
-        // The person may have opened the thread or one of the switches while
-        // the burst was coalescing.
-        if (!enabledFor(draft.kind, settings)) continue;
-        if (alreadyVisible(draft, focus)) continue;
-        if (draft.kind === "host_offline" && !stillOffline(draft, presence, connection)) {
+        if (draft.kind === "host_offline") {
+          hasHostDrafts = true;
           continue;
         }
-        this.deps.channel.show({
-          id: notificationId(draft.key),
-          key: draft.key,
-          title: draft.title,
-          body: draft.body,
-          threadId: draft.threadId,
-        });
+        // The person may have opened the thread, answered the approval or
+        // switched the kind off while the permission query was pending.
+        if (!enabledFor(draft.kind, settings) || alreadyVisible(draft, focus)) {
+          this.takeQueued(draft);
+          continue;
+        }
+        // Taken only now, at delivery: an `approval_resolved` that arrived
+        // while this flush waited has already removed (or replaced) it.
+        if (this.takeQueued(draft) === null) continue;
+        this.show(draft);
       }
+      if (hasHostDrafts) void this.flushHosts();
     } finally {
       this.flushing = false;
+      this.schedule(retryAt);
+    }
+  }
+
+  /**
+   * Re-checks a due host alert's presence and shows it only while the host is
+   * still away.
+   *
+   * Runs beside the thread drafts so a slow relay cannot delay an approval or
+   * a finished turn that became due at the same moment. The alerts are taken
+   * out of the queue before the request, so nothing re-arms a timer for them
+   * while the answer is in flight.
+   */
+  private async flushHosts(): Promise<void> {
+    if (this.hostFetching) return;
+    this.hostFetching = true;
+    try {
+      const { ready } = dueNotifications(this.queue, this.now());
+      const claimed: NotificationDraft[] = [];
+      for (const draft of ready) {
+        if (draft.kind !== "host_offline") continue;
+        if (this.takeQueued(draft) !== null) claimed.push(draft);
+      }
+      if (claimed.length === 0) return;
+
+      const fresh = await this.freshPresence();
+      const settings = this.deps.settings();
+      const focus = this.deps.focus();
+      for (const draft of claimed) {
+        if (!stillOffline(draft, fresh.presence, fresh.connection)) continue;
+        if (!enabledFor(draft.kind, settings)) continue;
+        if (alreadyVisible(draft, focus)) continue;
+        this.show(draft);
+      }
+    } finally {
+      this.hostFetching = false;
       this.schedule();
     }
+  }
+
+  /**
+   * Removes a due draft from the queue at the moment it is delivered.
+   *
+   * The key alone is not enough: an answered approval, or a newer approval for
+   * the same thread, can replace the entry while a flush waits for permission
+   * or a presence answer. Matching the approval id keeps the replacement in
+   * the queue and delivers nothing stale.
+   */
+  private takeQueued(draft: NotificationDraft): PendingNotification | null {
+    const pending = this.queue[draft.key];
+    if (!pending) return null;
+    if (pending.approvalId !== draft.approvalId) return null;
+    if (pending.dueAt > this.now()) return null;
+    const next = { ...this.queue };
+    delete next[draft.key];
+    this.queue = next;
+    return pending;
+  }
+
+  private show(draft: NotificationDraft): void {
+    this.deps.channel.show({
+      id: notificationId(draft.key),
+      key: draft.key,
+      title: draft.title,
+      body: draft.body,
+      threadId: draft.threadId,
+    });
   }
 
   /**
@@ -323,6 +415,9 @@ export class NotificationRuntime {
         lastTurn: this.memory.lastTurn(event.thread_id),
         announcedFailure: this.memory.failureAnnounced(event.thread_id),
         liveCompletion,
+        // A Done that another client placed by hand is a placement, not a
+        // completion, even while this client still remembers a live one.
+        placedByUser: event.placed_by_user,
       });
       // One live completion explains one transition, even when the person is
       // already looking at the thread or the switch is off, so a later manual
@@ -367,7 +462,7 @@ export class NotificationRuntime {
       // others' hosts.
       machines: this.machines ?? remote.linkedMachines,
       activeMachineId: remote.activeMachineId,
-      localHostId: state.localHostId,
+      localHostName: state.localHostId ? (state.hosts[state.localHostId]?.name ?? null) : null,
     });
   }
 

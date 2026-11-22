@@ -495,6 +495,33 @@ async fn creates_streams_and_moves_working_done_settled() {
     assert_eq!(done.thread_id, thread_id);
     assert!(done.unread);
     assert!(done.needs_attention);
+    // The daemon finished the turn; nobody placed it.
+    assert!(!done.placed_by_user);
+
+    // Another client's manual move to Done arrives as the same plain summary,
+    // but names the placement so a notifier does not call it "Finished".
+    let mut other = Client::connect(&daemon).await;
+    other.hello().await;
+    other
+        .request(ClientRequest::SetThreadTab {
+            thread_id: thread_id.clone(),
+            tab: ThreadTab::Working,
+            pinned: false,
+        })
+        .await
+        .expect("reopen");
+    let (_, reopened) = other.wait_for_tab(ThreadTab::Working).await;
+    assert!(reopened.placed_by_user);
+    other
+        .request(ClientRequest::SetThreadTab {
+            thread_id: thread_id.clone(),
+            tab: ThreadTab::Done,
+            pinned: false,
+        })
+        .await
+        .expect("done by hand");
+    let placed = client.wait_for_tab(ThreadTab::Done).await;
+    assert!(placed.1.placed_by_user);
 
     // Manual Settled sticks.
     let result = client
@@ -508,6 +535,7 @@ async fn creates_streams_and_moves_working_done_settled() {
     assert_eq!(result, ResponseBody::Ack);
     let (_, settled) = client.wait_for_tab(ThreadTab::Settled).await;
     assert!(!settled.unread);
+    assert!(settled.placed_by_user);
 
     let threads = client
         .request(ClientRequest::ListThreads {
