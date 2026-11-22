@@ -37,8 +37,8 @@ All notable changes to h4rn are recorded here. The format follows
   renders the switches off without forgetting the stored choice; the desktop notification plugin
   cannot detect a blocked permission, so Settings says nothing about it there rather than claiming
   a state it does not know. Host offline covers only the machines this device is linked to through
-  the relay; the live transport is always online, matched through `hello`'s local host even when no
-  machine was picked, and a due alert fetches linked presence once more before delivery and is
+  the relay; the live transport is always online, matched by `hello`'s local host's name even when
+  no machine was picked, and a due alert fetches linked presence once more before delivery and is
   dropped if the host came back, the fetch failed or the client disconnected. A direct-only session
   hides the row and says why. On Linux the desktop notification plugin passes `replaces_id = 0`, so
   a later message for the same key stacks instead of replacing; coalescing still limits it to one

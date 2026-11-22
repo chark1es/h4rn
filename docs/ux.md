@@ -253,7 +253,8 @@ that boundary are history. A live approval that arrives while the subscribe is s
 therefore news on a first connect and after a reconnect. If a subscribe outlives its own request
 timeout the client keeps holding the buffer until the answer names the boundary (or the socket
 closes and the next subscribe replays the range); an older daemon that accepts a live-edge
-subscribe without naming a boundary delivers those frames untagged, since nothing was replayed.
+subscribe with a plain ack, or with no boundary, delivers those frames untagged, since nothing was
+replayed.
 Finished and failed turns follow the
 daemon's thread summary but need a live `turn_completed` for the current turn: a thread moved to
 Done by another client, or a replayed completion followed by a live summary tick, stays quiet. A
