@@ -13,7 +13,9 @@ use h4rn_daemon::auth::TokenStore;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
 use h4rn_daemon::server::Outbound;
-use h4rn_daemon::terminal::{OpenSpec, QueryReply, TerminalManager, TracingAudit, run_viewer};
+use h4rn_daemon::terminal::{
+    OpenSpec, QueryReply, TerminalManager, TracingAudit, Viewer, run_viewer,
+};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
     HostId, ResponseBody, ServerFrame, TerminalId, TerminalInfo, pty_input_reply_seq,
@@ -1221,6 +1223,94 @@ async fn a_sole_viewer_that_attached_at_a_snapshot_answers_its_first_chunk() {
     );
 
     drop(attached);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A viewer that is registered but has not been handed its attach snapshot
+/// yet has received nothing, so it cannot answer and must not hold back the
+/// viewer that can.
+#[tokio::test]
+async fn a_viewer_still_attaching_does_not_block_the_answer() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (viewer_id, mut rx, attached) = attach_viewer(&manager, &terminal, true);
+    // This viewer's snapshot covers chunk 5; chunk 6 is its first raw chunk.
+    attached.viewer.reset_credit(5);
+    mark_sent(&attached, 6);
+
+    // A second viewer is registered while its attach is still working: it has
+    // no snapshot position yet and has been sent no output.
+    let second_id = manager.next_viewer_id();
+    let (second_tx, _second_rx) = mpsc::channel::<Outbound>(4);
+    attached
+        .session
+        .add_viewer(second_id, 80, 24, true, Arc::new(Viewer::new(second_tx)));
+
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iFIRST", at(6, 0))
+        .expect("the ready viewer answers its first raw chunk");
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut rx,
+        &manager,
+        &terminal.terminal_id,
+        viewer_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iFIRST").count(),
+        1,
+        "a viewer that has received nothing yet cannot block the answer: {output:?}"
+    );
+
+    drop(attached);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A viewer that attached before the chunk but is stalled below it never saw
+/// the query, so it does not hold back a late-attached viewer's answer.
+#[tokio::test]
+async fn a_stalled_viewer_below_the_chunk_does_not_block_the_answer() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (_early_id, _early_rx, early) = attach_viewer(&manager, &terminal, false);
+    // The early viewer attached at 0 but its output stalled at chunk 3.
+    mark_sent(&early, 3);
+    let (late_id, mut late_rx, late) = attach_viewer(&manager, &terminal, true);
+    // The late viewer attached with chunk 6 in its snapshot: chunk 7 is its
+    // first raw chunk and lies below its answer floor.
+    late.viewer.reset_credit(6);
+    mark_sent(&late, 7);
+
+    manager
+        .input_by_stream(terminal.stream_id, late_id, b"iLATE", at(7, 0))
+        .expect("the stalled viewer never saw chunk 7 and cannot block the answer");
+    manager
+        .input_by_stream(terminal.stream_id, late_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut late_rx,
+        &manager,
+        &terminal.terminal_id,
+        late_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iLATE").count(),
+        1,
+        "a viewer stalled below the chunk cannot leave the query unanswered: {output:?}"
+    );
+
+    drop(early);
+    drop(late);
     manager.close(&terminal.terminal_id).await.expect("close");
     manager.shutdown().await;
     drop(cwd);

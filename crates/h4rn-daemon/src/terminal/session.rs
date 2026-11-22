@@ -132,9 +132,8 @@ impl Viewer {
     ///
     /// The sent bound advances only when the frame has been handed to the
     /// outbound channel, so a reply cannot name output the viewer never got.
-    /// The receiver can acknowledge the frame before the sender gets here (the
-    /// handoff and the ack are on different tasks), so a chunk at or below the
-    /// acked position is already accounted for and must not be recorded again.
+    /// A chunk at or below the acked position was already sent and freed, so
+    /// recording it again would consume credit that no future ack frees.
     pub fn record_sent(&self, seq: u64, bytes: usize) {
         let mut credit = lock(&self.credit);
         credit.sent_through = credit.sent_through.max(seq);
@@ -163,11 +162,26 @@ impl Viewer {
         lock(&self.credit).sent_through
     }
 
+    /// Whether this viewer received the chunk at `position` and can number
+    /// its answers the way an earlier viewer does.
+    ///
+    /// A viewer that is registered but has not had its attach snapshot yet
+    /// has received nothing, and one stalled below `position` never saw the
+    /// query; neither can answer it, so neither may block a viewer that can.
+    pub fn could_answer(&self, position: u64) -> bool {
+        let credit = lock(&self.credit);
+        credit.answer_from <= position && credit.sent_through >= position
+    }
+
     /// Frees credit acknowledged by `up_to`.
     pub fn ack(&self, up_to: u64) {
         let mut credit = lock(&self.credit);
-        // The ack can arrive before the corresponding `record_sent`, so the
-        // position is remembered and a late record for it is skipped.
+        // An ack can name output that was never sent: a stale or bogus
+        // acknowledgement must not mark later chunks free, because nothing
+        // would then account for their credit. Clamp it to the sent bound.
+        let up_to = up_to.min(credit.sent_through);
+        // Remember the position so a late record of the same chunk is skipped
+        // instead of holding credit that no future ack would free.
         credit.acked_through = credit.acked_through.max(up_to);
         while let Some((seq, bytes)) = credit.outstanding.front().copied() {
             if seq > credit.acked_through {
@@ -654,9 +668,10 @@ impl Session {
     /// answer. A position the daemon never sent to that viewer is ignored, so
     /// a bogus claim cannot suppress a real answer.
     ///
-    /// The acceptance decision and the PTY write happen under the same writer
-    /// lock: two connections cannot be accepted in one order and have their
-    /// bytes reach the shell in another.
+    /// The acceptance decision, the PTY write and the record update happen
+    /// under the same writer lock: two connections cannot be accepted in one
+    /// order and have their bytes reach the shell in another, and a write that
+    /// fails records nothing.
     pub fn write_viewer_input(
         &self,
         viewer_id: ViewerId,
@@ -716,9 +731,14 @@ impl Session {
         // Keep the grace period after TERM so a job's cleanup handler can run
         // before the group is killed.
         tokio::time::sleep(TERM_GRACE).await;
-        {
-            let mut child = lock(&self.child);
-            let _ = child.kill();
+        // The reader thread may be holding the child in `wait()` after a PTY
+        // EOF; waiting for that lock here would outlast the close deadline.
+        // Fall back to signals that address the process, which need no handle.
+        match try_lock(&self.child) {
+            Some(mut child) => {
+                let _ = child.kill();
+            }
+            None => signal_pid(self.shell_pid, Signal::Kill),
         }
         if let Some(pgid) = self.process_group {
             signal_group(pgid, Signal::Kill);
@@ -731,11 +751,16 @@ impl Session {
     /// while the child lock is still held so `finish` can never see the child
     /// as reaped without also seeing its status. Both take the child lock
     /// before the captured-status lock.
+    ///
+    /// The child lock is only ever tried, never waited for: after a PTY EOF
+    /// the reader thread holds it in `wait()` until the shell exits, and a
+    /// blocking lock here would let that shell hold up the whole close. A
+    /// shell that is busy being reaped is simply still running as far as the
+    /// deadline is concerned, so the caller moves on to TERM and KILL.
     async fn wait_for_shell_exit(&self, limit: Duration) {
         let deadline = Instant::now() + limit;
         loop {
-            {
-                let mut child = lock(&self.child);
+            if let Some(mut child) = try_lock(&self.child) {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         *lock(&self.reaped_status) = Some(status);
@@ -755,9 +780,11 @@ impl Session {
 
 /// Writes one viewer's input under the writer lock.
 ///
-/// The lock covers the acceptance decision and the write, so two connections
-/// cannot be accepted in one order and have their bytes reach the shell in
-/// another.
+/// The lock covers the acceptance decision, the write and the record update,
+/// so two connections cannot be accepted in one order and have their bytes
+/// reach the shell in another. The record changes only after the bytes are
+/// written: a failed write must leave no answer claimed and no legacy owner,
+/// or the shell never sees the answer and no viewer may send it again.
 fn write_input_locked(
     writer: &Mutex<Option<Box<dyn Write + Send>>>,
     viewers: &Mutex<HashMap<ViewerId, ViewerEntry>>,
@@ -778,28 +805,63 @@ fn write_input_locked(
     let Some(viewer) = viewer else {
         return Err(ViewerInputError::NotAttached);
     };
-    if reply != QueryReply::No && !accepts_reply(viewers, answers, viewer_id, &viewer, reply) {
-        return Ok(());
-    }
+    let accepted = if reply == QueryReply::No {
+        None
+    } else {
+        match accepts_reply(viewers, answers, viewer_id, &viewer, reply) {
+            Some(accepted) => Some(accepted),
+            None => return Ok(()),
+        }
+    };
     writer.write_all(data).map_err(ViewerInputError::Io)?;
     writer.flush().map_err(ViewerInputError::Io)?;
+    if let Some(accepted) = accepted {
+        commit_reply(viewers, answers, accepted);
+    }
     Ok(())
+}
+
+/// A reply the arbitration accepted, committed once it is written.
+struct AcceptedReply {
+    /// Viewer whose reply it is.
+    viewer: ViewerId,
+    /// Whether writing it makes this viewer the legacy reply owner.
+    legacy_owner: bool,
+    /// The `(position, ordinal)` of the answer, when it names one.
+    answer: Option<(u64, u64)>,
+}
+
+/// Records an accepted reply after its bytes reached the shell.
+fn commit_reply(
+    viewers: &Mutex<HashMap<ViewerId, ViewerEntry>>,
+    answers: &Mutex<AnsweredQueries>,
+    accepted: AcceptedReply,
+) {
+    if let Some((position, ordinal)) = accepted.answer {
+        lock(answers).accept(position, ordinal);
+    }
+    if accepted.legacy_owner
+        && let Some(entry) = lock(viewers).get_mut(&accepted.viewer)
+    {
+        entry.legacy_owner = true;
+    }
 }
 
 /// Decides whether one marked reply may be written.
 ///
 /// The caller holds the writer lock, so the decision is not reordered against
-/// another connection's write.
+/// another connection's write. Nothing is recorded here: a reply is only
+/// committed by [`commit_reply`] once its bytes are written.
 fn accepts_reply(
     viewers: &Mutex<HashMap<ViewerId, ViewerEntry>>,
     answers: &Mutex<AnsweredQueries>,
     viewer_id: ViewerId,
     viewer: &Viewer,
     reply: QueryReply,
-) -> bool {
+) -> Option<AcceptedReply> {
     let latest = viewer.sent_through();
     let answer_from = viewer.answer_from();
-    let mut viewers = lock(viewers);
+    let viewers = lock(viewers);
     // Mixed versions are decided when each client attaches, not by whichever
     // reply happens to arrive first. While any attached viewer cannot name a
     // position, every reply follows the legacy single-owner rule: the first
@@ -814,11 +876,43 @@ fn accepts_reply(
         if let Some(owner) = owner
             && owner != viewer_id
         {
-            return false;
+            return None;
         }
-        let accepted = match reply {
-            QueryReply::No | QueryReply::Unpositioned => true,
-            QueryReply::At { position, ordinal } => accept_position(
+        let answer = match reply {
+            QueryReply::No | QueryReply::Unpositioned => None,
+            QueryReply::At { position, ordinal } => {
+                if !accept_position(
+                    &viewers,
+                    viewer_id,
+                    answers,
+                    position,
+                    ordinal,
+                    latest,
+                    answer_from,
+                ) {
+                    return None;
+                }
+                Some((position, ordinal))
+            }
+        };
+        // Only a reply that passed validation and is actually written takes
+        // the role. A bogus claim must not suppress the old client's next
+        // valid reply, and ownership is not reset by a legacy viewer merely
+        // attaching or detaching.
+        return Some(AcceptedReply {
+            viewer: viewer_id,
+            legacy_owner: owner.is_none(),
+            answer,
+        });
+    }
+    match reply {
+        QueryReply::No => None,
+        // Every attached viewer declared positions, so an unpositioned reply
+        // breaks that contract and names no answer: writing it could duplicate
+        // a query another viewer already answered.
+        QueryReply::Unpositioned => None,
+        QueryReply::At { position, ordinal } => {
+            if !accept_position(
                 &viewers,
                 viewer_id,
                 answers,
@@ -826,34 +920,15 @@ fn accepts_reply(
                 ordinal,
                 latest,
                 answer_from,
-            ),
-        };
-        // Only a reply that passed validation takes the role. A bogus claim
-        // must not suppress the old client's next valid reply, and ownership
-        // is not reset by a legacy viewer merely attaching or detaching.
-        if accepted
-            && owner.is_none()
-            && let Some(entry) = viewers.get_mut(&viewer_id)
-        {
-            entry.legacy_owner = true;
+            ) {
+                return None;
+            }
+            Some(AcceptedReply {
+                viewer: viewer_id,
+                legacy_owner: false,
+                answer: Some((position, ordinal)),
+            })
         }
-        return accepted;
-    }
-    match reply {
-        QueryReply::No => true,
-        // Every attached viewer declared positions, so an unpositioned reply
-        // breaks that contract and names no answer: writing it could duplicate
-        // a query another viewer already answered.
-        QueryReply::Unpositioned => false,
-        QueryReply::At { position, ordinal } => accept_position(
-            &viewers,
-            viewer_id,
-            answers,
-            position,
-            ordinal,
-            latest,
-            answer_from,
-        ),
     }
 }
 
@@ -870,12 +945,12 @@ fn clear_legacy_owners(viewers: &mut HashMap<ViewerId, ViewerEntry>) {
 /// chunk whose predecessor it never parsed: an answer's ordinal is counted
 /// from the start of the chunk, so a viewer that attached mid-query would
 /// number the same answers differently. That last rule protects the other
-/// viewers' numbering, so it only applies while another attached viewer could
-/// answer the position. A sole viewer (or a viewer whose neighbours all
-/// attached later too) has nothing to collide with and may answer its first
-/// raw chunk after a snapshot. A rejected reply is dropped without advancing
-/// the record, so it cannot suppress the answer of a viewer that really saw
-/// the query.
+/// viewers' numbering, so it only applies while another attached viewer
+/// received `position` and could answer it. A viewer that is still attaching,
+/// one stalled below `position`, and a sole viewer have nothing to collide
+/// with and may answer their first raw chunk after a snapshot. A rejected
+/// reply is dropped without advancing the record, so it cannot suppress the
+/// answer of a viewer that really saw the query.
 fn accept_position(
     viewers: &HashMap<ViewerId, ViewerEntry>,
     viewer_id: ViewerId,
@@ -891,11 +966,13 @@ fn accept_position(
     if position < answer_from
         && viewers
             .iter()
-            .any(|(id, entry)| *id != viewer_id && entry.viewer.answer_from() <= position)
+            .any(|(id, entry)| *id != viewer_id && entry.viewer.could_answer(position))
     {
         return false;
     }
-    lock(answers).accept(position, ordinal)
+    // Checked here and recorded after the write (`commit_reply`); the writer
+    // lock makes the two steps one decision.
+    !lock(answers).is_answered(position, ordinal)
 }
 
 /// Which query a reply answers.
@@ -975,6 +1052,17 @@ impl AnsweredQueries {
             return false;
         }
         if !self.recent.contains_key(&position) {
+            // The incoming position competes for retirement too. A late reply
+            // for a chunk older than everything tracked must not push the
+            // newest tracked chunk out; retiring the incoming one treats its
+            // answers as forgotten, exactly like a chunk that aged out.
+            if self.recent.len() >= ANSWERED_CHUNKS
+                && let Some((oldest, _)) = self.recent.first_key_value()
+                && position <= *oldest
+            {
+                self.through = self.through.max(position);
+                return false;
+            }
             while self.recent.len() >= ANSWERED_CHUNKS {
                 let Some((oldest, _)) = self.recent.pop_first() else {
                     break;
@@ -986,8 +1074,7 @@ impl AnsweredQueries {
     }
 
     /// Whether `(position, ordinal)` is already recorded.
-    #[cfg(test)]
-    fn answered(&self, position: u64, ordinal: u64) -> bool {
+    fn is_answered(&self, position: u64, ordinal: u64) -> bool {
         if position <= self.through {
             return true;
         }
@@ -1065,11 +1152,45 @@ fn signal_group(pgid: i32, signal: Signal) {
     }
 }
 
+/// Signals one process directly, without the child handle.
+///
+/// The close path uses this when the reader thread holds the child lock: the
+/// signal must go out on schedule, not after the shell decides to exit.
+fn signal_pid(pid: Option<i32>, signal: Signal) {
+    #[cfg(unix)]
+    {
+        let signal = match signal {
+            Signal::Term => libc::SIGTERM,
+            Signal::Kill => libc::SIGKILL,
+        };
+        // Ignore ESRCH for a shell that already exited.
+        if let Some(pid) = pid {
+            let _ = unsafe { libc::kill(pid, signal) };
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = (pid, signal);
+    }
+}
+
 /// Locks a mutex, recovering from a panic in another thread.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Tries to lock a mutex, recovering from a panic in another thread.
+///
+/// `None` means another thread holds it; the caller must not block, because
+/// the holder may be waiting on something this path is about to signal.
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }
 
 /// Encodes one PTY output chunk for a viewer.
@@ -1250,19 +1371,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ack_that_overtakes_the_sent_record_is_not_lost() {
+    async fn an_ack_beyond_the_sent_bound_cannot_open_the_window() {
         let (viewer, _rx) = viewer();
-        // The receiver can acknowledge each frame before the viewer task gets
-        // back from `tx.send` to record it; every chunk is then already free.
-        for seq in 1..=u64::from(CREDIT_MAX_CHUNKS) * 3 {
-            viewer.ack(seq);
-            viewer.record_sent(seq, CREDIT_MAX_BYTES as usize);
+        viewer.record_sent(1, 1024);
+        // A stale or bogus ack names output the daemon never sent.
+        viewer.ack(u64::MAX);
+        let window = u64::from(CREDIT_MAX_CHUNKS);
+        for seq in 2..=window + 1 {
+            viewer.record_sent(seq, 1024);
         }
         assert!(
             tokio::time::timeout(Duration::from_millis(50), viewer.wait_for_credit(1))
                 .await
-                .is_ok(),
-            "pre-acknowledged chunks must not keep the window closed"
+                .is_err(),
+            "chunks sent after a bogus ack must still consume credit"
+        );
+        viewer.ack(window + 1);
+        assert!(viewer.wait_for_credit(1).await);
+
+        // A resync clears the window; chunks after it must still count.
+        viewer.begin_resync();
+        viewer.record_snapshot_sent(window + 10);
+        viewer.record_sent(window + 11, CREDIT_MAX_BYTES as usize);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), viewer.wait_for_credit(1))
+                .await
+                .is_err(),
+            "a chunk after a resync must still consume credit"
         );
     }
 
@@ -1489,6 +1624,78 @@ mod tests {
             "finish must see the status reaped by the close wait"
         );
     }
+    /// A child that closes its stdio (so the master sees EOF) and then keeps
+    /// running while ignoring SIGHUP and SIGTERM.
+    ///
+    /// The EOF makes the reader thread call `finish`, which holds the child
+    /// lock inside `wait()` until the process ends. Closing the terminal must
+    /// still send TERM and then KILL on schedule instead of waiting for a lock
+    /// that the ignored hangup can never release.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_does_not_wait_for_a_shell_that_holds_the_child_lock() {
+        use std::time::Instant;
+
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.args(["-c", "trap '' HUP TERM; exec 0<&- 1>&- 2>&-; exec sleep 30"]);
+        let child = pty.slave.spawn_command(command).expect("spawn child");
+        // The parent's slave handle must close so the master sees EOF when the
+        // child closes its own stdio (as `spawn_shell` does in production).
+        drop(pty.slave);
+        let reader = pty.master.try_clone_reader().expect("pty reader");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let session = Arc::new(Session::new(
+            TerminalId::new("term_hup_ignored"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            child,
+            writer,
+        ));
+        session.start_reader(reader);
+
+        // Wait until the reader thread's `finish` holds the child in `wait`
+        // and can no longer release it before the close path runs.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.child.try_lock().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "the PTY EOF must let the reader thread reach the child wait"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The hangup is ignored, so the wait lasts its whole bound; the TERM
+        // grace follows. The child lock must add nothing on top.
+        tokio::time::timeout(
+            HANGUP_GRACE + TERM_GRACE + Duration::from_secs(1),
+            session.kill_with_grace(),
+        )
+        .await
+        .expect("close must not wait for the lock the reader thread holds");
+
+        // The pid/group signals reached the shell, so the reader thread's
+        // `wait` returns and the exit report is written.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.info().exit.is_none() {
+            assert!(Instant::now() < deadline, "the shell must be killed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[test]
     fn stream_ids_start_at_one_and_increase() {
         let counter = AtomicU64::new(0);
@@ -1560,6 +1767,30 @@ mod tests {
         assert_eq!(answers.recent.len(), ANSWERED_CHUNKS);
         assert!(!answers.accept(1, 0), "the evicted chunk is forgotten");
         assert!(answers.accept(ANSWERED_CHUNKS as u64 + 1, 1));
+    }
+
+    #[test]
+    fn a_late_reply_never_evicts_a_newer_chunk() {
+        let mut answers = AnsweredQueries::default();
+        // Fill the window with chunks 100..=163.
+        for position in 100..100 + ANSWERED_CHUNKS as u64 {
+            assert!(answers.accept(position, 0));
+        }
+        // A reply for chunk 99 arrives late. It is the oldest candidate, so it
+        // is the one retired; the tracked chunks stay.
+        assert!(
+            !answers.accept(99, 0),
+            "the incoming older chunk is the one that ages out"
+        );
+        assert!(answers.is_answered(100, 0), "chunk 100 stays recorded");
+        assert!(
+            !answers.accept(100, 0),
+            "a still-tracked chunk's answer is not written twice"
+        );
+        assert!(
+            answers.accept(100, 1),
+            "chunk 100's other answers are still tracked"
+        );
     }
 
     /// A writer that holds the first write until the test releases it, so a
@@ -1637,24 +1868,143 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("the second write must start");
             std::thread::sleep(Duration::from_millis(100));
-            assert!(
-                lock(&written).is_empty(),
-                "the second write must wait for the first"
-            );
-            assert!(
-                !lock(&answers).answered(4, 0),
-                "a reply still waiting for the writer must not enter the answered record"
-            );
+            // Observe only; the writers are released and joined before any of
+            // this is asserted, so a failure cannot leave a thread parked.
+            let second_wrote = !lock(&written).is_empty();
+            let waiting_recorded = lock(&answers).is_answered(4, 0);
 
             release_tx.send(()).expect("release the first write");
             first.join().expect("first thread").expect("first write");
             second.join().expect("second thread").expect("second write");
+
+            assert!(!second_wrote, "the second write must wait for the first");
+            assert!(
+                !waiting_recorded,
+                "a reply still waiting for the writer must not enter the answered record"
+            );
         });
 
         assert_eq!(&*lock(&written), b"34", "writes keep the accepted order");
         assert!(
-            lock(&answers).answered(4, 0),
+            lock(&answers).is_answered(4, 0),
             "the released reply is recorded once it is written"
         );
+    }
+
+    /// A writer whose first write fails, then works.
+    struct FailOnceWriter {
+        failed: bool,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for FailOnceWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.failed {
+                self.failed = true;
+                return Err(std::io::Error::other("the PTY write failed"));
+            }
+            lock(&self.written).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fail_once_writer(written: &Arc<Mutex<Vec<u8>>>) -> Mutex<Option<Box<dyn Write + Send>>> {
+        Mutex::new(Some(Box::new(FailOnceWriter {
+            failed: false,
+            written: Arc::clone(written),
+        })))
+    }
+
+    #[test]
+    fn a_failed_write_does_not_record_the_answer() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = fail_once_writer(&written);
+        let (first_viewer, _first_rx) = attached_viewer(10);
+        let (second_viewer, _second_rx) = attached_viewer(10);
+        let (viewers, answers) = input_state(&[(1, first_viewer), (2, second_viewer)]);
+
+        write_input_locked(
+            &writer,
+            &viewers,
+            &answers,
+            1,
+            b"iFIRST",
+            QueryReply::At {
+                position: 3,
+                ordinal: 0,
+            },
+        )
+        .expect_err("the failing write is reported");
+        assert!(
+            !lock(&answers).is_answered(3, 0),
+            "a failed write must not claim the answer"
+        );
+
+        write_input_locked(
+            &writer,
+            &viewers,
+            &answers,
+            2,
+            b"iSECOND",
+            QueryReply::At {
+                position: 3,
+                ordinal: 0,
+            },
+        )
+        .expect("the other viewer's answer is written");
+        assert_eq!(
+            &*lock(&written),
+            b"iSECOND",
+            "the failed reply never reached the shell; the valid one did"
+        );
+        assert!(lock(&answers).is_answered(3, 0));
+    }
+
+    #[test]
+    fn a_failed_write_does_not_take_the_legacy_owner() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = fail_once_writer(&written);
+        let (old_viewer, _old_rx) = attached_viewer(10);
+        let (new_viewer, _new_rx) = attached_viewer(10);
+        let (viewers, answers) = input_state(&[(1, old_viewer), (2, new_viewer)]);
+        lock(&viewers)
+            .get_mut(&1)
+            .expect("the old viewer")
+            .reply_positions = false;
+
+        write_input_locked(
+            &writer,
+            &viewers,
+            &answers,
+            1,
+            b"iOLD",
+            QueryReply::Unpositioned,
+        )
+        .expect_err("the failing write is reported");
+        assert!(
+            !lock(&viewers).get(&1).expect("the old viewer").legacy_owner,
+            "a failed write must not take the legacy owner role"
+        );
+
+        // The old viewer's valid answer would be dropped if the failed one had
+        // taken ownership, leaving the query unanswered.
+        write_input_locked(
+            &writer,
+            &viewers,
+            &answers,
+            2,
+            b"iNEW",
+            QueryReply::At {
+                position: 3,
+                ordinal: 0,
+            },
+        )
+        .expect("the positioned viewer's answer is written");
+        assert_eq!(&*lock(&written), b"iNEW");
+        assert!(lock(&viewers).get(&2).expect("the new viewer").legacy_owner);
     }
 }

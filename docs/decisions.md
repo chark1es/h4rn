@@ -151,7 +151,10 @@ user detached. The two-second wait runs only when a hangup was actually delivere
 POSIX signals, so closing a terminal there does not pause. When the close wait reaps the shell, it
 stores the status while still holding the child lock, and the reader thread's exit report takes the
 same locks in the same order, so it reuses that status rather than reporting `-1` from a second
-failed wait; the reap and the captured status can no longer be observed apart.
+failed wait; the reap and the captured status can no longer be observed apart. The close path never
+waits for the child handle: the hangup wait only tries its lock, and when the reader thread already
+holds it in `wait()` after a PTY EOF, TERM and KILL still go out on schedule, with KILL addressed to
+the shell's pid as well as its group.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's
@@ -172,23 +175,27 @@ that viewer also received chunk P-1, which means it attached at or before P-1 an
 that started in the previous chunk. A viewer that attached at position 0 is the exception, because
 there is no earlier chunk, so its first chunk is answerable. The rule protects the other viewers'
 numbering rather than the viewer itself: a reply below that viewer's floor is accepted when no
-other attached viewer could answer P (no other viewer has its floor at or below P), because then
-there is nothing to collide with. A sole viewer that attached at a snapshot — or that resynced
-after falling behind — therefore still answers its first raw chunk. The client never drops a reply
-below its own floor; it always sends and lets the daemon decide. When another viewer could answer
-the position, a viewer that attached mid-query is dropped rather than allowed to renumber that
-viewer's answers, and the earlier-attached viewer writes them. A query spanning more than two
-64 KiB chunks is out of scope: only the previous chunk is known to the daemon, and such a query is
-already unanswerable by a parser that attaches between its start and end. The sent bound also
-advances only when a frame is actually handed to the viewer's outbound channel, so a blocked send
-leaves it unchanged.
+other attached viewer could answer P, meaning no other viewer was sent P *and* has its floor at or
+below it, because then there is nothing to collide with. A viewer that is still attaching (its
+snapshot position is not set, so it was sent nothing) and a viewer whose output credit never
+reached P are not possible answerers and cannot hold an answer back. A sole viewer that attached at
+a snapshot — or that resynced after falling behind — therefore still answers its first raw chunk.
+The client never drops a reply below its own floor; it always sends and lets the daemon decide.
+When another viewer could answer the position, a viewer that attached mid-query is dropped rather
+than allowed to renumber that viewer's answers, and the earlier-attached viewer writes them.
+A query spanning more than two 64 KiB chunks is out of scope: only the previous chunk is known to
+the daemon, and such a query is already unanswerable by a parser that attaches between its start
+and end. The sent bound also advances only when a frame is actually handed to the viewer's outbound
+channel, so a blocked send leaves it unchanged.
 
 Clients declare reply-position support in the attach request (default false, so an older build is
 recognised immediately). While any attached viewer has not declared it, every reply follows the
 legacy single-owner rule: the first viewer to send a marked reply that is actually written owns
 them all, and its positioned replies are still validated and deduplicated. A rejected claim — a
 position the daemon never sent, or one that fails the attach boundary — does not take the role, so
-it cannot suppress the old client's next valid reply. The role moves only when its owner detaches
+it cannot suppress the old client's next valid reply, and neither does a reply whose write fails:
+the role and the answered-position record are only committed once the bytes reach the shell, all
+under the writer lock. The role moves only when its owner detaches
 or is replaced, or when the last legacy viewer leaves and the per-answer rule resumes; another
 legacy viewer attaching or detaching does not reset it while an answer may be in flight. Both
 arrival orders therefore write exactly one answer. When every attached viewer has declared
@@ -199,8 +206,13 @@ each, deliberately fixed so memory stays constant; the tail of a larger chunk co
 single high-water ordinal, and chunks older than the window collapse into the evicted high-water
 mark. Those limits are deliberate, not a missing feature: a 1024-answer batch in one 64 KiB chunk
 is already far beyond real queries, and the collapse can only drop answers for a chunk that has
-left the window. A stalled or backgrounded viewer therefore never blocks another viewer's answer,
-and two active viewers never both answer. The client never gives up reconnecting: after
+left the window. A late reply for a chunk older than the whole window is itself the entry retired,
+so it can never push a still-tracked chunk out. A viewer that was not sent the query's chunk — one
+whose credit is exhausted so the chunk never reached it, or one that is still attaching — therefore
+never blocks another viewer's answer, and two active viewers never both answer. One case remains: a
+viewer that was sent the chunk and has not answered it yet still counts as the possible answerer, so
+a later-attached viewer's reply for that position is dropped until the silent viewer answers or
+detaches. The client never gives up reconnecting: after
 the fast backoff it retries at the capped interval, and an online, focus or visibility event retries
 at once, except during the very first connect, which is not yet a retry, and while an attempt that
 started less than a second ago is still opening.
