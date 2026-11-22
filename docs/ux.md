@@ -343,7 +343,7 @@ mobile build does not send notifications yet and says so.
 | Show subagents | `⌘J` | `Ctrl+J` | Panels |
 | Find a file | `⌘P` | `Ctrl+P` | Panels |
 
-Keys that edit text rather than run commands: `↵` sends, `⇧↵` adds a line, `@` mentions a file or host, `Esc` closes an overlay or leaves Settings. In the IDE, `⌘S` saves and `⌘⇧F` searches files.
+Keys that edit text rather than run commands: `↵` sends, `⇧↵` adds a line, `↑` on the first line recalls an earlier prompt (`↓` walks forward and restores what you were typing), `@` mentions a file or host, `Esc` closes an overlay or leaves Settings. In the IDE, `⌘S` saves and `⌘⇧F` searches files.
 
 ### Command palette
 
@@ -610,6 +610,7 @@ flowchart TD
 - Attachments: paste, drop, or `⌘U`; images get thumbnails, text over 32 KiB becomes a text-file attachment, and every attachment shows a size. A failed upload keeps the draft and shows a retry per file.
 - The Start button states the consequence: “Runs Claude Code on atlas”. If the host is offline, Start is disabled with “atlas is offline — [Reconnect]”, not a generic error.
 - Starting is idempotent per draft: double-Enter does not create two threads.
+- The Task box keeps an unsent draft per host and folder on this device, so cancelling and reopening the dialog does not lose what you typed; the draft switches when you commit the folder (leave the field or press Enter), switching folders leaves the old folder's text saved there, and the last folder used on a host is remembered. Attachments are not persisted. The box stays disabled with a quiet “Connecting…” until a host is known, so text is never typed into a slot that does not exist yet. Start sends exactly what is on screen to the folder on screen, and clears only the draft the text came from.
 
 **Failure paths**
 
@@ -1201,7 +1202,7 @@ Wireframes are structural. Every screen uses the same pane grammar, the same row
 - **Cue gutter** numbers user and assistant turns; the current cue has a 2 px amber bar; clicking jumps. `[`/`]` move cue to cue. Struck/settled cues dim; they are never removed.
 - **Turns**: user turns are compact (no avatar, right-aligned label “You”, timestamp). Assistant turns start with orb + harness + host + time; the state line is one line (`thinking · reading file`, `running · 61 TPS`, `waiting for approval`). Tool calls collapse to one line (icon, name, target, duration, status); expanding shows args and a bounded result. Diffs inline show file + hunk + `Open in IDE`; full diff lives in the context panel.
 - **Approvals** render as a standby bar and an inline card at the cue that raised them. Go/Hold are the only primary actions; “Always allow this command” is an overflow choice with a scope (“for this thread” / “for this harness on atlas”).
-- **Composer** auto-grows 1–6 lines, keeps drafts per thread, supports `@` files/hosts and `/` commands, shows attachments as removable chips, and states the target (“Reply to Claude Code on atlas”). Send is disabled only with a reason (“atlas is offline”).
+- **Composer** auto-grows 1–6 lines, keeps drafts per thread on this device (they survive a reload, an app restart or Android killing the webview; each draft is its own key, so one tab never erases another thread's draft, and for the same thread the most recent edit wins; drafts untouched for 30 days are dropped, and attachments are not persisted), supports `@` files/hosts and `/` commands, shows attachments as removable chips, and states the target (“Reply to Claude Code on atlas”). With the caret on the first line, `↑` recalls an earlier prompt sent in this thread and `↓` walks forward to the text you were typing; recalling never replaces the stored draft, so a reload keeps what you were writing. Send is disabled only with a reason (“atlas is offline”).
 - **Context panel** tabs are `Diff`, `Files`, `Terminal`, `Subagents`; the last tab is remembered per thread. On tablet it becomes a tab in the detail header; on phone a sheet.
 - **Status bar** carries connection, host latency, cue position, token count and cost. Cost is estimated and labeled; it never pretends to be billing truth.
 - **Empty thread** (just created, no tokens): static skeleton of one assistant turn + “Waiting for Claude Code on atlas…” and a `Cancel` action. No spinner.
