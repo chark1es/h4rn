@@ -617,7 +617,7 @@ impl Forge for AzureDevOpsClient {
             )))
             .await?;
         let pr = self.fetch_pr(repo, number).await.unwrap_or(Value::Null);
-        let pr_url = links_html(&pr);
+        let pr_url = (!pr.is_null()).then(|| pr_web_url(repo, &pr, number));
         let threads = value["value"].as_array().cloned().unwrap_or_default();
         let mut comments = Vec::new();
         let mut review_threads = Vec::new();
@@ -717,7 +717,11 @@ impl Forge for AzureDevOpsClient {
             )))
             .await?;
         let mut checks = Vec::new();
-        for status in statuses["value"].as_array().into_iter().flatten() {
+        // A 200 without a `value` collection is not an empty result: Azure
+        // always sends `value`, so a missing one means half the answer was
+        // lost. Treating it as zero rows would turn green-but-incomplete data
+        // into a pass.
+        for status in collection(&statuses, "statuses")? {
             if status_is_current(status, current_iteration) {
                 checks.push(map_status(status));
             }
@@ -747,7 +751,7 @@ impl Forge for AzureDevOpsClient {
         // A status is reconciled with at most one policy; a second
         // same-named policy stays its own row.
         let mut reconciled: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for evaluation in evaluations["value"].as_array().into_iter().flatten() {
+        for evaluation in collection(&evaluations, "policy evaluations")? {
             let policy = &evaluation["configuration"];
             let evaluation_id = optional_text(evaluation, "evaluationId")
                 .or_else(|| optional_text(policy, "id"))
@@ -871,7 +875,8 @@ impl Forge for AzureDevOpsClient {
             .map(|id| id.to_string())
             .unwrap_or_default();
         let pr = self.fetch_pr(repo, number).await.unwrap_or(Value::Null);
-        let mapped = map_thread_comments(&value, &thread_id, "", links_html(&pr).as_deref());
+        let pr_url = (!pr.is_null()).then(|| pr_web_url(repo, &pr, number));
+        let mapped = map_thread_comments(&value, &thread_id, "", pr_url.as_deref());
         mapped
             .into_iter()
             .next()
@@ -914,6 +919,17 @@ fn versioned(url: &str) -> String {
     with_query(url, &[("api-version", API_VERSION.to_owned())])
 }
 
+/// The `value` array of a documented Azure collection.
+///
+/// `None` (or any other shape) is a parse error: the endpoint always sends the
+/// collection, and an empty one is `[]`, so a missing array must never look
+/// like "no rows".
+fn collection<'a>(value: &'a Value, what: &str) -> Result<&'a Vec<Value>> {
+    value["value"]
+        .as_array()
+        .ok_or_else(|| ForgeError::Parse(format!("Azure DevOps returned no {what} collection")))
+}
+
 fn with_query(url: &str, query: &[(&str, String)]) -> String {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     for (key, value) in query {
@@ -940,6 +956,22 @@ fn ref_branch(value: &str) -> String {
 
 fn links_html(value: &Value) -> Option<String> {
     optional_text(&value["_links"]["web"], "href")
+}
+
+/// The PR's browser URL.
+///
+/// Azure usually reports it in `_links.web`, but some responses (a projection
+/// without links, an older API) omit it. The repository's own web URL and the
+/// PR id are enough to build the same page, and falling back to the detected
+/// base URL, project and repository covers a response that names neither.
+fn pr_web_url(repo: &ForgeRepoRef, value: &Value, number: u32) -> String {
+    if let Some(url) = links_html(value).filter(|url| !url.trim().is_empty()) {
+        return url;
+    }
+    let git_web = optional_text(&value["repository"], "webUrl")
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| repo.web_url());
+    format!("{}/pullrequest/{number}", git_web.trim_end_matches('/'))
 }
 
 fn pr_state(value: &Value) -> ForgePrState {
@@ -976,7 +1008,7 @@ fn map_pr_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgePrSummary> 
         base_branch: ref_branch(&text(value, "targetRefName")),
         head_sha: optional_text(&value["lastMergeSourceCommit"], "commitId"),
         updated_at,
-        web_url: links_html(value).unwrap_or_default(),
+        web_url: pr_web_url(repo, value, number),
         checks: ForgeChecksState::Unknown,
         review: ForgeReviewState::Pending,
         draft: value["isDraft"].as_bool().unwrap_or(false),
@@ -1014,6 +1046,8 @@ fn map_pr_detail(repo: &ForgeRepoRef, value: &Value) -> Result<ForgePullRequest>
         base_sha: optional_text(&value["lastMergeTargetCommit"], "commitId"),
         additions: 0,
         deletions: 0,
+        // Azure does not report line totals; they only exist per file.
+        line_counts_known: false,
         changed_files: 0,
         changed_files_known: false,
         commits: 0,
@@ -1363,6 +1397,35 @@ mod tests {
         assert!(azure_thread_resolved("byDesign"));
         assert!(!azure_thread_resolved("active"));
         assert!(!azure_thread_resolved("pending"));
+    }
+
+    #[test]
+    fn pr_url_falls_back_when_links_are_absent() {
+        let value = json!({
+            "pullRequestId": 7,
+            "title": "Fix",
+            "status": "active",
+            "createdBy": {"displayName": "Alice"},
+            "creationDate": "2024-05-01T09:00:00Z",
+            "sourceRefName": "refs/heads/fix",
+            "targetRefName": "refs/heads/main",
+            "lastMergeSourceCommit": {"commitId": "abc"}
+        });
+        let summary = map_pr_summary(&repo(), &value).unwrap();
+        assert_eq!(
+            summary.web_url,
+            "https://dev.azure.com/acme/platform/_git/widget/pullrequest/7"
+        );
+
+        let mut with_web = value;
+        with_web["repository"] = json!({
+            "name": "widget",
+            "webUrl": "https://dev.azure.com/acme/platform/_git/widget"
+        });
+        assert_eq!(
+            map_pr_summary(&repo(), &with_web).unwrap().web_url,
+            "https://dev.azure.com/acme/platform/_git/widget/pullrequest/7"
+        );
     }
 
     #[test]

@@ -621,6 +621,9 @@ fn map_mr_detail(repo: &ForgeRepoRef, value: &Value) -> Result<ForgePullRequest>
         base_sha: optional_text(&value["diff_refs"], "base_sha"),
         additions: 0,
         deletions: 0,
+        // GitLab's merge request object carries no line totals; they only
+        // exist per file, so the counts are unknown rather than zero.
+        line_counts_known: false,
         changed_files,
         changed_files_known: true,
         commits: 0,

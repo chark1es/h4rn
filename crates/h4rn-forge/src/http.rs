@@ -443,25 +443,51 @@ fn response_message(body: &str) -> String {
     redact(trimmed)
 }
 
+/// Token prefixes that identify a forge credential. Azure DevOps personal
+/// access tokens have no prefix of their own, so they cannot be recognised by
+/// shape; the Atlassian and GitHub/GitLab forms can.
+const TOKEN_PREFIXES: [&str; 6] = ["ghp_", "gho_", "glpat-", "github_pat_", "ATBB", "ATATT"];
+
 /// Removes anything that looks like a token from a forge message.
+///
+/// The prefix is found anywhere in the text, not just at the start of a
+/// whitespace-delimited word: an error body often quotes it
+/// (`{"message":"bad token ghp_..."}`, `token=glpat-...`). The run of token
+/// characters after the prefix is replaced too, and the rest of the text
+/// (spacing included) is left exactly as it was.
 pub fn redact(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
-    for word in value.split_whitespace() {
-        if word.starts_with("ghp_")
-            || word.starts_with("gho_")
-            || word.starts_with("glpat-")
-            || word.starts_with("github_pat_")
-            || word.starts_with("ATBB")
-            // Atlassian API tokens have used the ATATT prefix since 2023.
-            || word.starts_with("ATATT")
-        {
-            output.push_str("[redacted]");
-        } else {
-            output.push_str(word);
-        }
-        output.push(' ');
+    let mut rest = value;
+    while let Some((index, prefix)) = find_token_prefix(rest) {
+        output.push_str(&rest[..index]);
+        output.push_str("[redacted]");
+        let after_prefix = &rest[index + prefix.len()..];
+        rest = &after_prefix[token_run_len(after_prefix)..];
     }
-    output.trim_end().to_owned()
+    output.push_str(rest);
+    output
+}
+
+/// The earliest known token prefix and its position.
+fn find_token_prefix(value: &str) -> Option<(usize, &'static str)> {
+    TOKEN_PREFIXES
+        .iter()
+        .filter_map(|prefix| value.find(prefix).map(|index| (index, *prefix)))
+        .min_by_key(|(index, _)| *index)
+}
+
+/// Length of the token characters at the start of `value`.
+///
+/// Quotes, colons, commas, brackets, braces and whitespace all end a token,
+/// which is what makes a JSON body redactable.
+fn token_run_len(value: &str) -> usize {
+    value
+        .char_indices()
+        .find(|(_, ch)| {
+            !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '~' | '+' | '/' | '='))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
 }
 
 fn redact_network_error(error: &reqwest::Error) -> String {
@@ -663,6 +689,30 @@ mod tests {
         assert_eq!(redact("glpat-xyz"), "[redacted]");
         assert_eq!(redact("ATBBtoken"), "[redacted]");
         assert_eq!(redact("ATATT3xFfGF0abc"), "[redacted]");
+    }
+
+    #[test]
+    fn redaction_finds_tokens_next_to_punctuation() {
+        // A quoted token inside a JSON error body, with the surrounding text
+        // and spacing left intact.
+        let body = r#"{"error":"bad token","detail":"ATATT3xFfGF0abc","retry":false}"#;
+        assert_eq!(
+            redact(body),
+            r#"{"error":"bad token","detail":"[redacted]","retry":false}"#
+        );
+        assert_eq!(
+            redact("token=glpat-abc123, host:bitbucket.org"),
+            "token=[redacted], host:bitbucket.org"
+        );
+        assert_eq!(
+            redact("Authorization: Bearer ATBBxyz\nnext line"),
+            "Authorization: Bearer [redacted]\nnext line",
+            "a newline stays a newline"
+        );
+        assert_eq!(
+            redact(r#"["ghp_quoted", "plain"]"#),
+            r#"["[redacted]", "plain"]"#
+        );
     }
 
     #[test]

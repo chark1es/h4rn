@@ -140,20 +140,40 @@ All notable changes to h4rn are recorded here. The format follows
   `forkSource.repository`, the old side comes from the target repository and the new side from the
   fork, where the source commit lives. A 404 for a side the change says exists is an error rather
   than a silently invented addition or deletion.
+- **Azure DevOps checks need both collections.** A 200 whose status or policy body lacks its `value`
+  collection is now an error instead of zero rows; a valid `value: []` stays empty. Half an answer
+  can no longer read as a pass.
 - **Bitbucket Cloud follows the cursor it is given.** The PR list carries the same-origin `next` URL
   forward as the next page instead of rebuilding `page=N`, so an opaque cursor keeps its filters and
-  pages do not repeat.
-- **Bitbucket Cloud Mine and Review requested work for personal tokens.** The author filter matches
-  `author.nickname` or `author.display_name`, because the viewer login can fall back to the display
-  name. Workspace, project and repository access tokens have no user identity, so those two filters
-  say “unsupported” with that reason instead of showing an empty list.
+  pages do not repeat. Learned cursors are sparse and bounded (the 64 most recent), and a page with
+  no learned cursor falls back to the documented `page` parameter, so a distant page never
+  allocates memory in proportion to its number.
+- **Bitbucket Cloud Mine and Review requested match the account uuid.** The filters use
+  `author.uuid` and `reviewers.uuid` from `/user`, as Bitbucket documents, instead of a nickname or
+  display name that two people can share (or that a token may not report). Workspace, project and
+  repository access tokens have no user identity, so those two filters say “unsupported” with that
+  reason instead of showing an empty list.
+- **Bitbucket Cloud reads `inline.outdated`.** A line-anchored thread is outdated when its root
+  comment says so; a file-level comment stays not outdated.
+- **Redaction finds tokens wherever they appear.** Atlassian and GitHub/GitLab token values are
+  removed next to quotes, colons, commas and brackets, including inside a quoted JSON error body,
+  instead of only at the start of a whitespace-delimited word.
+- **Azure DevOps pull requests keep a browser URL.** A response without `_links.web` falls back to
+  `<repository.webUrl>/pullrequest/<id>`, or to the base URL, project and repository, instead of an
+  empty link.
+- **Line counts are only shown when the forge reports them.** Azure DevOps (and GitLab) report no
+  PR-wide totals, so `line_counts_known` is `false` and the agent handoff says the counts are
+  unknown instead of “+0 −0”. Bitbucket sets it once the diffstat was read in full.
+- **A legacy `DefaultCollection` remote finds its Azure DevOps account.** An account added as
+  `https://<org>.visualstudio.com` matches a remote that spells
+  `https://<org>.visualstudio.com/DefaultCollection`, and the other way round.
 - **Bitbucket Cloud base-URL errors never repeat the input.** A non-root path is rejected with the
   same fixed wording Azure DevOps uses, and `ATATT…` Atlassian API tokens are redacted from error
   messages like `ATBB…` already was.
 - **Honest Bitbucket Cloud counts and anchors.** A failed or capped diffstat leaves the changed-file
-  count unknown (`changed_files_known: false`) so the PR header shows “—” instead of “0”; a
-  file-level inline comment is no longer marked outdated; and the comments page reports `has_more`
-  only when the last page it read linked a `next` page.
+  count and line counts unknown (`changed_files_known` and `line_counts_known` false) so the PR
+  header shows “—” instead of “0”; the comments page reports `has_more` only when the last page it
+  read linked a `next` page.
 - **The Bitbucket token form says Pull requests: read and write**, matching the documented scopes,
   and with several detected Bitbucket checkouts it lets the person choose which repository proves
   an access token (the first is used by default).

@@ -367,6 +367,12 @@ pub struct ForgePullRequest {
     /// `false` means the count is unknown (a diffstat page failed or hit its
     /// cap), not that the PR changes no files; clients show it as unknown.
     pub changed_files_known: bool,
+    /// Whether the forge reported the line counts.
+    ///
+    /// `false` means additions and deletions are unknown rather than zero;
+    /// clients show them as unknown instead of `+0 −0` (Azure DevOps does not
+    /// report totals without downloading every file).
+    pub line_counts_known: bool,
     /// Commits in the PR.
     pub commits: u32,
     /// When it was opened.

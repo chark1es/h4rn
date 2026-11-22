@@ -50,30 +50,37 @@ has no lifecycle filter, so merged and declined PRs are not listed) and uses
 the documented `q=` filter for author, reviewer and source-branch lists, so
 pagination stays server-side and pages never repeat; reviewer lists also ask
 for the documented partial-response addition `fields=+values.reviewers`. The
-Mine filter matches both `author.nickname` and `author.display_name`, because
-the viewer login can fall back to the display name. A workspace, project or
+Mine filter matches `author.uuid` and Review requested matches
+`reviewers.uuid`, both taken from `/user`, as Bitbucket documents. Display
+names and nicknames are not used: two accounts can share a display name, and a
+token may report no nickname at all. A workspace, project or
 repository access token has no user identity, so Mine and Review requested
 answer `unsupported` with that reason instead of returning an empty list that
-looks like “no pull requests”. The PR list carries the same-origin `next` URL
+looks like “no pull requests”. A `/user` answer without a `uuid` is an error
+rather than a filter by name. The PR list carries the same-origin `next` URL
 the server returned as the cursor for the next page instead of rebuilding
-`page=N`, so an opaque cursor keeps its filters. It reads the PR's raw unified
-diff from `/pullrequests/{id}/diff` (the API redirects that to the repository
-diff), rebuilds threads from the comment `parent` chain, and maps the commit's
-build statuses onto checks. A root comment's `resolution` object marks a
-thread resolved when the workspace reports it; otherwise threads are
+`page=N`, so an opaque cursor keeps its filters. Learned cursors are sparse
+and bounded (the 64 most recent per client), and a page whose cursor was never
+learned falls back to the documented `page` parameter, so asking for a distant
+page never allocates memory in proportion to its number. It reads the PR's raw
+unified diff from `/pullrequests/{id}/diff` (the API redirects that to the
+repository diff), rebuilds threads from the comment `parent` chain, and maps
+the commit's build statuses onto checks. A root comment's `resolution` object
+marks a thread resolved when the workspace reports it; otherwise threads are
 unresolved. Bitbucket does have a resolve-comment endpoint
 (`POST .../comments/{id}/resolve`), but this client does not call it yet, so
-`resolve_threads` is `false`. A file-level comment (no line anchor) is never
-marked outdated: without an explicit API flag there is no line that could have
-moved. The comments page reports `has_more` only when the last page it read
-still linked a `next` page; a list that happens to end at a page boundary is
-not “more”. Diffs are paginated locally. Additions, deletions and the
-changed-file count come from `/diffstat`; when its five-page cap is reached
-while a further page exists, or the diffstat request fails, the counts are
-left at zero and `changed_files_known` is `false`, so the UI shows the file
-count as unknown rather than “0”. Bitbucket does not report a credential's
-scopes, so the account row leaves them unknown instead of reading GitHub's
-`x-oauth-scopes` header.
+`resolve_threads` is `false`. A line-anchored thread takes `outdated` from the
+root comment's `inline.outdated`; a file-level comment (no line anchor) is
+never outdated because it has no line that could have moved. The comments page
+reports `has_more` only when the last page it read still linked a `next` page;
+a list that happens to end at a page boundary is not “more”. Diffs are
+paginated locally. Additions, deletions and the changed-file count come from
+`/diffstat`; when its five-page cap is reached while a further page exists, or
+the diffstat request fails, the counts are left at zero,
+`line_counts_known` and `changed_files_known` are `false`, and the UI and the
+agent handoff show them as unknown rather than “+0 −0” or “0 files”.
+Bitbucket does not report a credential's scopes, so the account row leaves
+them unknown instead of reading GitHub's `x-oauth-scopes` header.
 
 Azure DevOps Services uses REST 7.1. `ForgeRepoRef.base_url` carries the
 organization (`https://dev.azure.com/acme`) and `owner` carries the project.
@@ -106,7 +113,10 @@ shows the count as unknown. `/pullrequests/{id}/threads` supplies both general
 comments and inline threads; thread statuses `fixed`, `closed`, `wontFix` and
 `byDesign` are resolved. Checks are PR statuses plus policy evaluations
 requested with `api-version=7.1-preview.1`; the project id comes from the PR's
-`repository.project.id`. If the status, iteration or policy-evaluation request
+`repository.project.id`. Both endpoints always send a `value` collection, so a
+200 whose status or policy body lacks one is an error rather than an empty
+result; a valid `value: []` really is empty. If the status, iteration or
+policy-evaluation request
 fails, the whole checks request fails instead of reporting the surviving green
 rows as passing: a branch gate that could not be read is never a pass.
 Statuses carry an optional `iterationId`: PR-level statuses (no iteration) and
@@ -118,9 +128,14 @@ policy outcome wins only over a *status* with the same name. Change types are
 matched as exact tokens (`add`, `edit`, `rename`, `delete`, `undelete`, ...),
 so `undelete` restores a file instead of reading as a deletion. Commit pages
 follow the server's `x-ms-continuationtoken` through `continuationToken`, not
-`$skip`. Additions/deletions are not shown for Azure
-PRs: the API does not report line counts without downloading every file, and
-the detail request deliberately does not do that.
+`$skip`. A PR's browser URL comes from `_links.web`; a response without it
+(an older API or a projection that omits links) falls back to
+`<repository.webUrl>/pullrequest/<id>`, or to the base URL, project and
+repository when the repository object names no web URL. Additions/deletions
+are unknown for Azure PRs (`line_counts_known` is `false`): the API does not
+report line counts without downloading every file, and the detail request
+deliberately does not do that, so the agent handoff says the counts are
+unknown instead of “+0 −0”.
 
 Bitbucket Server / Data Center and Azure DevOps Server are not supported: they
 use different APIs and hosts, and this build only detects and speaks the cloud
@@ -185,8 +200,10 @@ token to the wrong server. Declare custom hosts in
 
 `host` is the name that appears in the remote (or the ssh alias), lowercased;
 `base_url` is required and is the public web URL without a trailing slash. An
-Azure DevOps base URL may include one organization segment
-(`https://dev.azure.com/acme`). A Bitbucket or Azure host may only be declared
+Azure DevOps base URL may include one organization or `DefaultCollection`
+segment (`https://dev.azure.com/acme`,
+`https://acme.visualstudio.com/DefaultCollection`). A Bitbucket or Azure host
+may only be declared
 for the cloud services; Server/Data Center and Azure DevOps Server are rejected
 when the host file is read because their APIs differ. The well-known hosts
 `github.com`, `gitlab.com`, `codeberg.org`, `gitea.com`, `bitbucket.org`,
@@ -207,7 +224,11 @@ Bitbucket access tokens the daemon validates against that repository, because
 `/user` and `/user/workspaces` are unavailable to them. Several
 accounts per forge are supported (work/personal, or two GHES hosts); every
 request may name an `account_id`, and the daemon picks the only account whose
-forge and base URL match when it is omitted.
+forge and base URL match when it is omitted. For Azure DevOps the legacy
+`https://<org>.visualstudio.com` and
+`https://<org>.visualstudio.com/DefaultCollection` forms name the same
+account, so a remote spelled either way resolves an account added with the
+other.
 
 Tokens are stored with the OS keychain under service `h4rn-forge` and account
 id when a keychain is available. Headless Linux and WSL fall back to an
@@ -239,12 +260,18 @@ access token is sent as Bearer and needs no username. Azure DevOps personal
 access tokens use HTTP Basic with an empty username. Bitbucket accounts record
 which scheme validated (`bitbucket_api_token` or `bitbucket_access_token`) so
 a restart keeps the same credential type. App passwords were retired by
-Atlassian in July 2026 and are not accepted by the form or the docs. Bitbucket Cloud and Azure DevOps base URLs must
-be plain `https://` origins without credentials, a path, a query or a fragment,
-and Bitbucket Cloud and Azure DevOps Server/Data Center hosts are rejected
-before anything is stored. Neither provider's base-URL errors repeat the input,
-because a path or query can carry a secret; Atlassian's `ATATT…` token prefix
-and `ATBB…` are redacted from error messages like GitHub's and GitLab's.
+Atlassian in July 2026 and are not accepted by the form or the docs. A
+Bitbucket Cloud base URL must be the plain `https://bitbucket.org` origin: no
+credentials, path, query or fragment, and no Bitbucket Server/Data Center
+host. An Azure DevOps base URL must be plain `https://` with one optional
+path segment: the organization (`https://dev.azure.com/acme`) or the legacy
+collection (`https://acme.visualstudio.com/DefaultCollection`), and no
+credentials, query or fragment; Azure DevOps Server hosts are rejected. Both
+forges are rejected before anything is stored when the host is not the cloud
+service. Neither provider's base-URL errors repeat the input, because a path
+or query can carry a secret; Atlassian's `ATATT…` and `ATBB…` token prefixes
+are redacted from error messages like GitHub's and GitLab's, including when
+they appear quoted inside a JSON error body.
 
 The daemon compares the scopes the forge reports with the least-privilege set
 and surfaces extras in the account row (`ForgeAccount.scopes`), so an
@@ -408,12 +435,16 @@ discussions and jobs; Gitea/Forgejo PRs, raw diff, comments, reviews, statuses;
 Bitbucket Cloud PRs, diffstat (including the paging cap), the `/diff`
 redirect, comment `parent` chains, build statuses, basic/bearer auth,
 repository-token validation with both account endpoints rejecting, the
-documented `q=` filters and duplicate-free pages, an opaque `next` cursor on
-the second PR page, comments `has_more` at the page cap, file-level comments,
+documented `q=` filters (including uuid-based personal filters for a viewer
+without a nickname and a namesake account) and duplicate-free pages, an opaque
+`next` cursor on the second PR page, a distant page served by the documented
+`page` parameter, comments `has_more` at the page cap, file-level comments and
+`inline.outdated` threads,
 `ssh.bitbucket.org`, and same-origin `next` handling; Azure DevOps PRs, raw
 iteration arrays, changed-file contents, the 100-file per-page budget, threads,
-statuses across iterations, same-name policy evaluations, a failed policy
-read, fork PRs whose source side exists only in the fork, unexpected item
+statuses across iterations, same-name policy evaluations, missing versus empty
+`value` collections, a failed policy read, PRs without `_links`, unknown line
+counts, fork PRs whose source side exists only in the fork, unexpected item
 404s, `undelete` change types, PAT auth, commit `continuationToken` pages and
 per-page diff contents. They also cover the
 remote-URL parsing matrix (including percent-decoded segments and the legacy

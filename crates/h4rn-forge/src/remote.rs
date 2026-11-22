@@ -306,6 +306,31 @@ pub fn validate_base_url_for(kind: ForgeKind, value: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
+/// Whether two account base URLs name the same forge account.
+///
+/// Only Azure DevOps has an alias: a legacy organization is reachable both as
+/// `https://<org>.visualstudio.com` and, with the historical collection
+/// segment, `https://<org>.visualstudio.com/DefaultCollection`. A remote can
+/// use either form while the account was added with the other, and both name
+/// the same organization.
+pub fn base_urls_match(kind: ForgeKind, a: &str, b: &str) -> bool {
+    fn normalize(kind: ForgeKind, value: &str) -> String {
+        let value = value.trim().trim_end_matches('/');
+        if kind == ForgeKind::AzureDevOps
+            && let Some(base) = value.strip_suffix("/DefaultCollection")
+            && Url::parse(base)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .is_some_and(|host| host.to_ascii_lowercase().ends_with(".visualstudio.com"))
+        {
+            return base.to_owned();
+        }
+        value.to_owned()
+    }
+
+    normalize(kind, a).eq_ignore_ascii_case(&normalize(kind, b))
+}
+
 /// The API root for one forge and web base URL.
 pub fn api_base_url(kind: ForgeKind, base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
@@ -934,6 +959,41 @@ mod tests {
             api_base_url(ForgeKind::AzureDevOps, "https://dev.azure.com/acme"),
             "https://dev.azure.com/acme"
         );
+    }
+
+    #[test]
+    fn default_collection_is_the_same_azure_account() {
+        assert!(base_urls_match(
+            ForgeKind::AzureDevOps,
+            "https://acme.visualstudio.com",
+            "https://acme.visualstudio.com/DefaultCollection"
+        ));
+        assert!(base_urls_match(
+            ForgeKind::AzureDevOps,
+            "https://acme.visualstudio.com/DefaultCollection/",
+            "https://acme.visualstudio.com"
+        ));
+        assert!(base_urls_match(
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.com/acme",
+            "https://dev.azure.com/acme/"
+        ));
+        assert!(!base_urls_match(
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.com/acme/DefaultCollection",
+            "https://dev.azure.com/acme"
+        ));
+        assert!(!base_urls_match(
+            ForgeKind::AzureDevOps,
+            "https://acme.visualstudio.com",
+            "https://other.visualstudio.com/DefaultCollection"
+        ));
+        // The alias belongs to Azure DevOps only.
+        assert!(!base_urls_match(
+            ForgeKind::Bitbucket,
+            "https://bitbucket.org",
+            "https://bitbucket.org/DefaultCollection"
+        ));
     }
 
     #[test]

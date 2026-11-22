@@ -21,6 +21,7 @@ const BB_PR: &str = include_str!("fixtures/bitbucket_pr_42.json");
 const BB_LIST: &str = include_str!("fixtures/bitbucket_pr_list.json");
 const BB_COMMITS: &str = include_str!("fixtures/bitbucket_commits.json");
 const BB_COMMENTS: &str = include_str!("fixtures/bitbucket_comments.json");
+const BB_COMMENTS_OUTDATED: &str = include_str!("fixtures/bitbucket_comments_outdated.json");
 const BB_DIFFSTAT: &str = include_str!("fixtures/bitbucket_diffstat.json");
 const BB_STATUSES: &str = include_str!("fixtures/bitbucket_statuses.json");
 const BB_DIFF: &str = include_str!("fixtures/bitbucket_diff.txt");
@@ -186,6 +187,7 @@ async fn bitbucket_reads_pull_requests_threads_and_checks() {
     assert_eq!(pr.deletions, 1);
     assert_eq!(pr.changed_files, 2);
     assert!(pr.changed_files_known);
+    assert!(pr.line_counts_known, "the complete diffstat reports totals");
     assert_eq!(pr.commits, 2);
     assert_eq!(pr.reviewers.len(), 2);
     assert_eq!(pr.summary.review, ForgeReviewState::ChangesRequested);
@@ -436,12 +438,11 @@ async fn bitbucket_filtered_lists_use_the_documented_q_filter() {
     for (filter, expected) in [
         (
             ForgePrFilter::Mine,
-            // The viewer login can be a display name, so both fields match.
-            "author.nickname = \"alice\" OR author.display_name = \"Alice Example\"".to_owned(),
+            "author.uuid = \"{alice-uuid}\"".to_owned(),
         ),
         (
             ForgePrFilter::ReviewRequested,
-            "reviewers.nickname = \"alice\"".to_owned(),
+            "reviewers.uuid = \"{alice-uuid}\"".to_owned(),
         ),
         (
             ForgePrFilter::ByBranch {
@@ -472,6 +473,154 @@ async fn bitbucket_filtered_lists_use_the_documented_q_filter() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn bitbucket_personal_filters_match_the_account_uuid() {
+    // The viewer has no nickname, so its login falls back to the display name.
+    // Two accounts can share that name; only the uuid identifies the viewer.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/2.0/user"))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alex Kim","uuid":"{viewer-uuid}"}"#,
+        ))
+        .mount(&server)
+        .await;
+    let api = "/2.0/repositories/acme/widget/pullrequests";
+    let viewer_pr = json!({
+        "type": "pullrequest",
+        "id": 1,
+        "title": "Mine",
+        "state": "OPEN",
+        "author": {"type": "user", "display_name": "Alex Kim", "uuid": "{viewer-uuid}"},
+        "source": {"branch": {"name": "alex/fix"}, "commit": {"hash": "aaaa1111"}},
+        "destination": {"branch": {"name": "main"}, "commit": {"hash": "bbbb1111"}},
+        "created_on": "2024-05-01T09:00:00+00:00",
+        "updated_on": "2024-05-01T12:00:00+00:00"
+    });
+    let namesake_pr = json!({
+        "type": "pullrequest",
+        "id": 2,
+        "title": "Someone else's",
+        "state": "OPEN",
+        "author": {"type": "user", "display_name": "Alex Kim", "uuid": "{other-uuid}"},
+        "source": {"branch": {"name": "other/fix"}, "commit": {"hash": "cccc1111"}},
+        "destination": {"branch": {"name": "main"}, "commit": {"hash": "bbbb1111"}},
+        "created_on": "2024-05-01T09:00:00+00:00",
+        "updated_on": "2024-05-01T12:00:00+00:00"
+    });
+    for (q, page) in [
+        (
+            "author.uuid = \"{viewer-uuid}\"",
+            json!({"pagelen": 1, "page": 1, "values": [viewer_pr.clone()]}),
+        ),
+        (
+            "reviewers.uuid = \"{viewer-uuid}\"",
+            json!({"pagelen": 1, "page": 1, "values": [viewer_pr.clone()]}),
+        ),
+        // A display-name match would return both people; mount it so a
+        // regression reads as two rows instead of a 404.
+        (
+            "author.nickname = \"Alex Kim\" OR author.display_name = \"Alex Kim\"",
+            json!({"pagelen": 2, "page": 1, "values": [viewer_pr.clone(), namesake_pr]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(api))
+            .and(query_param("q", q))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page))
+            .mount(&server)
+            .await;
+    }
+
+    let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&server.uri());
+    for filter in [ForgePrFilter::Mine, ForgePrFilter::ReviewRequested] {
+        let page = client.list_prs(&repo, &filter, 1).await.unwrap();
+        assert_eq!(
+            page.prs.len(),
+            1,
+            "{filter:?} matched a namesake instead of the uuid"
+        );
+        assert_eq!(page.prs[0].number, 1);
+    }
+    let requests = server.received_requests().await.unwrap();
+    let filter_queries: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.path() == api)
+        .filter_map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "q")
+                .map(|(_, value)| value.into_owned())
+        })
+        .collect();
+    assert_eq!(
+        filter_queries,
+        [
+            "author.uuid = \"{viewer-uuid}\"",
+            "reviewers.uuid = \"{viewer-uuid}\""
+        ],
+        "the filters never fall back to the display name"
+    );
+}
+
+#[tokio::test]
+async fn bitbucket_falls_back_to_the_page_parameter_for_a_distant_page() {
+    // No cursor was learned for this page. The documented `page` parameter is
+    // the fallback; the request must not depend on having walked every page
+    // before it.
+    let server = MockServer::start().await;
+    let api = "/2.0/repositories/acme/widget/pullrequests";
+    Mock::given(method("GET"))
+        .and(path(api))
+        .and(query_param("page", "1000000"))
+        .respond_with(ok(r#"{"pagelen":50,"page":1000000,"values":[]}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&server.uri());
+    let page = client
+        .list_prs(&repo, &ForgePrFilter::Open, 1_000_000)
+        .await
+        .unwrap();
+    assert!(page.prs.is_empty());
+    assert!(!page.has_more);
+}
+
+#[tokio::test]
+async fn bitbucket_reads_outdated_from_the_api() {
+    let server = MockServer::start().await;
+    let api = "/2.0/repositories/acme/widget/pullrequests/42";
+    Mock::given(method("GET"))
+        .and(path(api))
+        .respond_with(ok(BB_PR))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{api}/comments")))
+        .respond_with(ok(BB_COMMENTS_OUTDATED))
+        .mount(&server)
+        .await;
+    let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&server.uri());
+    let comments = client.list_comments(&repo, 42).await.unwrap();
+    assert_eq!(comments.threads.len(), 2);
+    let anchored = &comments.threads[0];
+    assert_eq!(anchored.line, Some(20));
+    assert!(
+        anchored.outdated,
+        "the root comment reports inline.outdated"
+    );
+    let file_level = &comments.threads[1];
+    assert_eq!(file_level.line, None);
+    assert!(
+        !file_level.outdated,
+        "a file-level note has no line that could be outdated, even when the API says so"
+    );
 }
 
 #[tokio::test]
@@ -638,6 +787,10 @@ async fn bitbucket_reports_unknown_size_when_diffstat_paging_hits_its_cap() {
         !pr.changed_files_known,
         "a capped diffstat is unknown, not an empty PR"
     );
+    assert!(
+        !pr.line_counts_known,
+        "a capped diffstat cannot report line totals"
+    );
 }
 
 /// An Azure server with only the checks sources mounted, so a test can pick
@@ -734,6 +887,59 @@ async fn azure_drops_statuses_from_older_iterations() {
     );
     assert_eq!(checks.failed, 0);
     assert_eq!(checks.state, ForgeChecksState::Passing);
+}
+
+#[tokio::test]
+async fn azure_checks_require_both_value_collections() {
+    let green = json!({
+        "count": 1,
+        "value": [{
+            "id": 1,
+            "state": "succeeded",
+            "context": {"name": "ci/build", "genre": "continuous-integration"},
+            "creationDate": "2024-05-01T11:00:00.000Z",
+            "updatedDate": "2024-05-01T11:05:00.000Z"
+        }]
+    });
+    let empty = json!({"count": 0, "value": []});
+    let client_for = |server: &MockServer| {
+        AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap()
+    };
+    let repo_for = |server: &MockServer| azure_repo(&server.uri());
+
+    // A valid empty collection stays empty: no rows, so no passing aggregate.
+    let server = azure_checks_server(empty.clone(), empty.clone()).await;
+    let checks = client_for(&server)
+        .list_checks(&repo_for(&server), 7)
+        .await
+        .unwrap();
+    assert_eq!(checks.total, 0);
+    assert_eq!(checks.state, ForgeChecksState::Unknown);
+
+    // An empty policy collection is a real answer next to green statuses.
+    let server = azure_checks_server(green.clone(), empty.clone()).await;
+    let checks = client_for(&server)
+        .list_checks(&repo_for(&server), 7)
+        .await
+        .unwrap();
+    assert_eq!(checks.total, 1);
+    assert_eq!(checks.state, ForgeChecksState::Passing);
+
+    // A missing `value` is not an empty answer: it is half the data, and a
+    // green status list must not become a pass from it.
+    let server = azure_checks_server(green.clone(), json!({"count": 0})).await;
+    let error = client_for(&server)
+        .list_checks(&repo_for(&server), 7)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ForgeError::Parse(_)), "{error:?}");
+
+    let server = azure_checks_server(json!({"count": 0}), empty).await;
+    let error = client_for(&server)
+        .list_checks(&repo_for(&server), 7)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ForgeError::Parse(_)), "{error:?}");
 }
 
 #[tokio::test]
@@ -1205,6 +1411,10 @@ async fn azure_reads_pull_requests_diff_threads_and_checks() {
     assert_eq!(pr.deletions, 0);
     assert_eq!(pr.changed_files, 5);
     assert!(pr.changed_files_known);
+    assert!(
+        !pr.line_counts_known,
+        "Azure reports no line totals without downloading every file"
+    );
     assert_eq!(pr.commits, 2);
     assert_eq!(pr.reviewers.len(), 3);
     assert_eq!(pr.summary.review, ForgeReviewState::ChangesRequested);

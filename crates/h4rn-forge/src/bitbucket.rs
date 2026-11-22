@@ -19,7 +19,7 @@
 //! Bitbucket Server and Data Center are not supported; they use a different
 //! API (`/rest/api/1.0`) and are rejected before this client is built.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -41,6 +41,10 @@ use crate::http::{ForgeHttp, basic_auth_header};
 use crate::remote::{api_base_url, validate_base_url_for};
 use crate::{Forge, ForgeViewer, PrPage};
 
+/// Learned page URLs kept per client. Only cursors a response actually
+/// returned are stored, so this bounds memory whatever page is requested.
+const CURSOR_ENTRIES: usize = 64;
+
 /// Bitbucket Cloud REST v2 client.
 pub struct BitbucketClient {
     http: ForgeHttp,
@@ -48,9 +52,57 @@ pub struct BitbucketClient {
     base_url: String,
     username: Option<String>,
     /// Cursors learned from a collection's `next` link, keyed by the URL of
-    /// the first page (without `page`). `pages[i]` is the URL of page `i + 1`;
-    /// a missing entry falls back to the documented `page` parameter.
-    cursors: Mutex<HashMap<String, Vec<Option<String>>>>,
+    /// the collection and the page the link addresses. Only learned cursors
+    /// are stored, and at most [`CURSOR_ENTRIES`] of them, so asking for a
+    /// distant page costs one lookup rather than a map sized by the page
+    /// number.
+    cursors: Mutex<LearnedCursors>,
+}
+
+/// Learned page URLs: a sparse, bounded LRU.
+#[derive(Default)]
+struct LearnedCursors {
+    /// Insertion order for eviction; the oldest entry is first.
+    order: VecDeque<(String, u32)>,
+    urls: HashMap<(String, u32), String>,
+}
+
+impl LearnedCursors {
+    fn get(&mut self, base: &str, page: u32) -> Option<String> {
+        let key = (base.to_owned(), page);
+        let url = self.urls.get(&key)?.clone();
+        self.touch(&key);
+        Some(url)
+    }
+
+    fn insert(&mut self, base: &str, page: u32, url: String) {
+        let key = (base.to_owned(), page);
+        if self.urls.insert(key.clone(), url).is_none() {
+            self.order.push_back(key);
+        } else {
+            self.touch(&key);
+        }
+        while self.order.len() > CURSOR_ENTRIES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.urls.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove(&mut self, base: &str, page: u32) {
+        let key = (base.to_owned(), page);
+        if self.urls.remove(&key).is_some() {
+            self.order.retain(|entry| entry != &key);
+        }
+    }
+
+    fn touch(&mut self, key: &(String, u32)) {
+        if let Some(index) = self.order.iter().position(|entry| entry == key) {
+            if let Some(entry) = self.order.remove(index) {
+                self.order.push_back(entry);
+            }
+        }
+    }
 }
 
 impl BitbucketClient {
@@ -90,45 +142,39 @@ impl BitbucketClient {
             api,
             base_url,
             username,
-            cursors: Mutex::new(HashMap::new()),
+            cursors: Mutex::new(LearnedCursors::default()),
         })
     }
 
     /// The URL to request for one page of a collection.
     ///
     /// Bitbucket links the next page in the response body, so the cursor it
-    /// returns is carried forward verbatim instead of rebuilding `page=N`:
+    /// returned is carried forward verbatim instead of rebuilding `page=N`:
     /// the server may use an opaque cursor, and a rebuilt page number would
-    /// then repeat rows or skip them. A page with no learned cursor falls back
-    /// to the documented parameter (the first page, or a jump to a page this
-    /// client never reached).
+    /// then repeat rows or skip them. A page whose cursor was never learned
+    /// falls back to the documented `page` parameter.
     fn page_url(&self, base: &str, page: u32) -> String {
         let learned = self
             .cursors
             .lock()
             .ok()
-            .and_then(|cursors| {
-                cursors
-                    .get(base)
-                    .and_then(|pages| pages.get(page.saturating_sub(1) as usize))
-                    .cloned()
-            })
-            .flatten();
+            .and_then(|mut cursors| cursors.get(base, page));
         learned.unwrap_or_else(|| with_query(base, &[("page", page.to_string())]))
     }
 
     /// Remembers the `next` link a page returned as the cursor for the page
-    /// after it.
+    /// after it. A missing or unusable link forgets any cursor learned for
+    /// that page earlier, so a stale entry cannot outlive the list it came
+    /// from.
     fn remember_cursor(&self, base: &str, page: u32, next: Option<String>) {
         let Ok(mut cursors) = self.cursors.lock() else {
             return;
         };
-        let pages = cursors.entry(base.to_owned()).or_default();
-        let index = page as usize;
-        if pages.len() <= index {
-            pages.resize(index + 1, None);
+        let next_page = page.saturating_add(1);
+        match next {
+            Some(url) => cursors.insert(base, next_page, url),
+            None => cursors.remove(base, next_page),
         }
-        pages[index] = next;
     }
 
     fn repo_url(&self, repo: &ForgeRepoRef) -> String {
@@ -221,8 +267,12 @@ impl BitbucketClient {
     /// Bitbucket does not report a credential's scopes on this (or any)
     /// response, so the account row leaves them unknown instead of inventing
     /// a list from an `x-oauth-scopes` header, which is a GitHub header.
+    async fn user_json(&self) -> Result<Value> {
+        self.http.get_json(&format!("{}/user", self.api)).await
+    }
+
     async fn user_viewer(&self) -> Result<ForgeViewer> {
-        let value = self.http.get_json(&format!("{}/user", self.api)).await?;
+        let value = self.user_json().await?;
         let login = optional_text(&value, "nickname")
             .or_else(|| optional_text(&value, "username"))
             .or_else(|| optional_text(&value, "display_name"))
@@ -237,14 +287,18 @@ impl BitbucketClient {
         })
     }
 
-    /// The viewer behind a personal token, for the filters that need a user
+    /// The authenticated account's uuid, for the filters that need a user
     /// identity.
     ///
-    /// A workspace, project or repository access token is a workspace, not a
-    /// person: `/user` rejects it and the workspace slug is not an author.
-    /// Those tokens get an honest "not supported" instead of an empty list.
-    async fn user_viewer_for_list(&self) -> Result<ForgeViewer> {
-        self.user_viewer().await.map_err(|error| match error {
+    /// Bitbucket documents `author.uuid` and `reviewers.uuid` as the stable
+    /// identity fields. Nicknames and display names are not unique (two
+    /// people can share a display name, and a token may expose no nickname),
+    /// so the filters never match on them. A workspace, project or repository
+    /// access token is a workspace, not a person: `/user` rejects it and the
+    /// workspace slug is not an author. Those tokens get an honest "not
+    /// supported" instead of an empty list.
+    async fn filter_uuid(&self) -> Result<String> {
+        let value = self.user_json().await.map_err(|error| match error {
             ForgeError::Unauthorized { .. } | ForgeError::Forbidden { .. } => {
                 ForgeError::Unsupported(
                     "Mine and review-requested lists need a personal account; a workspace, project or repository access token has no user identity. Add an Atlassian API token with your account email to use them."
@@ -252,7 +306,16 @@ impl BitbucketClient {
                 )
             }
             other => other,
-        })
+        })?;
+        optional_text(&value, "uuid")
+            .map(|uuid| uuid.trim().to_owned())
+            .filter(|uuid| !uuid.is_empty())
+            .ok_or_else(|| {
+                ForgeError::Parse(
+                    "Bitbucket returned no account uuid, so the personal filters cannot be applied"
+                        .into(),
+                )
+            })
     }
 
     /// Proves a repository-scoped token against the repository it was granted
@@ -362,26 +425,15 @@ impl Forge for BitbucketClient {
         match filter {
             ForgePrFilter::Open => {}
             ForgePrFilter::Mine => {
-                // The viewer login can fall back to `display_name` when the
-                // token cannot read a nickname, so match both.
-                let viewer = self.user_viewer_for_list().await?;
-                let mut author = format!("author.nickname = {}", quote(&viewer.login));
-                if let Some(name) = viewer
-                    .display_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty() && *name != viewer.login)
-                {
-                    author.push_str(&format!(" OR author.display_name = {}", quote(name)));
-                }
-                query.push(("q", author));
+                // Match the account's uuid, not its nickname or display name:
+                // two people can share a display name, and a token may expose
+                // no nickname at all.
+                let uuid = self.filter_uuid().await?;
+                query.push(("q", format!("author.uuid = {}", quote(&uuid))));
             }
             ForgePrFilter::ReviewRequested => {
-                let viewer = self.user_viewer_for_list().await?;
-                query.push((
-                    "q",
-                    format!("reviewers.nickname = {}", quote(&viewer.login)),
-                ));
+                let uuid = self.filter_uuid().await?;
+                query.push(("q", format!("reviewers.uuid = {}", quote(&uuid))));
                 // The PR collection omits `reviewers` by default; ask for the
                 // documented partial-response addition so the row can show
                 // who was asked even if the server's filter is lenient.
@@ -421,6 +473,7 @@ impl Forge for BitbucketClient {
         if let Some((additions, deletions, files)) = self.diffstat(repo, number).await {
             pr.additions = additions;
             pr.deletions = deletions;
+            pr.line_counts_known = true;
             pr.changed_files = files;
             pr.changed_files_known = true;
         }
@@ -667,6 +720,9 @@ fn map_pr_detail(repo: &ForgeRepoRef, value: &Value) -> Result<ForgePullRequest>
         base_sha: optional_text(&value["destination"]["commit"], "hash"),
         additions: 0,
         deletions: 0,
+        // The diffstat supplies the totals; when it cannot be read in full they
+        // stay unknown rather than zero.
+        line_counts_known: false,
         changed_files: 0,
         changed_files_known: false,
         commits: 0,
@@ -860,10 +916,10 @@ fn group_comments(values: &[Value]) -> (Vec<ForgeComment>, Vec<ForgeReviewThread
             line,
             side,
             resolved: !root["resolution"].is_null(),
-            // A file-level comment has no line to be outdated about, and
-            // Bitbucket reports no explicit flag for a line that moved. Only
-            // the API can say a thread is outdated; this one never guesses.
-            outdated: false,
+            // Only a line anchor can go stale. Bitbucket reports that as
+            // `inline.outdated` on the root comment; a file-level note (no
+            // `to`/`from` line) has no line that could have moved.
+            outdated: line.is_some() && inline["outdated"].as_bool().unwrap_or(false),
             comments,
         });
     }
@@ -980,6 +1036,49 @@ mod tests {
         assert_eq!(threads[0].comments[1].in_reply_to.as_deref(), Some("1"));
         // The root anchors a line, so it is not a file-level note.
         assert!(!threads[0].outdated);
+    }
+
+    #[test]
+    fn learned_cursors_are_sparse_and_bounded() {
+        let client =
+            BitbucketClient::new("https://bitbucket.test", "ATBB-token", None, 120).unwrap();
+        let base = "https://bitbucket.test/2.0/repositories/acme/widget/pullrequests?state=OPEN";
+        assert_eq!(client.page_url(base, 1), format!("{base}&page=1"));
+        client.remember_cursor(base, 1, Some("opaque-cursor".into()));
+        assert_eq!(client.page_url(base, 2), "opaque-cursor");
+        // A page that was never learned uses the documented parameter; it does
+        // not allocate a slot per intermediate page.
+        assert!(client.page_url(base, 1_000_000).ends_with("&page=1000000"));
+        for page in 2..=1_000 {
+            client.remember_cursor(base, page, Some(format!("cursor-{page}")));
+        }
+        let cursors = client.cursors.lock().unwrap();
+        assert_eq!(cursors.urls.len(), CURSOR_ENTRIES);
+        assert_eq!(cursors.order.len(), CURSOR_ENTRIES);
+    }
+
+    #[test]
+    fn bitbucket_reads_outdated_from_the_root_inline() {
+        let comments = vec![
+            json!({
+                "id": 1,
+                "content": {"raw": "moved"},
+                "user": {"nickname": "bob"},
+                "created_on": "2024-05-01T10:00:00Z",
+                "inline": {"path": "src/lib.rs", "from": null, "to": 4, "outdated": true}
+            }),
+            json!({
+                "id": 2,
+                "content": {"raw": "file note"},
+                "user": {"nickname": "bob"},
+                "created_on": "2024-05-01T10:01:00Z",
+                "inline": {"path": "src/lib.rs", "from": null, "to": null, "outdated": true}
+            }),
+        ];
+        let (_, threads) = group_comments(&comments);
+        assert_eq!(threads.len(), 2);
+        assert!(threads[0].outdated);
+        assert!(!threads[1].outdated);
     }
 
     #[test]

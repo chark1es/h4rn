@@ -942,11 +942,9 @@ impl ForgeService {
                     .accounts
                     .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let mut matches = accounts.iter().filter(|account| {
-                    account.forge == repo.forge
-                        && account.base_url.trim_end_matches('/')
-                            == repo.base_url.trim_end_matches('/')
-                });
+                let mut matches = accounts
+                    .iter()
+                    .filter(|account| account_matches_repo(account, repo));
                 let first = matches.next().cloned().ok_or_else(|| {
                     ForgeError::NotConfigured(format!(
                         "no {} account for {}",
@@ -965,9 +963,7 @@ impl ForgeService {
                 first
             }
         };
-        if account.forge != repo.forge
-            || account.base_url.trim_end_matches('/') != repo.base_url.trim_end_matches('/')
-        {
+        if !account_matches_repo(&account, repo) {
             return Err(ForgeError::InvalidRequest(format!(
                 "account {} is for {} at {}, not {} at {}",
                 account.account_id,
@@ -1203,6 +1199,17 @@ fn bitbucket_auth_source(
     }
 }
 
+/// Whether a stored account serves a repository.
+///
+/// Azure DevOps also matches the legacy `DefaultCollection` form, so a remote
+/// that spells `https://<org>.visualstudio.com/DefaultCollection` resolves the
+/// account added as `https://<org>.visualstudio.com` (and the other way
+/// round).
+fn account_matches_repo(account: &ForgeAccount, repo: &ForgeRepoRef) -> bool {
+    account.forge == repo.forge
+        && h4rn_forge::base_urls_match(account.forge, &account.base_url, &repo.base_url)
+}
+
 fn checks_signature(checks: &ForgeChecks) -> String {
     let mut signature = format!(
         "{:?}:{}:{}:{}:{}",
@@ -1370,6 +1377,43 @@ mod tests {
         );
         // Leave no stored credential behind in the developer's keychain.
         service.remove_account("acct_repo_token").unwrap();
+    }
+
+    #[test]
+    fn default_collection_remote_finds_the_plain_account() {
+        let account = ForgeAccount {
+            account_id: "acct_azure".into(),
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://acme.visualstudio.com".into(),
+            username: None,
+            display_name: None,
+            scopes: Vec::new(),
+            source: ForgeCredentialSource::Pat,
+            created_at: Utc::now(),
+        };
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://acme.visualstudio.com/DefaultCollection".into(),
+            owner: "platform".into(),
+            repo: "widget".into(),
+        };
+        assert!(account_matches_repo(&account, &repo));
+        let reversed = ForgeAccount {
+            base_url: repo.base_url.clone(),
+            ..account.clone()
+        };
+        let plain = ForgeRepoRef {
+            base_url: account.base_url.clone(),
+            ..repo.clone()
+        };
+        assert!(account_matches_repo(&reversed, &plain));
+
+        // Another organization is still a different account.
+        let other = ForgeRepoRef {
+            base_url: "https://other.visualstudio.com".into(),
+            ..repo
+        };
+        assert!(!account_matches_repo(&account, &other));
     }
 
     #[test]

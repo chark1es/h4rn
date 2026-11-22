@@ -48,6 +48,14 @@ changed_files: number,
  */
 changed_files_known: boolean, 
 /**
+ * Whether the forge reported the line counts.
+ *
+ * `false` means additions and deletions are unknown rather than zero;
+ * clients show them as unknown instead of `+0 −0` (Azure DevOps does not
+ * report totals without downloading every file).
+ */
+line_counts_known: boolean, 
+/**
  * Commits in the PR.
  */
 commits: number, 

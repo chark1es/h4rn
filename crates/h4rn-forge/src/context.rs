@@ -66,11 +66,14 @@ pub fn pr_context_for_agent(
     } else {
         "an unknown number of files".to_owned()
     };
-    let _ = writeln!(
-        out,
-        "- State: {state} · Diff: +{} −{} across {files}",
-        pr.additions, pr.deletions
-    );
+    // A forge that cannot count lines (Azure DevOps) reports no totals; saying
+    // "+0 −0" would claim the PR changes no lines.
+    let diff = if pr.line_counts_known {
+        format!("+{} −{}", pr.additions, pr.deletions)
+    } else {
+        "additions and deletions unknown".to_owned()
+    };
+    let _ = writeln!(out, "- State: {state} · Diff: {diff} across {files}");
     if let Some(head) = &summary.head_sha {
         let short = &head[..head.len().min(12)];
         let _ = writeln!(out, "- Head commit: `{short}`");
@@ -314,6 +317,7 @@ mod tests {
             base_sha: None,
             additions: 12,
             deletions: 3,
+            line_counts_known: true,
             changed_files: 2,
             changed_files_known: true,
             commits: 1,
@@ -403,6 +407,20 @@ mod tests {
         assert!(text.contains("### Failing"));
         assert!(text.contains("ci/test"));
         assert!(!text.contains("ci/lint"));
+    }
+
+    #[test]
+    fn unknown_line_counts_are_not_reported_as_zero() {
+        let mut pr = pr();
+        pr.additions = 0;
+        pr.deletions = 0;
+        pr.line_counts_known = false;
+        let text = pr_context_for_agent(&pr, &[], &checks());
+        assert!(text.contains("additions and deletions unknown across 2 files"));
+        assert!(
+            !text.contains("+0 −0"),
+            "an unreported count must not read as an empty diff:\n{text}"
+        );
     }
 
     #[test]
