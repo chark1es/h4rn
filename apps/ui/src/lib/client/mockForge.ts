@@ -98,6 +98,36 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       rerun_checks: false,
     },
   },
+  {
+    forge: "bitbucket",
+    capabilities: {
+      device_flow: false,
+      review_threads: true,
+      resolve_threads: false,
+      nested_replies: true,
+      inline_review_comments: true,
+      checks: true,
+      pipelines: false,
+      diff_pagination: false,
+      graphql: false,
+      rerun_checks: false,
+    },
+  },
+  {
+    forge: "azure_devops",
+    capabilities: {
+      device_flow: false,
+      review_threads: true,
+      resolve_threads: false,
+      nested_replies: true,
+      inline_review_comments: true,
+      checks: true,
+      pipelines: false,
+      diff_pagination: false,
+      graphql: false,
+      rerun_checks: false,
+    },
+  },
 ];
 
 const SUMMARIES: ForgePrSummary[] = [
@@ -364,7 +394,19 @@ function checksFor(repo: ForgeRepoRef, summary: ForgePrSummary): ForgeChecks {
             supported: false,
             reason: `${repo.forge === "gitea" ? "Gitea" : "Forgejo"} posts CI results as commit statuses and has no re-run API; re-run it in ${repo.forge === "gitea" ? "Gitea" : "Forgejo"}'s Actions tab`,
           }
-        : { supported: true, reason: null },
+        : repo.forge === "bitbucket"
+          ? {
+              supported: false,
+              reason:
+                "Bitbucket Cloud has no API to re-run build statuses; re-run the pipeline in Bitbucket",
+            }
+          : repo.forge === "azure_devops"
+            ? {
+                supported: false,
+                reason:
+                  "Azure DevOps can only re-queue a pipeline through the Builds API with extra scopes; re-run it in Azure Pipelines",
+              }
+            : { supported: true, reason: null },
     updated_at: now(-60_000),
   };
 }
@@ -524,7 +566,9 @@ export class MockForge {
           base_sha: "2d6b74d7f8e9a0b1c2d3e4f5a6b7c8d9e0f1a2b3",
           additions: 22,
           deletions: 7,
+          line_counts_known: true,
           changed_files: 3,
+          changed_files_known: true,
           commits: 3,
           created_at: now(-42 * 60_000),
           reviewers: REVIEWS[request.number] ?? [],
@@ -705,7 +749,9 @@ export class MockForge {
           base_sha: null,
           additions: 0,
           deletions: 0,
+          line_counts_known: true,
           changed_files: 0,
+          changed_files_known: true,
           commits: 1,
           created_at: now(),
           reviewers: [],

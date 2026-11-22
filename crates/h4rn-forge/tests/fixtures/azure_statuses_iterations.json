@@ -1,0 +1,40 @@
+{
+  "count": 3,
+  "value": [
+    {
+      "id": 1,
+      "state": "failed",
+      "description": "the first push failed",
+      "iterationId": 1,
+      "context": {
+        "name": "ci/build",
+        "genre": "continuous-integration"
+      },
+      "creationDate": "2024-05-01T09:30:00.000Z",
+      "updatedDate": "2024-05-01T09:31:00.000Z"
+    },
+    {
+      "id": 2,
+      "state": "succeeded",
+      "description": "the second push passed",
+      "iterationId": 2,
+      "context": {
+        "name": "ci/build",
+        "genre": "continuous-integration"
+      },
+      "creationDate": "2024-05-01T11:00:00.000Z",
+      "updatedDate": "2024-05-01T11:05:00.000Z"
+    },
+    {
+      "id": 3,
+      "state": "succeeded",
+      "description": "PR-level status",
+      "context": {
+        "name": "license/cla",
+        "genre": "continuous-integration"
+      },
+      "creationDate": "2024-05-01T11:00:00.000Z",
+      "updatedDate": "2024-05-01T11:00:00.000Z"
+    }
+  ]
+}

@@ -181,6 +181,260 @@ pub fn paginate(files: Vec<ForgeFileDiff>, page: u32, per_page: u32) -> (Vec<For
     (files[start..end].to_vec(), end < files.len())
 }
 
+/// Builds a unified diff for one file from its old and new contents.
+///
+/// Azure DevOps returns PR changes as per-file contents rather than a patch,
+/// so the client diffs them locally. `old` and `new` are `None` when the path
+/// does not exist on that side (an added or deleted file); an existing empty
+/// file is `Some("")` and is **not** `/dev/null`. `None` for either side of a
+/// text pair means at least one side is not text (a NUL byte); the caller
+/// reports the file as binary. Very large pairs fall back to one
+/// replace-everything hunk so the request stays bounded — the diff is still
+/// correct, just not minimal.
+///
+/// Lines keep their terminators, so a lone CRLF-to-LF change is a real diff
+/// rather than an invisible one, and a line with no final newline is followed
+/// by the standard `\ No newline at end of file` marker.
+pub fn unified_diff(
+    old_path: &str,
+    new_path: &str,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> Option<String> {
+    let old_text = old.unwrap_or_default();
+    let new_text = new.unwrap_or_default();
+    if old_text.as_bytes().contains(&0) || new_text.as_bytes().contains(&0) {
+        return None;
+    }
+    // Same side and same text is no change. A path that appears or vanishes
+    // is a change even when the surviving side is empty, so it still gets the
+    // `/dev/null` header.
+    if old == new || (old.is_some() == new.is_some() && old_text == new_text) {
+        return None;
+    }
+    let old_lines = split_lines(old_text);
+    let new_lines = split_lines(new_text);
+    let ops = diff_ops(&old_lines, &new_lines);
+    let hunks = hunk_ranges(&ops, 3);
+    let mut out = String::new();
+    out.push_str(&format!("diff --git a/{old_path} b/{new_path}\n"));
+    out.push_str(&format!(
+        "--- {}\n",
+        if old.is_some() {
+            format!("a/{old_path}")
+        } else {
+            "/dev/null".to_owned()
+        }
+    ));
+    out.push_str(&format!(
+        "+++ {}\n",
+        if new.is_some() {
+            format!("b/{new_path}")
+        } else {
+            "/dev/null".to_owned()
+        }
+    ));
+    for (start, end) in hunks {
+        let old_count = ops[start..end]
+            .iter()
+            .filter(|op| op.kind != OpKind::Insert)
+            .count();
+        let new_count = ops[start..end]
+            .iter()
+            .filter(|op| op.kind != OpKind::Delete)
+            .count();
+        // An added file has no lines on the old side and a deleted one has
+        // none on the new side; git writes `0,0` there, not `1,0`.
+        let old_start = if old_count == 0 {
+            0
+        } else {
+            1 + ops[..start]
+                .iter()
+                .filter(|op| op.kind != OpKind::Insert)
+                .count()
+        };
+        let new_start = if new_count == 0 {
+            0
+        } else {
+            1 + ops[..start]
+                .iter()
+                .filter(|op| op.kind != OpKind::Delete)
+                .count()
+        };
+        out.push_str(&format!(
+            "@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+        ));
+        for op in &ops[start..end] {
+            let prefix = match op.kind {
+                OpKind::Equal => ' ',
+                OpKind::Insert => '+',
+                OpKind::Delete => '-',
+            };
+            out.push(prefix);
+            if op.line.ends_with('\n') {
+                out.push_str(op.line);
+            } else {
+                out.push_str(op.line);
+                out.push_str("\n\\ No newline at end of file\n");
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Splits a file into lines that keep their `\n` or `\r\n` terminator.
+///
+/// `str::lines()` drops both, which hides a CRLF-only change and loses the
+/// information the no-newline marker needs.
+fn split_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            lines.push(&text[start..=index]);
+            start = index + 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpKind {
+    Equal,
+    Insert,
+    Delete,
+}
+
+#[derive(Clone, Debug)]
+struct Op<'a> {
+    kind: OpKind,
+    line: &'a str,
+}
+
+/// Longest-common-subsequence diff with common prefix and suffix trimmed.
+fn diff_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Op<'a>> {
+    let mut prefix = 0;
+    while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old.len() - prefix
+        && suffix < new.len() - prefix
+        && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let old_mid = &old[prefix..old.len() - suffix];
+    let new_mid = &new[prefix..new.len() - suffix];
+
+    let mut ops: Vec<Op<'a>> = old[..prefix]
+        .iter()
+        .map(|line| Op {
+            kind: OpKind::Equal,
+            line,
+        })
+        .collect();
+    if old_mid.len().saturating_mul(new_mid.len()) > 4_000_000 {
+        ops.extend(old_mid.iter().map(|line| Op {
+            kind: OpKind::Delete,
+            line,
+        }));
+        ops.extend(new_mid.iter().map(|line| Op {
+            kind: OpKind::Insert,
+            line,
+        }));
+    } else {
+        ops.extend(lcs_ops(old_mid, new_mid));
+    }
+    ops.extend(old[old.len() - suffix..].iter().map(|line| Op {
+        kind: OpKind::Equal,
+        line,
+    }));
+    ops
+}
+
+fn lcs_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Op<'a>> {
+    let n = old.len();
+    let m = new.len();
+    if n == 0 {
+        return new
+            .iter()
+            .map(|line| Op {
+                kind: OpKind::Insert,
+                line,
+            })
+            .collect();
+    }
+    if m == 0 {
+        return old
+            .iter()
+            .map(|line| Op {
+                kind: OpKind::Delete,
+                line,
+            })
+            .collect();
+    }
+    let width = m + 1;
+    let mut table = vec![0u32; (n + 1) * width];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            table[i * width + j] = if old[i] == new[j] {
+                table[(i + 1) * width + j + 1] + 1
+            } else {
+                table[(i + 1) * width + j].max(table[i * width + j + 1])
+            };
+        }
+    }
+    let mut ops = Vec::with_capacity(n + m);
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        if i < n && j < m && old[i] == new[j] {
+            ops.push(Op {
+                kind: OpKind::Equal,
+                line: old[i],
+            });
+            i += 1;
+            j += 1;
+        } else if i < n && (j == m || table[(i + 1) * width + j] >= table[i * width + j + 1]) {
+            ops.push(Op {
+                kind: OpKind::Delete,
+                line: old[i],
+            });
+            i += 1;
+        } else {
+            ops.push(Op {
+                kind: OpKind::Insert,
+                line: new[j],
+            });
+            j += 1;
+        }
+    }
+    ops
+}
+
+/// Groups changed lines into hunks with `context` lines around each change.
+fn hunk_ranges(ops: &[Op<'_>], context: usize) -> Vec<(usize, usize)> {
+    let changes: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| op.kind != OpKind::Equal)
+        .map(|(index, _)| index)
+        .collect();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for change in changes {
+        let start = change.saturating_sub(context);
+        let end = (change + 1 + context).min(ops.len());
+        match ranges.last_mut() {
+            Some((_, last_end)) if start <= *last_end => *last_end = end,
+            _ => ranges.push((start, end)),
+        }
+    }
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +492,85 @@ Binary files a/logo.png and b/logo.png differ\n";
         let (last, more) = paginate(files, 2, 1);
         assert_eq!(last.len(), 1);
         assert!(!more);
+    }
+
+    #[test]
+    fn builds_a_unified_diff_from_two_versions() {
+        let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
+        let new = "one\ntwo\nTHREE\nfour\nfive\nsix\nseven\neight\nnine\n";
+        let patch = unified_diff("src/lib.rs", "src/lib.rs", Some(old), Some(new)).unwrap();
+        assert!(patch.starts_with("diff --git a/src/lib.rs b/src/lib.rs\n"));
+        assert!(patch.contains("--- a/src/lib.rs\n"));
+        assert!(patch.contains("+++ b/src/lib.rs\n"));
+        assert!(patch.contains("-three\n+THREE\n"));
+        assert!(patch.contains("+nine\n"));
+        // A round trip through the parser recovers the counts and path.
+        let files = parse_unified_diff(&patch);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/lib.rs");
+        assert_eq!(files[0].additions, 2);
+        assert_eq!(files[0].deletions, 1);
+    }
+
+    #[test]
+    fn a_new_or_deleted_file_uses_dev_null() {
+        let added = unified_diff("src/new.rs", "src/new.rs", None, Some("hello\n")).unwrap();
+        assert!(added.contains("--- /dev/null\n"));
+        assert!(added.contains("@@ -0,0 +1,1 @@\n+hello\n"));
+        let deleted = unified_diff("src/old.rs", "src/old.rs", Some("bye\n"), None).unwrap();
+        assert!(deleted.contains("+++ /dev/null\n"));
+        assert!(deleted.contains("@@ -1,1 +0,0 @@\n-bye\n"));
+    }
+
+    #[test]
+    fn an_existing_empty_file_is_not_dev_null() {
+        let patch = unified_diff("src/empty.rs", "src/empty.rs", Some(""), Some("new\n")).unwrap();
+        assert!(!patch.contains("/dev/null"), "{patch}");
+        assert!(patch.contains("--- a/src/empty.rs\n"), "{patch}");
+        assert!(patch.contains("+++ b/src/empty.rs\n"), "{patch}");
+        assert!(patch.contains("@@ -0,0 +1,1 @@\n+new\n"), "{patch}");
+
+        let emptied = unified_diff("src/empty.rs", "src/empty.rs", Some("gone\n"), Some(""));
+        let emptied = emptied.unwrap();
+        assert!(!emptied.contains("/dev/null"), "{emptied}");
+        assert!(emptied.contains("@@ -1,1 +0,0 @@\n-gone\n"), "{emptied}");
+
+        // A path that appears with no lines still gets the /dev/null header.
+        let added_empty = unified_diff("src/blank.rs", "src/blank.rs", None, Some("")).unwrap();
+        assert!(added_empty.contains("--- /dev/null"), "{added_empty}");
+        assert!(added_empty.contains("+++ b/src/blank.rs"), "{added_empty}");
+    }
+
+    #[test]
+    fn a_missing_final_newline_gets_a_marker() {
+        let patch = unified_diff("hello", "hello", Some("hello"), Some("hello\n")).unwrap();
+        assert!(
+            patch.contains("-hello\n\\ No newline at end of file\n"),
+            "{patch}"
+        );
+        assert!(patch.contains("+hello\n"), "{patch}");
+        // Round trip: the parser counts one added and one deleted line.
+        let files = parse_unified_diff(&patch);
+        assert_eq!(files[0].additions, 1);
+        assert_eq!(files[0].deletions, 1);
+    }
+
+    #[test]
+    fn line_endings_are_part_of_the_content() {
+        let patch = unified_diff(
+            "src/windows.rs",
+            "src/windows.rs",
+            Some("one\r\ntwo\r\n"),
+            Some("one\ntwo\n"),
+        )
+        .unwrap();
+        assert!(patch.contains("-one\r\n"), "{patch:?}");
+        assert!(patch.contains("+one\n"), "{patch:?}");
+    }
+
+    #[test]
+    fn binary_and_unchanged_content_have_no_patch() {
+        assert!(unified_diff("a.bin", "a.bin", Some("a\0b"), Some("a\0c")).is_none());
+        assert!(unified_diff("a.txt", "a.txt", Some("same\n"), Some("same\n")).is_none());
     }
 }

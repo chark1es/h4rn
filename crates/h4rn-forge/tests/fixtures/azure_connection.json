@@ -1,0 +1,7 @@
+{
+  "authenticatedUser": {
+    "id": "alice-guid",
+    "providerDisplayName": "Alice Example",
+    "customDisplayName": "Alice Example"
+  }
+}
