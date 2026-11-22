@@ -68,14 +68,31 @@ describe("loadPreview errors", () => {
       content: null,
       content_omitted: "too_large" as const,
       size_bytes: PREVIEW_MAX_DOCUMENT_BYTES + 1,
-      hint: "This file is 0.4 MiB; a preview reads at most 400 KiB of text.",
+      hint: "This file is 401 KiB; a preview reads at most 400 KiB of text.",
     };
     const load = await loadPreview({ path: "big.html", read: reader({ "big.html": big }) });
     expect(load.document).toBeNull();
     expect(load.failure?.title).toBe("This file is too large to preview.");
     expect(load.failure?.detail).toContain("400 KiB");
-    expect(load.failure?.detail).not.toContain("10.0 MiB");
+    expect(load.failure?.detail).toContain("401 KiB");
+    // One unit, so the file size and the limit can be compared at a glance.
+    expect(load.failure?.detail).not.toContain("MiB");
     expect(load.watched).toEqual(["big.html"]);
+  });
+
+  it("explains a file that fits the raw cap but not the escaped frame", async () => {
+    const dense = {
+      ...textFile("dense.html", ""),
+      content: null,
+      content_omitted: "too_large" as const,
+      size_bytes: 390 * 1024,
+      hint: "This file is 390 KiB; escaping its text for the wire needs more than the 512 KiB one transport frame allows.",
+    };
+    const load = await loadPreview({ path: "dense.html", read: reader({ "dense.html": dense }) });
+    expect(load.document).toBeNull();
+    expect(load.failure?.detail).toContain("390 KiB");
+    expect(load.failure?.detail).toContain("escaped");
+    expect(load.failure?.detail).not.toContain("MiB");
   });
 
   it("keeps watching the selected file when the load fails", async () => {

@@ -38,6 +38,9 @@ export const PREVIEW_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
  * The secure transport refuses a frame over 512 KiB, and the JSON envelope
  * around a decoded document or stylesheet needs headroom. The daemon is asked
  * for this bound rather than reading a larger file and failing to send it.
+ * Escaping can still push a file under this bound past one frame, so the
+ * daemon measures the serialized response and answers `too_large` instead of
+ * sending a frame the transport would refuse.
  */
 export const PREVIEW_MAX_TEXT_BYTES = 400 * 1024;
 

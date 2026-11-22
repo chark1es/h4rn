@@ -39,15 +39,17 @@ function megabytes(bytes: number): string {
 }
 
 function kilobytes(bytes: number): string {
-  return `${Math.round(bytes / 1024)} KiB`;
+  return `${Math.ceil(bytes / 1024)} KiB`;
 }
 
 function documentTooLarge(size: number): PreviewFailure {
   return {
     title: "This file is too large to preview.",
-    detail: `${megabytes(size)} MiB is over the ${kilobytes(
+    detail: `The preview reads at most ${kilobytes(
       PREVIEW_MAX_DOCUMENT_BYTES,
-    )} the preview reads at a time so one response fits a transport frame. Open it in a terminal or split the report.`,
+    )} of text so one response fits a transport frame. This file is ${kilobytes(
+      size,
+    )}, or needs more than that once its text is escaped for the wire. Open it in a terminal or split the report.`,
   };
 }
 
@@ -66,10 +68,14 @@ function pageTooLarge(size: number): PreviewFailure {
  *
  * Only references that resolve inside the workspace are fetched, and text is
  * read with a frame-sized bound so one response always fits the secure
- * transport. The 10 MB budget is charged as each asset arrives: once it is
- * spent, later references are not fetched at all and are reported as skipped.
- * One asset over the per-response cap, missing, non-UTF-8 or outside the
- * workspace is skipped; the page still renders and reports the skipped count.
+ * transport. That bound is the raw text, not a promise that every file under
+ * it opens: JSON escaping of quotes, newlines and control characters can push
+ * the serialized response past the frame, and the daemon then answers with
+ * `content_omitted: too_large`. The 10 MB budget is charged as each asset
+ * arrives: once it is spent, later references are not fetched at all and are
+ * reported as skipped. One asset over the per-response cap, missing,
+ * non-UTF-8 or outside the workspace is skipped; the page still renders and
+ * reports the skipped count.
  */
 export async function loadPreview(options: {
   path: string;

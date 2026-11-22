@@ -676,9 +676,25 @@ export function takePendingIdePath(): string | null {
 let client: H4rnClient | null = null;
 let started = false;
 let windowHooked = false;
+const clientListeners = new Set<(client: H4rnClient) => void>();
+
+/**
+ * Notifies whenever the transport client is created or replaced.
+ *
+ * A sign-in, pairing or host switch rebuilds the whole client, so anything
+ * bound to the previous connection (such as the workspace watch) has to move
+ * to the new one. Listeners run before the new client starts.
+ */
+export function onClientChange(listener: (client: H4rnClient) => void): () => void {
+  clientListeners.add(listener);
+  return () => clientListeners.delete(listener);
+}
 
 export function getClient(): H4rnClient {
-  client ??= createClientFromEnv();
+  if (!client) {
+    client = createClientFromEnv();
+    for (const listener of [...clientListeners]) listener(client);
+  }
   return client;
 }
 

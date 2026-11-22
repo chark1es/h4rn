@@ -15,7 +15,9 @@ All notable changes to h4rn are recorded here. The format follows
   cookies or its storage. The desktop and mobile shells serve the prepared page from their own
   `h4rn-preview` origin (a `srcdoc` frame would inherit the window's `script-src 'self'`); the
   browser build keeps `srcdoc`. Limits are a 400 KiB text read for the page and its stylesheets and
-  scripts (one secure-transport frame), 360 KiB per binary asset and 10 MB for all embedded copies,
+  scripts (one secure-transport frame, escaping included, so a smaller file that needs more than
+  the frame once serialized is refused as too large instead of closing the session), 360 KiB per
+  binary asset and 10 MB for all embedded copies,
   charged as each asset arrives so a spent budget stops the fetching. References cover styles,
   scripts, images, `srcset`, `<video>/<audio>/<track>`, `<source>`, `<iframe>`, `<object>`,
   `<embed>`, SVG `href`/`xlink:href` and CSS `@import` of a workspace stylesheet, which is inlined
@@ -106,6 +108,24 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **An oversized filesystem response no longer closes the paired session.** JSON escaping of
+  quotes, backslashes, newlines and control characters can push a 400 KiB text read past the
+  secure transport's 512 KiB frame, and the transport answers an oversized frame with
+  `FrameTooLarge` by closing the session. The daemon now measures the serialized response with
+  headroom and answers a text or base64 read with a typed `content_omitted: too_large` /
+  `bytes_omitted: too_large` and an honest hint, and the response path keeps a last guard so no
+  filesystem response can exceed one frame. Copy and docs say 400 KiB is a read bound rather than
+  a promise that every file under it opens, and the too-large message uses one unit (KiB) for the
+  file size and the limit.
+- **Workspace watches survive a connection restart.** Signing in, pairing, switching machines or
+  recovering from offline replaces the transport client, and the file watcher's held watches were
+  tied to the old client instance, so live reload stopped until a view was remounted. The counts
+  and owners now live outside the client, and every held watch is re-sent on the connection that
+  replaces it, after a transport reconnect and on a new client's first ready notice.
+- **The mobile shell's Rust tests are compiled on the host.** The Android and iOS CI jobs build
+  for their own targets, so the mobile crate's unit tests (the preview store and its origin) were
+  never compiled. The Linux job that already installs Tauri's WebKitGTK packages now runs
+  `cargo check --tests` for `apps/mobile/src-tauri`.
 - **A second launch hands its deep link to the running app.** Launching h4rn while it is already
   running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that
   started the second process. The single-instance plugin now has its `deep-link` feature, so it

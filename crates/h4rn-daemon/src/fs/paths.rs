@@ -13,6 +13,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use h4rn_transport::DEFAULT_MAX_FRAME_BYTES;
 use thiserror::Error;
 
 /// Largest directory listing the daemon returns in one response.
@@ -26,6 +27,15 @@ pub const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 /// asset comes back with `FsOmitted::TooLarge` instead of failing the
 /// whole preview.
 pub const MAX_INLINE_BYTES: u64 = 360 * 1024;
+/// Bytes kept clear of the transport's hard frame limit for the JSON envelope
+/// and any framing the transport adds around it.
+pub const FRAME_HEADROOM_BYTES: usize = 8 * 1024;
+/// Largest serialized filesystem response the daemon sends in one frame.
+///
+/// A frame over the transport's limit is refused with `FrameTooLarge`, which
+/// closes the whole paired session, so the daemon measures the serialized
+/// response (escaping included) and omits the payload instead.
+pub const MAX_RESPONSE_BYTES: usize = DEFAULT_MAX_FRAME_BYTES - FRAME_HEADROOM_BYTES;
 /// Largest content the editor will write, in bytes.
 pub const MAX_WRITE_BYTES: usize = 8 * 1024 * 1024;
 

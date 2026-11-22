@@ -239,6 +239,78 @@ fn a_preview_text_read_fits_one_secure_frame() {
     assert_eq!(omitted.size_bytes, PREVIEW_TEXT_BYTES + 1);
     let hint = omitted.hint.unwrap_or_default();
     assert!(hint.contains("400 KiB"), "hint names the cap: {hint}");
+    assert!(
+        hint.contains("401 KiB"),
+        "one unit for size and cap: {hint}"
+    );
+
+    // JSON escaping can push a file that is under the raw cap past the
+    // serialized frame. Each of these must come back typed: an oversized frame
+    // closes the whole paired session, so the guard turns it into a result.
+    let escape_dense = [
+        ("all quotes", "\"".repeat(PREVIEW_TEXT_BYTES as usize)),
+        (
+            "quotes and newlines",
+            "\"\n".repeat(PREVIEW_TEXT_BYTES as usize / 2),
+        ),
+        (
+            "control characters",
+            "\u{1}".repeat(PREVIEW_TEXT_BYTES as usize),
+        ),
+    ];
+    for (name, dense) in escape_dense {
+        let file = format!("{}.html", name.replace(' ', "-"));
+        fixture.write(&file, &dense);
+        let read = fixture
+            .service
+            .read_with(fixture.workspace(), &file, false, Some(PREVIEW_TEXT_BYTES))
+            .expect("escape-dense text is a result, not an error");
+        assert_eq!(read.content_omitted, Some(FsOmitted::TooLarge), "{name}");
+        assert!(read.content.is_none(), "{name}");
+        assert_eq!(read.size_bytes, PREVIEW_TEXT_BYTES, "{name}");
+        let hint = read.hint.clone().unwrap_or_default();
+        assert!(hint.contains("512 KiB"), "{name}: {hint}");
+        assert!(
+            !hint.contains("MiB"),
+            "{name}: one unit for size and limit: {hint}"
+        );
+
+        // The typed result itself is small enough to send.
+        let frame = ServerFrame::Response {
+            id: 1,
+            result: Ok(ResponseBody::FsFile { file: read }),
+        };
+        let encoded = serde_json::to_vec(&frame).expect("serialize omitted frame");
+        assert!(
+            encoded.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+            "{name}: {} bytes over the frame limit",
+            encoded.len()
+        );
+    }
+}
+
+#[test]
+fn an_editor_text_read_that_cannot_fit_one_frame_is_typed() {
+    use h4rn_protocol::FsOmitted;
+
+    // Plain text under the editor's 2 MiB limit is still larger than one
+    // transport frame; the editor shows its "too large" notice instead of the
+    // session closing mid-response.
+    let fixture = Fixture::new();
+    let text = "a".repeat(1024 * 1024);
+    fixture.write("notes.txt", &text);
+    let read = fixture
+        .service
+        .read(fixture.workspace(), "notes.txt")
+        .expect("an oversized response is a result, not an error");
+    assert_eq!(read.content_omitted, Some(FsOmitted::TooLarge));
+    assert!(read.content.is_none());
+    assert!(read.truncated, "the editor draws its too-large notice");
+    assert_eq!(read.size_bytes, 1024 * 1024);
+    let hint = read.hint.unwrap_or_default();
+    assert!(hint.contains("1024 KiB"), "{hint}");
+    assert!(hint.contains("512 KiB"), "{hint}");
+    assert!(!hint.contains("MiB"), "one unit for size and limit: {hint}");
 }
 
 #[cfg(unix)]

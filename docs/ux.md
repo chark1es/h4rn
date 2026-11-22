@@ -187,9 +187,12 @@ without leaving h4rn.
   are inlined as `<style>`, `<script>` or `data:` URLs. That covers `srcset` candidates, `<img>`,
   `<source>`, `<video>/<audio>/<track>`, `<object data>`, `<embed src>`, SVG `href`/`xlink:href` and
   `url()` in styles. A workspace stylesheet reached through CSS `@import` is inlined as CSS text,
-  keeping its media condition. The HTML file itself may be up to 400 KiB, the largest text read
-  that leaves room for the response envelope inside the secure transport's 512 KiB frame; each
-  binary asset may be up to 360 KiB; all embedded copies together may be up to 10 MB. The budget is
+  keeping its media condition. The HTML file is read at most 400 KiB, which leaves room for the
+  response envelope inside the secure transport's 512 KiB frame. Escaping counts against that
+  frame, so a smaller file whose quotes, newlines or control characters need more than 512 KiB
+  once serialized is refused as too large instead of being sent, and the daemon applies the same
+  bound to every response so one oversized answer can never close the paired session. Each binary
+  asset may be up to 360 KiB; all embedded copies together may be up to 10 MB. The budget is
   charged as each asset arrives, so once it is spent the preview stops fetching and reports the
   rest as skipped. A repeated image counts every time it is embedded. Anything missing, outside
   the workspace root, or over a size limit is removed from the page (it is never left as a relative
@@ -204,10 +207,11 @@ without leaving h4rn.
 - **Expand** opens the preview full-width in the main area; **Back to thread** returns it to the
   panel. On a phone it opens in the existing panel sheet, which gains a Preview segment while a
   file is open.
-- A missing file, a file that is not UTF-8, or one over the 400 KiB text read limit gets a plain
-  inline message with Reload. The selected file stays watched on every outcome, so recreating it
-  (or fixing its encoding) reloads the preview without closing the tab; after a reconnect the
-  workspace watch is sent again.
+- A missing file, a file that is not UTF-8, or one the daemon cannot fit in one transport frame
+  (over 400 KiB of text, or under it but too large once escaped) gets a plain inline message with
+  Reload. The selected file stays watched on every outcome, so recreating it (or fixing its
+  encoding) reloads the preview without closing the tab; after a reconnect, a sign-in or a machine
+  switch the workspace watch is re-sent on the new connection.
 - Not supported yet: MCP Apps rendering, a headless browser, and proxying a page's own development
   server. A page that needs a dev server must use absolute `https:` URLs for its assets.
 

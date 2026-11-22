@@ -43,7 +43,7 @@ use tokio::task::JoinHandle;
 use crate::auth::{TokenStore, authorize};
 use crate::blobs::{BlobError, BlobStore, UploadOwner};
 use crate::forge::ForgeService;
-use crate::fs::{FsError, FsService};
+use crate::fs::{FsError, FsService, MAX_RESPONSE_BYTES, file_fits_one_frame, omit_file_payload};
 use crate::hosts::HostInventory;
 use crate::mcp::McpService;
 use crate::remote::{RemoteAudit, SessionOrigin};
@@ -1629,11 +1629,32 @@ where
 }
 
 fn response_frame(id: u64, body: ResponseBody) -> String {
-    serde_json::to_string(&ServerFrame::Response {
+    // No fs response may exceed one secure-transport frame: the transport
+    // answers an oversized frame with `FrameTooLarge` and closes the whole
+    // paired session. The read path already omits a payload it knows will not
+    // fit; this is the last guard for any response that still grew past it.
+    let body = match body {
+        ResponseBody::FsFile { file } if !file_fits_one_frame(&file) => ResponseBody::FsFile {
+            file: omit_file_payload(file),
+        },
+        body => body,
+    };
+    let encoded = serde_json::to_string(&ServerFrame::Response {
         id,
         result: Ok(body),
     })
-    .unwrap_or_default()
+    .unwrap_or_default();
+    if encoded.len() <= MAX_RESPONSE_BYTES {
+        return encoded;
+    }
+    error_frame(
+        id,
+        ProtoError::new(
+            ProtoErrorCode::InvalidRequest,
+            "this response is larger than one transport frame",
+            "Narrow the request: open a smaller file or a single diff hunk",
+        ),
+    )
 }
 
 fn error_frame(id: u64, error: ProtoError) -> String {
@@ -1774,5 +1795,46 @@ mod tests {
         assert_eq!(error.code, ProtoErrorCode::NotImplemented);
         assert!(error.message.contains("not implemented"));
         assert!(error.hint.unwrap().contains("mcp_list"));
+    }
+
+    #[test]
+    fn an_oversized_file_response_is_omitted_before_it_is_sent() {
+        use h4rn_protocol::{FsFileContent, FsOmitted, ResponseBody};
+
+        // A response built outside the read path (or one that escaped the
+        // service's own bound) must still never reach the transport oversized.
+        let file = FsFileContent {
+            path: "report.html".into(),
+            content: Some("\"".repeat(400 * 1024)),
+            etag: Some("etag".into()),
+            encoding: "utf-8".into(),
+            size_bytes: 400 * 1024,
+            binary: false,
+            truncated: false,
+            bytes_base64: None,
+            bytes_omitted: None,
+            content_omitted: None,
+            modified_at: None,
+            hint: None,
+        };
+        let frame = response_frame(7, ResponseBody::FsFile { file });
+        assert!(
+            frame.len() <= MAX_RESPONSE_BYTES,
+            "{} bytes is over the {} byte response bound",
+            frame.len(),
+            MAX_RESPONSE_BYTES
+        );
+        let decoded: ServerFrame = serde_json::from_str(&frame).expect("valid frame");
+        match decoded {
+            ServerFrame::Response {
+                id: 7,
+                result: Ok(ResponseBody::FsFile { file }),
+            } => {
+                assert_eq!(file.content_omitted, Some(FsOmitted::TooLarge));
+                assert!(file.content.is_none());
+                assert!(file.truncated);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
     }
 }
