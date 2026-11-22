@@ -13,6 +13,8 @@ import { closeShortcuts, navigate, useApp } from "@/lib/store/appStore";
 const TYPING: Array<[string, string[]]> = [
   ["Send", [ENTER]],
   ["New line", [SHIFT, ENTER]],
+  ["Recall an earlier prompt", ["↑"]],
+  ["Walk prompts forward", ["↓"]],
   ["Mention a file or host", ["@"]],
   ["Close a dialog or go back", [ESC]],
 ];
