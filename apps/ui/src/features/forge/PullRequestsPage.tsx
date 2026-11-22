@@ -150,6 +150,15 @@ function TabError({
   );
 }
 
+/** One tab's request still in flight, shown inside the tab. */
+function TabLoading({ label }: { label: string }) {
+  return (
+    <p className="q-faint" role="status" style={{ margin: "12px 0", fontSize: 12.5 }}>
+      {label}
+    </p>
+  );
+}
+
 /**
  * "View log" and "Re-run failed" under a checks list. View log is a link to
  * the forge's own log page. Re-run is the forge's API where it has one; where
@@ -794,12 +803,22 @@ function PrDetail({
   const [diffLoading, setDiffLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [commentsLoading, setCommentsLoading] = useState(true);
   const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [diffInitialLoading, setDiffInitialLoading] = useState(true);
   const [diffError, setDiffError] = useState<string | null>(null);
+  const [commitsLoading, setCommitsLoading] = useState(true);
   const [commitsError, setCommitsError] = useState<string | null>(null);
+  const [checksLoading, setChecksLoading] = useState(true);
   const [checksError, setChecksError] = useState<string | null>(null);
   const [tab, setTab] = useState<"conversation" | "commits" | "checks" | "files">("conversation");
-  const [reloadNonce, setReloadNonce] = useState(0);
+  // One nonce per request. A tab's Retry bumps only its own, so the PR header
+  // and the checks stay on screen while that tab loads again.
+  const [detailNonce, setDetailNonce] = useState(0);
+  const [commentsNonce, setCommentsNonce] = useState(0);
+  const [checksNonce, setChecksNonce] = useState(0);
+  const [commitsNonce, setCommitsNonce] = useState(0);
+  const [diffNonce, setDiffNonce] = useState(0);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyBusy, setReplyBusy] = useState<Record<string, boolean>>({});
   const [replyOpen, setReplyOpen] = useState<Record<string, boolean>>({});
@@ -820,16 +839,13 @@ function PrDetail({
   );
 
   useEffect(() => {
-    void reloadNonce;
+    void detailNonce;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setCommentsError(null);
-    setDiffError(null);
-    setCommitsError(null);
-    setChecksError(null);
-    // The detail gates the page; every tab loads on its own so one failed
-    // request (a diff, a comment page) cannot hide the PR header and checks.
+    // The detail gates the page. Every tab owns its own request, so one
+    // failed request (a diff, a comment page) cannot hide the PR header and
+    // the checks.
     api()
       .getPr(repo, number)
       .then((detail) => {
@@ -842,54 +858,103 @@ function PrDetail({
         setError(errorMessage(cause));
         setLoading(false);
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, detailNonce]);
+
+  useEffect(() => {
+    void commentsNonce;
+    let cancelled = false;
+    setCommentsLoading(true);
+    setCommentsError(null);
     api()
       .comments(repo, number)
       .then((page) => {
         if (cancelled) return;
         setComments(page);
+        setCommentsLoading(false);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
         setCommentsError(errorMessage(cause));
+        setCommentsLoading(false);
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, commentsNonce]);
+
+  useEffect(() => {
+    void checksNonce;
+    let cancelled = false;
+    setChecksLoading(true);
+    setChecksError(null);
     api()
       .checks(repo, number)
       .then((result) => {
         if (cancelled) return;
         setChecks(result);
+        setChecksLoading(false);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
         setChecksError(errorMessage(cause));
+        setChecksLoading(false);
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, checksNonce]);
+
+  useEffect(() => {
+    void diffNonce;
+    let cancelled = false;
+    setDiffInitialLoading(true);
+    setDiffError(null);
     api()
       .getDiff(repo, number, 1)
       .then((diff) => {
         if (cancelled) return;
         setDiffPage(diff);
         setDiffFiles(diff.files);
+        setDiffInitialLoading(false);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
         setDiffError(errorMessage(cause));
+        setDiffInitialLoading(false);
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, diffNonce]);
+
+  useEffect(() => {
+    void commitsNonce;
+    let cancelled = false;
+    setCommitsLoading(true);
+    setCommitsError(null);
     api()
       .commits(repo, number)
       .then((commitList) => {
         if (cancelled) return;
         setCommits(commitList);
+        setCommitsLoading(false);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
         setCommitsError(errorMessage(cause));
+        setCommitsLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [repo, number, reloadNonce]);
+  }, [repo, number, commitsNonce]);
 
   // Live checks: the daemon broadcasts a transient update when a watched PR's
-  // checks change, so the side column never needs to poll.
+  // checks change, so the side column never needs to poll. A real update is
+  // also what recovers the Checks tab from a failed load.
   useEffect(() => {
     return getClient().onEvent(({ event }) => {
       if (
@@ -899,6 +964,8 @@ function PrDetail({
         event.number === number
       ) {
         setChecks(event.checks);
+        setChecksError(null);
+        setChecksLoading(false);
       }
     });
   }, [repo, number]);
@@ -1138,7 +1205,7 @@ function PrDetail({
                 <button
                   type="button"
                   className="q-btn secondary"
-                  onClick={() => setReloadNonce((value) => value + 1)}
+                  onClick={() => setDetailNonce((value) => value + 1)}
                 >
                   Retry
                 </button>
@@ -1273,11 +1340,13 @@ function PrDetail({
                   )}
                 </div>
 
-                {commentsError ? (
+                {commentsLoading ? (
+                  <TabLoading label="Loading comments…" />
+                ) : commentsError ? (
                   <TabError
                     title="Comments did not load"
                     message={commentsError}
-                    onRetry={() => setReloadNonce((value) => value + 1)}
+                    onRetry={() => setCommentsNonce((value) => value + 1)}
                   />
                 ) : (
                   <>
@@ -1437,11 +1506,13 @@ function PrDetail({
 
             {tab === "commits" ? (
               <div>
-                {commitsError ? (
+                {commitsLoading ? (
+                  <TabLoading label="Loading commits…" />
+                ) : commitsError ? (
                   <TabError
                     title="Commits did not load"
                     message={commitsError}
-                    onRetry={() => setReloadNonce((value) => value + 1)}
+                    onRetry={() => setCommitsNonce((value) => value + 1)}
                   />
                 ) : commits && commits.commits.length > 0 ? (
                   <>
@@ -1478,12 +1549,8 @@ function PrDetail({
                   </>
                 ) : (
                   <div className="q-empty">
-                    <h3>{commits ? "No commits" : "Commits did not load"}</h3>
-                    <p>
-                      {commits
-                        ? "This pull request has no commits."
-                        : `${forgeLabel(repo.forge)} did not return the commit list.`}
-                    </p>
+                    <h3>No commits</h3>
+                    <p>This pull request has no commits.</p>
                   </div>
                 )}
               </div>
@@ -1491,11 +1558,13 @@ function PrDetail({
 
             {tab === "checks" ? (
               <div>
-                {checksError ? (
+                {checksLoading ? (
+                  <TabLoading label="Loading checks…" />
+                ) : checksError ? (
                   <TabError
                     title="Checks did not load"
                     message={checksError}
-                    onRetry={() => setReloadNonce((value) => value + 1)}
+                    onRetry={() => setChecksNonce((value) => value + 1)}
                   />
                 ) : checks ? (
                   <>
@@ -1547,90 +1616,102 @@ function PrDetail({
 
             {tab === "files" ? (
               <div>
-                {diffError ? (
-                  <TabError
-                    title="The diff did not load"
-                    message={diffError}
-                    onRetry={() => setReloadNonce((value) => value + 1)}
-                  />
-                ) : null}
-                {!diffError
-                  ? diffFiles.map((file) => {
-                      const { directory, name } = splitPath(file.path);
-                      const rows = parsePatch(file.patch);
-                      return (
-                        <div key={file.path} className="q-dfile">
-                          <div className="q-dfile-h">
-                            <span className="p q-mono">
-                              <span className="q-faint">{directory}</span>
-                              {name}
-                            </span>
-                            <span className="grow" />
-                            <span className="q-num q-pm">
-                              <span className="q-add">+{file.additions}</span>{" "}
-                              <span className="q-del">−{file.deletions}</span>
-                            </span>
-                          </div>
-                          {rows.length > 0 ? (
-                            <div
-                              className="q-hunk"
-                              style={{
-                                font: "12px/18px var(--mono)",
-                                background: "var(--bg-sunk)",
-                              }}
-                            >
-                              {rows.map((row) =>
-                                row.kind === "hunk" ? (
-                                  <div className="hh" key={`${file.path}:hunk:${row.text}`}>
-                                    {row.text}
+                {diffInitialLoading ? (
+                  <TabLoading label="Loading the diff…" />
+                ) : (
+                  <>
+                    {diffError ? (
+                      <TabError
+                        title="The diff did not load"
+                        message={diffError}
+                        onRetry={() => setDiffNonce((value) => value + 1)}
+                      />
+                    ) : null}
+                    {!diffError
+                      ? diffFiles.map((file) => {
+                          const { directory, name } = splitPath(file.path);
+                          const rows = parsePatch(file.patch);
+                          return (
+                            <div key={file.path} className="q-dfile">
+                              <div className="q-dfile-h">
+                                <span className="p q-mono">
+                                  <span className="q-faint">{directory}</span>
+                                  {name}
+                                </span>
+                                <span className="grow" />
+                                <span className="q-num q-pm">
+                                  <span className="q-add">+{file.additions}</span>{" "}
+                                  <span className="q-del">−{file.deletions}</span>
+                                </span>
+                              </div>
+                              {rows.length > 0 ? (
+                                <div
+                                  className="q-hunk"
+                                  style={{
+                                    font: "12px/18px var(--mono)",
+                                    background: "var(--bg-sunk)",
+                                  }}
+                                >
+                                  {rows.map((row) =>
+                                    row.kind === "hunk" ? (
+                                      <div className="hh" key={`${file.path}:hunk:${row.text}`}>
+                                        {row.text}
+                                      </div>
+                                    ) : (
+                                      <div
+                                        key={`${file.path}:${row.newLine ?? row.oldLine ?? row.text}`}
+                                        className={
+                                          row.kind === "add"
+                                            ? "q-ln a"
+                                            : row.kind === "del"
+                                              ? "q-ln d"
+                                              : "q-ln"
+                                        }
+                                      >
+                                        <span className="n">
+                                          {row.newLine ?? row.oldLine ?? ""}
+                                        </span>
+                                        <span className="sg" aria-hidden>
+                                          {row.kind === "add"
+                                            ? "+"
+                                            : row.kind === "del"
+                                              ? "−"
+                                              : " "}
+                                        </span>
+                                        <span className="q-cx">{row.text || " "}</span>
+                                      </div>
+                                    ),
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="q-hunk">
+                                  <div className="hh">
+                                    {file.binary
+                                      ? "Binary file"
+                                      : file.truncated
+                                        ? "Patch truncated by the forge"
+                                        : "No inline patch"}
                                   </div>
-                                ) : (
-                                  <div
-                                    key={`${file.path}:${row.newLine ?? row.oldLine ?? row.text}`}
-                                    className={
-                                      row.kind === "add"
-                                        ? "q-ln a"
-                                        : row.kind === "del"
-                                          ? "q-ln d"
-                                          : "q-ln"
-                                    }
-                                  >
-                                    <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
-                                    <span className="sg" aria-hidden>
-                                      {row.kind === "add" ? "+" : row.kind === "del" ? "−" : " "}
-                                    </span>
-                                    <span className="q-cx">{row.text || " "}</span>
-                                  </div>
-                                ),
+                                </div>
                               )}
                             </div>
-                          ) : (
-                            <div className="q-hunk">
-                              <div className="hh">
-                                {file.binary
-                                  ? "Binary file"
-                                  : file.truncated
-                                    ? "Patch truncated by the forge"
-                                    : "No inline patch"}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  : null}
-                {diffPage?.has_more && !diffError ? (
-                  <div style={{ padding: "12px 0" }}>
-                    <button
-                      type="button"
-                      className="q-btn secondary"
-                      disabled={diffLoading}
-                      onClick={() => void loadMoreDiff()}
-                    >
-                      {diffLoading ? "Loading…" : "Load more files"}
-                    </button>
-                  </div>
-                ) : null}
+                          );
+                        })
+                      : null}
+                    {diffPage?.has_more && !diffError ? (
+                      <div style={{ padding: "12px 0" }}>
+                        <button
+                          type="button"
+                          className="q-btn secondary"
+                          disabled={diffLoading}
+                          onClick={() => void loadMoreDiff()}
+                        >
+                          {diffLoading ? "Loading…" : "Load more files"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </>
+                )}
               </div>
             ) : null}
           </div>
@@ -1660,9 +1741,15 @@ function PrDetail({
             <div className="q-side-sec" hidden={tab === "checks"}>
               <h3>
                 <span>Checks</span>
-                <span>{checks ? `${passed} of ${total} passed` : "Unknown"}</span>
+                <span>
+                  {checksLoading ? "Loading…" : checks ? `${passed} of ${total} passed` : "Unknown"}
+                </span>
               </h3>
-              {checks && checks.checks.length > 0 ? (
+              {checksLoading ? (
+                <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
+                  Loading checks…
+                </p>
+              ) : checks && checks.checks.length > 0 ? (
                 checks.checks.slice(0, 8).map((check) => (
                   <div className="q-chk" key={check.name}>
                     <CheckIcon status={check.status} />

@@ -278,7 +278,7 @@ impl ForgeHttp {
 
     /// Classifies a failed response.
     pub fn status_error(&self, response: &HttpResponse) -> ForgeError {
-        let message = self.sanitize(&response_message(&response.body));
+        let message = self.response_message(&response.body);
         match response.status {
             StatusCode::UNAUTHORIZED => ForgeError::Unauthorized {
                 forge: self.forge,
@@ -341,6 +341,32 @@ impl ForgeHttp {
             output = redact_secret(&output, secret);
         }
         redact(&output)
+    }
+
+    /// The message a failed body carries, already redacted.
+    ///
+    /// A JSON body is walked as decoded strings and every string is sanitized
+    /// before any nested value is serialized back into the message: a
+    /// credential containing a quote would otherwise reach the message as a
+    /// JSON-escaped `\"` value that the configured-secret match cannot see.
+    /// Non-JSON bodies are sanitized as text.
+    fn response_message(&self, body: &str) -> String {
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            return "no message".into();
+        }
+        if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
+            redact_json_strings(&mut value, &|text| self.sanitize(text));
+            for key in ["message", "error", "detail", "errors"] {
+                if let Some(message) = value.get(key) {
+                    if let Some(text) = message.as_str() {
+                        return text.to_owned();
+                    }
+                    return message.to_string();
+                }
+            }
+        }
+        self.sanitize(trimmed)
     }
 
     fn cached(&self, key: &str) -> Option<CachedResponse> {
@@ -454,22 +480,22 @@ fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
-fn response_message(body: &str) -> String {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return "no message".into();
-    }
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        for key in ["message", "error", "detail", "errors"] {
-            if let Some(message) = value.get(key) {
-                if let Some(text) = message.as_str() {
-                    return text.to_owned();
-                }
-                return message.to_string();
+/// Sanitizes every string inside a decoded JSON value in place.
+fn redact_json_strings(value: &mut Value, sanitize: &dyn Fn(&str) -> String) {
+    match value {
+        Value::String(text) => *text = sanitize(text),
+        Value::Array(items) => {
+            for item in items {
+                redact_json_strings(item, sanitize);
             }
         }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                redact_json_strings(item, sanitize);
+            }
+        }
+        _ => {}
     }
-    trimmed.to_owned()
 }
 
 /// Token prefixes that identify a forge credential. Azure DevOps personal
@@ -519,33 +545,25 @@ fn token_run_len(value: &str) -> usize {
         .unwrap_or(value.len())
 }
 
-/// Replaces one configured secret, matching percent escapes regardless of hex
-/// case.
+/// Replaces every copy of one configured secret, matching percent escapes
+/// regardless of hex case.
 ///
-/// The plain form is tried first. When the secret contains a percent escape, a
-/// second pass compares both sides with every `%xx` escape uppercased, so
-/// `%2f`, `%2F` and a mixed spelling all match while Base64's own case stays
-/// exact. Uppercasing changes no byte lengths or offsets, so the match index
-/// in the normalised copy is the index to replace in the original.
+/// Both sides are normalised with every `%xx` escape uppercased, then every
+/// matching span in the text is replaced. Normalising once up front means a
+/// body that carries the plain value and an uppercase- and a lowercase-escaped
+/// copy has all three removed; uppercasing changes no byte lengths or offsets,
+/// so the match index in the normalised copy is the index to replace in the
+/// original. Base64's own case stays exact.
 fn redact_secret(value: &str, secret: &str) -> String {
-    if value.contains(secret) {
-        return value.replace(secret, "[redacted]");
-    }
-    if !secret.contains('%') {
-        return value.to_owned();
-    }
     let needle = normalize_escapes(secret);
     let mut output = String::with_capacity(value.len());
     let mut rest = value;
-    loop {
-        let Some(index) = normalize_escapes(rest).find(&needle) else {
-            output.push_str(rest);
-            break;
-        };
+    while let Some(index) = normalize_escapes(rest).find(&needle) {
         output.push_str(&rest[..index]);
         output.push_str("[redacted]");
         rest = &rest[index + secret.len()..];
     }
+    output.push_str(rest);
     output
 }
 
@@ -617,6 +635,16 @@ fn secret_forms(header: &str) -> Vec<String> {
         }
     }
 
+    // A nested JSON value is serialized with `\"` for a quote and `\\` for a
+    // backslash. A body that quotes an already-serialized detail keeps that
+    // spelling, so the escaped form is matched as a second layer.
+    for secret in secrets.clone() {
+        let escaped = json_escaped(&secret);
+        if escaped != secret {
+            secrets.push(escaped);
+        }
+    }
+
     // A Base64 credential decodes to `user:token`; an empty username leaves
     // the whole token. Short values are not credentials and would mangle
     // ordinary words.
@@ -625,6 +653,13 @@ fn secret_forms(header: &str) -> Vec<String> {
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     secrets.dedup();
     secrets
+}
+
+/// The spelling `secret` takes inside a serialized JSON string: quotes and
+/// backslashes escaped, control characters written as `\uXXXX` or `\n`.
+fn json_escaped(secret: &str) -> String {
+    let quoted = Value::String(secret.to_owned()).to_string();
+    quoted[1..quoted.len() - 1].to_owned()
 }
 
 /// A local token bucket plus the forge's documented remaining quota.
@@ -875,28 +910,72 @@ mod tests {
         client.status_error(&response).to_string()
     }
 
-    #[test]
-    fn configured_azure_pat_is_redacted_quoted_and_as_a_basic_header() {
-        use base64::Engine as _;
-        let pat = "azp/7Kq+2f9Xr3Lm0";
-        let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
-        let client = ForgeHttp::new(
+    /// A PAT-shaped value assembled from parts, so no credential literal lands
+    /// in the source: secret scanners flag realistic fakes as if they were
+    /// real.
+    fn fake_pat(suffix: &str) -> String {
+        let mut value = ["azp", "/7Kq+", "2f9Xr3Lm0"].concat();
+        value.push_str(suffix);
+        value
+    }
+
+    /// A PAT-shaped value whose secret contains a quote. A nested JSON error
+    /// body serializes that quote as `\"`.
+    fn quoted_pat() -> String {
+        ["azp\"7Kq", "+2f9Xr3Lm0"].concat()
+    }
+
+    fn client_with_pat(pat: &str) -> ForgeHttp {
+        ForgeHttp::new(
             ForgeKind::AzureDevOps,
             "https://dev.azure.test/acme",
             basic_auth_header("", pat),
             "application/json",
             120,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn configured_azure_pat_is_redacted_quoted_and_as_a_basic_header() {
+        use base64::Engine as _;
+        let pat = fake_pat("");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
+        let escaped = encode_path_segment(&pat);
+        let client = client_with_pat(&pat);
         // A quoted PAT, the Base64 Basic credential echoed in the same JSON
         // message, and the percent-encoded spelling a URL would carry.
         let body = format!(
-            r#"{{"message":"bad PAT \"{pat}\" in Authorization: Basic {encoded}; saw azp%2F7Kq%2B2f9Xr3Lm0"}}"#
+            r#"{{"message":"bad PAT \"{pat}\" in Authorization: Basic {encoded}; saw {escaped}"}}"#
         );
         let message = error_for(&client, body);
-        assert!(!message.contains(pat), "{message}");
+        assert!(!message.contains(&pat), "{message}");
         assert!(!message.contains(&encoded), "{message}");
-        assert!(!message.contains("azp%2F7Kq%2B2f9Xr3Lm0"), "{message}");
+        assert!(!message.contains(&escaped), "{message}");
+        assert!(message.contains("[redacted]"), "{message}");
+    }
+
+    #[test]
+    fn every_escaped_copy_of_the_secret_is_redacted() {
+        // The same credential, spelled plain, with uppercase escapes and with
+        // lowercase escapes, in one body. Each copy must go, not just the
+        // first spelling the matcher happens to see.
+        let pat = fake_pat("");
+        let upper = encode_path_segment(&pat);
+        let lower = upper.replace("%2F", "%2f").replace("%2B", "%2b");
+        assert_ne!(upper, lower, "the two spellings differ in hex case");
+        let client = client_with_pat(&pat);
+        let body =
+            format!(r#"{{"message":"saw {pat} then {upper} then {lower} in the same body"}}"#);
+        let message = error_for(&client, body);
+        assert!(!message.contains(&pat), "{message}");
+        assert!(!message.contains(&upper), "{message}");
+        assert!(
+            !message.contains(&lower),
+            "the lowercase-escaped copy survived: {message}"
+        );
+        assert!(!message.contains("%2f"), "{message}");
+        assert!(!message.contains("%2b"), "{message}");
         assert!(message.contains("[redacted]"), "{message}");
     }
 
@@ -906,23 +985,16 @@ mod tests {
         // A PAT containing `/`, `+` and `=` so its percent-encoded spelling
         // exercises `%2f`, `%2b` and `%3d`; the Basic header adds another
         // `%3d` for the Base64 padding. Servers do not agree on hex case.
-        let pat = "azp/7Kq+2f9Xr3Lm0=";
+        let pat = fake_pat("=");
         let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
-        let client = ForgeHttp::new(
-            ForgeKind::AzureDevOps,
-            "https://dev.azure.test/acme",
-            basic_auth_header("", pat),
-            "application/json",
-            120,
-        )
-        .unwrap();
+        let client = client_with_pat(&pat);
         let lowered = |value: &str| {
             value
                 .replace("%2F", "%2f")
                 .replace("%2B", "%2b")
                 .replace("%3D", "%3d")
         };
-        let pat_escaped = lowered(&encode_path_segment(pat));
+        let pat_escaped = lowered(&encode_path_segment(&pat));
         let basic_escaped = lowered(&encode_path_segment(&format!("Basic {encoded}")));
         assert!(
             pat_escaped.contains("%2f")
@@ -936,7 +1008,7 @@ mod tests {
             r#"{{"message":"bad PAT \"{pat}\"; Authorization: Basic {encoded}; saw {pat_escaped} and {basic_escaped}"}}"#
         );
         let message = error_for(&client, body);
-        assert!(!message.contains(pat), "{message}");
+        assert!(!message.contains(&pat), "{message}");
         assert!(!message.contains(&encoded), "{message}");
         assert!(!message.contains(&pat_escaped), "{message}");
         assert!(!message.contains(&basic_escaped), "{message}");
@@ -946,46 +1018,77 @@ mod tests {
     }
 
     #[test]
+    fn nested_error_body_redacts_a_quoted_secret_before_serializing() {
+        // `error` is an object, so its nested detail is serialized into the
+        // message. The configured secret contains a quote, which that
+        // serialization escapes; matching the decoded strings first is what
+        // keeps it out of the message at all.
+        let pat = quoted_pat();
+        let marker = ["7Kq", "+2f9X", "r3Lm0"].concat();
+        let client = client_with_pat(&pat);
+        let body = serde_json::json!({
+            "error": {
+                "code": "Unauthorized",
+                "detail": format!("the token \"{pat}\" was rejected"),
+            }
+        })
+        .to_string();
+        let message = error_for(&client, body);
+        assert!(message.contains("[redacted]"), "{message}");
+        assert!(message.contains("Unauthorized"), "{message}");
+        assert!(
+            !message.contains(&marker),
+            "the nested detail kept the credential: {message}"
+        );
+        assert!(!message.contains(&pat), "{message}");
+    }
+
+    #[test]
+    fn the_json_escaped_form_of_the_secret_is_redacted_too() {
+        // A non-JSON body that quotes a credential after it was serialized
+        // carries the escaped spelling; the escaped form is matched as a
+        // second layer.
+        let pat = quoted_pat();
+        let escaped = json_escaped(&pat);
+        assert_ne!(escaped, pat);
+        let client = client_with_pat(&pat);
+        let message = error_for(&client, format!("the proxy echoed {escaped} verbatim"));
+        assert!(!message.contains(&escaped), "{message}");
+        assert!(!message.contains("7Kq"), "{message}");
+        assert!(message.contains("[redacted]"), "{message}");
+    }
+
+    #[test]
     fn configured_secret_is_redacted_before_pattern_redaction() {
-        // The pattern pass treats `ghp_tail` as a token and would leave the
-        // `azp_secret,` half of this credential in the message. The
-        // configured-secret pass must run first so the whole value goes.
-        let pat = "azp_secret,ghp_tail";
-        let client = ForgeHttp::new(
-            ForgeKind::AzureDevOps,
-            "https://dev.azure.test/acme",
-            basic_auth_header("", pat),
-            "application/json",
-            120,
-        )
-        .unwrap();
+        // The pattern pass treats the token half as a token and would leave
+        // the rest of this credential in the message. The configured-secret
+        // pass must run first so the whole value goes.
+        let head = ["azp", "_secret"].concat();
+        let token = ["ghp", "_tail"].concat();
+        let pat = format!("{head},{token}");
+        let client = client_with_pat(&pat);
         let message = error_for(
             &client,
             format!(r#"{{"message":"bad PAT \"{pat}\" was rejected"}}"#),
         );
-        assert!(!message.contains("azp_secret"), "{message}");
-        assert!(!message.contains("ghp_tail"), "{message}");
+        assert!(!message.contains(&head), "{message}");
+        assert!(!message.contains(&token), "{message}");
         assert!(message.contains("[redacted]"), "{message}");
     }
 
     #[test]
     fn pattern_redaction_stays_as_a_second_layer() {
-        let client = ForgeHttp::new(
-            ForgeKind::AzureDevOps,
-            "https://dev.azure.test/acme",
-            basic_auth_header("", "azp_configured"),
-            "application/json",
-            120,
-        )
-        .unwrap();
+        let configured = ["azp", "_configured"].concat();
+        let client = client_with_pat(&configured);
+        let outsider = ["ghp", "_outsider"].concat();
         let message = error_for(
             &client,
-            r#"{"message":"proxy said token ghp_outsider leaked"}"#.into(),
+            format!(r#"{{"message":"proxy said token {outsider} leaked"}}"#),
         );
         assert!(
             message.contains("[redacted]"),
             "a credential that is not this account's is still hidden: {message}"
         );
-        assert!(!message.contains("ghp_outsider"), "{message}");
+        assert!(!message.contains(&outsider), "{message}");
     }
 }

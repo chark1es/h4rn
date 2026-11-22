@@ -443,10 +443,14 @@ against the forge's own limits:
 Error messages redact the account's own configured credential first, verbatim
 and in every form an error body or URL can echo it: quoted inside a JSON
 message, percent-encoded (the `%xx` escapes match whichever hex case the server
-used), or Base64 inside a Basic header. A second, pattern-based pass removes
-anything that still looks like a GitHub, GitLab or Atlassian token. The
-redacted message is what reaches a log or a protocol error; the raw response
-body never does.
+used), or Base64 inside a Basic header. Every copy in a body is replaced, so a
+message that carries the plain value plus an uppercase- and a lowercase-escaped
+copy loses all three. A JSON body is redacted as decoded strings before a
+nested value is serialized into the message, so a credential containing a quote
+cannot come back as a JSON-escaped `\"` value; the escaped spelling is also
+matched as a second layer. A pattern-based pass removes anything that still
+looks like a GitHub, GitLab or Atlassian token. The redacted message is what
+reaches a log or a protocol error; the raw response body never does.
 
 ## Testing
 
