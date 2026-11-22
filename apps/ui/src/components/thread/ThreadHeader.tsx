@@ -27,7 +27,7 @@ import type { HostSummary, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { glyphForThread } from "@/lib/agent";
-import { harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
+import { harnessSeed, machineSeed, threadHarnessLabel } from "@/lib/entities";
 import { absoluteDateTime, relativeAge } from "@/lib/format";
 import { shortcutText, titleWithShortcut } from "@/lib/keybindings";
 import {
@@ -252,12 +252,12 @@ export function ThreadHeader({
             <span>{hostName}</span>
             <span className="q-sep">·</span>
             <EntityAvatar
-              seed={harnessSeed(summary.host, summary.harness)}
+              seed={harnessSeed(summary.host, summary.harness, summary.agent_id)}
               kind="harness"
-              label={harnessLabel(summary.harness)}
+              label={threadHarnessLabel(summary.harness, summary.agent_id)}
               size={14}
             />
-            <span>{harnessLabel(summary.harness)}</span>
+            <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
             <span className="grow" />
             <span className={cn("q-th-state", summary.needs_attention && "q-accent")}>
               <AgentGlyph glyph={glyph} size={14} />
@@ -284,12 +284,12 @@ export function ThreadHeader({
           <span>{hostName}</span>
           <span className="q-sep">/</span>
           <EntityAvatar
-            seed={harnessSeed(summary.host, summary.harness)}
+            seed={harnessSeed(summary.host, summary.harness, summary.agent_id)}
             kind="harness"
-            label={harnessLabel(summary.harness)}
+            label={threadHarnessLabel(summary.harness, summary.agent_id)}
             size={14}
           />
-          <span>{harnessLabel(summary.harness)}</span>
+          <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
           <span className="opt">
             <span className="q-sep">/</span> {summary.model}
           </span>

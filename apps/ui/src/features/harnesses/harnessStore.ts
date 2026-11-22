@@ -1,6 +1,14 @@
 import { useEffect, useSyncExternalStore } from "react";
 
-import type { HarnessKind, HarnessUpdateEvent, HarnessVersionInfo, ProtoError } from "@/gen";
+import type {
+  AcpAgent,
+  AcpAgentProbe,
+  AcpAgentSpec,
+  HarnessKind,
+  HarnessUpdateEvent,
+  HarnessVersionInfo,
+  ProtoError,
+} from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
 import { onHarnessFrame } from "@/lib/client/frames";
 import { getClient } from "@/lib/store/appStore";
@@ -18,6 +26,14 @@ export type HarnessState = {
   updating: Partial<Record<HarnessKind, boolean>>;
   output: Partial<Record<HarnessKind, string[]>>;
   results: Partial<Record<HarnessKind, HarnessResult>>;
+  /** Local ACP commands configured on this daemon. */
+  agents: AcpAgent[];
+  agentsLoaded: boolean;
+  agentsLoading: boolean;
+  agentsError: ProtoError | null;
+  /** The last probe of each agent, by instance id. */
+  probes: Record<string, AcpAgentProbe>;
+  probing: Record<string, boolean>;
 };
 
 const initialState: HarnessState = {
@@ -28,6 +44,12 @@ const initialState: HarnessState = {
   updating: {},
   output: {},
   results: {},
+  agents: [],
+  agentsLoaded: false,
+  agentsLoading: false,
+  agentsError: null,
+  probes: {},
+  probing: {},
 };
 
 type Listener = () => void;
@@ -123,6 +145,84 @@ export async function updateHarness(harness: HarnessKind): Promise<void> {
         },
       },
     });
+  }
+}
+
+/** Loads the configured local ACP agents once per mount. */
+export function useAcpAgents(): void {
+  useEffect(() => {
+    if (!state.agentsLoaded && !state.agentsLoading) void loadAcpAgents();
+  }, []);
+}
+
+export async function loadAcpAgents(): Promise<void> {
+  patch({ agentsLoading: true, agentsError: null });
+  try {
+    const response = await getClient().request({ type: "list_acp_agents" });
+    if (response.type !== "acp_agents") return;
+    patch({
+      agents: response.agents,
+      agentsLoaded: true,
+      agentsLoading: false,
+      agentsError: null,
+    });
+  } catch (error) {
+    patch({ agentsLoaded: true, agentsLoading: false, agentsError: toProtoError(error) });
+  }
+}
+
+function protoMessage(error: unknown): string {
+  const proto = toProtoError(error);
+  return proto.hint ? `${proto.message} ${proto.hint}` : proto.message;
+}
+
+export async function addAcpAgent(agent: AcpAgentSpec): Promise<string | null> {
+  try {
+    const response = await getClient().request({ type: "add_acp_agent", agent });
+    if (response.type !== "acp_agent") return null;
+    await loadAcpAgents();
+    return null;
+  } catch (error) {
+    return protoMessage(error);
+  }
+}
+
+export async function updateAcpAgent(id: string, agent: AcpAgentSpec): Promise<string | null> {
+  try {
+    const response = await getClient().request({ type: "update_acp_agent", id, agent });
+    if (response.type !== "acp_agent") return null;
+    await loadAcpAgents();
+    return null;
+  } catch (error) {
+    return protoMessage(error);
+  }
+}
+
+export async function removeAcpAgent(id: string): Promise<string | null> {
+  try {
+    await getClient().request({ type: "remove_acp_agent", id });
+    await loadAcpAgents();
+    return null;
+  } catch (error) {
+    return protoMessage(error);
+  }
+}
+
+/** Starts one agent once and records what it advertises. */
+export async function probeAcpAgent(id: string): Promise<string | null> {
+  patch({ probing: { ...state.probing, [id]: true } });
+  try {
+    const response = await getClient().request({ type: "probe_acp_agent", id });
+    if (response.type !== "acp_agent_probe") return null;
+    patch({
+      probes: { ...state.probes, [id]: response.probe },
+      probing: { ...state.probing, [id]: false },
+    });
+    if (response.probe.version) await loadAcpAgents();
+    return response.probe.error ?? null;
+  } catch (error) {
+    patch({ probing: { ...state.probing, [id]: false } });
+    return protoMessage(error);
   }
 }
 

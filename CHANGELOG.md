@@ -5,6 +5,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Harnesses: run any ACP agent as a local command.** Settings → Harnesses can now store any
+  number of local ACP agents (display name, unique instance id, executable, literal arguments,
+  environment overrides and a thread-workspace or fixed working directory). A new `acp` harness
+  kind reuses the shared ACP session runtime, so prompts, tool calls, plans, permission requests,
+  cancel and `session/load` resume behave exactly as they do for Antigravity; the Antigravity
+  fallback transport and limit parsing stay in its own adapter. The new-thread picker lists
+  configured agents and reads the models each one advertises. Writes need the `admin` scope and are
+  persisted in `acp-agents.json`. Installed state comes from resolving the executable, and a version
+  is shown only when the agent reports one during `initialize`; h4rn does not install or update it.
+  See [docs/acp.md](docs/acp.md).
+
 ### Fixed
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

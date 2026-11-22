@@ -62,6 +62,7 @@ const START_MODELS: Record<HarnessKind, string> = {
   codex: "gpt-5.1-codex",
   opencode: "claude-sonnet-5-5",
   antigravity: "gemini-4-argon-medium",
+  acp: "default",
 };
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];

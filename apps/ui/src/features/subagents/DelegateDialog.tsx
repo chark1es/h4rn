@@ -41,7 +41,9 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
   const spawning = useSubagentStore((state) => state.spawning);
   const hosts = useApp((state) => state.hosts);
   const [task, setTask] = useState("");
-  const [harness, setHarness] = useState<HarnessKind>(thread.harness);
+  const [harness, setHarness] = useState<HarnessKind>(
+    thread.harness === "acp" ? "claude_code" : thread.harness,
+  );
   const [host, setHost] = useState<HostId>(thread.host);
   const [model, setModel] = useState(thread.model);
   const [isolation, setIsolation] = useState<SubagentIsolation>("worktree");
@@ -61,7 +63,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
   useEffect(() => {
     if (!open) return;
     setTask("");
-    setHarness(thread.harness);
+    setHarness(thread.harness === "acp" ? "claude_code" : thread.harness);
     setHost(thread.host);
     setModel(thread.model);
     setIsolation("worktree");

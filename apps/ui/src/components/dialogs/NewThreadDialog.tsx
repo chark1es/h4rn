@@ -2,7 +2,6 @@ import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-r
 import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
-
 import { ENTER, Kbd, MOD } from "@/components/common/Kbd";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,7 +17,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
-import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
+import { acpPickerOptions } from "@/features/harnesses/acpForm";
+import {
+  probeAcpAgent,
+  useAcpAgents,
+  useHarnesses,
+  useHarnessVersions,
+} from "@/features/harnesses/harnessStore";
 import {
   proxyDefaultModel,
   proxyModelsFor,
@@ -28,7 +33,7 @@ import {
 } from "@/features/proxy/proxyStore";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
-import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
+import { HARNESS_LABELS, HARNESS_SLUGS, threadHarnessLabel } from "@/lib/entities";
 import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
@@ -65,6 +70,9 @@ export function NewThreadDialog() {
   const isPhone = useIsPhone();
   useProxyCatalog();
   useHarnessVersions();
+  useAcpAgents();
+  const agents = useHarnesses((value) => value.agents);
+  const probes = useHarnesses((value) => value.probes);
   const harnessRows = useHarnesses((value) => (value.loaded ? value.rows : null));
   const installed = useMemo(
     () => harnessRows?.filter((row) => row.installed !== null).map((row) => row.harness) ?? null,
@@ -83,6 +91,7 @@ export function NewThreadDialog() {
 
   const [host, setHost] = useState<HostId | "">("");
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
+  const [agentId, setAgentId] = useState<string | null>(null);
   const [model, setModel] = useState(DEFAULT_MODELS.claude_code);
   const [workspace, setWorkspace] = useState("~/code");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("approval_required");
@@ -102,6 +111,7 @@ export function NewThreadDialog() {
       const nextHarness =
         detectedHarnesses(HARNESSES, installed, first.harnesses)[0] ?? "claude_code";
       setHarness(nextHarness);
+      setAgentId(null);
       setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
     }
     setStarting(false);
@@ -131,20 +141,48 @@ export function NewThreadDialog() {
 
   const selectedHost = host ? hosts[host] : undefined;
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
+  const selectedAgent = agentId ? agents.find((agent) => agent.id === agentId) : undefined;
+  const probe = agentId ? probes[agentId] : undefined;
   const modelInfo = HARNESS_MODELS[harness];
+  // Built-in harnesses and configured agents share one picker. A value is a
+  // harness kind, or `acp:<instance>` for a local command.
+  const harnessValue = harness === "acp" && agentId ? `acp:${agentId}` : harness;
 
   // If detection settles and the chosen harness is not among those found,
   // move to one that is rather than leave an undetected harness selected.
   const firstChoice = harnessChoices[0];
-  const harnessMissing = harnessChoices.length > 0 && !harnessChoices.includes(harness);
+  const agentGone = harness === "acp" && !selectedAgent;
+  const harnessMissing =
+    harness !== "acp" && harnessChoices.length > 0 && !harnessChoices.includes(harness);
   useEffect(() => {
-    if (!open || !harnessMissing || !firstChoice) return;
+    if (!open) return;
+    if (!harnessMissing && !agentGone) return;
+    if (!firstChoice) return;
     setHarness(firstChoice);
+    setAgentId(null);
     setModel(proxyDefaultModel(firstChoice) ?? DEFAULT_MODELS[firstChoice]);
-  }, [open, harnessMissing, firstChoice]);
+  }, [open, harnessMissing, agentGone, firstChoice]);
+
+  // The model list comes from the agent's own handshake. Probe once when the
+  // picker selects it; the daemon starts the command once and stops it.
+  useEffect(() => {
+    if (!open || !agentId || probes[agentId]) return;
+    void probeAcpAgent(agentId);
+  }, [open, agentId, probes]);
+
+  // Adopt the agent's first advertised model while the user has not chosen.
+  const agentModels = probe?.models.map((entry) => entry.id) ?? [];
+  const firstAgentModel = agentModels[0];
+  useEffect(() => {
+    if (!open || harness !== "acp" || !firstAgentModel) return;
+    setModel((current) => (current === "default" || current === "" ? firstAgentModel : current));
+  }, [open, harness, firstAgentModel]);
   const offline = connection !== "online";
   const modelChoices = [
-    ...new Set([...modelInfo.models, ...proxyModels.map((candidate) => candidate.id)]),
+    ...new Set([
+      ...(harness === "acp" ? agentModels : modelInfo.models),
+      ...(harness === "acp" ? [] : proxyModels.map((candidate) => candidate.id)),
+    ]),
   ];
   const attachments = useAttachmentDrafts("new-thread", {
     enabled: !offline && Boolean(host),
@@ -165,6 +203,7 @@ export function NewThreadDialog() {
     const ok = await createThread({
       host,
       harness,
+      agentId: harness === "acp" ? agentId : null,
       workspacePath: workspace.trim() || "~/code",
       model,
       prompt: prompt.trim(),
@@ -215,8 +254,9 @@ export function NewThreadDialog() {
                 const nextHost = hosts[value];
                 setHost(value);
                 const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
-                if (nextHarness) {
+                if (nextHarness && harness !== "acp") {
                   setHarness(nextHarness);
+                  setAgentId(null);
                   setModel(DEFAULT_MODELS[nextHarness]);
                 }
               }}
@@ -230,14 +270,28 @@ export function NewThreadDialog() {
               block
               label="Harness"
               placeholder="No harness detected"
-              value={harnessChoices.includes(harness) ? harness : ""}
-              options={harnessChoices.map((option) => ({
-                value: option,
-                label: HARNESS_LABELS[option],
-              }))}
+              value={
+                harnessValue === harness && !harnessChoices.includes(harness) ? "" : harnessValue
+              }
+              options={acpPickerOptions(
+                harnessChoices.map((option) => ({
+                  value: option as string,
+                  label: HARNESS_LABELS[option],
+                })),
+                agents,
+              )}
               onChange={(next) => {
-                setHarness(next);
-                setModel(proxyDefaultModel(next) ?? DEFAULT_MODELS[next]);
+                if (next.startsWith("acp:")) {
+                  const id = next.slice(4);
+                  setHarness("acp");
+                  setAgentId(id);
+                  setModel("default");
+                  return;
+                }
+                const kind = next as HarnessKind;
+                setHarness(kind);
+                setAgentId(null);
+                setModel(proxyDefaultModel(kind) ?? DEFAULT_MODELS[kind]);
               }}
             />
           </div>
@@ -256,7 +310,17 @@ export function NewThreadDialog() {
                 <option key={option} value={option} />
               ))}
             </datalist>
-            {modelInfo.thinking ? (
+            {harness === "acp" ? (
+              <span className="text-small text-fg-3">
+                {probe?.error
+                  ? probe.error
+                  : probe
+                    ? probe.models.length > 0
+                      ? `${probe.models.length} models from ${selectedAgent?.name ?? "the agent"}.`
+                      : "The agent advertises no models; type one or leave `default`."
+                    : "Reading the agent's models…"}
+              </span>
+            ) : modelInfo.thinking ? (
               <span className="text-small text-fg-3">
                 {modelInfo.thinking.kind}: {modelInfo.thinking.levels.join(", ")}
               </span>
@@ -378,7 +442,13 @@ export function NewThreadDialog() {
         <p className="rounded-sm border border-line bg-bg-side px-2.5 py-1.5 text-small text-fg-2">
           {selectedHost ? (
             <>
-              Starts <span className="font-mono">{HARNESS_SLUGS[harness]}</span> on{" "}
+              Starts{" "}
+              <span className="font-mono">
+                {harness === "acp"
+                  ? (selectedAgent?.command ?? HARNESS_SLUGS.acp)
+                  : HARNESS_SLUGS[harness]}
+              </span>{" "}
+              {harness === "acp" ? `(${threadHarnessLabel(harness, agentId)})` : null} on{" "}
               <span className="font-medium text-fg">{selectedHost.name}</span> in{" "}
               <span className="font-mono">{workspace || "~/code"}</span>.
             </>

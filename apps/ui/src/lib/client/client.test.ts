@@ -154,6 +154,7 @@ function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "
   return {
     host: "host_a",
     harness: "claude_code",
+    agent_id: null,
     workspace_path: "/work/repo",
     model: "opus",
     prompt: "hello",
