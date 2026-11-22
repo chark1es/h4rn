@@ -267,14 +267,18 @@ describe("H4rnClient", () => {
     expect(events.map((envelope) => envelope.seq)).toEqual([3, 4]);
   });
 
-  it("tags frames held for a slow subscribe as replayed history", async () => {
+  it("tags frames held for a slow resumed subscribe as replayed history", async () => {
     vi.useFakeTimers();
     try {
       let answerSubscribe: Reply | null = null;
       const { client, events, transports } = harness(
-        () =>
+        (context) =>
           new FakeTransport((frame, reply) => {
             if (frame.body.type !== "subscribe") return false;
+            if (context.attempt === 0) {
+              reply({ type: "subscribed", replay_through: 0 });
+              return true;
+            }
             answerSubscribe = reply;
             return true;
           }),
@@ -282,10 +286,18 @@ describe("H4rnClient", () => {
 
       client.start();
       await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+      transport.emit(3, { type: "agent_state_changed", thread_id: "t1", state: "thinking" });
+      await settle();
+      expect(events).toHaveLength(1);
+      transport.drop();
+      await vi.advanceTimersByTimeAsync(20);
       expect(client.getSnapshot().status).toBe("online");
+      expect(answerSubscribe).not.toBeNull();
 
-      // The person's device was away while this approval happened. The
-      // subscribe has not answered, so the frame belongs to the replay.
+      // The person's device was away while this approval happened. The resume
+      // asks from the last seen sequence, so the frame belongs to the replay.
       const approval: Event = {
         type: "approval_requested",
         thread_id: "t1",
@@ -296,37 +308,37 @@ describe("H4rnClient", () => {
         prompt: "npm test",
         options: [],
       };
-      const transport = transports[0];
-      if (!transport) throw new Error("transport was not created");
-      transport.emit(7, approval);
+      const resumed = transports[1];
+      if (!resumed) throw new Error("the reconnect transport was not created");
+      resumed.emit(7, approval);
 
       // A slow replay is exactly the case the old wall-clock grace guessed at.
       await vi.advanceTimersByTimeAsync(3_000);
-      expect(events).toHaveLength(0);
+      expect(events).toHaveLength(1);
       (answerSubscribe as Reply | null)?.({
         type: "subscribed",
         replay_through: 7,
       });
       await settle();
 
-      expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+      expect(events).toHaveLength(2);
+      expect(events[1]).toMatchObject({ seq: 7, replayed: true });
 
       const notificationOptions = {
         threads: {},
         settings: NOTIFICATION_DEFAULTS,
         focus: { windowFocused: false, openThreadId: null, connection: "online" as const },
       };
-      const replayed = events[0];
+      const replayed = events[1];
       if (!replayed) throw new Error("replay was not delivered");
       expect(draftForEnvelope(replayed, notificationOptions)).toBeNull();
 
       // One second later, the same kind of event is live news.
       await vi.advanceTimersByTimeAsync(1_000);
-      transport.emit(8, { ...approval, approval_id: "ap_2" } as Event);
-      expect(events).toHaveLength(2);
-      expect(events[1]?.replayed).toBeUndefined();
-      const live = events[1];
+      resumed.emit(8, { ...approval, approval_id: "ap_2" } as Event);
+      expect(events).toHaveLength(3);
+      expect(events[2]?.replayed).toBeUndefined();
+      const live = events[2];
       if (!live) throw new Error("live event was not delivered");
       expect(draftForEnvelope(live, notificationOptions)).not.toBeNull();
     } finally {
@@ -334,7 +346,7 @@ describe("H4rnClient", () => {
     }
   });
 
-  it("treats a live approval that arrived before the first subscribe answer as news", async () => {
+  it("treats every frame held on a first connect as news", async () => {
     vi.useFakeTimers();
     try {
       let answerSubscribe: Reply | null = null;
@@ -352,10 +364,10 @@ describe("H4rnClient", () => {
       const transport = transports[0];
       if (!transport) throw new Error("transport was not created");
 
-      // On a first connect the replay is empty (`since_seq: null`), but an
-      // approval already waiting at the served head is still history, and one
-      // that arrives after it is live news.
-      transport.emit(2, approvalEvent("ap_history"));
+      // `since_seq: null` means the daemon sent no history at all. Both frames
+      // arrived on this socket after it opened, including the one whose
+      // sequence the answer's journal head already covers, so both are news.
+      transport.emit(2, approvalEvent("ap_before_subscribe"));
       transport.emit(4, approvalEvent("ap_live"));
       (answerSubscribe as Reply | null)?.({
         type: "subscribed",
@@ -363,8 +375,12 @@ describe("H4rnClient", () => {
       });
       await settle();
 
-      expect(events[0]).toMatchObject({ seq: 2, replayed: true });
+      expect(events[0]).toMatchObject({ seq: 2 });
+      expect(events[0]?.replayed).toBeUndefined();
       expect(events[1]?.replayed).toBeUndefined();
+      const first = events[0];
+      if (!first) throw new Error("held event was not delivered");
+      expect(draftForEnvelope(first, notificationOptions())).not.toBeNull();
       const live = events[1];
       if (!live) throw new Error("live event was not delivered");
       expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
@@ -438,8 +454,8 @@ describe("H4rnClient", () => {
       if (!transport) throw new Error("transport was not created");
 
       // Held while the subscribe is open, and still held after its request
-      // times out: without the answer's boundary there is no honest tag yet.
-      transport.emit(7, approvalEvent("ap_replay"));
+      // times out: without the answer nothing can be delivered yet.
+      transport.emit(7, approvalEvent("ap_held"));
       await vi.advanceTimersByTimeAsync(6_000);
       expect(client.getSnapshot().status).toBe("online");
       expect(events).toHaveLength(0);
@@ -454,8 +470,11 @@ describe("H4rnClient", () => {
       });
       await settle();
 
+      // A first connect replayed nothing, so the frame at the served head is
+      // as live as the one after it.
       expect(events).toHaveLength(2);
-      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+      expect(events[0]).toMatchObject({ seq: 7 });
+      expect(events[0]?.replayed).toBeUndefined();
       expect(events[1]?.replayed).toBeUndefined();
       const live = events[1];
       if (!live) throw new Error("live event was not delivered");

@@ -36,6 +36,7 @@ import {
   clearCredentials,
   completeLogin,
   deviceRegistration,
+  type LinkedMachines,
   normalizeTokens,
   pollDeviceGrant,
   type RemoteCredentials,
@@ -74,6 +75,13 @@ export type RemoteState = {
   machines: MachineSummary[];
   /** The machines this device is linked to (or runs), for presence rows. */
   linkedMachines: MachineSummary[];
+  /**
+   * Whether the relay honoured `?linked=true`.
+   *
+   * An older relay answers with every machine on the account and no marker;
+   * `linkedMachines` is then empty so nothing pretends to be a link.
+   */
+  linkedSupported: boolean;
   pairings: PairingInfo[];
   activeMachineId: string | null;
   active: ActiveRemote | null;
@@ -142,6 +150,7 @@ function createInitialState(): RemoteState {
     devices: [],
     machines: [],
     linkedMachines: [],
+    linkedSupported: false,
     pairings: [],
     activeMachineId: active?.machineId ?? null,
     active,
@@ -325,6 +334,7 @@ export function initializeRemote(): void {
       ],
       machines: mockMachines(config.scenario),
       linkedMachines: mockMachines(config.scenario),
+      linkedSupported: true,
       pairings: [],
       activeMachineId: readActiveRemote()?.machineId ?? MOCK_MACHINE_ID,
       lastSyncAt: Date.now(),
@@ -519,13 +529,13 @@ export async function refresh(): Promise<void> {
     return;
   }
   try {
-    const [me, machines, linkedMachines, pairings] = await Promise.all([
+    const [me, machines, linked, pairings] = await Promise.all([
       client.me(),
       client.machines(),
       // This device's links decide which machines can appear in presence
       // rows; the full list feeds the machine picker. Presence is an extra: a
       // proof or relay failure here must not throw away the account refresh.
-      client.machines({ linked: true }).catch(() => [] as MachineSummary[]),
+      client.linkedMachines().catch(() => null as LinkedMachines | null),
       client.listPairings().catch(() => [] as PairingInfo[]),
     ]);
     const device =
@@ -536,7 +546,11 @@ export async function refresh(): Promise<void> {
       device,
       devices: me.devices,
       machines,
-      linkedMachines,
+      // A failed presence request keeps the last known answer rather than
+      // claiming the relay dropped its filter.
+      ...(linked === null
+        ? {}
+        : { linkedMachines: linked.machines, linkedSupported: linked.supported }),
       pairings,
       activeMachineId: remoteStore.getState().activeMachineId,
       lastSyncAt: Date.now(),

@@ -82,6 +82,12 @@ function browserChannel(): NotificationChannel | null {
   if (typeof window === "undefined" || !("Notification" in window)) return null;
   const listeners = new Set<(threadId: ThreadId | null) => void>();
   const shown = new Map<string, Notification>();
+  /**
+   * A constructor that threw once will keep throwing for this page: the OS
+   * permission was revoked, or the context does not allow notifications. The
+   * notifier would otherwise retry on every flush and throw each time.
+   */
+  let unavailable = false;
 
   const emit = (threadId: ThreadId | null) => {
     for (const listener of listeners) listener(threadId);
@@ -89,9 +95,10 @@ function browserChannel(): NotificationChannel | null {
 
   return {
     kind: "browser",
-    permission: async () => normalizePermission(Notification.permission),
+    permission: async () => (unavailable ? "denied" : normalizePermission(Notification.permission)),
     requestPermission: async () => normalizePermission(await Notification.requestPermission()),
     show: (message) => {
+      if (unavailable) return;
       try {
         shown.get(message.key)?.close();
         const notification = new Notification(message.title, {
@@ -108,9 +115,13 @@ function browserChannel(): NotificationChannel | null {
         notification.onclose = () => {
           if (shown.get(message.key) === notification) shown.delete(message.key);
         };
-      } catch {
+      } catch (error) {
         // Some browsers throw when permission was revoked between the check
-        // and the constructor; the next flush asks again.
+        // and the constructor, or when the context forbids notifications
+        // outright. Say it once, then degrade quietly: every later message
+        // would hit the same wall.
+        unavailable = true;
+        console.warn("h4rn: the browser notification channel is unavailable.", error);
       }
     },
     onClick: (listener) => {

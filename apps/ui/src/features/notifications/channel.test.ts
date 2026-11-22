@@ -47,6 +47,46 @@ describe("notification channel permission", () => {
   });
 });
 
+describe("browser notification delivery", () => {
+  it("logs once and stops retrying when the constructor throws", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const ThrowingNotification = vi.fn(() => {
+      throw new Error("permission was revoked");
+    });
+    Object.assign(ThrowingNotification, {
+      permission: "denied",
+      requestPermission: vi.fn(async () => "denied"),
+    });
+    vi.stubGlobal("Notification", ThrowingNotification);
+    vi.stubGlobal("window", {
+      Notification: ThrowingNotification,
+      navigator: { userAgent: "Mozilla/5.0 (X11; Linux x86_64)" },
+    });
+    const channel = notificationChannel();
+
+    channel?.show({
+      id: 1,
+      key: "thread:t1",
+      title: "A thread",
+      body: "Needs an approval.",
+      threadId: "t1",
+    });
+    channel?.show({
+      id: 2,
+      key: "thread:t2",
+      title: "Another thread",
+      body: "Finished.",
+      threadId: "t2",
+    });
+
+    // The first throw is reported, and the dead channel never tries again.
+    expect(ThrowingNotification).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning.mock.calls[0]?.[0]).toContain("browser notification");
+    await expect(channel?.permission()).resolves.toBe("denied");
+  });
+});
+
 describe("desktop notification delivery", () => {
   it("shows through the plugin with the thread as click data", async () => {
     const win = desktopWindow();

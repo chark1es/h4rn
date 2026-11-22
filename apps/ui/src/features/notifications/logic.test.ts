@@ -214,6 +214,7 @@ describe("finished-turn notifications", () => {
       lastTurn?: LastTurn;
       announcedFailure?: boolean;
       liveCompletion?: boolean;
+      placedByUser?: boolean;
     } = {},
   ) {
     return finishedDraft(options.previous ?? wasIn(), next, {
@@ -224,6 +225,7 @@ describe("finished-turn notifications", () => {
       ...(options.announcedFailure === undefined
         ? {}
         : { announcedFailure: options.announcedFailure }),
+      ...(options.placedByUser === undefined ? {} : { placedByUser: options.placedByUser }),
     });
   }
 
@@ -272,6 +274,49 @@ describe("finished-turn notifications", () => {
       { lastTurn: lastTurn("failed", "the host went away") },
     );
     expect(draft?.body).toBe("Failed: the host went away");
+  });
+
+  it("announces a failure while the thread is pinned to Working", () => {
+    // A hand-set Working pin marks `placed_by_user`, but it is a per-thread
+    // override, not a finished turn: the failure still needs the person.
+    const draft = finished(
+      summary(THREAD, {
+        tab: "working",
+        pinned: true,
+        placed_by_user: true,
+        needs_attention: true,
+        agent_state: "error",
+      }),
+      {
+        lastTurn: lastTurn("failed", "the provider rejected the model"),
+        placedByUser: true,
+      },
+    );
+    expect(draft?.body).toBe("Failed: the provider rejected the model");
+  });
+
+  it("announces a failure after the person moved the thread to Working by hand", () => {
+    const draft = finished(
+      summary(THREAD, {
+        tab: "working",
+        placed_by_user: true,
+        needs_attention: true,
+        agent_state: "error",
+      }),
+      {
+        lastTurn: lastTurn("failed", "the host went away"),
+        placedByUser: true,
+      },
+    );
+    expect(draft?.body).toBe("Failed: the host went away");
+  });
+
+  it("stays quiet when the person placed the thread in Done", () => {
+    expect(
+      finished(summary(THREAD, { tab: "done", placed_by_user: true }), {
+        placedByUser: true,
+      }),
+    ).toBeNull();
   });
 
   it("does not repeat a failure when the same turn reaches Done", () => {
@@ -480,7 +525,7 @@ describe("host offline", () => {
     id: string,
     name: string,
     online: boolean,
-    hosts = [{ id, name, kind: "host" as const, distro: null }],
+    hosts: MachineSummary["hosts"] = [{ id, name, kind: "host", distro: null }],
   ): MachineSummary {
     return {
       id,
@@ -537,6 +582,49 @@ describe("host offline", () => {
       }),
     );
     expect(next?.[relayId]?.online).toBe(true);
+  });
+
+  it("does not merge two machines that share a hostname", () => {
+    // With no machine picked, the name cannot say which of the two the live
+    // transport reached. Neither is marked online, so one cannot mask the
+    // other's relay presence.
+    const next = hostPresence(
+      source({
+        activeMachineId: null,
+        localHostName: "atlas",
+        machines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
+      }),
+    );
+    expect(next?.m_one).toEqual({ name: "atlas", online: false });
+    expect(next?.m_two).toEqual({ name: "atlas", online: false });
+  });
+
+  it("keys the connected machine by id when one was picked", () => {
+    const next = hostPresence(
+      source({
+        activeMachineId: "m_one",
+        localHostName: "atlas",
+        machines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
+      }),
+    );
+    expect(next?.m_one?.online).toBe(true);
+    expect(next?.m_two?.online).toBe(false);
+  });
+
+  it("marks only the connected host of a machine, not every WSL distro", () => {
+    const windows = machine("m_atlas", "atlas", false, [
+      { id: "h_windows", name: "atlas", kind: "host", distro: null },
+      { id: "h_wsl", name: "Ubuntu", kind: "wsl", distro: "Ubuntu" },
+    ]);
+    const next = hostPresence(
+      source({
+        activeMachineId: "m_atlas",
+        localHostName: "Ubuntu",
+        machines: [windows],
+      }),
+    );
+    expect(next?.h_wsl?.online).toBe(true);
+    expect(next?.h_windows?.online).toBe(false);
   });
 
   it("has no presence for a direct-only session", () => {

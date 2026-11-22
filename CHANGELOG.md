@@ -87,6 +87,38 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A first connect no longer calls its own handshake history.** `since_seq: null` makes the daemon
+  send no replay, so every frame held between `hello` and the subscribe answer is live news, even
+  when its sequence already sits at or below the journal head named by the answer. Only a resumed
+  subscribe tags frames at or below its boundary as replay. This is what lets an approval that
+  arrives during a first handshake notify.
+- **A pinned or hand-moved thread still alerts when its turn fails.** `placed_by_user` is also set
+  for the Working pin and a manual move to Working. Those are per-thread overrides, not a finished
+  turn, so only a Done transition is attributed to the placement; a failure that raises its hand
+  while the thread is pinned now notifies as it should.
+- **Refreshing the thread list keeps live completions.** A routine list refresh re-seeds the
+  daemon's placement but no longer forgets a `turn_completed` that arrived live, so a Done summary
+  that follows still announces the turn. Remembered completions are cleared only when the stream
+  recovers (a reconnect), because that is when the list may be healing a real gap.
+- **An older relay's ignored `?linked=true` no longer becomes this device's linked presence.** The
+  relay now marks a filtered machine list with `x-h4rn-machine-filter: linked` (and exposes it to
+  browsers). A client that sees no marker treats the list as unsupported, keeps its presence rows
+  off and says the relay is too old, instead of announcing hosts on the whole account.
+- **Presence identifies the connected host by machine id.** A hostname fallback is used only when
+  no machine was picked, and only when exactly one machine owns a host of that name, so two paired
+  machines with the same hostname cannot mask each other. The name match applies per host, so
+  working in one WSL distribution does not mark the Windows host or its siblings online.
+- **A failed tab move leaves no placement note.** The notifier hears about a manual move into Done
+  or Settled only after the daemon accepts it, so a rejected move cannot spend a remembered live
+  completion.
+- **Open at login shows the real OS state.** The row draws no switch while the plugin is being read
+  (instead of a make-believe off), and stays hidden when the shell has no autostart plugin rather
+  than offering a switch that cannot work.
+- **A browser `Notification` constructor that throws is reported once.** Permission revoked between
+  the check and the constructor, or a context that forbids notifications, no longer throws again
+  for every message: the channel logs the first failure and then degrades quietly for the page.
+- **The Host offline row waits for the first account answer.** Settings no longer flashes the "no
+  linked host" explanation before the relay has had a chance to say what is linked.
 - **A second launch hands its deep link to the running app.** Launching h4rn while it is already
   running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that
   started the second process. The single-instance plugin now has its `deep-link` feature, so it

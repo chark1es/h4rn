@@ -71,3 +71,54 @@ describe("notification settings", () => {
     expect(settings.displayedNotificationSetting("denied", true)).toBe(false);
   });
 });
+
+describe("host offline row visibility", () => {
+  it("stays hidden until the first account answer", async () => {
+    const settings = await import("./settings");
+    // No flash of "no linked host" (or a row) before the relay answers.
+    expect(
+      settings.hostOfflineVisibility({
+        phase: "loading",
+        signedIn: true,
+        linkedSupported: true,
+        linkedMachineCount: 1,
+      }),
+    ).toEqual({ kind: "hidden" });
+  });
+
+  it("appears for a filtered relay with linked machines", async () => {
+    const settings = await import("./settings");
+    expect(
+      settings.hostOfflineVisibility({
+        phase: "signed_in",
+        signedIn: true,
+        linkedSupported: true,
+        linkedMachineCount: 2,
+      }),
+    ).toEqual({ kind: "available" });
+  });
+
+  it("says there are no links after a filtered answer with none", async () => {
+    const settings = await import("./settings");
+    expect(
+      settings.hostOfflineVisibility({
+        phase: "signed_in",
+        signedIn: true,
+        linkedSupported: true,
+        linkedMachineCount: 0,
+      }),
+    ).toEqual({ kind: "no-links" });
+  });
+
+  it("names an older relay instead of claiming there are no links", async () => {
+    const settings = await import("./settings");
+    expect(
+      settings.hostOfflineVisibility({
+        phase: "signed_in",
+        signedIn: true,
+        linkedSupported: false,
+        linkedMachineCount: 0,
+      }),
+    ).toEqual({ kind: "relay-too-old" });
+  });
+});

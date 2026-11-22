@@ -892,21 +892,26 @@ export class H4rnClient {
    * arrived live after the daemon went live and must be treated as news. When
    * the subscribe failed there is no boundary, so everything held is history.
    *
-   * `liveEdge` says the subscribe asked from the live edge (`since_seq: null`)
-   * and an older daemon answered without a boundary. Nothing was replayed in
-   * that case, so the held frames can be delivered untagged.
+   * `firstConnect` says the subscribe asked from the live edge
+   * (`since_seq: null`). Nothing was replayed in that case, whatever boundary
+   * the answer names: the daemon sends no history for a live-edge subscribe,
+   * so every held frame reached this socket after it opened and is news. A
+   * frame that arrived between `hello` and `subscribe` belongs here too, even
+   * though the daemon's journal head (and therefore `replayThrough`) already
+   * covers its sequence.
    */
-  private flushReplay(replayThrough: number | null, liveEdge = false): void {
+  private flushReplay(replayThrough: number | null, firstConnect = false): void {
     if (!this.replaying) return;
     this.replaying = false;
     const pending = this.replayBuffer.splice(0).sort((left, right) => left.seq - right.seq);
     for (const envelope of pending) {
       if (envelope.seq <= this.lastSeq) continue;
       this.lastSeq = envelope.seq;
-      // These frames were sent while the subscribe replay was still open, so
-      // they are history from before this client caught up. Tagging them is
-      // what lets the notifier tell a burst of old approvals from a live one.
-      const isReplay = replayThrough !== null ? envelope.seq <= replayThrough : !liveEdge;
+      // Held frames on a resumed subscribe are history from before this client
+      // caught up. Tagging them is what lets the notifier tell a burst of old
+      // approvals from a live one. A first connect has no history to tell.
+      const isReplay =
+        !firstConnect && (replayThrough !== null ? envelope.seq <= replayThrough : true);
       const replayed: EventEnvelope = {
         ...envelope,
         ...(isReplay ? { replayed: true } : {}),
@@ -924,12 +929,14 @@ export class H4rnClient {
 
   /** Closes the replay window with the subscribe answer's boundary. */
   private finishSubscribe(replayThrough: number | null, accepted: boolean): void {
-    // An older daemon can accept a live-edge subscribe without naming a
-    // boundary; nothing was replayed then, so the held frames are live. A
-    // refused subscribe gets no such benefit of the doubt.
-    const liveEdge = accepted && replayThrough === null && this.subscribeSince === null;
+    // A subscribe from the live edge replayed nothing, however its answer
+    // names the boundary: the daemon sends no history for `since_seq: null`, so
+    // every held frame is live. A resumed subscribe's held frames are history
+    // unless the boundary says otherwise. A refused subscribe gets no such
+    // benefit of the doubt.
+    const firstConnect = accepted && this.subscribeSince === null;
     this.subscribeSince = null;
-    this.flushReplay(replayThrough, liveEdge);
+    this.flushReplay(replayThrough, firstConnect);
   }
 
   private handleClose(code: number, reason: string): void {

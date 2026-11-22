@@ -206,8 +206,11 @@ export function finishedDraft(
     /**
      * The summary says the person just placed the thread in this tab.
      *
-     * Another client's manual move arrives as a plain summary and is not the
-     * end of a turn, even when this client still remembers a live completion.
+     * Another client's manual move to Done arrives as a plain summary and is
+     * not the end of a turn, even when this client still remembers a live
+     * completion. The same flag is also set for the hand-set Working pin and
+     * for a manual move to Working; those are per-thread overrides, not a
+     * finished turn, and must never silence a failure alert.
      */
     placedByUser?: boolean;
   },
@@ -217,7 +220,10 @@ export function finishedDraft(
   if (next.parent_thread_id) return null;
   const transition = finishedTransition(previous, next);
   if (!transition) return null;
-  if (options.placedByUser) return null;
+  // Only a Done transition can be the placement itself. A failure raises its
+  // hand while the thread is still Working (possibly because the person pinned
+  // it there), and staying quiet would hide the one thing worth saying.
+  if (transition === "done" && options.placedByUser) return null;
   if (!options.settings.finishedTurns) return null;
   // The summary moving to Done is not news by itself: a different client may
   // have moved the thread, or the list may have healed a gap after a failed
@@ -339,31 +345,66 @@ export type PresenceSource = {
  * The same presence the sidebar shows, shaped for the notifier.
  *
  * The live transport is authoritative for the host this client is connected
- * to, so the relay can never report our own working host as offline. That is
- * true even when no machine was picked by hand: `hello`'s local host names the
- * machine the transport is actually talking to. Other linked machines keep
- * connect's presence. With no relay list there is no independent signal, so
- * this returns `null` (direct sessions hide the row rather than show a switch
- * that can never fire).
+ * to, so the relay can never report our own working host as offline. Which
+ * host that is comes from the machine this session picked when there is one;
+ * only with no machine picked does the local host's name stand in, because
+ * connect mints its own machine and host ids. A name shared by two machines
+ * cannot say which one the transport reached, so the fallback matches neither
+ * (keying on machine id avoids one masking the other). Presence is per host,
+ * never per machine: a Windows host and its WSL distributions are separate
+ * rows, and working in one must not mark the others online.
+ *
+ * Other linked machines keep connect's presence. With no relay list there is
+ * no independent signal, so this returns `null` (direct sessions hide the row
+ * rather than show a switch that can never fire).
  */
 export function hostPresence(source: PresenceSource): Record<string, HostState> | null {
   if (source.connection !== "online") return null;
   if (!source.signedIn || source.machines.length === 0) return null;
   const localHostName = source.localHostName?.toLowerCase() ?? null;
-  const next: Record<string, HostState> = {};
 
+  // A machine picked by hand is exact, as long as the list still names it.
+  // Without one, the local host's name is the only bridge; it identifies a
+  // machine only when exactly one owns a host of that name.
+  const pickedMachineId =
+    source.activeMachineId !== null &&
+    source.machines.some((machine) => machine.id === source.activeMachineId)
+      ? source.activeMachineId
+      : null;
+  let connectedMachineId = pickedMachineId;
+  if (connectedMachineId === null && localHostName !== null) {
+    const matches = source.machines.filter((machine) =>
+      machineHosts(machine).some((host) => host.name.toLowerCase() === localHostName),
+    );
+    if (matches.length === 1) connectedMachineId = matches[0]?.id ?? null;
+  }
+
+  const next: Record<string, HostState> = {};
   for (const machine of source.machines) {
-    const hosts =
-      machine.hosts.length > 0 ? machine.hosts : [{ id: machine.id, name: machine.name }];
-    const connected =
-      machine.id === source.activeMachineId ||
-      (localHostName !== null && hosts.some((host) => host.name.toLowerCase() === localHostName));
+    const hosts = machineHosts(machine);
+    const connectedMachine = machine.id === connectedMachineId;
+    const namedHost =
+      localHostName !== null
+        ? hosts.find((host) => host.name.toLowerCase() === localHostName)
+        : undefined;
     for (const host of hosts) {
-      next[host.id] = { name: host.name, online: connected ? true : machine.online };
+      // The transport vouches for the one host it is talking to. Without a
+      // name match it vouches for the picked machine's hosts as a group.
+      const local =
+        connectedMachine &&
+        (namedHost === undefined ? pickedMachineId !== null : host.id === namedHost.id);
+      next[host.id] = { name: host.name, online: local ? true : machine.online };
     }
   }
 
   return Object.keys(next).length > 0 ? next : null;
+}
+
+/** A machine's addressable hosts, or its own row when none were reported. */
+function machineHosts(machine: MachineSummary): MachineSummary["hosts"] {
+  return machine.hosts.length > 0
+    ? machine.hosts
+    : [{ id: machine.id, name: machine.name, kind: "host", distro: null }];
 }
 
 /**

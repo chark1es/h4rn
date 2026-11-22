@@ -107,7 +107,7 @@ function approvalResolved(threadId: ThreadId, approvalId = "ap_1"): Event {
 
 function turnCompleted(
   threadId: ThreadId,
-  status: "completed" | "interrupted" = "completed",
+  status: "completed" | "interrupted" | "failed" = "completed",
 ): Event {
   return {
     type: "turn_completed",
@@ -166,6 +166,7 @@ function harness(options: {
   let remote: RuntimeRemote = {
     user: { id: "user-1", email: null, display_name: "Dev", avatar_url: null },
     linkedMachines: [],
+    linkedSupported: true,
     activeMachineId: null,
     ...options.remote,
   };
@@ -266,17 +267,35 @@ describe("notification runtime wiring", () => {
     expect(h.shown).toHaveLength(1);
   });
 
-  it("re-seeds the baseline and drops completions when the list syncs", async () => {
+  it("keeps a live completion across a routine thread-list refresh", async () => {
     vi.useFakeTimers();
     const h = harness({});
     h.runtime.start();
 
-    // A live completion before the list healed the gap...
+    // A live completion before the person refreshed the list...
     h.emit(turnCompleted(THREAD));
-    // ...then the authoritative list arrives, still saying Working.
+    // ...does not stop explaining the Done summary that follows: a routine
+    // refresh re-seeds placement, not the event stream.
     h.updateState({ lastSyncAt: 2 });
 
-    // A summary-only Done from another client must not reuse that completion.
+    h.emit(threadUpserted(threadSummary(THREAD, { tab: "done", agent_state: "done" })));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0]?.body).toBe("Finished: the turn is done.");
+  });
+
+  it("drops remembered completions when the stream recovers", async () => {
+    vi.useFakeTimers();
+    const h = harness({});
+    h.runtime.start();
+
+    // A live completion belongs to the stream that is about to be replaced...
+    h.emit(turnCompleted(THREAD));
+    h.updateState({ connection: connection("degraded") });
+    h.updateState({ connection: connection("online"), lastSyncAt: 2 });
+
+    // ...so a summary-only Done after the reconnect must not reuse it.
     h.emit(threadUpserted(threadSummary(THREAD, { tab: "done", agent_state: "done" })));
 
     await vi.advanceTimersByTimeAsync(5_000);
@@ -324,6 +343,29 @@ describe("notification runtime wiring", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(h.shown).toHaveLength(1);
     expect(h.shown[0]?.body).toBe("Finished: the turn is done.");
+  });
+
+  it("still alerts on a failure while the thread is pinned to Working", async () => {
+    vi.useFakeTimers();
+    const h = harness({});
+    h.runtime.start();
+
+    h.emit(turnCompleted(THREAD, "failed"));
+    h.emit(
+      threadUpserted(
+        threadSummary(THREAD, {
+          tab: "working",
+          pinned: true,
+          placed_by_user: true,
+          needs_attention: true,
+          agent_state: "error",
+        }),
+      ),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0]?.body).toBe("Failed: the turn ended with an error.");
   });
 
   it("stays quiet for another client's manual move to Done", async () => {
@@ -386,55 +428,65 @@ describe("host offline delivery", () => {
 
   it("drops an alert when a fresh presence fetch says the host is back", async () => {
     vi.useFakeTimers();
-    const machines = vi.fn(async () => [online]);
-    const h = queuedHostAlert({ machines });
+    const linkedMachines = vi.fn(async () => ({ supported: true, machines: [online] }));
+    const h = queuedHostAlert({ linkedMachines });
 
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(machines).toHaveBeenCalledTimes(1);
-    expect(machines).toHaveBeenCalledWith({ linked: true });
+    expect(linkedMachines).toHaveBeenCalledTimes(1);
     expect(h.shown).toHaveLength(0);
   });
 
   it("drops an alert when fresh presence cannot be fetched", async () => {
     vi.useFakeTimers();
-    const machines = vi.fn(async () => {
+    const linkedMachines = vi.fn(async () => {
       throw new Error("the relay is unreachable");
     });
-    const h = queuedHostAlert({ machines });
+    const h = queuedHostAlert({ linkedMachines });
 
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(machines).toHaveBeenCalledTimes(1);
+    expect(linkedMachines).toHaveBeenCalledTimes(1);
     expect(h.shown).toHaveLength(0);
   });
 
   it("drops an alert without a request when the client disconnected", async () => {
     vi.useFakeTimers();
-    const machines = vi.fn(async () => [offline]);
-    const h = queuedHostAlert({ machines });
+    const linkedMachines = vi.fn(async () => ({ supported: true, machines: [offline] }));
+    const h = queuedHostAlert({ linkedMachines });
 
     h.updateState({ connection: connection("degraded") });
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(machines).not.toHaveBeenCalled();
+    expect(linkedMachines).not.toHaveBeenCalled();
     expect(h.shown).toHaveLength(0);
   });
 
   it("delivers the alert when the fresh presence still says offline", async () => {
     vi.useFakeTimers();
-    const machines = vi.fn(async () => [offline]);
-    const h = queuedHostAlert({ machines });
+    const linkedMachines = vi.fn(async () => ({ supported: true, machines: [offline] }));
+    const h = queuedHostAlert({ linkedMachines });
 
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(machines).toHaveBeenCalledTimes(1);
+    expect(linkedMachines).toHaveBeenCalledTimes(1);
     expect(h.shown).toHaveLength(1);
     expect(h.shown[0]).toMatchObject({
       key: "host:m_atlas",
       title: "atlas",
       body: "Host offline: h4rn can no longer reach it.",
     });
+  });
+
+  it("drops an alert when the relay did not filter to this device's links", async () => {
+    vi.useFakeTimers();
+    const linkedMachines = vi.fn(async () => ({ supported: false, machines: [offline] }));
+    const h = queuedHostAlert({ linkedMachines });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(linkedMachines).toHaveBeenCalledTimes(1);
+    expect(h.shown).toHaveLength(0);
   });
 });
 
@@ -445,13 +497,13 @@ describe("delivery beside a pending fetch", () => {
   /** A presence call that stays pending until the test answers it. */
   function pendingPresence() {
     let release: (list: MachineSummary[]) => void = () => undefined;
-    const machines = vi.fn(
+    const linkedMachines = vi.fn(
       () =>
-        new Promise<MachineSummary[]>((resolve) => {
-          release = resolve;
+        new Promise<{ supported: boolean; machines: MachineSummary[] }>((resolve) => {
+          release = (list) => resolve({ supported: true, machines: list });
         }),
     );
-    return { machines, release: (list: MachineSummary[]) => release(list) };
+    return { linkedMachines, release: (list: MachineSummary[]) => release(list) };
   }
 
   function withHostAlert(client: PresenceClient | null) {
@@ -468,14 +520,14 @@ describe("delivery beside a pending fetch", () => {
   it("shows a due approval without waiting for the host presence fetch", async () => {
     vi.useFakeTimers();
     const presence = pendingPresence();
-    const h = withHostAlert({ machines: presence.machines });
+    const h = withHostAlert({ linkedMachines: presence.linkedMachines });
     h.emit(approvalRequested(THREAD));
 
     await vi.advanceTimersByTimeAsync(1_000);
 
     // The relay request is still in flight, but the approval is not hostage
     // to it.
-    expect(presence.machines).toHaveBeenCalledTimes(1);
+    expect(presence.linkedMachines).toHaveBeenCalledTimes(1);
     expect(h.shown.map((message) => message.key)).toEqual([`thread:${THREAD}`]);
 
     presence.release([offline]);

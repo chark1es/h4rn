@@ -198,7 +198,11 @@ fn cors_layer(config: &Config) -> Option<CorsLayer> {
                 HeaderName::from_static("x-h4rn-proof"),
                 HeaderName::from_static("x-h4rn-timestamp"),
                 HeaderName::from_static("x-h4rn-nonce"),
-            ]),
+            ])
+            // The machine list's filter marker tells the client whether an
+            // older relay ignored `?linked=true`; a browser cannot read it
+            // without being allowed to see it cross-origin.
+            .expose_headers([HeaderName::from_static(MACHINES_FILTER_HEADER)]),
     )
 }
 
@@ -1181,11 +1185,30 @@ struct MachineListQuery {
     linked: bool,
 }
 
+/// Response header naming the filter a machine list was served with.
+///
+/// Older relays ignore `?linked=true` and answer with every machine on the
+/// account. A client cannot tell that answer from a filtered one by the body
+/// alone, so a relay that honours the filter says so; its absence means the
+/// list is the whole account, not this device's links.
+const MACHINES_FILTER_HEADER: &str = "x-h4rn-machine-filter";
+
+fn machine_list_headers(linked: bool) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if linked {
+        headers.insert(
+            HeaderName::from_static(MACHINES_FILTER_HEADER),
+            HeaderValue::from_static("linked"),
+        );
+    }
+    headers
+}
+
 async fn list_machines(
     State(state): State<AppState>,
     authed: Authed,
     Query(query): Query<MachineListQuery>,
-) -> Result<Json<Vec<MachineSummary>>> {
+) -> Result<(HeaderMap, Json<Vec<MachineSummary>>)> {
     let online: HashSet<Uuid> = state.relay.online_machines(authed.user.id).await;
     let mut machines = state.store.machines(authed.user.id, &online).await?;
     if query.linked {
@@ -1200,7 +1223,7 @@ async fn list_machines(
         machines
             .retain(|machine| Uuid::parse_str(&machine.id).is_ok_and(|id| linked.contains(&id)));
     }
-    Ok(Json(machines))
+    Ok((machine_list_headers(query.linked), Json(machines)))
 }
 
 async fn update_hosts(
@@ -1862,4 +1885,27 @@ async fn relay_upgrade(
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
     crate::relay::upgrade(state, client, query, headers, ws).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_linked_filter_is_named_only_when_it_applied() {
+        // The client treats a missing marker as "an older relay ignored the
+        // query", so an unfiltered list must never claim the linked scope.
+        assert!(
+            machine_list_headers(false)
+                .get(MACHINES_FILTER_HEADER)
+                .is_none(),
+            "an unfiltered list must not claim the linked scope"
+        );
+        assert_eq!(
+            machine_list_headers(true)
+                .get(MACHINES_FILTER_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("linked")
+        );
+    }
 }

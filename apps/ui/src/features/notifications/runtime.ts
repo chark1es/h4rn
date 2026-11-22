@@ -69,11 +69,15 @@ export type RuntimeState = Pick<
 >;
 
 /** The bits of remote state the notifier reads. */
-export type RuntimeRemote = Pick<RemoteState, "user" | "linkedMachines" | "activeMachineId">;
+export type RuntimeRemote = Pick<
+  RemoteState,
+  "user" | "linkedMachines" | "linkedSupported" | "activeMachineId"
+>;
 
-/** The one connect call presence needs. */
+/** One linked-machine answer from connect. */
 export type PresenceClient = {
-  machines(options?: { linked?: boolean }): Promise<MachineSummary[]>;
+  /** The machines this device is linked to, and whether the relay filtered. */
+  linkedMachines(): Promise<{ supported: boolean; machines: MachineSummary[] }>;
 };
 
 /**
@@ -117,6 +121,8 @@ export class NotificationRuntime {
   private hosts: Record<string, HostState> | null = null;
   /** The last polled connect machine list, while signed in. */
   private machines: MachineSummary[] | null = null;
+  /** Whether the relay honours `?linked=true`; null until a poll answers. */
+  private linkedSupported: boolean | null = null;
   /** The daemon summary each thread was last seen in. */
   private readonly summaries = new Map<
     ThreadId,
@@ -179,9 +185,9 @@ export class NotificationRuntime {
     this.deps.refreshHosts();
     const client = this.deps.connectClient();
     if (!client) return;
-    let list: MachineSummary[];
+    let answer: { supported: boolean; machines: MachineSummary[] };
     try {
-      list = await client.machines({ linked: true });
+      answer = await client.linkedMachines();
     } catch {
       // A relay that cannot answer says nothing about a host's presence.
       return;
@@ -191,7 +197,8 @@ export class NotificationRuntime {
       this.hosts = null;
       return;
     }
-    this.machines = list;
+    this.linkedSupported = answer.supported;
+    this.machines = answer.supported ? answer.machines : null;
     this.evaluateHosts();
   }
 
@@ -354,9 +361,9 @@ export class NotificationRuntime {
     const remote = this.deps.remote();
     const client = this.deps.connectClient();
     if (remote.user === null || client === null) return { presence: null, connection };
-    let list: MachineSummary[];
+    let answer: { supported: boolean; machines: MachineSummary[] };
     try {
-      list = await client.machines({ linked: true });
+      answer = await client.linkedMachines();
     } catch {
       return {
         presence: null,
@@ -365,7 +372,8 @@ export class NotificationRuntime {
     }
     const after = this.deps.state().connection.status;
     if (after !== "online") return { presence: null, connection: after };
-    this.machines = list;
+    this.linkedSupported = answer.supported;
+    this.machines = answer.supported ? answer.machines : null;
     return { presence: this.presenceSnapshot(), connection: after };
   }
 
@@ -454,6 +462,7 @@ export class NotificationRuntime {
   private presenceSnapshot(): Record<string, HostState> | null {
     const state = this.deps.state();
     const remote = this.deps.remote();
+    if (!this.linkedAvailable()) return null;
     return hostPresence({
       connection: state.connection.status,
       signedIn: remote.user !== null,
@@ -466,10 +475,19 @@ export class NotificationRuntime {
     });
   }
 
+  /** Whether the relay said it filtered `?linked=true` for this device. */
+  private linkedAvailable(): boolean {
+    return this.linkedSupported ?? this.deps.remote().linkedSupported;
+  }
+
   /** Whether this session has the relay presence that makes the row meaningful. */
   private relayPresenceAvailable(): boolean {
     const remote = this.deps.remote();
-    return remote.user !== null && (this.machines ?? remote.linkedMachines).length > 0;
+    return (
+      remote.user !== null &&
+      this.linkedAvailable() &&
+      (this.machines ?? remote.linkedMachines).length > 0
+    );
   }
 
   /**
@@ -496,12 +514,12 @@ export class NotificationRuntime {
    * A reconnect or a failed subscribe can leave the event stream with a gap
    * that only the thread list fills. The list is authoritative for the
    * baseline: if it says Done, a later summary update is not the moment a turn
-   * finished. Remembered live completions go too: they belonged to the stream
-   * that the list just replaced.
+   * finished. Remembered live completions belong to that same stream, so a
+   * gap recovery clears them too.
    */
-  private reseedSummaries(): void {
+  private reseedSummaries(clearCompletions = false): void {
     this.summaries.clear();
-    this.memory.clearCompletions();
+    if (clearCompletions) this.memory.clearCompletions();
     this.seedSummaries();
     this.lastThreadsSyncAt = this.deps.state().lastSyncAt;
   }
@@ -512,9 +530,12 @@ export class NotificationRuntime {
     this.lastConnection = state.connection.status;
     if (becameOnline) {
       // Every ready handshake starts a fresh baseline, before any list arrives.
-      this.reseedSummaries();
+      this.reseedSummaries(true);
     } else if (state.lastSyncAt !== this.lastThreadsSyncAt) {
-      // The thread list loaded and may have healed a gap.
+      // A routine refresh also adopts the list's placement, but it does not
+      // replace the event stream: a live completion that arrived before the
+      // person opened Settings or refreshed is still the reason a later Done
+      // summary is news.
       this.reseedSummaries();
     } else {
       this.seedSummaries();
