@@ -69,6 +69,9 @@ export type RuntimeState = Pick<
   "connection" | "threads" | "hosts" | "lastSyncAt" | "localHostId"
 >;
 
+/** The parts of a thread summary a transition is measured against. */
+type SummaryBaseline = Pick<ThreadSummary, "tab" | "needs_attention" | "agent_state">;
+
 /** The bits of remote state the notifier reads. */
 export type RuntimeRemote = {
   user: RemoteState["user"];
@@ -78,11 +81,15 @@ export type RuntimeRemote = {
    * linked answer arrives.
    */
   linkedSupported: boolean | null;
-  activeMachineId: string | null;
   /**
-   * This device as connect registered it. A paired client carries the
-   * machine's id, which names the connected machine without a manual pick.
+   * The machine the active transport dials, from the persisted descriptor.
+   *
+   * Pairing writes the relay's `machine_devices` id here and a manual pick
+   * writes the chosen machine, so this is the peer for relay and direct
+   * addresses alike.
    */
+  activeMachineId: string | null;
+  /** This device as connect registered it, for the daemon's own identity. */
   device: ConnectDevice | null;
 };
 
@@ -135,17 +142,27 @@ export class NotificationRuntime {
   private machines: MachineSummary[] | null = null;
   /** Whether the relay honours `?linked=true`; null until a poll answers. */
   private linkedSupported: boolean | null = null;
-  /** The daemon summary each thread was last seen in. */
-  private readonly summaries = new Map<
-    ThreadId,
-    Pick<ThreadSummary, "tab" | "needs_attention" | "agent_state">
-  >();
+  /**
+   * The last summary the live stream sent per thread.
+   *
+   * Kept apart from list snapshots: a list reply can answer Done before the
+   * completion and its upsert arrive, and adopting that placement as the
+   * baseline would swallow the very transition the completion explains.
+   */
+  private readonly streamed = new Map<ThreadId, SummaryBaseline>();
+  /**
+   * The placement a thread was first seen in through a list response.
+   *
+   * Used only for threads the stream has not named yet, so a fresh page knows
+   * a thread was already Done instead of treating its next tick as a finish.
+   */
+  private readonly listed = new Map<ThreadId, SummaryBaseline>();
   /** Threads the daemon reported as subagent children. */
   private readonly childThreads = new Set<ThreadId>();
+  /** Live failure reports waiting for a summary to name their thread. */
+  private readonly pendingFailures = new Set<ThreadId>();
   /** What each thread's most recent turn did, until the next turn starts. */
   private readonly memory = new NotificationMemory();
-  /** The store's last list sync, so a healed list can re-seed the baseline. */
-  private lastThreadsSyncAt: number | null = null;
   private lastConnection: string | null = null;
   private started = false;
 
@@ -159,9 +176,8 @@ export class NotificationRuntime {
     if (this.started) return;
     this.started = true;
 
-    this.seedSummaries();
+    this.seedListed();
     this.lastConnection = this.deps.state().connection.status;
-    this.lastThreadsSyncAt = this.deps.state().lastSyncAt;
 
     this.deps.channel.onClick((threadId) => {
       if (threadId) this.deps.openThread?.(threadId);
@@ -405,7 +421,10 @@ export class NotificationRuntime {
     if (event.type === "error") {
       this.memory.rememberError(event.thread_id, event.message, this.now());
     }
-    if (event.type === "turn_started") this.memory.startTurn(event.thread_id);
+    if (event.type === "turn_started") {
+      this.memory.startTurn(event.thread_id);
+      this.pendingFailures.delete(event.thread_id);
+    }
     if (event.type === "turn_completed") {
       this.memory.completeTurn(event.thread_id, event.status, this.now(), !envelope.replayed);
       // The completion is the turn's own outcome, wherever the tab sits. A
@@ -414,28 +433,19 @@ export class NotificationRuntime {
       // there, so placement must not be the thing that decides this.
       if (!envelope.replayed) {
         const threadId = event.thread_id;
-        const isChild =
-          this.childThreads.has(threadId) ||
-          this.deps.state().threads[threadId]?.parent_thread_id != null;
-        const failed = failedOutcomeDraft(threadId, {
-          threads: this.deps.state().threads,
-          settings: this.deps.settings(),
-          focus: this.deps.focus(),
-          lastTurn: this.memory.lastTurn(threadId),
-          announcedFailure: this.memory.failureAnnounced(threadId),
-          childThread: isChild,
-        });
-        if (failed !== null) {
-          // The outcome was the announcement: a later Done summary for the
-          // same turn has nothing left to say.
-          this.memory.announceFailure(threadId);
-          this.memory.announceFinished(threadId);
+        if (event.status === "failed" && !this.summaryKnown(threadId)) {
+          // A failure can arrive before any summary names its thread. Wait for
+          // the summary: if it turns out to be a subagent child, the parent
+          // already mirrors the moment and there must be no alert.
+          this.pendingFailures.add(threadId);
+        } else {
+          this.announceOutcomeFailure(threadId);
         }
-        this.queueDraft(failed);
       }
     }
 
     if (event.type === "thread_upserted") {
+      const deferredFailure = this.pendingFailures.delete(event.thread_id);
       if (event.parent_thread_id) {
         // An approval can arrive before the summary that names the child. The
         // parent mirrors it, so withdraw the queued child draft now.
@@ -445,13 +455,18 @@ export class NotificationRuntime {
       } else {
         this.childThreads.delete(event.thread_id);
       }
-      const previous = this.summaries.get(event.thread_id);
+      const previous = this.streamed.get(event.thread_id) ?? this.listed.get(event.thread_id);
       const transition = finishedTransition(previous, event);
-      this.summaries.set(event.thread_id, {
+      this.streamed.set(event.thread_id, {
         tab: event.tab,
         needs_attention: event.needs_attention,
         agent_state: event.agent_state,
       });
+      if (deferredFailure && !event.parent_thread_id) {
+        // The summary is the first thing to name this thread. It is not a
+        // child, so its live failure still needs the person.
+        this.announceOutcomeFailure(event.thread_id, event.title);
+      }
       if (envelope.replayed) return;
       const liveCompletion = this.memory.hasLiveCompletion(event.thread_id);
       const draft = finishedDraft(previous, event, {
@@ -495,6 +510,39 @@ export class NotificationRuntime {
     );
   }
 
+  /** Whether a summary (live or listed) already names this thread. */
+  private summaryKnown(threadId: ThreadId): boolean {
+    return (
+      this.childThreads.has(threadId) ||
+      this.deps.state().threads[threadId] !== undefined ||
+      this.streamed.has(threadId) ||
+      this.listed.has(threadId)
+    );
+  }
+
+  /** Queues a live failure outcome once the thread is known not to be a child. */
+  private announceOutcomeFailure(threadId: ThreadId, title?: string): void {
+    const isChild =
+      this.childThreads.has(threadId) ||
+      this.deps.state().threads[threadId]?.parent_thread_id != null;
+    const failed = failedOutcomeDraft(threadId, {
+      threads: this.deps.state().threads,
+      settings: this.deps.settings(),
+      focus: this.deps.focus(),
+      lastTurn: this.memory.lastTurn(threadId),
+      announcedFailure: this.memory.failureAnnounced(threadId),
+      childThread: isChild,
+      ...(title === undefined ? {} : { title }),
+    });
+    if (failed !== null) {
+      // The outcome was the announcement: a later Done summary for the
+      // same turn has nothing left to say.
+      this.memory.announceFailure(threadId);
+      this.memory.announceFinished(threadId);
+    }
+    this.queueDraft(failed);
+  }
+
   /** The current host snapshot, in the same shape the sidebar's rows use. */
   private presenceSnapshot(): Record<string, HostState> | null {
     const state = this.deps.state();
@@ -507,8 +555,7 @@ export class NotificationRuntime {
       // list is every machine on the account, and this device cannot see the
       // others' hosts.
       machines: this.machines ?? remote.linkedMachines,
-      activeMachineId: remote.activeMachineId,
-      pairedMachineId: remote.device?.machine_id ?? null,
+      connectedMachineId: connectedMachineId(state, remote),
       localHostName: state.localHostId ? (state.hosts[state.localHostId]?.name ?? null) : null,
     });
   }
@@ -533,12 +580,15 @@ export class NotificationRuntime {
    *
    * `start()` runs before the first thread list loads, so without this a
    * thread that was already Done at startup would look brand new when it later
-   * finished a turn, and its first transition would be ignored.
+   * finished a turn, and its first transition would be ignored. A thread's
+   * first listed placement is kept: later list ticks never replace it, because
+   * a reply can outrun the stream with a Done that the live upsert is about to
+   * explain. The stream's own summaries live in `streamed` and always win.
    */
-  private seedSummaries(replace = false): void {
+  private seedListed(): void {
     for (const [threadId, summary] of Object.entries(this.deps.state().threads)) {
-      if (!replace && this.summaries.has(threadId)) continue;
-      this.summaries.set(threadId, {
+      if (this.listed.has(threadId)) continue;
+      this.listed.set(threadId, {
         tab: summary.tab,
         needs_attention: summary.needs_attention,
         agent_state: summary.agent_state,
@@ -547,32 +597,37 @@ export class NotificationRuntime {
   }
 
   /**
-   * Re-seeds from the daemon store without transitions.
+   * Starts a fresh baseline after the connection becomes ready.
    *
    * A reconnect or a failed subscribe can leave the event stream with a gap
-   * that only the thread list fills. The list is authoritative for the
-   * baseline: if it says Done, a later summary update is not the moment a turn
-   * finished. Remembered live completions belong to that same stream, so a
-   * gap recovery clears them too.
-   *
-   * A routine refresh is not a gap recovery, though. When it returns Done for
-   * a thread whose live completion has not been announced yet, the list has
-   * simply outrun the stream: adopting its placement as the baseline would
-   * swallow the very transition the completion is about to explain. Those
-   * threads keep the last streamed summary as their baseline until the live
-   * upsert arrives.
+   * that only the thread list fills. The list is authoritative at that moment:
+   * if it says Done, a later summary update is not the moment a turn finished.
+   * Remembered live completions belong to the previous stream, so they are
+   * cleared too.
    */
-  private reseedSummaries(clearCompletions = false): void {
-    const streamed = new Map(this.summaries);
-    this.summaries.clear();
-    if (clearCompletions) this.memory.clearCompletions();
-    this.seedSummaries();
-    if (!clearCompletions) {
-      for (const [threadId, summary] of streamed) {
-        if (this.memory.hasLiveCompletion(threadId)) this.summaries.set(threadId, summary);
-      }
+  private resetBaseline(): void {
+    this.streamed.clear();
+    this.listed.clear();
+    this.pendingFailures.clear();
+    this.memory.clearCompletions();
+    this.seedListed();
+  }
+
+  /**
+   * Queues a deferred failure once a list snapshot names its thread.
+   *
+   * A child's failure is cancelled rather than announced: its parent mirrors
+   * the moment.
+   */
+  private resolvePendingFailures(): void {
+    if (this.pendingFailures.size === 0) return;
+    const threads = this.deps.state().threads;
+    for (const threadId of [...this.pendingFailures]) {
+      const summary = threads[threadId];
+      if (!summary) continue;
+      this.pendingFailures.delete(threadId);
+      if (summary.parent_thread_id == null) this.announceOutcomeFailure(threadId, summary.title);
     }
-    this.lastThreadsSyncAt = this.deps.state().lastSyncAt;
   }
 
   private onStoreChange(): void {
@@ -581,16 +636,15 @@ export class NotificationRuntime {
     this.lastConnection = state.connection.status;
     if (becameOnline) {
       // Every ready handshake starts a fresh baseline, before any list arrives.
-      this.reseedSummaries(true);
-    } else if (state.lastSyncAt !== this.lastThreadsSyncAt) {
-      // A routine refresh also adopts the list's placement, but it does not
-      // replace the event stream: a live completion that arrived before the
-      // person opened Settings or refreshed is still the reason a later Done
-      // summary is news.
-      this.reseedSummaries();
+      this.resetBaseline();
     } else {
-      this.seedSummaries();
+      // A routine refresh may introduce a thread the stream has not named yet,
+      // but it never replaces a baseline: the event stream owns every thread it
+      // has spoken about, and a list that answers Done first must not swallow
+      // the live completion and upsert that follow.
+      this.seedListed();
     }
+    this.resolvePendingFailures();
     this.evaluateHosts();
   }
 
@@ -611,6 +665,29 @@ export class NotificationRuntime {
     }
     this.hosts = next;
   }
+}
+
+/**
+ * The machine the live transport is actually reaching.
+ *
+ * It never comes from the account's device rows: a paired client's
+ * `ConnectDevice.machine_id` is empty and, even when set, names the daemon
+ * device, not the machine this socket reached. The active descriptor is the
+ * peer the transport dials — pairing wrote the relay's `machine_devices` id
+ * there, and a manual pick wrote the chosen machine. A direct loopback with no
+ * active descriptor reaches the daemon this device is registered as, so its
+ * own machine id is the peer. Otherwise the local host's name is the only
+ * fallback, and it is narrowed to the one host it names.
+ */
+export function connectedMachineId(
+  state: Pick<RuntimeState, "connection">,
+  remote: Pick<RuntimeRemote, "activeMachineId" | "device">,
+): string | null {
+  if (remote.activeMachineId !== null) return remote.activeMachineId;
+  if (state.connection.transport !== "relay" && remote.device?.kind === "daemon") {
+    return remote.device.machine_id ?? null;
+  }
+  return null;
 }
 
 function focusSnapshot(): FocusSnapshot {

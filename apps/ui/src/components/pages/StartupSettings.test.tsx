@@ -48,7 +48,7 @@ describe("Startup settings", () => {
   it("hides the row when the shell has no autostart plugin", async () => {
     bridge.current = shell({
       autostartEnabled: async () => {
-        throw new Error("plugin:autostart|is_enabled is not allowed");
+        throw new Error("plugin:autostart|is_enabled not found");
       },
     });
     render(<StartupSettings />);
@@ -56,6 +56,21 @@ describe("Startup settings", () => {
     // The tray row still proves the group rendered.
     expect(await screen.findByText("Keep running in tray")).toBeTruthy();
     await waitFor(() => expect(screen.queryByText("Open at login")).toBeNull());
+  });
+
+  it("keeps the row when the plugin is present but denies the capability", async () => {
+    bridge.current = shell({
+      autostartEnabled: async () => {
+        throw new Error("plugin:autostart|is_enabled is not allowed");
+      },
+    });
+    render(<StartupSettings />);
+
+    // A capability denial is not a missing plugin: the build can offer the
+    // setting, so the row stays and says what went wrong.
+    expect(await screen.findByText("Open at login")).toBeTruthy();
+    expect(screen.queryByRole("switch", { name: "Open at login" })).toBeNull();
+    expect((await screen.findByRole("alert")).textContent).toContain("is not allowed");
   });
 
   it("shows any other read failure as an error line, not as a missing plugin", async () => {

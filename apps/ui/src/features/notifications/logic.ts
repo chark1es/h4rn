@@ -272,6 +272,8 @@ export function failedOutcomeDraft(
     announcedFailure?: boolean;
     /** A subagent child thread: its parent mirrors the moment. */
     childThread?: boolean;
+    /** The title from the summary that named a deferred failure's thread. */
+    title?: string;
   },
 ): NotificationDraft | null {
   if (options.childThread) return null;
@@ -283,7 +285,7 @@ export function failedOutcomeDraft(
   const draft: NotificationDraft = {
     key: threadKey(threadId),
     kind: "finished",
-    title: threadTitle(options.threads, threadId),
+    title: options.title ?? threadTitle(options.threads, threadId),
     body: finishedBody(options.lastTurn),
     threadId,
   };
@@ -367,17 +369,16 @@ export type PresenceSource = {
    * no presence to report.
    */
   machines: MachineSummary[];
-  /** The machine the person picked by hand, if any. */
-  activeMachineId: string | null;
   /**
-   * The machine this client is paired with, as connect records it on this
-   * device (`ConnectDevice.machine_id`).
+   * The machine the live transport is actually reaching.
    *
-   * Unlike `activeMachineId`, this needs no manual pick: a paired phone or
-   * browser already knows which machine the relay handed it to, so the live
-   * transport can vouch for that machine even before the person chooses one.
+   * It comes from the peer, never from the account's device rows: a relay
+   * link names the machine its URL was minted for (pairing writes the relay's
+   * `machine_devices` id, a manual pick writes the chosen machine), and a
+   * direct loopback reaches the daemon this device is registered as. When
+   * neither exists the id is `null` and the local host name is the fallback.
    */
-  pairedMachineId: string | null;
+  connectedMachineId: string | null;
   /**
    * Name of the host this client is connected to (`hello`'s local host id
    * resolved through the daemon's host list).
@@ -393,17 +394,18 @@ export type PresenceSource = {
 /**
  * The same presence the sidebar shows, shaped for the notifier.
  *
- * The live transport is authoritative for the host this client is connected
- * to, so the relay can never report our own working host as offline. Which
- * machine that is comes from a verified id: the machine the person picked, or
- * the machine this device is paired with. Only when neither exists does the
- * local host's name stand in, because connect mints its own machine and host
- * ids. A name shared by two machines cannot say which one the transport
- * reached, so those hosts are left out of presence entirely instead of
- * feeding the relay's (possibly stale) answer for a machine in active use.
- * Presence is per host, never per machine: a Windows host and its WSL
- * distributions are separate rows, and working in one must not mark the
- * others online.
+ * The live transport is authoritative for the machine this client is
+ * connected to, so the relay can never report our own working machine as
+ * offline. Which machine that is comes from the peer: a verified machine id
+ * from the transport (a relay link's machine, or the daemon's own registration
+ * on a direct loopback). That id keeps every host of the machine online, so a
+ * Windows host and its WSL siblings are not split by a stale relay answer.
+ * Only when there is no such id does the local host's name stand in, because
+ * connect mints its own machine and host ids; a name match is then narrow, per
+ * host, so working in one WSL distribution does not mark the others online.
+ * A name shared by two machines cannot say which one the transport reached,
+ * so those hosts are left out of presence entirely instead of feeding the
+ * relay's (possibly stale) answer for a machine in active use.
  *
  * Other linked machines keep connect's presence. With no relay list there is
  * no independent signal, so this returns `null` (direct sessions hide the row
@@ -418,9 +420,9 @@ export function hostPresence(source: PresenceSource): Record<string, HostState> 
     machineId !== null && source.machines.some((machine) => machine.id === machineId)
       ? machineId
       : null;
-  const pickedMachineId = known(source.activeMachineId);
-  const pairedMachineId = known(source.pairedMachineId);
-  let connectedMachineId = pickedMachineId ?? pairedMachineId;
+  let connectedMachineId = known(source.connectedMachineId);
+  /** The one host a narrow name match vouches for, if that is how we matched. */
+  let namedHostId: string | null = null;
   /** Hosts an ambiguous name match can no longer speak for. */
   const suppressed = new Set<string>();
   if (connectedMachineId === null && localHostName !== null) {
@@ -435,6 +437,7 @@ export function hostPresence(source: PresenceSource): Record<string, HostState> 
     const match = matches.length === 1 ? matches[0] : undefined;
     if (match) {
       connectedMachineId = match.machineId;
+      namedHostId = match.hostId;
     } else {
       // Two machines answer to the same name: neither can be trusted as the
       // one the transport reached. Leaving them out of presence means no
@@ -447,15 +450,11 @@ export function hostPresence(source: PresenceSource): Record<string, HostState> 
   for (const machine of source.machines) {
     const hosts = machineHosts(machine);
     const connectedMachine = machine.id === connectedMachineId;
-    const namedHost =
-      localHostName !== null
-        ? hosts.find((host) => host.name.toLowerCase() === localHostName)
-        : undefined;
     for (const host of hosts) {
       if (suppressed.has(host.id)) continue;
-      // The transport vouches for the one host it is talking to. Without a
-      // name match it vouches for the connected machine's hosts as a group.
-      const local = connectedMachine && (namedHost === undefined || host.id === namedHost.id);
+      // A verified machine id vouches for the machine's hosts as a group. A
+      // name-only match can only vouch for the one host it named.
+      const local = connectedMachine && (namedHostId === null || host.id === namedHostId);
       next[host.id] = { name: host.name, online: local ? true : machine.online };
     }
   }

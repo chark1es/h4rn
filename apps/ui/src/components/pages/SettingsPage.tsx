@@ -128,8 +128,16 @@ type AutostartState =
  * person should see, not a reason to pretend the setting does not exist.
  */
 export function autostartUnsupported(message: string): boolean {
-  return /plugin:autostart|plugin (?:is )?not found|command not found|no such (?:command|plugin)|not allowed/i.test(
-    message,
+  // A missing plugin or command is the only shape that means "this build
+  // cannot offer the setting". A permission or capability denial ("not
+  // allowed") comes from a plugin that is present, so the row must stay and
+  // say what failed instead of vanishing.
+  const missing =
+    /(?:plugin[: ][\w-]+|unknown plugin|plugin)\b[^\n]*\b(?:not found|not installed|does not exist|unknown)\b/i;
+  return (
+    missing.test(message) ||
+    /(?:command|plugin) not found/i.test(message) ||
+    /no such (?:command|plugin)/i.test(message)
   );
 }
 

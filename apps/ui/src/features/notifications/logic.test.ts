@@ -602,8 +602,7 @@ describe("host offline", () => {
       connection: "online",
       signedIn: true,
       machines: [machine("m_atlas", "atlas", false), machine("m_buildbox", "buildbox", true)],
-      activeMachineId: "m_atlas",
-      pairedMachineId: null,
+      connectedMachineId: "m_atlas",
       localHostName: null,
       ...patch,
     };
@@ -616,15 +615,15 @@ describe("host offline", () => {
     expect(next?.m_atlas).toEqual({ name: "atlas", online: true });
   });
 
-  it("trusts the local host's name even when no machine was picked", () => {
-    // A direct connection through a relay has no `activeMachineId`. Connect
+  it("trusts the local host's name when the transport names no machine", () => {
+    // A direct connection through a relay has no verified machine id. Connect
     // mints its own machine and host ids when a machine registers, so the
     // relay's id never equals `hello`'s local host id; the name is the only
     // field both lists agree on.
     const relayId = "0b5f2b1e-9f3a-4a44-9a5e-71f0a2f7c9d1";
     const next = hostPresence(
       source({
-        activeMachineId: null,
+        connectedMachineId: null,
         localHostName: "atlas",
         machines: [machine(relayId, "atlas", false)],
       }),
@@ -636,7 +635,7 @@ describe("host offline", () => {
     const relayId = "0b5f2b1e-9f3a-4a44-9a5e-71f0a2f7c9d1";
     const next = hostPresence(
       source({
-        activeMachineId: null,
+        connectedMachineId: null,
         localHostName: "Atlas",
         machines: [machine(relayId, "atlas", false)],
       }),
@@ -645,13 +644,13 @@ describe("host offline", () => {
   });
 
   it("does not merge two machines that share a hostname", () => {
-    // With no verified machine id and no pick, the name cannot say which of
-    // the two the live transport reached. Neither is fed relay presence, so
-    // one cannot mask the other's presence and neither can raise an offline
-    // alert for the machine the person is actually using.
+    // With no verified machine id, the name cannot say which of the two the
+    // live transport reached. Neither is fed relay presence, so one cannot
+    // mask the other's presence and neither can raise an offline alert for the
+    // machine the person is actually using.
     const next = hostPresence(
       source({
-        activeMachineId: null,
+        connectedMachineId: null,
         localHostName: "atlas",
         machines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
       }),
@@ -659,13 +658,12 @@ describe("host offline", () => {
     expect(next).toBeNull();
   });
 
-  it("keys the connected machine by the paired device's machine id", () => {
-    // A paired phone or browser knows its machine from connect without the
-    // person picking one, so the relay can never report it offline.
+  it("keys the connected machine by the id the transport reached", () => {
+    // The peer's id (a relay link's machine, or the daemon's own device) needs
+    // no manual pick, so the relay can never report that machine offline.
     const next = hostPresence(
       source({
-        activeMachineId: null,
-        pairedMachineId: "m_one",
+        connectedMachineId: "m_one",
         localHostName: null,
         machines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
       }),
@@ -674,32 +672,40 @@ describe("host offline", () => {
     expect(next?.m_two?.online).toBe(false);
   });
 
-  it("keys the connected machine by id when one was picked", () => {
-    const next = hostPresence(
-      source({
-        activeMachineId: "m_one",
-        localHostName: "atlas",
-        machines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
-      }),
-    );
-    expect(next?.m_one?.online).toBe(true);
-    expect(next?.m_two?.online).toBe(false);
-  });
-
-  it("marks only the connected host of a machine, not every WSL distro", () => {
+  it("keeps every host of the verified machine online, including WSL siblings", () => {
+    // The transport reached the machine, not one row of it: a relay that has
+    // not caught up must not split the Windows host from its WSL distro.
     const windows = machine("m_atlas", "atlas", false, [
       { id: "h_windows", name: "atlas", kind: "host", distro: null },
       { id: "h_wsl", name: "Ubuntu", kind: "wsl", distro: "Ubuntu" },
     ]);
     const next = hostPresence(
       source({
-        activeMachineId: "m_atlas",
-        localHostName: "Ubuntu",
+        connectedMachineId: "m_atlas",
+        localHostName: "atlas",
         machines: [windows],
       }),
     );
+    expect(next?.h_windows?.online).toBe(true);
     expect(next?.h_wsl?.online).toBe(true);
-    expect(next?.h_windows?.online).toBe(false);
+  });
+
+  it("marks only the named host when the name fallback matched", () => {
+    // Without a verified id the name says just which host answered. A sibling
+    // WSL distro keeps the relay's answer rather than riding on the match.
+    const windows = machine("m_atlas", "atlas", false, [
+      { id: "h_windows", name: "atlas", kind: "host", distro: null },
+      { id: "h_wsl", name: "Ubuntu", kind: "wsl", distro: "Ubuntu" },
+    ]);
+    const next = hostPresence(
+      source({
+        connectedMachineId: null,
+        localHostName: "atlas",
+        machines: [windows],
+      }),
+    );
+    expect(next?.h_windows?.online).toBe(true);
+    expect(next?.h_wsl?.online).toBe(false);
   });
 
   it("has no presence for a direct-only session", () => {
@@ -710,11 +716,11 @@ describe("host offline", () => {
         source({
           signedIn: false,
           machines: [],
-          activeMachineId: null,
+          connectedMachineId: null,
         }),
       ),
     ).toBeNull();
-    expect(hostPresence(source({ machines: [], activeMachineId: null }))).toBeNull();
+    expect(hostPresence(source({ machines: [], connectedMachineId: null }))).toBeNull();
   });
 
   it("notifies only for another linked machine that actually went offline", () => {
