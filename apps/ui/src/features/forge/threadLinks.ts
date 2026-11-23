@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type { ThreadPullRequest } from "@/gen";
-import { getClient } from "@/lib/store/appStore";
+import { getClient, onAppEvent } from "@/lib/store/appStore";
 
 import { ForgeApi } from "./store";
 
@@ -52,6 +52,20 @@ export function useThreadPullRequests(
   useEffect(() => {
     if (!threadId) return;
     return subscribeThreadLinks(threadId, reload);
+  }, [threadId, reload]);
+
+  // A watch wake arrives as a user message appended to the thread. It may
+  // also be the last thing the watch ever says (a merge or close ends it), so
+  // re-read rather than keep showing the pre-wake state and a stale
+  // "Stop watching".
+  useEffect(() => {
+    if (!threadId) return;
+    return onAppEvent(({ event }) => {
+      if (event.type !== "item_completed") return;
+      if (event.thread_id !== threadId) return;
+      if (event.item.kind !== "message" || event.item.role !== "user") return;
+      reload();
+    });
   }, [threadId, reload]);
 
   useEffect(() => {

@@ -337,6 +337,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The PR watch keeps its promises under races and failures.** A re-watch read
+  that a poll overtakes is discarded instead of moving the baseline backwards,
+  so the same failed check is not reported twice. Watch reads no longer add the
+  PR to the 30-second checks poller that the PR screens use, so ending a watch
+  or a link leaves no poll behind. A watch request during a rate-limit pause
+  spends no requests and takes its baseline from the first poll after the pause.
+  A wake the daemon cannot deliver keeps the watcher's previous snapshot so the
+  next poll retries the same events (bounded like failed reads), and a terminal
+  watch waits for its wake instead of ending unheard. The thread header badge
+  re-reads when the daemon's watch state can have changed — when a wake message
+  is appended and when its panel opens — so a merged PR stops offering "Stop
+  watching".
+
 - **A PR watch hears every change since it started, exactly once.** The GitHub
   change probe is gone: the watch reads the PR detail conditionally, so a `304`
   is built from the body the account's shared cache returns rather than from the

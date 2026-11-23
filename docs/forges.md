@@ -471,13 +471,28 @@ seen-failure state: a second thread watching the same PR, or a thread watching
 again, never replaces another watcher's baseline, so it can neither hide a
 change that watcher has not heard nor repeat one it has. A new watch starts
 from the current snapshot, and it never clears a rate-limit pause the poller
-recorded for that PR. A failure wake fires only for a failing check that was
-not already failing in that watcher's previous snapshot, so a re-run that
-passed and left other checks failing is not reported as a new failure. A watch
-ends after ten wakes in a row that brought only comments or reviews, after
-eight failed reads in a row, or when the thread is settled or archived. A rate
-limit only pauses the watch until the forge's `retry-after` (or two minutes
-when it does not say); it is not a failed read.
+recorded for that PR. While that pause is in effect a watch request spends no
+requests: the first poll after the pause takes the baseline. A re-watch read
+that a poll overtakes is discarded, so a body from before a failure can never
+move the baseline back and cause the same failure to be reported twice. A
+failure wake fires only for a failing check that was not already failing in
+that watcher's previous snapshot, so a re-run that passed and left other
+checks failing is not reported as a new failure. A watch ends after ten wakes
+in a row that brought only comments or reviews, after eight failed reads in a
+row, or when the thread is settled or archived. A rate limit only pauses the
+watch until the forge's `retry-after` (or two minutes when it does not say); it
+is not a failed read.
+
+The watch reads the forge through the service's read paths without asking the
+30-second checks poller to take on the PR. That poller belongs to the screens
+that show a PR; a watch has its own two-minute poll and leaves no entry behind
+when the watch or the link goes away.
+
+A wake the daemon cannot deliver — the thread is busy, the daemon is shutting
+down — keeps that watcher's previous snapshot, and the next poll recomputes the
+same events and tries again. A terminal watch stays until its wake is
+delivered. Failed wakes are bounded like failed reads: after eight in a row the
+watch ends.
 
 Comments and reviews from the linked account itself never wake the agent. That
 needs the account's login, which some credentials do not report (a Bitbucket
@@ -489,7 +504,10 @@ linked-items panel. The other triggers (checks, conflicts, merge and close)
 still apply.
 
 Because the thread list is a client concern, a client that reconnects re-reads
-`ListThreadPullRequests`; watch changes do not add a journaled event.
+`ListThreadPullRequests`; watch changes do not add a journaled event. The badge
+also re-reads when it opens and when a wake message is appended to its thread,
+so a watch that ended (a merge, a close) stops offering "Stop watching" without
+waiting for a reconnect.
 
 ## Polling, rate limits and caching
 

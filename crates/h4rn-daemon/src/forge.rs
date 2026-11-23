@@ -653,9 +653,35 @@ impl ForgeService {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<ForgePullRequest, ForgeServiceError> {
+        self.get_pr_inner(account_id, repo, number, true).await
+    }
+
+    /// Fetches one PR without enrolling it in the checks poller.
+    ///
+    /// The PR watch reads every two minutes on its own and must not leave the
+    /// PR in the 30-second checks poll set. A client surface (the PR page)
+    /// still uses [`Self::get_pr`], so its registration is untouched.
+    pub async fn get_pr_quiet(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgePullRequest, ForgeServiceError> {
+        self.get_pr_inner(account_id, repo, number, false).await
+    }
+
+    async fn get_pr_inner(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        register: bool,
+    ) -> Result<ForgePullRequest, ForgeServiceError> {
         let (account, client) = self.resolve_client(account_id, repo)?;
         let pr = client.get_pr(repo, number).await?;
-        self.watch(&account, repo, number);
+        if register {
+            self.watch(&account, repo, number);
+        }
         Ok(pr)
     }
 
@@ -696,9 +722,33 @@ impl ForgeService {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<ForgeCommentPage, ForgeServiceError> {
+        self.list_comments_inner(account_id, repo, number, true)
+            .await
+    }
+
+    /// Fetches comments without enrolling the PR in the checks poller.
+    pub async fn list_comments_quiet(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeCommentPage, ForgeServiceError> {
+        self.list_comments_inner(account_id, repo, number, false)
+            .await
+    }
+
+    async fn list_comments_inner(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        register: bool,
+    ) -> Result<ForgeCommentPage, ForgeServiceError> {
         let (account, client) = self.resolve_client(account_id, repo)?;
         let page = client.list_comments(repo, number).await?;
-        self.watch(&account, repo, number);
+        if register {
+            self.watch(&account, repo, number);
+        }
         Ok(page)
     }
 
@@ -709,9 +759,32 @@ impl ForgeService {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<ForgeChecks, ForgeServiceError> {
+        self.list_checks_inner(account_id, repo, number, true).await
+    }
+
+    /// Fetches checks without enrolling the PR in the checks poller.
+    pub async fn list_checks_quiet(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeChecks, ForgeServiceError> {
+        self.list_checks_inner(account_id, repo, number, false)
+            .await
+    }
+
+    async fn list_checks_inner(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        register: bool,
+    ) -> Result<ForgeChecks, ForgeServiceError> {
         let (account, client) = self.resolve_client(account_id, repo)?;
         let checks = client.list_checks(repo, number).await?;
-        self.remember_checks(&account, repo, number, &checks);
+        if register {
+            self.remember_checks(&account, repo, number, &checks);
+        }
         Ok(checks)
     }
 
@@ -1021,6 +1094,17 @@ impl ForgeService {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry((account_id.to_owned(), repo.clone(), number))
             .or_insert(WatchState { signature: None });
+    }
+
+    /// The PRs whose checks the 30-second poller reads, for daemon tests.
+    #[cfg(test)]
+    pub(crate) fn watched_prs(&self) -> Vec<(String, ForgeRepoRef, u32)> {
+        self.watches
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn remember_checks(
