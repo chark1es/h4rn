@@ -2,6 +2,7 @@ import { forgeLabel } from "@/features/forge/store";
 import type {
   ClientRequest,
   ForgeAccount,
+  ForgeCapabilities,
   ForgeCapabilityEntry,
   ForgeIssue,
   ForgeIssueCapabilities,
@@ -74,9 +75,14 @@ export class IssueApi {
   async forgeAccounts(): Promise<{
     accounts: ForgeAccount[];
     capabilities: ForgeCapabilityEntry[];
+    linear: ForgeCapabilities | null;
   }> {
     const response = await this.call({ type: "forge_list_accounts" }, "forge_accounts");
-    return { accounts: response.accounts, capabilities: response.capabilities };
+    return {
+      accounts: response.accounts,
+      capabilities: response.capabilities,
+      linear: response.linear ?? null,
+    };
   }
 
   async detectRepo(workspace: string): Promise<ForgeRepoRef | null> {
@@ -394,12 +400,12 @@ export function issueCapabilitiesFor(
   kind: "forge" | "linear",
   account: ForgeAccount | LinearAccount | undefined,
   entries: ForgeCapabilityEntry[],
+  linear: ForgeCapabilities | null | undefined = null,
 ): ForgeIssueCapabilities {
   if (kind === "linear") {
-    return (
-      entries.find((entry) => entry.forge === "linear")?.capabilities.issues ??
-      NO_ISSUE_CAPABILITIES
-    );
+    // Linear never appears in the forge list; its capabilities arrive in
+    // their own field so older clients keep reading a forge-only list.
+    return linear?.issues ?? NO_ISSUE_CAPABILITIES;
   }
   if (!account) return NO_ISSUE_CAPABILITIES;
   const forge = (account as ForgeAccount).forge;

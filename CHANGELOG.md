@@ -22,11 +22,13 @@ All notable changes to h4rn are recorded here. The format follows
   the work-item types the project actually defines, keyed by type, so a process without `Issue` or
   without `Bug` still lists, and each type closes on its own finished state. Bitbucket Cloud
   removed its issue API in August 2026, so each such project shows a note and no request is sent.
-  What each tracker can do comes from its capability row (Linear has its own
-  row beside the forges), so the page hides a filter, the labels
+  What each tracker can do comes from its capability row (Linear's arrives in
+  the response's own optional field, so an older client's forge list keeps its
+  shape), so the page hides a filter, the labels
   editor or the close-reason picker where it would fail, and a request that names a comment page
   carries the provider's continuation (Gitea returns a discussion whole and
-  reads the whole label catalogue). A GitHub duplicate close resolves the
+  reads the whole label catalogue, even when a server caps its pages smaller
+  than the 50 rows asked for). A GitHub duplicate close resolves the
   picked number to that issue's own
   id, and Linear's `duplicate` workflow state shows as closed. A Linear API key connected under Settings → Source control & issues is
   stored like a forge token, never returned and never echoed in an error; pick a team per project

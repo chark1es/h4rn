@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ClientRequest,
   ForgeAccount,
+  ForgeCapabilities,
   ForgeCapabilityEntry,
   ForgeIssue,
   ForgeIssueCapabilities,
@@ -76,6 +77,31 @@ function capabilityEntry(
   };
 }
 
+/** Linear's capabilities arrive in the response's own `linear` field. */
+function linearCapabilities(overrides: Partial<ForgeIssueCapabilities> = {}): ForgeCapabilities {
+  return {
+    device_flow: false,
+    review_threads: false,
+    resolve_threads: false,
+    nested_replies: false,
+    inline_review_comments: false,
+    checks: false,
+    pipelines: false,
+    diff_pagination: false,
+    graphql: true,
+    rerun_checks: false,
+    conditional_poll: false,
+    issues: issueCapabilities({
+      write: false,
+      labels: false,
+      assignees: false,
+      close_reason: false,
+      mentioning_filter: false,
+      ...overrides,
+    }),
+  };
+}
+
 const mock = vi.hoisted(() => {
   const state = {
     threads: {},
@@ -93,6 +119,7 @@ const mock = vi.hoisted(() => {
     ],
     accounts: [] as unknown[],
     capabilities: [] as unknown[],
+    linearCapabilities: null as ForgeCapabilities | null,
     repos: {} as Record<string, unknown>,
     mappings: [] as unknown[],
     linearAccounts: [] as unknown[],
@@ -145,6 +172,7 @@ const mock = vi.hoisted(() => {
           type: "forge_accounts",
           accounts: state.accounts as ForgeAccount[],
           capabilities: state.capabilities as ForgeCapabilityEntry[],
+          linear: state.linearCapabilities,
         };
       case "linear_list_accounts":
         return {
@@ -264,7 +292,7 @@ const mock = vi.hoisted(() => {
             comments_next_cursor: after ? null : "lc_2",
             linked_pull_requests: [],
           },
-          read_only: false,
+          read_only: state.readOnly,
         };
       }
       case "forge_list_issue_comments": {
@@ -385,6 +413,7 @@ function resetTracker(
     detailLabels?: { name: string; color: string | null }[];
     detailAssignees?: { login: string; name: string | null }[];
     readOnly?: boolean;
+    linearCapabilities?: ForgeCapabilities | null;
   } = {},
 ) {
   mock.state.projects = options.projects ?? [
@@ -400,17 +429,9 @@ function resetTracker(
   mock.state.accounts = options.accounts ?? [account()];
   mock.state.capabilities = options.capabilities ?? [
     capabilityEntry("github", issueCapabilities()),
-    capabilityEntry(
-      "linear",
-      issueCapabilities({
-        write: false,
-        labels: false,
-        assignees: false,
-        close_reason: false,
-        mentioning_filter: false,
-      }),
-    ),
   ];
+  mock.state.linearCapabilities =
+    "linearCapabilities" in options ? (options.linearCapabilities ?? null) : linearCapabilities();
   mock.state.repos = options.repos ?? { "/work/widget": repo };
   mock.state.commentsCursor = options.commentsCursor ?? null;
   mock.state.mappings = options.mappings ?? [];
@@ -485,6 +506,32 @@ describe("the Issues page", () => {
     ).toBeTruthy();
     expect(screen.queryByLabelText("Issue title")).toBeNull();
     expect(screen.queryByRole("button", { name: "Comment" })).toBeNull();
+  });
+
+  it("says a Linear issue is read-only because its team is not on a project", async () => {
+    resetTracker({
+      readOnly: true,
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
+    expect(
+      await screen.findByText(
+        "This Linear team is not attached to a project, so its issues are read-only. Choose the team for a project in Settings → Source control & issues.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Issue title")).toBeNull();
   });
 
   it("opens the issue beside the list and saves an edited title", async () => {
@@ -926,26 +973,20 @@ describe("issue paging", () => {
 });
 
 describe("Linear capabilities", () => {
-  it("comes from the daemon's linear row, not the UI's own defaults", () => {
-    const row = capabilityEntry(
+  it("comes from the daemon's linear field, not the UI's own defaults", () => {
+    const caps = issueCapabilitiesFor(
       "linear",
-      issueCapabilities({
-        write: false,
-        labels: false,
-        assignees: false,
-        close_reason: false,
-        mentioning_filter: false,
-        linked_pull_requests: false,
-      }),
+      undefined,
+      [capabilityEntry("github", issueCapabilities())],
+      linearCapabilities({ linked_pull_requests: false }),
     );
-    const caps = issueCapabilitiesFor("linear", undefined, [row]);
     expect(caps.read).toBe(true);
     expect(caps.comments).toBe(true);
     expect(caps.linked_pull_requests).toBe(false);
   });
 
-  it("offers nothing for Linear when the daemon has no linear row", () => {
-    expect(issueCapabilitiesFor("linear", undefined, []).read).toBe(false);
+  it("offers nothing for Linear when the daemon sends no linear field", () => {
+    expect(issueCapabilitiesFor("linear", undefined, [], null).read).toBe(false);
   });
 });
 

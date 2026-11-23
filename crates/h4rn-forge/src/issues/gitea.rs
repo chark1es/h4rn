@@ -17,11 +17,31 @@ use url::form_urlencoded;
 use super::{labels, people, state_from_closed};
 use crate::common::{optional_text, parse_datetime, parse_optional_datetime, text, validate_repo};
 use crate::error::{ForgeError, Result};
-use crate::http::ForgeHttp;
+use crate::http::{ForgeHttp, header_u64, next_link};
 
 /// Gitea's default page size, and the largest page a server returns unless
 /// its `MAX_RESPONSE_ITEMS` setting raises it.
 const PAGE_LIMIT: usize = 50;
+
+/// Whether a list response has another page.
+///
+/// Gitea clamps `limit` to the server's `MAX_RESPONSE_ITEMS`, which can be
+/// smaller than the page this client asked for. A short page is therefore not
+/// proof that the listing ended: a `Link` header with `rel="next"` is
+/// authoritative, and the total count bounds the listing when the server sends
+/// it. The count alone cannot say which page size the server actually used, so
+/// it can ask for one page past the end but never stops before one; with
+/// neither header, only an empty page ends the listing.
+fn page_has_more(headers: &reqwest::header::HeaderMap, page: u32, returned: usize) -> bool {
+    if next_link(headers).is_some() {
+        return true;
+    }
+    if let Some(total) = header_u64(headers, "x-total-count") {
+        let seen = u64::from(page) * returned as u64;
+        return returned > 0 && seen < total;
+    }
+    returned > 0
+}
 
 fn repo_url(api: &str, repo: &ForgeRepoRef) -> String {
     format!(
@@ -95,7 +115,11 @@ pub(crate) async fn list(
         params.push(("q", search.to_owned()));
     }
     let url = format!("{}/issues?{}", repo_url(api, repo), query(&params));
-    let value = http.get_json(&url).await?;
+    let response = http
+        .request(reqwest::Method::GET, &url, None, false)
+        .await?;
+    let headers = response.headers.clone();
+    let value = http.json(response)?;
     let items = value
         .as_array()
         .ok_or_else(|| ForgeError::Parse("Gitea returned no issue list".into()))?;
@@ -106,7 +130,7 @@ pub(crate) async fn list(
             .filter_map(|item| map_summary(repo, item))
             .collect(),
         page,
-        has_more: items.len() >= PAGE_LIMIT,
+        has_more: page_has_more(&headers, page, items.len()),
     })
 }
 
@@ -248,11 +272,16 @@ async fn label_ids(http: &ForgeHttp, repo: &str, names: &[String]) -> Result<Vec
     }
     let mut resolved: HashMap<String, u64> = HashMap::new();
     let mut page = 1u32;
+    let mut seen = 0u64;
     loop {
-        let value = http
-            .get_json(&format!("{repo}/labels?limit={PAGE_LIMIT}&page={page}"))
+        let url = format!("{repo}/labels?limit={PAGE_LIMIT}&page={page}");
+        let response = http
+            .request(reqwest::Method::GET, &url, None, false)
             .await?;
+        let total = header_u64(&response.headers, "x-total-count");
+        let value = http.json(response)?;
         let available = value.as_array().cloned().unwrap_or_default();
+        seen += available.len() as u64;
         for name in names {
             if resolved.contains_key(name) {
                 continue;
@@ -265,7 +294,13 @@ async fn label_ids(http: &ForgeHttp, repo: &str, names: &[String]) -> Result<Vec
                 resolved.insert(name.clone(), id);
             }
         }
-        if resolved.len() == names.len() || available.len() < PAGE_LIMIT {
+        // The server may clamp `limit`, so a short page is not the last one.
+        // Keep going until the catalogue is exhausted: the total count says
+        // when that is, or an empty page when the server sends no count.
+        if resolved.len() == names.len()
+            || available.is_empty()
+            || total.is_some_and(|total| seen >= total)
+        {
             break;
         }
         // A server that ignores `page` must not spin forever.

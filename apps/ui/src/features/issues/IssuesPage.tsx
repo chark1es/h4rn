@@ -26,6 +26,7 @@ import { accountsForRepo } from "@/features/forge/store";
 import { useProjects } from "@/features/projects/store";
 import type {
   ForgeAccount,
+  ForgeCapabilities,
   ForgeCapabilityEntry,
   ForgeIssue,
   ForgeIssueCapabilities,
@@ -165,6 +166,8 @@ export function IssuesPage() {
 
   const [accounts, setAccounts] = useState<ForgeAccount[]>([]);
   const [forgeCapabilities, setForgeCapabilities] = useState<ForgeCapabilityEntry[]>([]);
+  // Linear is not a forge, so its capabilities come in their own field.
+  const [linearCapabilities, setLinearCapabilities] = useState<ForgeCapabilities | null>(null);
   const [linearAccounts, setLinearAccounts] = useState<LinearAccount[]>([]);
   const [mappings, setMappings] = useState<LinearProjectTeam[]>([]);
   const [repos, setRepos] = useState<Record<string, ForgeRepoRef>>({});
@@ -215,6 +218,7 @@ export function IssuesPage() {
         if (cancelled) return;
         setAccounts(forge.accounts);
         setForgeCapabilities(forge.capabilities);
+        setLinearCapabilities(forge.linear);
         setLinearAccounts(linear);
         setMappings(teams);
       })
@@ -290,7 +294,12 @@ export function IssuesPage() {
         candidates.find((candidate) => candidate.account_id === accountChoices[project.id]) ??
         candidates[0];
       if (!account) continue;
-      const capabilities = issueCapabilitiesFor("forge", account, forgeCapabilities);
+      const capabilities = issueCapabilitiesFor(
+        "forge",
+        account,
+        forgeCapabilities,
+        linearCapabilities,
+      );
       if (!capabilities.read) continue;
       forgeSources.push({
         kind: "forge",
@@ -385,7 +394,12 @@ export function IssuesPage() {
             loading: false,
             error: null,
             sources: [],
-            capabilities: issueCapabilitiesFor(kind, account, forgeCapabilities),
+            capabilities: issueCapabilitiesFor(
+              kind,
+              account,
+              forgeCapabilities,
+              linearCapabilities,
+            ),
           } satisfies Group);
         group.rows = mergeRows(group.rows, result.rows);
         group.hasMore = group.hasMore || result.source.hasMore;
@@ -402,6 +416,7 @@ export function IssuesPage() {
   }, [
     accounts,
     forgeCapabilities,
+    linearCapabilities,
     linearAccounts,
     mappings,
     projects,
@@ -1011,7 +1026,9 @@ function IssueDetail({
       </header>
       {readOnly ? (
         <p className="q-issues-note">
-          This project does not own the repository, so the issue is read-only.
+          {row.scope.tracker === "linear"
+            ? "This Linear team is not attached to a project, so its issues are read-only. Choose the team for a project in Settings → Source control & issues."
+            : "This project does not own the repository, so the issue is read-only."}
         </p>
       ) : null}
       {canWrite ? (

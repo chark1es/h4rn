@@ -1,6 +1,7 @@
 import type {
   ClientRequest,
   ForgeAccount,
+  ForgeCapabilities,
   ForgeCapabilityEntry,
   ForgeChecks,
   ForgeComment,
@@ -223,36 +224,35 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       },
     },
   },
-  {
-    forge: "linear",
-    capabilities: {
-      device_flow: false,
-      review_threads: false,
-      resolve_threads: false,
-      nested_replies: false,
-      inline_review_comments: false,
-      checks: false,
-      pipelines: false,
-      diff_pagination: false,
-      graphql: true,
-      rerun_checks: false,
-      conditional_poll: false,
-      issues: {
-        read: true,
-        write: false,
-        comments: true,
-        labels: false,
-        assignees: false,
-        close_reason: false,
-        search: true,
-        assigned_filter: true,
-        created_filter: true,
-        mentioning_filter: false,
-        linked_pull_requests: true,
-      },
-    },
-  },
 ];
+
+/// Linear is not a forge: its capabilities travel in their own field.
+const LINEAR_CAPABILITIES: ForgeCapabilities = {
+  device_flow: false,
+  review_threads: false,
+  resolve_threads: false,
+  nested_replies: false,
+  inline_review_comments: false,
+  checks: false,
+  pipelines: false,
+  diff_pagination: false,
+  graphql: true,
+  rerun_checks: false,
+  conditional_poll: false,
+  issues: {
+    read: true,
+    write: false,
+    comments: true,
+    labels: false,
+    assignees: false,
+    close_reason: false,
+    search: true,
+    assigned_filter: true,
+    created_filter: true,
+    mentioning_filter: false,
+    linked_pull_requests: true,
+  },
+};
 
 const ISSUE_SUMMARY: ForgeIssueSummary = {
   repo: REPO,
@@ -636,6 +636,7 @@ export class MockForge {
           type: "forge_accounts",
           accounts: this.accounts,
           capabilities: CAPABILITIES,
+          linear: LINEAR_CAPABILITIES,
         });
         return true;
       }

@@ -40,6 +40,14 @@ fn ok(value: Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(value)
 }
 
+/// A list response that reports how many items the catalogue holds, as Gitea
+/// and Forgejo do. The header is what lets a short page keep paging.
+fn ok_with_total(value: Value, total: u64) -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .set_body_json(value)
+        .insert_header("x-total-count", total.to_string())
+}
+
 fn github_issue() -> Value {
     json!({
         "number": 12,
@@ -645,13 +653,13 @@ async fn gitea_resolves_a_label_on_the_second_catalogue_page() {
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/acme/widget/labels"))
         .and(query_param("page", "1"))
-        .respond_with(ok(Value::Array(first_page)))
+        .respond_with(ok_with_total(Value::Array(first_page), 51))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/acme/widget/labels"))
         .and(query_param("page", "2"))
-        .respond_with(ok(json!([{"id": 51, "name": "release"}])))
+        .respond_with(ok_with_total(json!([{"id": 51, "name": "release"}]), 51))
         .mount(&server)
         .await;
 
@@ -688,6 +696,167 @@ async fn gitea_resolves_a_label_on_the_second_catalogue_page() {
         .await
         .unwrap();
     assert_eq!(updated.summary.labels[0].name, "release");
+}
+
+/// A Gitea server whose `MAX_RESPONSE_ITEMS` is 30 caps every page at 30 even
+/// though this client asks for 50. A 30-row page is not the last page.
+fn gitea_issue_rows(start: u32, count: u32) -> Value {
+    Value::Array(
+        (start..start + count)
+            .map(|number| {
+                json!({
+                    "number": number,
+                    "title": format!("Issue {number}"),
+                    "state": "open",
+                    "user": {"login": "alice"},
+                    "labels": [],
+                    "assignees": [],
+                    "comments": 0,
+                    "updated_at": "2026-03-02T00:00:00Z",
+                    "html_url": format!("https://gitea.com/acme/widget/issues/{number}")
+                })
+            })
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn gitea_keeps_paging_when_the_server_page_is_smaller_than_requested() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues"))
+        .and(query_param("page", "1"))
+        .respond_with(ok_with_total(gitea_issue_rows(1, 30), 70))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues"))
+        .and(query_param("page", "2"))
+        .respond_with(ok_with_total(gitea_issue_rows(31, 30), 70))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues"))
+        .and(query_param("page", "3"))
+        .respond_with(ok_with_total(gitea_issue_rows(61, 10), 70))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues"))
+        .and(query_param("page", "4"))
+        .respond_with(ok_with_total(gitea_issue_rows(1, 0), 70))
+        .mount(&server)
+        .await;
+
+    let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
+    let repo = repo(ForgeKind::Gitea, &base);
+    let first = client
+        .list_issues(&repo, ForgeIssueFilter::Open, 1, None)
+        .await
+        .unwrap();
+    assert_eq!(first.issues.len(), 30);
+    assert!(
+        first.has_more,
+        "a short page from a clamped server still has a next page"
+    );
+
+    let second = client
+        .list_issues(&repo, ForgeIssueFilter::Open, 2, None)
+        .await
+        .unwrap();
+    assert_eq!(second.issues.len(), 30);
+    assert!(second.has_more, "the last row lives on a third short page");
+
+    let third = client
+        .list_issues(&repo, ForgeIssueFilter::Open, 3, None)
+        .await
+        .unwrap();
+    assert_eq!(third.issues.last().map(|issue| issue.number), Some(70));
+
+    // A count without a Link header cannot name the server's page size, so it
+    // may ask once more; the empty page is what ends the listing.
+    let fourth = client
+        .list_issues(&repo, ForgeIssueFilter::Open, 4, None)
+        .await
+        .unwrap();
+    assert!(fourth.issues.is_empty());
+    assert!(!fourth.has_more);
+}
+
+#[tokio::test]
+async fn gitea_finds_a_label_past_a_smaller_catalogue_page() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    let first_page: Vec<Value> = (1..=30)
+        .map(|id| json!({"id": id, "name": format!("label-{id}")}))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "1"))
+        .respond_with(ok_with_total(Value::Array(first_page), 45))
+        .mount(&server)
+        .await;
+    let second_page: Vec<Value> = (31..=45)
+        .map(|id| {
+            json!({
+                "id": id,
+                "name": if id == 45 { "release".to_owned() } else { format!("label-{id}") }
+            })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "2"))
+        .respond_with(ok_with_total(Value::Array(second_page), 45))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .and(body_json(json!({"labels": [45]})))
+        .respond_with(ok(json!([{"id": 45, "name": "release"}])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4"))
+        .respond_with(ok(json!({
+            "number": 4,
+            "title": "Export CSV",
+            "state": "open",
+            "user": {"login": "alice"},
+            "labels": [{"id": 45, "name": "release"}],
+            "updated_at": "2026-03-02T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
+    let repo = repo(ForgeKind::Gitea, &base);
+    let updated = client
+        .update_issue(
+            &repo,
+            4,
+            &ForgeIssueUpdate {
+                labels: Some(vec!["release".into()]),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.summary.labels[0].name, "release");
+    let label_pages = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path() == "/api/v1/repos/acme/widget/labels")
+        .count();
+    assert_eq!(
+        label_pages, 2,
+        "the short first page did not end the catalogue"
+    );
 }
 
 // ---------------------------------------------------------------------------

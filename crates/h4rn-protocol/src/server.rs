@@ -354,6 +354,11 @@ pub enum ResponseBody {
         accounts: Vec<crate::forge::ForgeAccount>,
         /// Capability rows, one per supported forge.
         capabilities: Vec<crate::forge::ForgeCapabilityEntry>,
+        /// What Linear's issue tracker can do. Linear is not a forge and never
+        /// appeared in `capabilities`, so it travels separately: a client
+        /// built before this field simply ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        linear: Option<crate::forge::ForgeCapabilities>,
     },
     /// A forge account was validated and stored.
     ForgeAccount {

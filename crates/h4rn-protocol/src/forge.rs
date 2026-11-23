@@ -798,55 +798,16 @@ pub struct PrLinkedThread {
     pub watching: bool,
 }
 
-/// The tracker a capabilities row describes.
+/// A capabilities row for one forge.
 ///
-/// Forges use the same names as [`ForgeKind`]. Linear is a separate tracker
-/// with its own API, so it gets its own row rather than being folded into a
-/// forge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
-pub enum TrackerKind {
-    /// github.com or a GitHub Enterprise Server (GHES) instance.
-    #[serde(rename = "github")]
-    GitHub,
-    /// gitlab.com or a self-hosted GitLab instance.
-    #[serde(rename = "gitlab")]
-    GitLab,
-    /// gitea.com or a self-hosted Gitea instance.
-    #[serde(rename = "gitea")]
-    Gitea,
-    /// codeberg.org or a self-hosted Forgejo instance.
-    #[serde(rename = "forgejo")]
-    Forgejo,
-    /// bitbucket.org (Bitbucket Cloud).
-    #[serde(rename = "bitbucket")]
-    Bitbucket,
-    /// dev.azure.com or a legacy `*.visualstudio.com` organization.
-    #[serde(rename = "azure_devops")]
-    AzureDevOps,
-    /// Linear.
-    #[serde(rename = "linear")]
-    Linear,
-}
-
-impl From<ForgeKind> for TrackerKind {
-    fn from(forge: ForgeKind) -> Self {
-        match forge {
-            ForgeKind::GitHub => Self::GitHub,
-            ForgeKind::GitLab => Self::GitLab,
-            ForgeKind::Gitea => Self::Gitea,
-            ForgeKind::Forgejo => Self::Forgejo,
-            ForgeKind::Bitbucket => Self::Bitbucket,
-            ForgeKind::AzureDevOps => Self::AzureDevOps,
-        }
-    }
-}
-
-/// A capabilities row for one tracker.
+/// This list has only ever described forges, and older clients still read it
+/// that way, so Linear's capabilities travel in
+/// [`crate::ResponseBody::ForgeAccounts`]'s separate `linear` field instead of
+/// widening `forge`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ForgeCapabilityEntry {
-    /// Tracker the row describes: a forge kind, or `linear`. Linear has its
-    /// own row rather than being folded into a forge.
-    pub forge: TrackerKind,
+    /// Forge the row describes.
+    pub forge: ForgeKind,
     /// What it supports.
     pub capabilities: ForgeCapabilities,
 }

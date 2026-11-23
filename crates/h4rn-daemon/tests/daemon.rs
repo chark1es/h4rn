@@ -119,7 +119,21 @@ async fn boot_inner_with_text_generation(
     text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
 ) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
-    boot_in_dir(dir, options, harness, isolated, text_generation).await
+    boot_in_dir(dir, options, harness, isolated, text_generation, None).await
+}
+
+/// Boots an isolated daemon whose Linear client talks to `endpoint`.
+async fn boot_with_linear_endpoint(endpoint: impl Into<String>) -> TestDaemon {
+    let dir = tempfile::tempdir().expect("tempdir");
+    boot_in_dir(
+        dir,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        None,
+        Some(endpoint.into()),
+    )
+    .await
 }
 
 async fn boot_in_dir(
@@ -128,6 +142,7 @@ async fn boot_in_dir(
     harness: FakeHarness,
     isolated: bool,
     text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
+    linear_endpoint: Option<String>,
 ) -> TestDaemon {
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -148,6 +163,9 @@ async fn boot_in_dir(
         .with_lifecycle(options);
     if let Some(service) = text_generation {
         builder = builder.with_text_generation(service);
+    }
+    if let Some(endpoint) = linear_endpoint {
+        builder = builder.with_linear_endpoint(endpoint);
     }
     builder = if isolated {
         builder.with_catalog(Arc::new(
@@ -3347,6 +3365,7 @@ async fn an_issue_write_checks_ownership_against_the_checkouts_not_a_cache() {
         FakeHarness::new(),
         false,
         None,
+        None,
     )
     .await;
     let host = host_id_for(&daemon).await;
@@ -3519,18 +3538,6 @@ async fn opening_a_linear_issue_reads_it_once() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Restores the Linear endpoint environment when the test ends.
-    struct EndpointGuard(Option<std::ffi::OsString>);
-
-    impl Drop for EndpointGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => unsafe { std::env::set_var("H4RN_LINEAR_ENDPOINT", value) },
-                None => unsafe { std::env::remove_var("H4RN_LINEAR_ENDPOINT") },
-            }
-        }
-    }
-
     let server = MockServer::start().await;
     // One document serves the viewer connect and the issue detail alike;
     // GraphQL clients read only the keys they asked for.
@@ -3566,10 +3573,7 @@ async fn opening_a_linear_issue_reads_it_once() {
         .mount(&server)
         .await;
 
-    let _guard = EndpointGuard(std::env::var_os("H4RN_LINEAR_ENDPOINT"));
-    unsafe { std::env::set_var("H4RN_LINEAR_ENDPOINT", format!("{}/graphql", server.uri())) };
-
-    let daemon = boot_inner(ThreadManagerOptions::default(), FakeHarness::new(), true).await;
+    let daemon = boot_with_linear_endpoint(format!("{}/graphql", server.uri())).await;
     let mut client = Client::connect(&daemon).await;
     client.hello().await;
 
@@ -3586,6 +3590,25 @@ async fn opening_a_linear_issue_reads_it_once() {
         other => panic!("unexpected connect response: {other:?}"),
     };
 
+    // Linear's capabilities travel separately so the forge list keeps its old
+    // shape for clients built before the field existed.
+    match client
+        .request(ClientRequest::ForgeListAccounts)
+        .await
+        .expect("list accounts")
+    {
+        ResponseBody::ForgeAccounts {
+            capabilities,
+            linear,
+            ..
+        } => {
+            assert_eq!(capabilities.len(), 6, "only the six forges are listed");
+            let linear = linear.expect("Linear's row is in its own field");
+            assert!(linear.issues.read);
+            assert!(!linear.issues.write);
+        }
+        other => panic!("unexpected accounts response: {other:?}"),
+    }
     let before = server.received_requests().await.expect("recorded").len();
     let opened = client
         .request(ClientRequest::LinearGetIssue {
@@ -4110,6 +4133,7 @@ async fn a_pull_request_opened_from_the_git_actions_dialog_is_linked_to_its_thre
         },
         FakeHarness::new(),
         false,
+        None,
         None,
     )
     .await;

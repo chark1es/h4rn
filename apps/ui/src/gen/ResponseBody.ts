@@ -10,6 +10,7 @@ import type { DirectoryListing } from "./DirectoryListing";
 import type { FailoverOptions } from "./FailoverOptions";
 import type { FileEntry } from "./FileEntry";
 import type { ForgeAccount } from "./ForgeAccount";
+import type { ForgeCapabilities } from "./ForgeCapabilities";
 import type { ForgeCapabilityEntry } from "./ForgeCapabilityEntry";
 import type { ForgeChecks } from "./ForgeChecks";
 import type { ForgeComment } from "./ForgeComment";
@@ -332,7 +333,13 @@ accounts: Array<ForgeAccount>,
 /**
  * Capability rows, one per supported forge.
  */
-capabilities: Array<ForgeCapabilityEntry>, } | { "type": "forge_account", 
+capabilities: Array<ForgeCapabilityEntry>, 
+/**
+ * What Linear's issue tracker can do. Linear is not a forge and never
+ * appeared in `capabilities`, so it travels separately: a client
+ * built before this field simply ignores it.
+ */
+linear?: ForgeCapabilities | null, } | { "type": "forge_account", 
 /**
  * Public account metadata (never the token).
  */

@@ -3,6 +3,7 @@ import type {
   ClientRequest,
   ForgeAccount,
   ForgeAgentTarget,
+  ForgeCapabilities,
   ForgeCapabilityEntry,
   ForgeChecks,
   ForgeChecksState,
@@ -44,6 +45,8 @@ export type ForgeRequest = (
 export type ForgeAccounts = {
   accounts: ForgeAccount[];
   capabilities: ForgeCapabilityEntry[];
+  /** Linear's issue capabilities; absent on a daemon built before the field. */
+  linear: ForgeCapabilities | null;
 };
 
 export class ForgeApi {
@@ -63,7 +66,11 @@ export class ForgeApi {
 
   async accounts(): Promise<ForgeAccounts> {
     const response = await this.call({ type: "forge_list_accounts" }, "forge_accounts");
-    return { accounts: response.accounts, capabilities: response.capabilities };
+    return {
+      accounts: response.accounts,
+      capabilities: response.capabilities,
+      linear: response.linear ?? null,
+    };
   }
 
   async detectRepo(workspace: string): Promise<ForgeRemote[]> {

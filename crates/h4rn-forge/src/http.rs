@@ -607,7 +607,7 @@ fn retry_at(headers: &HeaderMap) -> Option<DateTime<Utc>> {
         .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
 }
 
-fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
+pub(crate) fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())

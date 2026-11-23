@@ -27,7 +27,6 @@ use h4rn_protocol::{
     ForgeCommentPage, ForgeCredentialSource, ForgeDeviceFlow, ForgeDeviceFlowStatus, ForgeDiffPage,
     ForgeHandoff, ForgeKind, ForgeNewPr, ForgePrFilter, ForgePullRequest, ForgeRemote,
     ForgeRepoRef, ForgeReviewComment, ProtoError, ProtoErrorCode, RuntimeMode, ThreadId,
-    TrackerKind,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -347,19 +346,17 @@ impl ForgeService {
         }
     }
 
-    /// Configured accounts plus one capability row per tracker.
+    /// Configured accounts plus one capability row per forge.
+    ///
+    /// Linear is not a forge and is reported separately by the response, so
+    /// older clients keep reading a list that only ever names forges.
     pub fn list_accounts(&self) -> (Vec<ForgeAccount>, Vec<ForgeCapabilityEntry>) {
         let accounts = self
             .accounts
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let mut entries = h4rn_forge::capability_entries();
-        entries.push(ForgeCapabilityEntry {
-            forge: TrackerKind::Linear,
-            capabilities: crate::linear::capabilities(),
-        });
-        (accounts, entries)
+        (accounts, h4rn_forge::capability_entries())
     }
 
     /// Validates a token with the forge, then stores the account.
@@ -1566,18 +1563,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_capability_list_carries_a_linear_row() {
+    async fn the_capability_list_names_only_forges() {
         let dir = tempfile::tempdir().unwrap();
         let service = ForgeService::open(dir.path()).unwrap();
         let (_, entries) = service.list_accounts();
-        let linear = entries
-            .iter()
-            .find(|entry| entry.forge == TrackerKind::Linear)
-            .expect("Linear has its own row");
-        assert!(linear.capabilities.issues.read);
-        assert!(linear.capabilities.issues.comments);
-        assert!(linear.capabilities.issues.search);
-        assert!(!linear.capabilities.issues.write);
+        assert_eq!(entries.len(), 6);
+        for forge in [
+            ForgeKind::GitHub,
+            ForgeKind::GitLab,
+            ForgeKind::Gitea,
+            ForgeKind::Forgejo,
+            ForgeKind::Bitbucket,
+            ForgeKind::AzureDevOps,
+        ] {
+            assert!(
+                entries.iter().any(|entry| entry.forge == forge),
+                "{forge:?} has a capability row"
+            );
+        }
+        // Linear's row is not part of this list: the response carries it in
+        // its own `linear` field so older clients keep their old shape.
+        assert!(crate::linear::capabilities().issues.read);
         service.shutdown();
     }
 

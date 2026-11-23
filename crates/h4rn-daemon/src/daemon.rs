@@ -53,6 +53,8 @@ pub struct DaemonBuilder {
     text_generation: Option<Arc<crate::text_generation::TextGenerationService>>,
     /// Whether a title job may look for the host's own `claude` or `codex`.
     detect_title_agents: bool,
+    /// Linear GraphQL endpoint; tests point it at a local server.
+    linear_endpoint: Option<String>,
 }
 
 impl DaemonBuilder {
@@ -75,6 +77,7 @@ impl DaemonBuilder {
             update_runner: None,
             text_generation: None,
             detect_title_agents: true,
+            linear_endpoint: None,
         }
     }
 
@@ -144,6 +147,16 @@ impl DaemonBuilder {
         service: Arc<crate::text_generation::TextGenerationService>,
     ) -> Self {
         self.text_generation = Some(service);
+        self
+    }
+
+    /// Points Linear at another GraphQL endpoint (tests use a local server).
+    ///
+    /// The endpoint is passed to [`crate::linear::LinearService::open_with_endpoint`]
+    /// instead of a process-wide environment variable, so parallel tests never
+    /// see each other's server.
+    pub fn with_linear_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.linear_endpoint = Some(endpoint.into());
         self
     }
 
@@ -348,8 +361,13 @@ impl DaemonBuilder {
             Arc::new(crate::pr_links::ThreadWakeSink::new(Arc::clone(&manager))),
         );
         pr_links.start();
-        let linear = crate::linear::LinearService::open(&self.config.data_dir)
-            .map_err(|error| anyhow::anyhow!("open the Linear service: {error}"))?;
+        let linear = match self.linear_endpoint.as_deref() {
+            Some(endpoint) => {
+                crate::linear::LinearService::open_with_endpoint(&self.config.data_dir, endpoint)
+            }
+            None => crate::linear::LinearService::open(&self.config.data_dir),
+        }
+        .map_err(|error| anyhow::anyhow!("open the Linear service: {error}"))?;
         let issue_links = crate::issue_links::IssueLinkService::new(
             journal,
             Arc::new(crate::issue_links::TrackerIssueSource::new(

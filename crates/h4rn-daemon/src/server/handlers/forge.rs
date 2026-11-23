@@ -74,6 +74,7 @@ pub(super) async fn handle(
             Ok(ResponseBody::ForgeAccounts {
                 accounts,
                 capabilities,
+                linear: Some(crate::linear::capabilities()),
             })
         }
         ClientRequest::ForgeAddAccount {
