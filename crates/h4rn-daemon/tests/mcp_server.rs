@@ -1459,20 +1459,20 @@ async fn a_supervised_message_runs_at_approval_required_and_leaves_the_mode_alon
 async fn raising_the_thread_mode_does_not_lift_a_queued_supervised_ceiling() {
     use h4rn_harness::SettingChange;
 
-    let (fake, gate) = FakeHarness::new().with_send_gate();
+    // The session startup is held, so the first turn waits with no session:
+    // the agent's message queues behind it, and the person can still raise the
+    // thread's mode before anything is dispatched.
+    let (fake, startup) = FakeHarness::new().with_start_gate();
     let daemon = boot_with(fake, None, None).await;
     let client = http();
     let token = supervised_token(&daemon, &client).await;
     let repo = git_repo_with_remote();
 
-    // The thread starts at approval-required, and its first turn is held open
-    // so the agent's message has to queue behind it.
     let thread = daemon
         .manager
         .create_thread(new_thread(&daemon.host, repo.path(), "held open"))
         .await
         .expect("create thread");
-    wait_for_settings(&daemon.settings, 1).await;
 
     let sent = call_tool(
         &client,
@@ -1491,9 +1491,24 @@ async fn raising_the_thread_mode_does_not_lift_a_queued_supervised_ceiling() {
         .await
         .expect("raise the mode");
 
-    // Let both turns run.
-    gate.release();
-    let changes = wait_for_settings(&daemon.settings, 3).await;
+    // Let both turns run, then read what the fake was actually started with.
+    startup.release();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let summary = daemon
+            .manager
+            .thread_summary(&thread.thread_id)
+            .await
+            .expect("summary");
+        let busy = daemon.manager.active_turn_count().await > 0;
+        if (!busy && summary.agent_state == h4rn_protocol::AgentState::Done)
+            || Instant::now() > deadline
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let changes = daemon.settings.get();
     let started: Vec<_> = changes
         .iter()
         .filter_map(|change| match change {
@@ -1501,6 +1516,10 @@ async fn raising_the_thread_mode_does_not_lift_a_queued_supervised_ceiling() {
             _ => None,
         })
         .collect();
+    assert!(
+        !started.is_empty(),
+        "the fake harness never started a session: {changes:?}"
+    );
     assert_eq!(
         started.last().copied(),
         Some(RuntimeMode::ApprovalRequired),
