@@ -608,7 +608,9 @@ async fn deleting_a_task_while_its_run_is_working_does_not_resurrect_it() {
 #[tokio::test]
 async fn a_spent_once_task_still_saves_an_edit() {
     let clock = Arc::new(ManualClock::at(
-        "2026-11-01T00:00:00Z".parse::<DateTime<Utc>>().expect("clock"),
+        "2026-11-01T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("clock"),
     ));
     let fixture = fixture(FakeHarness::new(), clock).await;
     let task = fixture
