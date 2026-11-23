@@ -10,9 +10,12 @@ export type GitPushResult = {
  */
 branch: string, 
 /**
- * Upstream it now tracks (`origin/main`).
+ * The remote branch this push updated (`origin/main`).
+ *
+ * This is the push target, not the branch's tracking upstream: the
+ * upstream changes only when the request asked to set it.
  */
-upstream: string, 
+remote_branch: string, 
 /**
  * Fresh status after the push.
  */

@@ -114,8 +114,11 @@ pub struct GitCommitResult {
 pub struct GitPushResult {
     /// Branch that was pushed.
     pub branch: String,
-    /// Upstream it now tracks (`origin/main`).
-    pub upstream: String,
+    /// The remote branch this push updated (`origin/main`).
+    ///
+    /// This is the push target, not the branch's tracking upstream: the
+    /// upstream changes only when the request asked to set it.
+    pub remote_branch: String,
     /// Fresh status after the push.
     pub status: GitThreadStatus,
 }

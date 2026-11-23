@@ -199,8 +199,9 @@ pub async fn pull_request_input(
 
 /// Pushes a branch before a pull request when the remote needs it.
 ///
-/// Nothing is pushed when the branch already tracks an upstream and has no
-/// local commits the upstream lacks. A new upstream is created on `remote`.
+/// Nothing is pushed when the remote's own branch already points at `HEAD`.
+/// The remote is asked directly, so a stale remote-tracking ref cannot skip a
+/// needed push or hide one that moved. A missing branch is created on `remote`.
 pub async fn push_for_pull_request(
     workspace: &Path,
     remote: &str,
@@ -611,18 +612,35 @@ fn remote_branch_head(workspace: &Path, remote: &str, branch: &str) -> Option<St
     .filter(|value| !value.is_empty())
 }
 
-/// How many local commits `<remote>/<branch>` does not have.
-fn ahead_of_remote(workspace: &Path, remote: &str, branch: &str) -> Option<u32> {
-    git_opt(
+/// The commit `<remote>/<branch>` points at on the remote itself.
+///
+/// `refs/remotes/<remote>/<branch>` is only what the last fetch saw. A branch
+/// deleted on the forge keeps that ref until `fetch --prune`, so a decision
+/// made from it can skip the push a pull request needs; a ref that a fetch has
+/// not advanced can hide a remote that moved. Asking the remote costs one
+/// round trip and sees the truth. The URL is the one a push uses, which is also
+/// what a fork or a test with a separate push URL needs.
+fn remote_branch_head_on_remote(
+    workspace: &Path,
+    remote: &str,
+    branch: &str,
+) -> Result<Option<String>, GitActionError> {
+    let url = git_text(
         workspace,
-        &[
-            "rev-list",
-            "--count",
-            &format!("refs/remotes/{remote}/{branch}..HEAD"),
-        ],
+        &["remote", "get-url", "--push", "--", remote],
         STATUS_TIMEOUT,
-    )
-    .and_then(|value| value.trim().parse().ok())
+    )?;
+    let reference = format!("refs/heads/{branch}");
+    let output = git_text(
+        workspace,
+        &["ls-remote", "--heads", "--", url.trim(), &reference],
+        PUSH_TIMEOUT,
+    )?;
+    Ok(output.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let sha = parts.next()?;
+        (parts.next() == Some(reference.as_str())).then(|| sha.to_owned())
+    }))
 }
 
 /// The exact push h4rn runs: one branch, named remote, never forced.
@@ -665,7 +683,7 @@ fn push_blocking(workspace: &Path, set_upstream: bool) -> Result<GitPushResult, 
     let status = status_blocking(workspace)?;
     Ok(GitPushResult {
         branch: branch.clone(),
-        upstream: format!("{remote}/{branch}"),
+        remote_branch: format!("{remote}/{branch}"),
         status,
     })
 }
@@ -736,9 +754,10 @@ fn push_for_pull_request_blocking(
             status.branch.as_deref().unwrap_or("a detached HEAD")
         )));
     }
-    if remote_branch_head(workspace, remote, branch).is_some()
-        && ahead_of_remote(workspace, remote, branch) == Some(0)
-    {
+    // Compare the remote's own answer with `HEAD`, not the local tracking ref:
+    // a stale ref can name a branch that was deleted, or miss one that moved.
+    let head = git_text(workspace, &["rev-parse", "HEAD"], STATUS_TIMEOUT)?;
+    if remote_branch_head_on_remote(workspace, remote, branch)?.as_deref() == Some(head.trim()) {
         return Ok(false);
     }
     let target = format!("{remote}/{branch}");
@@ -874,10 +893,12 @@ fn commit_input_blocking(
         .map(|paths| validate_paths(workspace, paths))
         .transpose()?;
     let mut args = vec!["--literal-pathspecs", "diff"];
-    if !include_unstaged {
-        args.push("--cached");
-    } else {
+    // A named path is committed with `--only`, which records its working-tree
+    // content whether or not it was staged. Describe that, not just the index.
+    if include_unstaged || paths.is_some() {
         args.push("HEAD");
+    } else {
+        args.push("--cached");
     }
     args.extend([
         "--no-color",

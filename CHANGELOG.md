@@ -398,6 +398,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Commit, push and pull request follow what git and the forge really say.** A
+  branch deleted on the forge no longer skips the push a pull request needs just
+  because the local remote-tracking ref is stale: the daemon asks the remote
+  which commit its branch points at. A path-limited commit message describes the working-tree
+  content `--only` will record, including an edit that was never staged. A push
+  result names the remote branch it wrote (`remote_branch`) and no longer claims
+  the branch's tracking upstream changed when `set_upstream` was false. See
+  [docs/git-actions.md](docs/git-actions.md).
 - **The PR watch keeps its promises under races and failures.** A re-watch read
   that a poll overtakes is discarded instead of moving the baseline backwards,
   and a poll read that a re-watch overtakes is discarded the same way, so the

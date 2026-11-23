@@ -32,7 +32,9 @@ the commit, and its last lines are shown in the panel.
 A request that names `paths` commits only those paths: h4rn stages nothing else,
 uses `git commit --only`, and leaves work staged for other paths in the index. Its
 "nothing to commit" answer and the diff sent to a model cover exactly the paths
-named, never a change staged elsewhere.
+named, never a change staged elsewhere. The message input compares `HEAD` with
+those paths' working-tree content, which is what `--only` records, so an edit
+that was never staged is still described.
 
 Messages and paths are never handed to git as options. The message is the value
 of `-m`; path selection is validated as workspace-relative (no absolute paths,
@@ -48,13 +50,15 @@ remote). It always names one non-forced refspec,
 other branches and a `remote.<name>.push` beginning with `+` cannot force-update
 anything. A branch without one gets `origin/<branch>` created, because the
 panel's button always asks for it. The decision to push reads
-`origin/<branch>`, not whatever upstream a branch happens to track (the panel's
-ahead/behind counts still follow the branch's tracking upstream): a branch
-that tracks `origin/main` is still published as `origin/<branch>`, and a fork
-with two remotes pushes to `origin`. A push is **never forced**: when the remote
-has commits the branch does not, the panel says so and asks you to pull or
-rebase. A rejected credential is reported as a credential problem, not a generic
-failure, and any credential-shaped text git prints is redacted.
+`<remote>/<branch>`, not whatever upstream a branch happens to track (the
+panel's ahead/behind counts still follow the branch's tracking upstream): a
+branch that tracks `origin/main` is still published as `origin/<branch>`, and a
+fork with two remotes pushes to `origin`. The push result names the remote
+branch it wrote (`remote_branch`); the branch's tracking upstream changes only
+when the request asked for it (`set_upstream`). A push is **never forced**: when
+the remote has commits the branch does not, the panel says so and asks you to
+pull or rebase. A rejected credential is reported as a credential problem, not a
+generic failure, and any credential-shaped text git prints is redacted.
 
 ## Pull request
 
@@ -64,11 +68,15 @@ the repository's default branch when git reports one; when it does not, the fiel
 is left empty and the panel asks you to name the target rather than guessing
 `main`. **Generate** fills the title and body and does nothing else.
 
-The daemon pushes the branch first when `<remote>/<branch>` does not exist or is
-behind the local branch, then asks the forge to open the request. On GitHub,
-Bitbucket and Azure DevOps the draft flag travels in its own field; GitLab and
-Gitea have no such field on the create request and mark a draft with a `Draft:`
-or `WIP:` title prefix (a title that already carries one is sent as it is). The
+The daemon asks the remote which commit its branch points at, then pushes first
+when `<remote>/<branch>` is missing or does not name the local `HEAD`. It does
+not trust the local remote-tracking ref for that: a branch deleted on the forge
+leaves a stale `refs/remotes/<remote>/<branch>` until a prune, and the pull
+request would otherwise name a head branch that no longer exists. Then it asks
+the forge to open the request. On GitHub, Bitbucket and Azure DevOps the draft
+flag travels in its own field; GitLab and Gitea have no such field on the create
+request and mark a draft with a `Draft:` or `WIP:` title prefix (a title that
+already carries one is sent as it is). The
 open request waits as long as the push may take, and the dialog cannot submit
 twice. A PR opened this way is linked to its thread, so the header badge, the PR
 page and a watch all find it. Opening a request is never done silently from
@@ -93,7 +101,9 @@ What leaves the machine is only what the request needs:
   characters, plus up to 20 recent commit subjects. A binary file appears as
   git's `Binary files … differ` line, never its bytes. With *Include unstaged*
   on, the diff is taken against `HEAD`, and untracked files are listed by name
-  only — their contents are never read or sent.
+  only — their contents are never read or sent. A request that names paths also
+  diffs against `HEAD`, limited to those paths, because the commit records their
+  working-tree content.
 - **Pull request**: the commits on the branch against the base (subjects and
   bodies, capped at 8,000 characters) and `git diff --stat` for the same range
   (capped at 4,000 characters).

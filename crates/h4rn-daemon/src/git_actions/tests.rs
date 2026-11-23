@@ -243,6 +243,29 @@ fn commit_input_covers_exactly_the_requested_paths() {
     );
 }
 
+/// `--only -- paths` records each named path's working-tree content, so the
+/// message input has to describe `HEAD -- paths`, not just the index.
+#[test]
+fn commit_input_for_named_paths_includes_edits_that_were_not_staged() {
+    let repo = Repo::new();
+    repo.write("a.txt", "staged version\n");
+    repo.git(&["add", "a.txt"]);
+    repo.write("a.txt", "unstaged version\n");
+
+    let input =
+        commit_input_blocking(repo.path(), false, Some(&["a.txt".to_owned()])).expect("input");
+    assert!(
+        input.diff.contains("+unstaged version"),
+        "the edit that will be committed is described: {}",
+        input.diff
+    );
+    assert!(
+        !input.diff.contains("+staged version"),
+        "an intermediate index state is not what the commit records: {}",
+        input.diff
+    );
+}
+
 #[test]
 fn paths_outside_the_workspace_and_option_shaped_names_are_refused() {
     let repo = Repo::new();
@@ -367,7 +390,7 @@ async fn push_needs_an_upstream_unless_asked_to_set_one() {
 
     let pushed = push_blocking(repo.path(), true).expect("push");
     assert_eq!(pushed.branch, "main");
-    assert_eq!(pushed.upstream, "origin/main");
+    assert_eq!(pushed.remote_branch, "origin/main");
     assert_eq!(pushed.status.ahead, 0);
     let remote_head = Command::new("git")
         .args(["rev-parse", "main"])
@@ -495,7 +518,7 @@ async fn a_branch_tracking_origin_main_pushes_under_its_own_name() {
 
     let pushed = push_blocking(repo.path(), true).expect("push");
     assert_eq!(pushed.branch, "feature/widget");
-    assert_eq!(pushed.upstream, "origin/feature/widget");
+    assert_eq!(pushed.remote_branch, "origin/feature/widget");
     assert_eq!(bare_head(bare.path(), "feature/widget"), feature_head);
     assert_eq!(
         bare_head(bare.path(), "main"),
@@ -530,7 +553,7 @@ async fn a_fork_layout_pushes_to_origin_not_the_upstream_remote() {
     let head = repo.head();
 
     let pushed = push_blocking(repo.path(), true).expect("push");
-    assert_eq!(pushed.upstream, "origin/main");
+    assert_eq!(pushed.remote_branch, "origin/main");
     assert_eq!(bare_head(fork.path(), "main"), head);
     assert_eq!(
         bare_head(upstream.path(), "main"),
@@ -707,6 +730,81 @@ async fn a_pull_request_push_only_pushes_when_it_must() {
         String::from_utf8_lossy(&remote_head.stdout).trim(),
         repo.head()
     );
+}
+
+/// The local remote-tracking ref is only what the last fetch saw. A branch
+/// deleted on the forge must still be pushed before its pull request opens.
+#[tokio::test]
+async fn a_deleted_remote_branch_is_pushed_again_despite_a_stale_tracking_ref() {
+    let (repo, bare) = repo_with_remote();
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.write("feature.txt", "feature\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Feature work"]);
+    let head = repo.head();
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "feature/widget")
+            .await
+            .expect("first push"),
+    );
+
+    // Delete the branch on the remote, without a fetch --prune here: the local
+    // ref still names the same commit as HEAD.
+    let deleted = Command::new("git")
+        .args([
+            "--git-dir",
+            bare.path().to_str().unwrap(),
+            "update-ref",
+            "-d",
+            "refs/heads/feature/widget",
+        ])
+        .output()
+        .expect("delete remote branch");
+    assert!(
+        deleted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", "refs/remotes/origin/feature/widget"]),
+        head,
+        "the stale ref still matches HEAD"
+    );
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "feature/widget")
+        .await
+        .expect("push a deleted branch again");
+    assert!(pushed, "a branch missing on the remote is pushed");
+    assert_eq!(bare_head(bare.path(), "feature/widget"), head);
+}
+
+/// A push names the remote branch it wrote; it never claims the branch's
+/// tracking upstream changed when it was not asked to.
+#[tokio::test]
+async fn a_push_names_the_remote_branch_without_changing_tracking() {
+    let (repo, bare) = repo_with_remote();
+    push_blocking(repo.path(), true).expect("publish main");
+
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.write("feature.txt", "feature\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Feature work"]);
+    push_blocking(repo.path(), true).expect("publish feature");
+    repo.git(&["branch", "--set-upstream-to=origin/main"]);
+
+    repo.write("more.txt", "more\n");
+    repo.git(&["add", "more.txt"]);
+    repo.git(&["commit", "-m", "More work"]);
+    let head = repo.head();
+
+    let pushed = push_blocking(repo.path(), false).expect("push without -u");
+    assert_eq!(pushed.remote_branch, "origin/feature/widget");
+    assert_eq!(
+        pushed.status.upstream.as_deref(),
+        Some("origin/main"),
+        "set_upstream=false leaves tracking alone"
+    );
+    assert_eq!(bare_head(bare.path(), "feature/widget"), head);
 }
 
 #[test]

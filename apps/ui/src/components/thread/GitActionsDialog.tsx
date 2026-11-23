@@ -166,7 +166,7 @@ export function GitActionsDialog({
       const result = await api.push(threadId, true);
       setStatus(result.status);
       pushToast({
-        title: `Pushed ${result.branch} to ${result.upstream}.`,
+        title: `Pushed ${result.branch} to ${result.remote_branch}.`,
         variant: "success",
       });
     } catch (cause) {
@@ -192,7 +192,7 @@ export function GitActionsDialog({
       const pushed = await api.push(threadId, true);
       setStatus(pushed.status);
       pushToast({
-        title: `Pushed ${pushed.branch} to ${pushed.upstream}.`,
+        title: `Pushed ${pushed.branch} to ${pushed.remote_branch}.`,
         variant: "success",
       });
     } catch (cause) {
