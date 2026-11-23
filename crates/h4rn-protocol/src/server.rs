@@ -1176,22 +1176,35 @@ mod tests {
             "daemon_machine_id": "m_atlas",
             "local_host": "host_atlas",
             "hosts": [],
+            "daemon_timezone": "Europe/Berlin",
         });
         match serde_json::from_value::<ResponseBody>(value.clone()).unwrap() {
             ResponseBody::Hello {
-                daemon_machine_id, ..
-            } => assert_eq!(daemon_machine_id.as_deref(), Some("m_atlas")),
+                daemon_machine_id,
+                daemon_timezone,
+                ..
+            } => {
+                assert_eq!(daemon_machine_id.as_deref(), Some("m_atlas"));
+                assert_eq!(daemon_timezone, "Europe/Berlin");
+            }
             other => panic!("unexpected body: {other:?}"),
         }
 
-        // A daemon older than this field answers without it. Its absence must
-        // not fail the handshake; the client falls back to the local host name.
+        // A daemon older than these fields answers without them. Their absence
+        // must not fail the handshake; the client falls back to the local host
+        // name and its own zone.
         let mut older = value;
         older.as_object_mut().unwrap().remove("daemon_machine_id");
+        older.as_object_mut().unwrap().remove("daemon_timezone");
         match serde_json::from_value::<ResponseBody>(older).unwrap() {
             ResponseBody::Hello {
-                daemon_machine_id, ..
-            } => assert_eq!(daemon_machine_id, None),
+                daemon_machine_id,
+                daemon_timezone,
+                ..
+            } => {
+                assert_eq!(daemon_machine_id, None);
+                assert_eq!(daemon_timezone, "");
+            }
             other => panic!("unexpected body: {other:?}"),
         }
     }

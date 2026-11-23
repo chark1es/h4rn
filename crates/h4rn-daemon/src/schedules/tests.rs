@@ -1349,3 +1349,34 @@ async fn a_wrong_webhook_path_is_refused_before_the_body_is_read() {
     assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn a_disabled_future_once_task_saves_without_a_next_run() {
+    let clock = Arc::new(ManualClock::at(
+        "2026-11-01T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("clock"),
+    ));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let mut draft = draft(
+        &fixture.workspace_path,
+        ScheduleSpec::Once {
+            date: "2026-12-01".into(),
+            time: "09:00".into(),
+        },
+        ScheduleDestination::NewThread,
+    );
+    draft.enabled = false;
+    let task = fixture
+        .service
+        .create(draft)
+        .await
+        .expect("save paused once");
+    assert!(task.next_run_at.is_none());
+    let enabled = fixture
+        .service
+        .set_enabled(&task.task_id, true)
+        .await
+        .expect("resume");
+    assert!(enabled.next_run_at.is_some());
+}

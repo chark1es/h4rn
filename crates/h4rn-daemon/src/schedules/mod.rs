@@ -703,8 +703,7 @@ impl ScheduleService {
         self.inner.wake.notify_one();
     }
 
-    /// Takes the per-task write lock, dropping locks for tasks that no longer
-    /// exist so a long-lived daemon does not accumulate them.
+    /// Takes the per-task write lock.
     async fn write_lock(&self, task_id: &ScheduleTaskId) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = lock(&self.inner.task_locks);
@@ -991,7 +990,10 @@ impl ScheduleService {
         if task.destination != ScheduleDestination::NewThread && task.thread_id.is_none() {
             task.thread_id = run.thread_id.clone();
         }
-        if matches!(trigger, Trigger::Scheduled) {
+        if matches!(trigger, Trigger::Scheduled)
+            && run.scheduled_for.is_some()
+            && task.next_run_at == run.scheduled_for
+        {
             // A once slot is consumed even if recording has to be retried:
             // the thread already started, so this slot must never run twice
             // (including the second occurrence of a repeated hour).
@@ -1211,7 +1213,7 @@ impl ScheduleService {
                 && task.schedule == draft.schedule
         });
         let schedule_is_webhook = draft.schedule.is_webhook();
-        let next_run_at = if schedule_is_webhook || !draft.enabled || once_consumed {
+        let computed_next = if schedule_is_webhook || once_consumed {
             None
         } else {
             next_after(
@@ -1222,11 +1224,13 @@ impl ScheduleService {
             )
             .map_err(|error| ScheduleServiceError::Invalid(error.message().to_owned()))?
         };
-        if !schedule_is_webhook && !once_consumed && next_run_at.is_none() {
+        if !schedule_is_webhook && !once_consumed && computed_next.is_none() {
             return Err(ScheduleServiceError::Invalid(
                 "This once task's date and time are in the past. Choose a future time.".into(),
             ));
         }
+        // A disabled task has no next run; enabling it computes one from now.
+        let next_run_at = if draft.enabled { computed_next } else { None };
         let created_at = existing.map_or(now, |task| task.created_at);
         Ok(ScheduleTask {
             task_id,
