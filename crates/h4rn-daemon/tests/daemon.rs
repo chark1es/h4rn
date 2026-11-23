@@ -119,7 +119,21 @@ async fn boot_inner_with_text_generation(
     text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
 ) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
-    boot_in_dir(dir, options, harness, isolated, text_generation).await
+    boot_in_dir(dir, options, harness, isolated, text_generation, None).await
+}
+
+/// Boots an isolated daemon whose Linear client talks to `endpoint`.
+async fn boot_with_linear_endpoint(endpoint: impl Into<String>) -> TestDaemon {
+    let dir = tempfile::tempdir().expect("tempdir");
+    boot_in_dir(
+        dir,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        None,
+        Some(endpoint.into()),
+    )
+    .await
 }
 
 async fn boot_in_dir(
@@ -128,6 +142,7 @@ async fn boot_in_dir(
     harness: FakeHarness,
     isolated: bool,
     text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
+    linear_endpoint: Option<String>,
 ) -> TestDaemon {
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -148,6 +163,9 @@ async fn boot_in_dir(
         .with_lifecycle(options);
     if let Some(service) = text_generation {
         builder = builder.with_text_generation(service);
+    }
+    if let Some(endpoint) = linear_endpoint {
+        builder = builder.with_linear_endpoint(endpoint);
     }
     builder = if isolated {
         builder.with_catalog(Arc::new(
@@ -3258,6 +3276,372 @@ async fn a_provider_test_does_not_block_the_connection() {
 }
 
 #[tokio::test]
+async fn an_issue_write_checks_ownership_against_the_checkouts_not_a_cache() {
+    use h4rn_protocol::issues::{ForgeIssueFilter, ForgeIssueUpdate};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "login": "alice",
+            "name": "Alice"
+        })))
+        .mount(&server)
+        .await;
+    // A read populates the ownership cache. A write after this must not
+    // reuse it.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    // The fork's parent reads fine but no checkout owns it, so it is
+    // read-only.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/parent/widget/issues"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/parent/widget/issues/4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "number": 4,
+            "title": "Upstream report",
+            "state": "open",
+            "user": {"login": "carol"},
+            "comments": 0,
+            "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-01T00:00:00Z",
+            "html_url": "https://example.test/parent/widget/issues/4"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/parent/widget/issues/4/timeline"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let repo_dir = tempfile::tempdir().expect("repo");
+    git_in(repo_dir.path(), &["init", "-b", "main"]);
+    git_in(
+        repo_dir.path(),
+        &[
+            "remote",
+            "add",
+            "upstream",
+            &format!("{}/parent/widget.git", server.uri()),
+        ],
+    );
+    git_in(
+        repo_dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("{}/acme/widget.git", server.uri()),
+        ],
+    );
+
+    // The mock server stands in for a forge host the daemon knows, so its
+    // URL is what the checkout's remotes name and what ownership compares.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    std::fs::write(
+        data_dir.path().join(h4rn_daemon::forge::HOSTS_FILE),
+        serde_json::to_vec(&serde_json::json!({
+            "hosts": [{
+                "host": "127.0.0.1",
+                "forge": "github",
+                "base_url": server.uri()
+            }]
+        }))
+        .expect("host config"),
+    )
+    .expect("write host config");
+    let daemon = boot_in_dir(
+        data_dir,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        false,
+        None,
+        None,
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let account = match client
+        .request(ClientRequest::ForgeAddAccount {
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            token: "fixture-token".into(),
+            username: None,
+            source: ForgeCredentialSource::Pat,
+            repository: None,
+        })
+        .await
+        .expect("add the forge account")
+    {
+        ResponseBody::ForgeAccount { account } => account,
+        other => panic!("unexpected account response: {other:?}"),
+    };
+    let project = match client
+        .request(ClientRequest::AddProject {
+            host: host.clone(),
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the checkout")
+    {
+        ResponseBody::Project { project } => project,
+        other => panic!("unexpected project response: {other:?}"),
+    };
+
+    let repo = |owner: &str| h4rn_protocol::ForgeRepoRef {
+        forge: ForgeKind::GitHub,
+        base_url: server.uri(),
+        owner: owner.into(),
+        repo: "widget".into(),
+    };
+    client
+        .request(ClientRequest::ForgeListIssues {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("acme"),
+            filter: ForgeIssueFilter::Open,
+            page: 1,
+            query: None,
+        })
+        .await
+        .expect("the designated repository lists");
+
+    // A repository no project checks out still reads, and says it is
+    // read-only so the page can refuse writes before the request.
+    let unowned_page = client
+        .request(ClientRequest::ForgeListIssues {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            filter: ForgeIssueFilter::Open,
+            page: 1,
+            query: None,
+        })
+        .await
+        .expect("an unowned repository still reads");
+    match unowned_page {
+        ResponseBody::ForgeIssues { read_only, .. } => {
+            assert!(read_only, "the parent repository is not ours to write");
+        }
+        other => panic!("unexpected list response: {other:?}"),
+    }
+    let unowned_issue = client
+        .request(ClientRequest::ForgeGetIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            number: 4,
+        })
+        .await
+        .expect("an unowned issue still reads");
+    match unowned_issue {
+        ResponseBody::ForgeIssue { read_only, .. } => {
+            assert!(read_only, "the parent repository is not ours to write");
+        }
+        other => panic!("unexpected issue response: {other:?}"),
+    }
+
+    // A fork checkout designates its `origin`, never its `upstream`.
+    let comment = client
+        .request(ClientRequest::ForgeCommentIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            number: 4,
+            body: "Should be refused".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(comment.code, ProtoErrorCode::Forbidden);
+    let update = client
+        .request(ClientRequest::ForgeUpdateIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            number: 4,
+            update: ForgeIssueUpdate {
+                title: Some("Should be refused".into()),
+                ..ForgeIssueUpdate::default()
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(update.code, ProtoErrorCode::Forbidden);
+
+    // The read above cached a positive answer for acme. Moving origin to a
+    // fork must refuse the very next write, not 30 seconds later.
+    git_in(
+        repo_dir.path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            &format!("{}/moved/widget.git", server.uri()),
+        ],
+    );
+    let moved = client
+        .request(ClientRequest::ForgeCommentIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("acme"),
+            number: 4,
+            body: "Should be refused".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(moved.code, ProtoErrorCode::Forbidden);
+
+    // Removing the project must also take effect at once.
+    client
+        .request(ClientRequest::RemoveProject {
+            host,
+            project_id: project.id,
+        })
+        .await
+        .expect("remove the project");
+    let removed = client
+        .request(ClientRequest::ForgeUpdateIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("acme"),
+            number: 4,
+            update: ForgeIssueUpdate {
+                title: Some("Should be refused".into()),
+                ..ForgeIssueUpdate::default()
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(removed.code, ProtoErrorCode::Forbidden);
+
+    let writes = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .into_iter()
+        .filter(|request| request.method.as_str() != "GET")
+        .collect::<Vec<_>>();
+    assert!(writes.is_empty(), "no tracker write was sent: {writes:?}");
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn opening_a_linear_issue_reads_it_once() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    // One document serves the viewer connect and the issue detail alike;
+    // GraphQL clients read only the keys they asked for.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "viewer": {
+                    "name": "Acme",
+                    "email": "alice@example.test",
+                    "organization": {"name": "Acme"}
+                },
+                "issue": {
+                    "id": "iss_1",
+                    "identifier": "ENG-1",
+                    "title": "Rate limit the import",
+                    "description": "Imports hammer the API.",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-02T00:00:00Z",
+                    "url": "https://linear.app/acme/issue/ENG-1",
+                    "state": {"name": "In Progress", "type": "started"},
+                    "team": {"id": "team_1", "key": "ENG"},
+                    "assignee": null,
+                    "labels": {"nodes": []},
+                    "comments": {
+                        "nodes": [],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    },
+                    "attachments": {"nodes": []}
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let daemon = boot_with_linear_endpoint(format!("{}/graphql", server.uri())).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let account = match client
+        .request(ClientRequest::LinearConnect {
+            api_key: "fixture-linear-key".into(),
+        })
+        .await
+        .expect("connect Linear")
+    {
+        ResponseBody::LinearAccounts { accounts } => {
+            accounts.into_iter().next().expect("one connected account")
+        }
+        other => panic!("unexpected connect response: {other:?}"),
+    };
+
+    // Linear's capabilities travel separately so the forge list keeps its old
+    // shape for clients built before the field existed.
+    match client
+        .request(ClientRequest::ForgeListAccounts)
+        .await
+        .expect("list accounts")
+    {
+        ResponseBody::ForgeAccounts {
+            capabilities,
+            linear,
+            ..
+        } => {
+            assert_eq!(capabilities.len(), 6, "only the six forges are listed");
+            let linear = linear.expect("Linear's row is in its own field");
+            assert!(linear.issues.read);
+            assert!(!linear.issues.write);
+        }
+        other => panic!("unexpected accounts response: {other:?}"),
+    }
+    let before = server.received_requests().await.expect("recorded").len();
+    let opened = client
+        .request(ClientRequest::LinearGetIssue {
+            account_id: account.account_id.clone(),
+            issue_id: "iss_1".into(),
+            comments_after: None,
+        })
+        .await
+        .expect("open the issue");
+    match opened {
+        ResponseBody::LinearIssue { issue, read_only } => {
+            assert_eq!(issue.summary.identifier, "ENG-1");
+            // No project owns this team, so the page says read-only.
+            assert!(read_only);
+        }
+        other => panic!("unexpected issue response: {other:?}"),
+    }
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(
+        requests.len() - before,
+        1,
+        "opening an issue must read the tracker once: {:?}",
+        requests
+            .iter()
+            .map(|request| request.url.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_large_editor_read_is_delivered_whole_on_the_plain_path() {
     // The plain loopback WebSocket has no transport frame bound. The session
     // limit is chosen by the request handler from the connection's origin, so
@@ -3750,6 +4134,7 @@ async fn a_pull_request_opened_from_the_git_actions_dialog_is_linked_to_its_thre
         },
         FakeHarness::new(),
         false,
+        None,
         None,
     )
     .await;

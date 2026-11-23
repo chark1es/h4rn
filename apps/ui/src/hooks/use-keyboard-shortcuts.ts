@@ -95,6 +95,9 @@ export function runCommand(id: CommandId, state: State = getState()): boolean {
     case "nav.pulls":
       navigate({ kind: "placeholder", surface: "pulls", path: "/pulls" });
       return true;
+    case "nav.issues":
+      navigate({ kind: "placeholder", surface: "issues", path: "/issues" });
+      return true;
     case "nav.usage":
       navigate({ kind: "placeholder", surface: "usage", path: "/usage" });
       return true;

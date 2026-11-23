@@ -524,7 +524,11 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
 export function ForgeSettings() {
   const threads = useApp((state) => state.threads);
   const [repositories, setRepositories] = useState<ForgeRemote[]>([]);
-  const [data, setData] = useState<ForgeAccounts>({ accounts: [], capabilities: [] });
+  const [data, setData] = useState<ForgeAccounts>({
+    accounts: [],
+    capabilities: [],
+    linear: null,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);

@@ -104,7 +104,7 @@ function userMessage(threadId: string): EventEnvelope {
 }
 
 function openBadge(): void {
-  const trigger = screen.getByRole("button", { name: "Linked pull requests" });
+  const trigger = screen.getByRole("button", { name: "Linked items" });
   fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
   fireEvent.pointerUp(trigger, { button: 0, pointerType: "mouse" });
   fireEvent.click(trigger);
@@ -123,7 +123,7 @@ afterEach(() => {
 describe("the linked pull request badge follows the daemon", () => {
   it("re-reads after a wake message ends a watch", async () => {
     render(<ThreadPullRequestBadge threadId="th_1" />);
-    const badge = await screen.findByRole("button", { name: "Linked pull requests" });
+    const badge = await screen.findByRole("button", { name: "Linked items" });
     expect(badge.textContent).toContain("#7 Open");
     expect(mock.state.calls).toBe(1);
 
@@ -141,7 +141,7 @@ describe("the linked pull request badge follows the daemon", () => {
 
   it("ignores a message in another thread", async () => {
     render(<ThreadPullRequestBadge threadId="th_1" />);
-    await screen.findByRole("button", { name: "Linked pull requests" });
+    await screen.findByRole("button", { name: "Linked items" });
 
     act(() => mock.emit(userMessage("th_other")));
     expect(mock.state.calls).toBe(1);
@@ -149,7 +149,7 @@ describe("the linked pull request badge follows the daemon", () => {
 
   it("catches up after a reconnect, once per replayed burst", async () => {
     render(<ThreadPullRequestBadge threadId="th_1" />);
-    const badge = await screen.findByRole("button", { name: "Linked pull requests" });
+    const badge = await screen.findByRole("button", { name: "Linked items" });
     expect(mock.state.calls).toBe(1);
 
     // The PR merged while the client was offline. The replay arrives as one
@@ -169,7 +169,7 @@ describe("the linked pull request badge follows the daemon", () => {
 
   it("does not read for another thread's replayed history", async () => {
     render(<ThreadPullRequestBadge threadId="th_1" />);
-    await screen.findByRole("button", { name: "Linked pull requests" });
+    await screen.findByRole("button", { name: "Linked items" });
     expect(mock.state.calls).toBe(1);
 
     // A reconnect replays every thread's history. Only this thread's wakes
@@ -184,7 +184,7 @@ describe("the linked pull request badge follows the daemon", () => {
 
   it("does not read for replayed history that is not a user message", async () => {
     render(<ThreadPullRequestBadge threadId="th_1" />);
-    await screen.findByRole("button", { name: "Linked pull requests" });
+    await screen.findByRole("button", { name: "Linked items" });
     expect(mock.state.calls).toBe(1);
 
     const assistant: EventEnvelope = {
@@ -212,7 +212,7 @@ describe("the linked pull request badge follows the daemon", () => {
 
   it("re-reads when the panel opens", async () => {
     render(<ThreadPullRequestBadge threadId="th_1" />);
-    const badge = await screen.findByRole("button", { name: "Linked pull requests" });
+    const badge = await screen.findByRole("button", { name: "Linked items" });
     expect(mock.state.calls).toBe(1);
 
     mock.state.pulls = [pull("merged", false)];
@@ -224,7 +224,7 @@ describe("the linked pull request badge follows the daemon", () => {
 
   it("stops listening when it unmounts", async () => {
     const { unmount } = render(<ThreadPullRequestBadge threadId="th_1" />);
-    await screen.findByRole("button", { name: "Linked pull requests" });
+    await screen.findByRole("button", { name: "Linked items" });
     unmount();
     expect(mock.listenerCount()).toBe(0);
   });

@@ -23,6 +23,36 @@ All notable changes to h4rn are recorded here. The format follows
   hashes of the link token and the browser cookie, only an admin device may copy
   the URL, and the page through Connect never runs on Connect's origin with
   daemon HTML.
+- **Issues from every forge and Linear sit beside your projects, and can be linked to a
+  thread.** The new Issues page reads each visible project's tracker, grouped per account, with
+  open/closed, assigned/opened/mentioning filters, a per-project visibility toggle and search that
+  runs on the tracker. Selecting an issue opens it beside the list with its body, state, labels,
+  assignees, comments and linked pull requests. Where the account allows it you can comment, edit
+  the title and body, replace labels and assignees, and close or reopen (with a reason where the
+  tracker records one); a repository no local project owns is read-only, and only the project's
+  designated remote is writable, so a fork never writes to its parent; ownership is read from the
+  checkouts on every write, so removing a project or repointing `origin` takes effect at once
+  rather than after a cache window. Choosing a filter or search that is already applied leaves the
+  list alone, and two accounts on the same host let the person choose which one reads each project
+  in the Projects menu. GitHub, GitLab, Gitea/Forgejo and Azure Boards are supported; Azure reads
+  the work-item types the project actually defines, keyed by type, so a process without `Issue` or
+  without `Bug` still lists, and each type closes on its own finished state. Bitbucket Cloud
+  removed its issue API in August 2026, so each such project shows a note and no request is sent.
+  What each tracker can do comes from its capability row (Linear's arrives in
+  the response's own optional field, so an older client's forge list keeps its
+  shape), so the page hides a filter, the labels
+  editor or the close-reason picker where it would fail, and a request that names a comment page
+  carries the provider's continuation (Gitea returns a discussion whole and
+  reads the whole label catalogue, even when a server caps its pages smaller
+  than the 50 rows asked for). A GitHub duplicate close resolves the
+  picked number to that issue's own
+  id, and Linear's `duplicate` workflow state shows as closed. A Linear API key connected under Settings → Source control is
+  stored like a forge token, never returned and never echoed in an error; pick a team per project
+  and its issues appear beside the forge ones, with comments. Issues link to threads through the
+  journal, survive a restart, are always read live, and appear with pull requests in the thread's
+  linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
+  `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and
+  `LinkIssue`/`UnlinkIssue`/`ListThreadIssues`. See [docs/forges.md](docs/forges.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a
@@ -596,6 +626,60 @@ All notable changes to h4rn are recorded here. The format follows
   when the daemon's watch state can have changed — when a wake message is
   appended and when its panel opens — so a merged PR stops offering "Stop
   watching", and messages replayed on reconnect do not each cost a forge read.
+- **The Tailscale CLI tests no longer fail for a reason the code cannot fix.** The prompt-CLI test
+  wrote a fresh executable script and spawned it immediately; when another test thread forked while
+  that write handle was open, the child inherited it and the spawn failed with `Text file busy`
+  (os error 26), which `run_until` reports as "off" - the exact CI failure. The tests now run
+  `/bin/sh`, which is never freshly written, and each test that expects "off" first proves the shell
+  really runs, so a spawn failure cannot pass for the command's result. The shell preflight has its
+  own budget, measured separately from the command under test, and the hung-CLI test writes a marker
+  as its first act and asserts it: a spent deadline that never started the hung command now fails
+  instead of passing for a timeout nobody exercised. The sibling harness fixtures no longer leave a
+  write handle to chance: a short-lived `/bin/sh` writes the fake CLI and exits, and the finished
+  file is renamed into place, so the test process itself never holds a descriptor another thread's
+  fork can inherit. A stress run of the same sequence (writers plus `/bin/sh` churn) produced no
+  `Text file busy` failures in 20,000 install-and-spawn rounds; the same sequence failed 254 of
+  20,000 before the change (264 in a second run).
+- **A reply that reached the pipe before the agent exited is kept, and a queued message survives a
+  usage limit even when the queue was already promoted.** A real ACP peer ends its turn with an
+  ordinary newline-terminated frame and can exit at once, so the process may be reaped before the
+  stdout reader has drained the reply already in the pipe. The supervisor now waits, bounded, for
+  the reader to reach EOF before it fails anything still pending, so an answered turn settles
+  Completed instead of Failed with the exit report. Reply resolution no longer depends on the event
+  consumer keeping up either: the reader publishes into its own queue that one forwarder hands to
+  the session in order, so a full 16-slot queue can no longer park the reader before it reads the
+  reply behind it (a long `session/load` replay still drains its own history before the next turn).
+  That queue is bounded at four session queues: when it is full, the newest ordinary update is
+  dropped and counted, so a chatty agent cannot grow memory. A permission request, a transport close,
+  stdout's close and the exit report take a reserved path instead: they are never counted or dropped,
+  and once more than one session queue of updates is waiting they get the next slot, so a flood of
+  text cannot hide the event that decides what a request means or that the agent is gone. While the
+  consumer keeps up they stay in the reader's order, so a close never arrives before the words read
+  ahead of it. A turn's settlement also stays in order behind the updates the reader had already
+  taken. The adapter also tags every update with the prompt generation it follows and
+  publishes a turn's settlement behind the updates the reader had already taken. The daemon holds a
+  promoted turn's text, tools, plan and usage from the moment its prompt goes on the wire until that
+  write returns `Ok`: an adapter that has not accepted the prompt yet can still be draining the
+  finished turn's output, so those events are neither published nor journaled, and a write that
+  fails drops them instead of keeping them under a turn that never ran. The hold is released in the
+  adapter's order when the write is accepted, so the turn's own first words are not lost. Text a
+  peer writes after it has read the next prompt still cannot be attributed - ACP carries no turn id -
+  so the hold covers exactly everything up to the acceptance. When the queued message was already
+  promoted onto a transport that then closed, it is handed back to the exit report's pause instead of
+  being failed: its write failed, so nothing it collected can be its own, and the parked prompt is
+  delivered after the reset. A turn that already did work is never run a second time: a completed
+  tool call (which leaves the running-tool map empty) counts as proof the prompt reached the
+  provider, so that turn settles as limited with its own tool card and output instead of being
+  replayed. A death observed before the promotion is still held back by a bounded wait for the exit
+  report; in the ordering where the completion is published first, the requeue is what guarantees
+  the outcome. A pause that binds to a promoted turn saves that prompt on the thread row only once
+  the ledger has really armed it, and a claim that finds the turn parked refuses to write it, so a limit landing between
+  promotion and claim survives a restart and is delivered once after the reset; a ledger that refuses
+  the schedule leaves no prompt on the row for a restart to deliver again. If no schedule can be
+  armed (no usage meter, or a ledger that refuses it), the requeued turn fails honestly instead of
+  staying pending with no delivery owner, and the thread reads as rate-limited, never as
+  `Scheduled` with nothing to fire. A requeue also keeps the dead session's exit status and stderr
+  row instead of clearing it.
 - **A re-watched PR and a reconnected badge keep their promises.** Every watcher
   generation now comes from one service-wide counter that never reuses a value,
   so a poll that started before an unwatch and re-watch cannot hand its older

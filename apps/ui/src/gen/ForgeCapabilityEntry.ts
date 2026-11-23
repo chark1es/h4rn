@@ -3,11 +3,16 @@ import type { ForgeCapabilities } from "./ForgeCapabilities";
 import type { ForgeKind } from "./ForgeKind";
 
 /**
- * A capabilities row for one forge kind.
+ * A capabilities row for one forge.
+ *
+ * This list has only ever described forges, and older clients still read it
+ * that way, so Linear's capabilities travel in
+ * [`crate::ResponseBody::ForgeAccounts`]'s separate `linear` field instead of
+ * widening `forge`.
  */
 export type ForgeCapabilityEntry = { 
 /**
- * Forge kind.
+ * Forge the row describes.
  */
 forge: ForgeKind, 
 /**

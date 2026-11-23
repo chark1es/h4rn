@@ -370,6 +370,11 @@ pub enum ResponseBody {
         accounts: Vec<crate::forge::ForgeAccount>,
         /// Capability rows, one per supported forge.
         capabilities: Vec<crate::forge::ForgeCapabilityEntry>,
+        /// What Linear's issue tracker can do. Linear is not a forge and never
+        /// appeared in `capabilities`, so it travels separately: a client
+        /// built before this field simply ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        linear: Option<crate::forge::ForgeCapabilities>,
     },
     /// A forge account was validated and stored.
     ForgeAccount {
@@ -439,6 +444,82 @@ pub enum ResponseBody {
     ForgePrOpened {
         /// The new PR.
         pr: crate::forge::ForgePullRequest,
+    },
+    /// One page of forge issues.
+    ForgeIssues {
+        /// Matching issues.
+        issues: Vec<crate::issues::ForgeIssueSummary>,
+        /// Page number returned.
+        page: u32,
+        /// Another page exists.
+        has_more: bool,
+        /// The local checkout does not own the repository, so writes are off.
+        read_only: bool,
+    },
+    /// One forge issue.
+    ForgeIssue {
+        /// Detail.
+        issue: crate::issues::ForgeIssue,
+        /// The local checkout does not own the repository, so writes are off.
+        read_only: bool,
+    },
+    /// One forge issue's comments.
+    ForgeIssueComments {
+        /// Comments page.
+        page: crate::issues::ForgeIssueCommentPage,
+    },
+    /// A comment was posted on a forge issue.
+    ForgeIssueCommentPosted {
+        /// The new comment.
+        comment: crate::issues::ForgeIssueComment,
+    },
+    /// Connected Linear workspaces.
+    LinearAccounts {
+        /// Connections, oldest first.
+        accounts: Vec<crate::issues::LinearAccount>,
+    },
+    /// Teams exposed by one Linear workspace.
+    LinearTeams {
+        /// Teams.
+        teams: Vec<crate::issues::LinearTeam>,
+    },
+    /// The Linear team attached to each project.
+    LinearProjectTeams {
+        /// Mappings.
+        teams: Vec<crate::issues::LinearProjectTeam>,
+    },
+    /// One page of Linear issues.
+    LinearIssues {
+        /// Matching issues.
+        issues: Vec<crate::issues::LinearIssueSummary>,
+        /// Cursor for the next page.
+        next_cursor: Option<String>,
+        /// The local checkout does not own the project, so writes are off.
+        read_only: bool,
+    },
+    /// One Linear issue with its comments.
+    LinearIssue {
+        /// Detail.
+        issue: crate::issues::LinearIssue,
+        /// The issue's team is not attached to a project here, so writes are off.
+        read_only: bool,
+    },
+    /// A comment was posted on a Linear issue.
+    LinearIssueCommentPosted {
+        /// The new comment.
+        comment: crate::issues::LinearIssueComment,
+    },
+    /// One thread's linked issues, with their latest tracker state.
+    ThreadIssues {
+        /// Thread the links belong to.
+        thread_id: crate::ThreadId,
+        /// Linked issues, oldest link first.
+        issues: Vec<crate::issues::ThreadIssue>,
+    },
+    /// One linked issue after a link change.
+    ThreadIssue {
+        /// The link and its latest state.
+        issue: crate::issues::ThreadIssue,
     },
     /// The thread workspace's git state.
     GitStatus {

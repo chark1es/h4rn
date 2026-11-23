@@ -9,12 +9,16 @@ import type { DeviceInfo } from "./DeviceInfo";
 import type { DiffAgainst } from "./DiffAgainst";
 import type { ForgeAgentTarget } from "./ForgeAgentTarget";
 import type { ForgeCredentialSource } from "./ForgeCredentialSource";
+import type { ForgeIssueFilter } from "./ForgeIssueFilter";
+import type { ForgeIssueUpdate } from "./ForgeIssueUpdate";
 import type { ForgeKind } from "./ForgeKind";
 import type { ForgePrFilter } from "./ForgePrFilter";
 import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { FsCreateKind } from "./FsCreateKind";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
+import type { IssueScope } from "./IssueScope";
+import type { LinearProjectTeam } from "./LinearProjectTeam";
 import type { McpRequest } from "./McpRequest";
 import type { McpServerInput } from "./McpServerInput";
 import type { PairScope } from "./PairScope";
@@ -1083,7 +1087,179 @@ base: string,
 /**
  * Open as a draft.
  */
-draft: boolean, } | { "type": "git_status", 
+draft: boolean, } | { "type": "forge_list_issues", 
+/**
+ * Account to use; the only matching one when omitted.
+ */
+account_id: string | null, 
+/**
+ * Repository to query.
+ */
+repo: ForgeRepoRef, 
+/**
+ * Which issues to return.
+ */
+filter: ForgeIssueFilter, 
+/**
+ * Page number, starting at 1.
+ */
+page: number, 
+/**
+ * The tracker's own search text, when non-empty.
+ */
+query: string | null, } | { "type": "forge_get_issue", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * Issue number.
+ */
+number: number, } | { "type": "forge_list_issue_comments", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * Issue number.
+ */
+number: number, 
+/**
+ * Provider continuation from the previous page, carried unchanged.
+ */
+cursor: string | null, } | { "type": "forge_comment_issue", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * Issue number.
+ */
+number: number, 
+/**
+ * Markdown body.
+ */
+body: string, } | { "type": "forge_update_issue", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * Issue number.
+ */
+number: number, 
+/**
+ * Fields to change; the rest stay as they are.
+ */
+update: ForgeIssueUpdate, } | { "type": "linear_list_accounts" } | { "type": "linear_connect", 
+/**
+ * Linear personal API key.
+ */
+api_key: string, } | { "type": "linear_remove_account", 
+/**
+ * Connection to remove.
+ */
+account_id: string, } | { "type": "linear_list_teams", 
+/**
+ * Connection to use.
+ */
+account_id: string, } | { "type": "linear_project_teams" } | { "type": "linear_set_project_team", 
+/**
+ * h4rn project id.
+ */
+project_id: string, 
+/**
+ * Chosen connection and team.
+ */
+team: LinearProjectTeam | null, } | { "type": "linear_list_issues", 
+/**
+ * h4rn project id.
+ */
+project_id: string, 
+/**
+ * Open, closed or every issue.
+ */
+filter: ForgeIssueFilter, 
+/**
+ * Cursor returned by the previous page.
+ */
+cursor: string | null, 
+/**
+ * Search text, when the tracker should search.
+ */
+query: string | null, } | { "type": "linear_get_issue", 
+/**
+ * Connection to read with.
+ */
+account_id: string, 
+/**
+ * Linear issue id.
+ */
+issue_id: string, 
+/**
+ * Provider continuation for the next comment page.
+ */
+comments_after: string | null, } | { "type": "linear_comment_issue", 
+/**
+ * Connection to comment with.
+ */
+account_id: string, 
+/**
+ * Linear issue id.
+ */
+issue_id: string, 
+/**
+ * Markdown body.
+ */
+body: string, } | { "type": "link_issue", 
+/**
+ * Thread that will hold the link.
+ */
+thread_id: ThreadId, 
+/**
+ * Account to read with; the matching one when omitted.
+ */
+account_id: string | null, 
+/**
+ * Tracker coordinates.
+ */
+scope: IssueScope, 
+/**
+ * Forge issue number, or Linear issue id.
+ */
+issue_id: string, } | { "type": "unlink_issue", 
+/**
+ * Thread that holds the link.
+ */
+thread_id: ThreadId, 
+/**
+ * Tracker coordinates.
+ */
+scope: IssueScope, 
+/**
+ * Forge issue number, or Linear issue id.
+ */
+issue_id: string, } | { "type": "list_thread_issues", 
+/**
+ * Thread to list.
+ */
+thread_id: ThreadId, } | { "type": "git_status", 
 /**
  * Thread whose workspace is read.
  */

@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -25,6 +25,23 @@ use super::protocol::{
 use crate::{TransportCloseKind, TransportHealth};
 
 const DEFAULT_EVENT_CAPACITY: usize = 1_024;
+/// How many ordinary session updates the reader may have queued ahead of the
+/// forwarder, as a multiple of the session event capacity.
+///
+/// The reader must never block on the consumer: a reply behind a flood of
+/// updates still has to be read and resolved, which is why it queues instead of
+/// sending into the session channel itself. That queue needs a bound of its
+/// own, or an agent that streams faster than the bridge drains grows memory
+/// without limit. Four session queues is far more than one turn's live output,
+/// and the history replayed by `session/load` is dropped by the load path
+/// before it reaches here. On overflow the newest ordinary update is dropped and
+/// counted.
+///
+/// The events that decide what a request means or report that the transport is
+/// gone do not share that queue: they have their own reserved path (see
+/// `is_reserved_event`), so a flood of text cannot park a permission handshake,
+/// the close notice or the exit report behind it.
+const READER_QUEUE_MULTIPLE: usize = 4;
 const FRAME_CHANNEL_CAPACITY: usize = 256;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -199,6 +216,12 @@ pub enum AcpError {
 pub enum AcpEvent {
     /// A `session/update` notification.
     SessionUpdate {
+        /// The prompt generation the update follows.
+        ///
+        /// `0` means it arrived while no prompt was running. The bridge drops
+        /// an update whose generation is not the running turn's, so a finished
+        /// turn's late output never lands on the turn that follows it.
+        generation: u64,
         /// Session the update belongs to.
         session_id: String,
         /// Parsed update.
@@ -257,6 +280,32 @@ pub enum AcpEvent {
         retryable: bool,
         /// Which end of the transport failed.
         kind: TransportCloseKind,
+    },
+    /// The session is about to write a prompt.
+    ///
+    /// Queued through the reader's own event queue before the prompt frame is
+    /// written, so the bridge knows that updates arriving from here on belong
+    /// to a running turn (see [`Self::Settled`]). `generation` tags the turn:
+    /// every update the reader publishes while it is the current generation
+    /// belongs to it, and a settlement only closes the generation it names.
+    PromptStarted {
+        /// The prompt generation this turn is.
+        generation: u64,
+    },
+    /// The events a prompt task produced for the turn it just finished.
+    ///
+    /// Queued through the reader's own event queue, so they are published
+    /// behind every `session/update` the reader had already read. The prompt
+    /// task and the bridge are two producers of one turn's stream; without
+    /// this order a turn's last update could land after its completion and be
+    /// applied to the turn that follows it. The bridge drops session updates
+    /// after this until the next [`Self::PromptStarted`]: no turn is running
+    /// then, so an update cannot belong to one.
+    Settled {
+        /// The prompt generation that settled.
+        generation: u64,
+        /// The turn's final events, in the order they must be applied.
+        events: Vec<crate::HarnessEvent>,
     },
 }
 
@@ -317,8 +366,52 @@ struct Shared {
     next_id: AtomicU64,
     pending: PendingMap,
     stdin_tx: Mutex<Option<mpsc::Sender<OutgoingFrame>>>,
-    events_tx: mpsc::Sender<AcpEvent>,
+    /// What the reader published, in the order it read it.
+    ///
+    /// Unbounded on purpose: request resolution must never wait for the event
+    /// consumer. With only the bounded channel, a slow consumer could fill it,
+    /// park the reader inside a `session/update` send, and the supervisor's
+    /// bounded exit wait would then abort a reader that had not yet read the
+    /// reply sitting behind those updates. A forwarder task moves these into
+    /// the session's bounded channel in the same order, so delivery can lag
+    /// without ever blocking a reply.
+    ///
+    /// Ordinary events share one queue, in the reader's order. Ordinary session
+    /// updates are bounded by [`READER_QUEUE_MULTIPLE`] session queues (see
+    /// `publish`): when that many are waiting, the newest is dropped rather than
+    /// growing this queue.
+    reader_events: mpsc::UnboundedSender<AcpEvent>,
+    /// The reserved path: the events that decide what a request means or report
+    /// the transport gone.
+    ///
+    /// A permission handshake, a transport close, stdout's close and the exit
+    /// report are not updates, and they must not wait behind a flood of them.
+    /// When the session channel is blocked or the update backlog is larger than
+    /// one session queue, the forwarder gives one of these the next slot. Such events are at most
+    /// a handful per turn, so this queue is not counted against the update
+    /// bound: the flood that can grow without limit is the update stream, which
+    /// is capped. While the session channel flows, both queues are delivered in
+    /// the reader's order, so a close never arrives before the words read ahead
+    /// of it.
+    reader_control: mpsc::UnboundedSender<AcpEvent>,
+    /// How many ordinary session updates are queued and not yet forwarded.
+    queued_updates: Arc<AtomicUsize>,
+    /// How many ordinary session updates were dropped because that bound was
+    /// reached.
+    dropped_updates: AtomicU64,
+    /// How many events the reader has published, in order.
+    ///
+    /// The load path uses it to know when the forwarder has moved everything
+    /// the replay produced into the bounded channel it drains, so none of the
+    /// history is left behind to look like live output.
+    reader_published: AtomicU64,
+    /// How many published events the forwarder has moved on.
+    forwarded: Arc<AtomicU64>,
     events_rx: Mutex<Option<mpsc::Receiver<AcpEvent>>>,
+    /// The prompt generation the reader tags updates with.
+    ///
+    /// Advanced before a prompt frame is written; `0` while no prompt runs.
+    prompt_generation: AtomicU64,
     server: Mutex<Option<AcpServerInfo>>,
     stderr: StderrRing,
     pid: Option<u32>,
@@ -417,7 +510,36 @@ impl AcpClient {
                 // this client ended it on purpose (a write deadline, a
                 // shutdown): that exit is not a second failure to report.
                 let deliberate = shared.shutting_down.swap(true, Ordering::SeqCst);
+                // The agent's last reply can still be in the pipe when it is
+                // reaped: a real peer writes a newline-terminated answer and
+                // exits at once. The reader owns the order, so give it the
+                // drain window before failing anything, or a request the agent
+                // answered would be settled with the exit error. A grandchild
+                // may hold the pipe open, so the wait is bounded.
+                let reader = lock(&shared.reader).take();
+                let (_, _) = tokio::join!(
+                    async {
+                        if let Some(mut reader) = reader
+                            && tokio::time::timeout(STDERR_DRAIN_GRACE, &mut reader)
+                                .await
+                                .is_err()
+                        {
+                            // A grandchild is holding the pipe open: nothing
+                            // more can arrive inside the window, and the task
+                            // would otherwise outlive the agent it belongs to.
+                            reader.abort();
+                        }
+                    },
+                    // The agent's last diagnostic can still be in the pipe when
+                    // the notable events are sent: let the reader drain it
+                    // before the exit report is built, so the one failure row a
+                    // waiting prompt publishes carries it. Bounded for the same
+                    // reason as above.
+                    tokio::time::timeout(STDERR_DRAIN_GRACE, stderr_task),
+                );
                 shared.health.close_with(TransportCloseKind::Exit);
+                // Only requests the drain did not answer are failed now; the
+                // reader removed every reply it read from the pending map.
                 fail_pending(
                     &shared,
                     AcpError::Closed {
@@ -425,12 +547,6 @@ impl AcpClient {
                         kind: TransportCloseKind::Exit,
                     },
                 );
-                // The agent's last diagnostic can still be in the pipe when the
-                // notable events are sent: let the reader drain it before the
-                // exit report is built, so the one failure row a waiting prompt
-                // publishes carries it. A grandchild may hold the pipe open, so
-                // the wait is bounded.
-                let _ = tokio::time::timeout(STDERR_DRAIN_GRACE, stderr_task).await;
                 let (status_text, stderr_tail) = match status {
                     Ok(status) => (status.to_string(), shared.stderr.snapshot()),
                     Err(error) => (
@@ -443,14 +559,14 @@ impl AcpClient {
                     stderr: stderr_tail.clone(),
                 });
                 shared.exit_notify.notify_waiters();
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::Exited {
+                publish(
+                    &shared,
+                    AcpEvent::Exited {
                         status: status_text,
                         stderr: stderr_tail,
                         deliberate,
-                    })
-                    .await;
+                    },
+                );
             });
             *lock(&client.shared.supervisor) = Some(supervisor);
         }
@@ -474,6 +590,98 @@ impl AcpClient {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (events_tx, events_rx) = mpsc::channel(config.event_capacity.max(16));
+        let (reader_events, mut reader_events_rx) = mpsc::unbounded_channel();
+        let (reader_control, mut reader_control_rx) = mpsc::unbounded_channel();
+        // One task owns the bounded channel: the reader only queues here, so a
+        // slow consumer can never stop it from reading (and resolving) the
+        // agent's replies. Ordinary updates are counted against a bound in
+        // `publish`; the forwarder gives each one back as it moves on, so a
+        // stalled consumer drops updates instead of growing memory.
+        //
+        // The reserved queue is used when the session channel has no room or
+        // the waiting updates fill more than one session queue: a permission
+        // request, a close or the exit report then goes next instead of waiting
+        // behind all of them. While the consumer keeps up, delivery keeps the
+        // reader's order, so a close report cannot overtake the turn's last
+        // words that were read before it.
+        let relay = events_tx.clone();
+        let session_capacity = config.event_capacity.max(16);
+        let forwarded = Arc::new(AtomicU64::new(0));
+        let forwarded_count = Arc::clone(&forwarded);
+        let queued = Arc::new(AtomicUsize::new(0));
+        let queued_count = Arc::clone(&queued);
+        tokio::spawn(async move {
+            let mut ordinary_open = true;
+            let mut control_open = true;
+            let mut ordinary_slot: Option<AcpEvent> = None;
+            let mut control_slot: Option<AcpEvent> = None;
+            loop {
+                // Fill both slots without blocking, so the choice below can see
+                // what each side has waiting.
+                if ordinary_slot.is_none() && ordinary_open {
+                    match reader_events_rx.try_recv() {
+                        Ok(event) => {
+                            if is_ordinary_update(&event) {
+                                queued_count.fetch_sub(1, Ordering::SeqCst);
+                            }
+                            ordinary_slot = Some(event);
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                        Err(mpsc::error::TryRecvError::Disconnected) => ordinary_open = false,
+                    }
+                }
+                if control_slot.is_none() && control_open {
+                    match reader_control_rx.try_recv() {
+                        Ok(event) => control_slot = Some(event),
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                        Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
+                    }
+                }
+                // The reserved path: a blocked session channel, or an update
+                // backlog larger than one session queue, gives the control
+                // event the next slot. A consumer that is keeping up keeps the
+                // reader's order instead, so a close never overtakes the words
+                // read before it.
+                let control_first = control_slot.is_some()
+                    && (relay.capacity() == 0
+                        || queued_count.load(Ordering::SeqCst) >= session_capacity);
+                let event = if control_first {
+                    control_slot.take()
+                } else if ordinary_slot.is_some() {
+                    ordinary_slot.take()
+                } else if control_slot.is_some() {
+                    control_slot.take()
+                } else {
+                    if !ordinary_open && !control_open {
+                        break;
+                    }
+                    tokio::select! {
+                        biased;
+                        event = reader_control_rx.recv(), if control_open => match event {
+                            Some(event) => control_slot = Some(event),
+                            None => control_open = false,
+                        },
+                        event = reader_events_rx.recv(), if ordinary_open => match event {
+                            Some(event) => {
+                                if is_ordinary_update(&event) {
+                                    queued_count.fetch_sub(1, Ordering::SeqCst);
+                                }
+                                ordinary_slot = Some(event);
+                            }
+                            None => ordinary_open = false,
+                        },
+                    }
+                    continue;
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                if relay.send(event).await.is_err() {
+                    break;
+                }
+                forwarded_count.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let (stdin_tx, stdin_rx) = mpsc::channel(FRAME_CHANNEL_CAPACITY);
         let shared = Arc::new(Shared {
             config,
@@ -481,8 +689,14 @@ impl AcpClient {
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             stdin_tx: Mutex::new(Some(stdin_tx)),
-            events_tx,
+            reader_events,
+            reader_control,
+            queued_updates: queued,
+            dropped_updates: AtomicU64::new(0),
+            reader_published: AtomicU64::new(0),
+            forwarded,
             events_rx: Mutex::new(Some(events_rx)),
+            prompt_generation: AtomicU64::new(0),
             server: Mutex::new(None),
             stderr,
             pid,
@@ -576,6 +790,26 @@ impl AcpClient {
         lock(&self.shared.events_rx).take()
     }
 
+    /// Queues `event` behind every frame the reader has already read.
+    ///
+    /// The reader sends a frame's events before it resolves that frame's
+    /// reply, so an event queued here after the reply was observed is behind
+    /// every update the turn produced before it. The prompt task uses this to
+    /// publish its turn's settlement without overtaking the turn's own
+    /// updates.
+    pub(crate) fn queue_behind_reader(&self, event: AcpEvent) -> bool {
+        publish(&self.shared, event)
+    }
+
+    /// Starts a new prompt generation and returns it.
+    ///
+    /// Called before the prompt frame is written: every `session/update` the
+    /// reader publishes from then on is tagged with this generation, and the
+    /// bridge only applies the updates that belong to the running prompt.
+    pub(crate) fn begin_prompt(&self) -> u64 {
+        self.shared.prompt_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     /// Opens a new session and returns its models, modes and id.
     pub async fn new_session(
         &self,
@@ -655,16 +889,34 @@ impl AcpClient {
             // The reader queues the last replayed frames before it resolves
             // the reply, so some history can still sit in the channel once the
             // call settles. Drain it now, or it would surface as output of the
-            // next turn.
-            while let Ok(event) = receiver.try_recv() {
-                if !matches!(event, AcpEvent::SessionUpdate { .. }) {
-                    kept.push(event);
+            // next turn. The forwarder may not have moved the tail in yet, so
+            // wait, bounded, until everything the reader had published by the
+            // reply has arrived here, draining as it does.
+            let target = self.shared.reader_published.load(Ordering::SeqCst);
+            let deadline = tokio::time::Instant::now() + STDERR_DRAIN_GRACE;
+            loop {
+                loop {
+                    match receiver.try_recv() {
+                        Ok(event) => {
+                            if !matches!(event, AcpEvent::SessionUpdate { .. }) {
+                                kept.push(event);
+                            }
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    }
                 }
+                if self.shared.forwarded.load(Ordering::SeqCst) >= target
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
             // Hand back what arrived during the load before anything newer can
             // be read, so a permission request or an error keeps its order.
             for event in kept {
-                let _ = self.shared.events_tx.send(event).await;
+                publish(&self.shared, event);
             }
             *lock(&self.shared.events_rx) = Some(receiver);
         }
@@ -1187,6 +1439,84 @@ impl Drop for AcpClient {
     }
 }
 
+/// Publishes `event` in the order the reader read it.
+///
+/// Never blocks on the consumer: the bounded channel is fed by one forwarder
+/// task, so a slow bridge can delay delivery but never stop the reader from
+/// reading (and resolving) the agent's replies.
+///
+/// Ordinary session updates are bounded: at most `READER_QUEUE_MULTIPLE` session
+/// queues may be waiting for the forwarder, and one that arrives with no room is
+/// dropped and counted. Dropping the newest update keeps the read side
+/// independent of how fast the bridge drains; it is the only loss this queue
+/// makes.
+///
+/// The events that decide what a request means or report the transport gone go
+/// on a reserved queue instead (see `is_reserved_event`). They are never counted
+/// against that bound and never dropped because of it. When the session channel
+/// is blocked, or more than one session queue of updates is waiting, the
+/// forwarder gives one of them the next slot, so a flood of text can never make
+/// a permission hand or the exit report wait behind all of it. While the
+/// consumer keeps up, delivery keeps the reader's order.
+fn publish(shared: &Arc<Shared>, event: AcpEvent) -> bool {
+    let ordinary = is_ordinary_update(&event);
+    let reserved = is_reserved_event(&event);
+    if ordinary {
+        let queued = shared.queued_updates.fetch_add(1, Ordering::SeqCst) + 1;
+        if queued > reader_queue_capacity(&shared.config) {
+            shared.queued_updates.fetch_sub(1, Ordering::SeqCst);
+            let dropped = shared.dropped_updates.fetch_add(1, Ordering::SeqCst) + 1;
+            if dropped == 1 || dropped % 1_000 == 0 {
+                tracing::warn!(
+                    dropped,
+                    "the ACP event consumer is not keeping up; dropping session updates"
+                );
+            }
+            return false;
+        }
+    }
+    let queue = if reserved {
+        &shared.reader_control
+    } else {
+        &shared.reader_events
+    };
+    let published = queue.send(event).is_ok();
+    if published {
+        shared.reader_published.fetch_add(1, Ordering::SeqCst);
+    } else if ordinary {
+        shared.queued_updates.fetch_sub(1, Ordering::SeqCst);
+    }
+    published
+}
+
+/// Whether `event` is one of the session's ordinary updates, the only kind
+/// `publish` bounds and drops.
+fn is_ordinary_update(event: &AcpEvent) -> bool {
+    matches!(event, AcpEvent::SessionUpdate { .. })
+}
+
+/// Whether `event` takes the reserved path ahead of queued updates.
+///
+/// These are the events that decide what a request means or that the transport
+/// is gone: a permission handshake, a close and the exit report. A settlement
+/// deliberately stays on the ordinary queue: it must follow the updates the
+/// reader had already taken, or a turn's last text would land after its
+/// completion.
+fn is_reserved_event(event: &AcpEvent) -> bool {
+    matches!(
+        event,
+        AcpEvent::PermissionRequest { .. }
+            | AcpEvent::TransportClosed { .. }
+            | AcpEvent::Closed { .. }
+            | AcpEvent::Exited { .. }
+    )
+}
+
+/// The most ordinary updates the reader queue may hold.
+fn reader_queue_capacity(config: &AcpClientConfig) -> usize {
+    config.event_capacity.max(16) * READER_QUEUE_MULTIPLE
+}
+
 fn spawn_writer<W>(
     mut stdin: W,
     mut frames: mpsc::Receiver<OutgoingFrame>,
@@ -1201,13 +1531,13 @@ where
             let mut bytes = match serde_json::to_vec(&frame) {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    let _ = shared
-                        .events_tx
-                        .send(AcpEvent::Error {
+                    publish(
+                        &shared,
+                        AcpEvent::Error {
                             message: format!("failed to encode an ACP frame: {error}"),
                             retryable: false,
-                        })
-                        .await;
+                        },
+                    );
                     continue;
                 }
             };
@@ -1234,14 +1564,14 @@ where
                         kind: TransportCloseKind::Write,
                     },
                 );
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::TransportClosed {
+                publish(
+                    &shared,
+                    AcpEvent::TransportClosed {
                         message: format!("failed to write to the ACP agent: {detail}"),
                         retryable: false,
                         kind: TransportCloseKind::Write,
-                    })
-                    .await;
+                    },
+                );
                 // The caller's one failure row is built from this: name the
                 // writer's own I/O error, not just that the writer left.
                 if let Some(written) = written {
@@ -1264,14 +1594,14 @@ where
                         kind: TransportCloseKind::Write,
                     },
                 );
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::TransportClosed {
+                publish(
+                    &shared,
+                    AcpEvent::TransportClosed {
                         message: format!("failed to flush the ACP agent stdin: {detail}"),
                         retryable: false,
                         kind: TransportCloseKind::Write,
-                    })
-                    .await;
+                    },
+                );
                 if let Some(written) = written {
                     let _ = written.send(Err(detail));
                 }
@@ -1300,14 +1630,14 @@ where
                 Ok(None) => break,
                 Err(error) => {
                     close_kind = TransportCloseKind::Read;
-                    let _ = shared
-                        .events_tx
-                        .send(AcpEvent::TransportClosed {
+                    publish(
+                        &shared,
+                        AcpEvent::TransportClosed {
                             message: format!("failed to read the ACP agent stdout: {error}"),
                             retryable: false,
                             kind: TransportCloseKind::Read,
-                        })
-                        .await;
+                        },
+                    );
                     break;
                 }
             };
@@ -1318,16 +1648,16 @@ where
             let frame: Value = match serde_json::from_str(line) {
                 Ok(frame) => frame,
                 Err(error) => {
-                    let _ = shared
-                        .events_tx
-                        .send(AcpEvent::Error {
+                    publish(
+                        &shared,
+                        AcpEvent::Error {
                             message: format!(
                                 "unparseable ACP frame ({error}): {}",
                                 truncate(line, 320)
                             ),
                             retryable: false,
-                        })
-                        .await;
+                        },
+                    );
                     continue;
                 }
             };
@@ -1342,19 +1672,22 @@ where
             } else if let Some(id) = frame.get("id") {
                 resolve_response(&shared, id.clone(), &frame);
             } else {
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::Error {
+                publish(
+                    &shared,
+                    AcpEvent::Error {
                         message: "ACP frame had neither method nor id".into(),
                         retryable: false,
-                    })
-                    .await;
+                    },
+                );
             }
         }
 
         // The agent's stdout is gone: no reply can ever come back. Mark the
         // transport dead before failing the pending calls, so a prompt that
-        // fails because of this can see why.
+        // fails because of this can see why. This runs only after every line
+        // already in the pipe was read, so a reply the agent wrote before
+        // exiting is resolved rather than failed; the supervisor waits for
+        // this reader to reach EOF for exactly that reason.
         shared.health.close_with(close_kind);
         fail_pending(
             &shared,
@@ -1364,13 +1697,13 @@ where
             },
         );
         if !shared.shutting_down.load(Ordering::SeqCst) {
-            let _ = shared
-                .events_tx
-                .send(AcpEvent::Closed {
+            publish(
+                &shared,
+                AcpEvent::Closed {
                     message: "the ACP agent stdout closed".into(),
                     kind: close_kind,
-                })
-                .await;
+                },
+            );
         }
     })
 }
@@ -1378,20 +1711,28 @@ where
 async fn handle_notification(shared: &Arc<Shared>, method: &str, params: Value) {
     if method == "session/update" {
         if let Some((session_id, update)) = parse_session_update(&params) {
-            let _ = shared
-                .events_tx
-                .send(AcpEvent::SessionUpdate { session_id, update })
-                .await;
+            // Tag the update with the prompt it follows. The reader reads the
+            // generation when it reads the frame, so an update read while no
+            // prompt runs is tagged 0 and dropped by the bridge.
+            let generation = shared.prompt_generation.load(Ordering::SeqCst);
+            publish(
+                shared,
+                AcpEvent::SessionUpdate {
+                    generation,
+                    session_id,
+                    update,
+                },
+            );
             return;
         }
     }
-    let _ = shared
-        .events_tx
-        .send(AcpEvent::Notification {
+    publish(
+        shared,
+        AcpEvent::Notification {
             method: method.to_string(),
             params,
-        })
-        .await;
+        },
+    );
 }
 
 async fn handle_inbound(shared: &Arc<Shared>, id: Value, method: &str, params: Value) {
@@ -1418,13 +1759,13 @@ async fn handle_inbound(shared: &Arc<Shared>, id: Value, method: &str, params: V
         }
         "session/request_permission" => {
             let request = AcpPermissionRequest::from_value(&params);
-            let _ = shared
-                .events_tx
-                .send(AcpEvent::PermissionRequest {
+            publish(
+                shared,
+                AcpEvent::PermissionRequest {
                     request_id: id,
                     request,
-                })
-                .await;
+                },
+            );
         }
         "terminal/create"
         | "terminal/output"
@@ -1534,16 +1875,19 @@ fn teardown_transport(shared: &Arc<Shared>, message: String) {
             kind: TransportCloseKind::Write,
         },
     );
-    if let Err(error) = shared.events_tx.try_send(AcpEvent::TransportClosed {
-        message,
-        retryable: false,
-        kind: TransportCloseKind::Write,
-    }) {
-        // A full event queue already has plenty for the daemon to act on; the
-        // closed transport is visible through `is_closed` either way.
+    if !publish(
+        shared,
+        AcpEvent::TransportClosed {
+            message,
+            retryable: false,
+            kind: TransportCloseKind::Write,
+        },
+    ) {
+        // The queue only fails once its forwarder and receiver are gone, which
+        // is a client nobody is reading any more; the closed transport is
+        // visible through `is_closed` either way.
         tracing::debug!(
             target: "h4rn_harness::acp",
-            %error,
             "could not report the torn-down transport"
         );
     }
@@ -1990,7 +2334,9 @@ mod tests {
         let mut events = events;
         let first = events.recv().await.expect("event");
         match first {
-            AcpEvent::SessionUpdate { session_id, update } => {
+            AcpEvent::SessionUpdate {
+                session_id, update, ..
+            } => {
                 assert_eq!(session_id, "s-1");
                 assert_eq!(update.text().as_deref(), Some("pong"));
             }
@@ -2830,6 +3176,250 @@ mod tests {
         }
         agent_task.await.expect("agent");
         client.shutdown().await.expect("shutdown");
+    }
+
+    /// A reply that reached the pipe before the agent exited is never lost.
+    ///
+    /// A real peer answers and exits at once: the newline-terminated reply is
+    /// already in the child's stdout when the supervisor reaps the process.
+    /// The supervisor used to close the transport and fail every pending call
+    /// before the reader had drained that reply, so an answered request was
+    /// settled with the exit error. The reader owns that order now: the
+    /// supervisor waits, bounded, for it to reach EOF before failing what is
+    /// still pending.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_written_before_the_exit_resolves_instead_of_failing() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // The peer answers the first frame it reads with a well-formed
+        // `initialize` reply (the client's first request always uses id 1)
+        // and exits immediately, without waiting for anything else.
+        let config = AcpClientConfig::new("/bin/sh", workspace.path()).args([
+            "-c",
+            "read -r line; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"Exit Peer\"}}}'; exit 0",
+        ]);
+        for run in 0..100 {
+            let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+            let _events = client.take_events().expect("events");
+            let info = client
+                .initialize()
+                .await
+                .unwrap_or_else(|error| panic!("run {run}: the reply was lost: {error:?}"));
+            assert_eq!(info.agent_name, "Exit Peer", "run {run}");
+            client.shutdown().await.expect("shutdown");
+        }
+    }
+
+    /// A reply behind a full event queue still resolves.
+    ///
+    /// A real agent can stream more updates than the consumer has read when its
+    /// reply lands. The reader used to block on the 17th update of a 16-slot
+    /// queue, so the supervisor's bounded exit wait aborted it before it read
+    /// the reply already in the pipe: an answered request failed with
+    /// `Closed { kind: Exit }`. Delivery may lag; it may never decide whether a
+    /// request was answered.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_behind_a_full_event_queue_still_resolves() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut frames = String::new();
+        for index in 0..40 {
+            frames.push_str(&format!(
+                "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"s-1\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"update {index}\"}}}}}}}}\n"
+            ));
+        }
+        frames.push_str(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"Busy Peer\"}}}\n",
+        );
+        // The peer answers the first frame it reads with 40 updates and then
+        // its reply, and exits without waiting for anything else.
+        let script = format!("read -r line; printf '%s' '{frames}'; exit 0");
+        let mut config =
+            AcpClientConfig::new("/bin/sh", workspace.path()).args(["-c", script.as_str()]);
+        // The review's shape: 17 updates must not stall a 16-slot queue.
+        config.event_capacity = 16;
+        for run in 0..20 {
+            let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+            // The test never reads these: the queue fills and stays full.
+            let _events = client.take_events().expect("events");
+            let info = client
+                .initialize()
+                .await
+                .unwrap_or_else(|error| panic!("run {run}: the reply was lost: {error:?}"));
+            assert_eq!(info.agent_name, "Busy Peer", "run {run}");
+            client.shutdown().await.expect("shutdown");
+        }
+    }
+
+    /// A chatty agent cannot grow the reader's queue past its bound.
+    ///
+    /// The reader publishes into its own queue so a slow consumer can never
+    /// park it before it reads the reply behind the updates. That queue used to
+    /// be unbounded, so an agent that streams faster than the bridge drains grew
+    /// memory without limit. Ordinary updates are now capped at four session
+    /// queues and the excess is dropped. The consumer here never reads, so both
+    /// the session channel and the reader's queue stay full for the whole flood.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_chatty_agent_cannot_grow_a_stalled_consumers_queue() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut config = flooding_peer(workspace.path(), FLOOD, "");
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        // The test never reads these: the session queue and the reader queue
+        // stay full, so anything the reader kept beyond its bound would show.
+        let _events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        assert!(
+            client
+                .wait_for_exit(Duration::from_secs(30))
+                .await
+                .is_some(),
+            "the flooding peer never exited"
+        );
+
+        let cap = reader_queue_capacity(&config);
+        let queued = client.shared.queued_updates.load(Ordering::SeqCst);
+        let dropped = client.shared.dropped_updates.load(Ordering::SeqCst);
+        let published = client.shared.reader_published.load(Ordering::SeqCst);
+        assert!(
+            queued <= cap,
+            "the reader queue grew past its bound: {queued} > {cap}"
+        );
+        assert!(dropped > 0, "a 5,000-update flood dropped nothing");
+        assert!(
+            published <= (config.event_capacity.max(16) + cap + 8) as u64,
+            "more events were queued than the reader's and session's bounds allow: {published}"
+        );
+    }
+
+    /// An exit behind a full reader queue is still delivered first.
+    ///
+    /// The close and exit reports take the reserved path: they are never
+    /// dropped and never wait behind the update queue. The consumer reads
+    /// nothing until the agent is gone, so a full session channel plus a full
+    /// reader queue stand between the consumer and the exit. The exit must still
+    /// arrive after at most one session queue of already-delivered updates, not
+    /// behind the four queues of updates the reader is holding.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_exit_behind_a_full_reader_queue_is_still_delivered() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut config = flooding_peer(workspace.path(), FLOOD, "");
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        let mut events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        wait_for_exit_published(&client).await;
+        assert!(
+            client.shared.dropped_updates.load(Ordering::SeqCst) > 0,
+            "the queue never overflowed, so this proves nothing"
+        );
+
+        let mut seen = 0usize;
+        let exited = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await {
+                    Some(AcpEvent::Exited { .. }) => return true,
+                    Some(_) => seen += 1,
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .expect("the exit report never reached a consumer behind the flood");
+        assert!(exited, "the event stream ended before the exit report");
+        assert!(
+            seen <= config.event_capacity.max(16) + 4,
+            "the exit report waited behind {seen} updates instead of taking the \
+             reserved path"
+        );
+    }
+
+    /// A permission request at the back of a flood is delivered first too.
+    ///
+    /// The request is written after 5,000 updates, with no consumer reading.
+    /// Without the reserved path it would sit behind the session channel and the
+    /// reader queue (about eighty updates); with it, it arrives after at most
+    /// the one session queue already delivered into the channel.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_permission_request_behind_a_flood_is_delivered_first() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let tail = "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"s-1\"}}';";
+        let mut config = flooding_peer(workspace.path(), FLOOD, tail);
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        let mut events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        wait_for_exit_published(&client).await;
+        assert!(
+            client.shared.dropped_updates.load(Ordering::SeqCst) > 0,
+            "the queue never overflowed, so this proves nothing"
+        );
+
+        let mut seen = 0usize;
+        let asked = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await {
+                    Some(AcpEvent::PermissionRequest { .. }) => return true,
+                    Some(_) => seen += 1,
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .expect("the permission request never reached a consumer behind the flood");
+        assert!(
+            asked,
+            "the event stream ended before the permission request"
+        );
+        assert!(
+            seen <= config.event_capacity.max(16) + 4,
+            "the permission request waited behind {seen} updates instead of \
+             taking the reserved path"
+        );
+    }
+
+    /// Waits until the peer has exited *and* its exit report is published.
+    ///
+    /// `wait_for_exit` returns as soon as the report is stored; the supervisor
+    /// publishes it as an event one step later. Draining events before that
+    /// would race the reserved path this test is about.
+    #[cfg(unix)]
+    async fn wait_for_exit_published(client: &AcpClient) {
+        assert!(
+            client
+                .wait_for_exit(Duration::from_secs(30))
+                .await
+                .is_some(),
+            "the flooding peer never exited"
+        );
+        let supervisor = { lock(&client.shared.supervisor).take() };
+        if let Some(supervisor) = supervisor {
+            supervisor.await.expect("the supervisor");
+        }
+    }
+
+    /// A shell peer that answers the first frame, writes `count` session
+    /// updates, then `tail`, then exits.
+    #[cfg(unix)]
+    fn flooding_peer(workspace: &std::path::Path, count: usize, tail: &str) -> AcpClientConfig {
+        let flood = format!(
+            "printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1,\"agentInfo\":{{\"name\":\"Flood Peer\"}}}}}}'; \
+             i=0; while [ \"$i\" -lt {count} ]; do \
+               printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"s-1\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"x\"}}}}}}}}'; \
+               i=$((i+1)); \
+             done;"
+        );
+        let script = format!("read -r line; {flood} {tail} exit 0");
+        AcpClientConfig::new("/bin/sh", workspace).args(["-c", script.as_str()])
     }
 
     #[test]

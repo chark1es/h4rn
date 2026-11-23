@@ -25,6 +25,7 @@ export type CommandId =
   | "view.toggle"
   | "nav.inbox"
   | "nav.pulls"
+  | "nav.issues"
   | "nav.usage"
   | "nav.tools"
   | "tab.working"
@@ -102,6 +103,13 @@ export const COMMANDS: readonly CommandSpec[] = [
     label: "Go to pull requests",
     group: "Navigate",
     binding: "mod+shift+p",
+    inInputs: true,
+  },
+  {
+    id: "nav.issues",
+    label: "Go to issues",
+    group: "Navigate",
+    binding: "mod+shift+i",
     inInputs: true,
   },
   {
