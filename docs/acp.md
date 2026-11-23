@@ -108,10 +108,18 @@ The new-thread and composer mode pickers only offer a choice h4rn can map onto a
 The mapping is the daemon's: Approval required → `default`, `ask`, `manual` or `supervised`;
 Auto-accept edits → `accept-edits`, `acceptEdits` or `accept_edits`; Plan → `plan`, `read-only` or
 `readonly`; Full access → `auto`, `full-access`, `bypass` or `bypassPermissions`. An agent whose
-ids map to none of those shows **Mode is managed by the agent** in the dialog and no permission rows
-in the thread. A mode the agent does not advertise is refused with the advertised list rather than
-silently started in another mode. Plan is offered at creation and mid-thread wherever the agent
+ids map to none of those, or that advertises no mode catalogue at all, shows **Mode is managed by the
+agent** in the dialog and no permission rows in the thread; h4rn does not guess the four built-in
+modes for a catalogue it cannot see. A mode the agent does not advertise is refused with the
+advertised list rather than silently started in another mode, and a fresh session asked for a
+non-default mode without any catalogue is refused the same way (only Approval required, which asks
+for no mode change, starts). Plan is offered at creation and mid-thread wherever the agent
 advertises it.
+
+Choosing the `default` model on a live agent is deferred rather than refused: ACP has no "reset to
+the agent's default" method and the catalogue does not say which entry is the default, so the change
+applies from the next session instead of pretending the running one switched. The summary shows
+`default`, and the next turn starts a session on the agent's own choice.
 
 When an agent has a fixed working directory, **New thread** shows that directory before Start and
 the thread's workspace (Files and Changes) is that directory, not the thread workspace a built-in

@@ -361,6 +361,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Thread settings apply to the turn they promise, and never to one already running.** A
+  settings change that lands while a session is still starting no longer detaches the session that
+  startup is about to write the turn to (which left the thread Working forever), and only a turn
+  whose prompt has not reached the harness yet may be moved onto a fresh session; a change made
+  during a running turn applies from the turn after it. Two settings changed at the same time each
+  keep their own field instead of one request writing back the whole snapshot it read before the
+  other landed. Choosing an ACP agent's `default` model on a live session is deferred to the next
+  session instead of being refused. A Claude Code process that exits while a control request is
+  outstanding now fails that request at once instead of after a 10-second timeout. The composer's
+  model list uses the session's own catalogue (Codex's `model/list`, a configured agent's advertised
+  models) once a session has run, falling back to the static list only before the first session, and
+  Codex offers `minimal` reasoning effort. An ACP agent that advertises no mode catalogue shows
+  "Mode is managed by the agent" instead of all four permission modes, and a start refuses a
+  non-default mode it cannot map.
 - **A PR watch hears every change since it started, exactly once.** The GitHub
   change probe is gone: the watch reads the PR detail conditionally, so a `304`
   is built from the body the account's shared cache returns rather than from the
