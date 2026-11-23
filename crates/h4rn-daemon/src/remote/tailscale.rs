@@ -209,6 +209,17 @@ fn run_until(binary: &Path, args: &[&str], deadline: Instant) -> Option<String> 
 mod tests {
     use super::*;
 
+    /// Budget for a fake CLI that is supposed to answer promptly.
+    ///
+    /// The tests below exercise "does a prompt CLI still answer", not the
+    /// production [`DETECT_TIMEOUT`]. Injecting that budget would make the
+    /// assertion about the machine's scheduling speed: a loaded runner can
+    /// delay a `sh` that echoes by more than two seconds, and `run_until` would
+    /// then correctly report a CLI that outlived its budget as off. The
+    /// deadline itself is covered by
+    /// [`a_hung_cli_is_killed_at_the_deadline`], which keeps a short one.
+    const ANSWER_BUDGET: Duration = Duration::from_secs(60);
+
     #[test]
     fn modes_parse_strictly() {
         assert_eq!(TailscaleMode::parse("AUTO"), Some(TailscaleMode::Auto));
@@ -268,7 +279,7 @@ mod tests {
     fn a_prompt_cli_still_answers() {
         let dir = tempfile::tempdir().unwrap();
         let binary = script(dir.path(), "echo 100.64.1.5");
-        let output = run_until(&binary, &["ip", "-4"], Instant::now() + DETECT_TIMEOUT);
+        let output = run_until(&binary, &["ip", "-4"], Instant::now() + ANSWER_BUDGET);
         assert_eq!(output.as_deref().map(str::trim), Some("100.64.1.5"));
     }
 
@@ -278,7 +289,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let binary = script(dir.path(), "exit 1");
         assert_eq!(
-            run_until(&binary, &["ip", "-4"], Instant::now() + DETECT_TIMEOUT),
+            run_until(&binary, &["ip", "-4"], Instant::now() + ANSWER_BUDGET),
             None
         );
     }
