@@ -25,7 +25,7 @@ function openPull(url: string): void {
 
 /** The quiet header badge and its linked-items popover. */
 export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
-  const { pulls } = useThreadPullRequests(threadId, resolveApi);
+  const { pulls, reload } = useThreadPullRequests(threadId, resolveApi);
   const [busy, setBusy] = useState<string | null>(null);
 
   if (pulls.length === 0) return null;
@@ -50,6 +50,7 @@ export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
     <LinkedPullRequestsMenu
       pulls={pulls}
       busy={busy}
+      onOpen={reload}
       onUnlink={(pull) =>
         run(`unlink:${pull.number}`, () =>
           resolveApi().unlinkPullRequest(threadId, pull.repo, pull.number),
@@ -73,12 +74,15 @@ export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
 export function LinkedPullRequestsMenu({
   pulls,
   busy = null,
+  onOpen,
   onUnlink,
   onWatch,
   onUnwatch,
 }: {
   pulls: ThreadPullRequest[];
   busy?: string | null;
+  /** Reads the daemon again when the panel opens. */
+  onOpen?: () => void;
   onUnlink: (pull: ThreadPullRequest) => void;
   onWatch: (pull: ThreadPullRequest) => void;
   onUnwatch: (pull: ThreadPullRequest) => void;
@@ -88,7 +92,7 @@ export function LinkedPullRequestsMenu({
   const extra = pulls.length - 1;
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={(open) => open && onOpen?.()}>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
