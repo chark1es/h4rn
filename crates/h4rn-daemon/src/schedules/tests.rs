@@ -1696,6 +1696,69 @@ async fn a_pending_disarm_keeps_the_edit_the_person_saved() {
 }
 
 #[tokio::test]
+async fn a_staged_pause_rechecks_the_settings_the_person_fixed() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = a_task_that_cannot_name_its_next_slot(&fixture).await;
+    let slot = task
+        .next_run_at
+        .expect("the broken task is still armed for a slot");
+
+    fixture.service.fail_next_commit();
+    fixture.service.run_due().await;
+    wait_pending(&fixture.service, &task.task_id).await;
+
+    // The person fixes the zone while the failed write waits, and the clock is
+    // just before the slot the failed run was for: the corrected settings name
+    // that very same slot again.
+    fixture.clock.advance(chrono::Duration::seconds(-2));
+    let waiting = fixture.service.task(&task.task_id).await.expect("task");
+    let mut edit = waiting.draft();
+    edit.timezone = "Europe/Berlin".into();
+    let edited = fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("edit");
+    assert!(edited.enabled);
+    assert_eq!(
+        edited.next_run_at,
+        Some(slot),
+        "the corrected settings name the slot the failed run was for"
+    );
+
+    // The retry still records the original failure, but the stale pause loses
+    // to the fixed settings and the slot runs once.
+    fixture.clock.advance(chrono::Duration::seconds(32));
+    fixture.service.run_due().await;
+    let live = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        live.enabled,
+        "a fixed task is not paused by the retry of its old failure"
+    );
+    let runs = fixture.service.runs(&task.task_id).await.expect("runs");
+    assert_eq!(
+        runs.last().map(|run| run.outcome),
+        Some(ScheduleRunOutcome::Failed),
+        "the original failure is still recorded: {runs:?}"
+    );
+    let started: Vec<&ScheduleRun> = runs
+        .iter()
+        .filter(|run| run.outcome == ScheduleRunOutcome::Started)
+        .collect();
+    assert_eq!(
+        started.len(),
+        1,
+        "the corrected task runs that slot once: {runs:?}"
+    );
+    assert_eq!(started[0].scheduled_for, Some(slot));
+    assert!(
+        live.next_run_at.is_some_and(|at| at > slot),
+        "the task moves on to a later slot"
+    );
+}
+
+#[tokio::test]
 async fn a_row_disarmed_before_the_pause_existed_opens_paused() {
     let clock = Arc::new(ManualClock::at(Utc::now()));
     let fixture = fixture(FakeHarness::new(), clock).await;
@@ -1815,6 +1878,61 @@ async fn a_row_disarmed_before_the_pause_existed_opens_paused() {
     assert!(reopened_once.enabled, "a spent Once task keeps its state");
     assert!(reopened_once.once_consumed);
     assert!(reopened_once.next_run_at.is_none());
+}
+
+#[tokio::test]
+async fn an_unreadable_slot_without_a_disarm_failure_is_left_as_stored() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let journal = Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+    let fixture = fixture_with_journal(
+        FakeHarness::new(),
+        clock,
+        Some(journal.clone() as Arc<dyn Journal>),
+    )
+    .await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+
+    // A row whose timestamp no longer decodes: it opens with no readable next
+    // run, but its last recorded run is not the disarm failure.
+    journal
+        .set_raw_next_run_at(&task.task_id, Some("not-a-timestamp"))
+        .await
+        .expect("write the unreadable slot");
+
+    let reopened = ScheduleService::open(
+        Arc::clone(&fixture.journal),
+        Arc::clone(&fixture.manager),
+        HostId::new("host_schedule_test"),
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("reopen");
+    let opened = reopened.task(&task.task_id).await.expect("task");
+    assert!(
+        opened.enabled,
+        "a row that never failed to disarm keeps its enabled state"
+    );
+    assert!(
+        opened.next_run_at.is_none(),
+        "the stored slot cannot be decoded"
+    );
+    assert_eq!(
+        journal
+            .raw_next_run_at(&task.task_id)
+            .await
+            .expect("raw slot")
+            .as_deref(),
+        Some("not-a-timestamp"),
+        "an upgrade never erases a timestamp it could not read"
+    );
 }
 
 #[tokio::test]

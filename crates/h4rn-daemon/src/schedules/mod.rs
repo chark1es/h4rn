@@ -83,6 +83,12 @@ const RETRY_CAP_SECS: i64 = 3600;
 /// The prefix of a webhook task's public path.
 pub const WEBHOOK_PREFIX: &str = "/webhooks/";
 
+/// How a disarm failure starts its detail in a task's history.
+///
+/// `open()` uses it to recognize the row an older daemon disarmed, so the
+/// pause is only restored for a task that really failed to name its next slot.
+const DISARM_DETAIL_PREFIX: &str = "Its schedule has no next run:";
+
 /// Why a schedule request failed.
 #[derive(Debug)]
 pub enum ScheduleServiceError {
@@ -262,7 +268,17 @@ impl ScheduleService {
                 && task.next_run_at.is_none()
                 && !task.schedule.is_webhook()
                 && !spent_once
+                // Only a task whose last recorded run is the disarm failure was
+                // disarmed by an older daemon. An enabled row whose stored slot
+                // merely failed to decode never failed to run: pausing it would
+                // drop the timestamp the person's task still owns and free its
+                // checkout for no reason, so it is left exactly as stored.
+                && task
+                    .last_run
+                    .as_ref()
+                    .is_some_and(is_disarm_failure)
             {
+                // Only the pause changes; every other stored field stays.
                 task.enabled = false;
                 if let Err(error) = journal.upsert_schedule(task).await {
                     tracing::warn!(
@@ -1201,7 +1217,7 @@ impl ScheduleService {
             thread_id: None,
             outcome: ScheduleRunOutcome::Failed,
             detail: Some(format!(
-                "Its schedule has no next run: {reason} Fix the schedule to run it again."
+                "{DISARM_DETAIL_PREFIX} {reason} Fix the schedule to run it again."
             )),
         };
         if let Err(error) = self
@@ -1413,10 +1429,11 @@ impl ScheduleService {
     ///
     /// This writes the run and the current task row only; it never re-admits
     /// the slot, so a retry cannot start a second run. A staged automatic pause
-    /// is written with its failure unless the person has since moved the task
-    /// to another slot, in which case their state stands. The entry stays in
-    /// the map during the attempt so admission cannot slip a new run in behind
-    /// it.
+    /// is written with its failure only while the task's current settings still
+    /// cannot name a next slot and the task still holds the failed slot; a
+    /// person who fixed the schedule first keeps the task enabled, and the same
+    /// slot then runs once. The entry stays in the map during the attempt so
+    /// admission cannot slip a new run in behind it.
     async fn flush_pending(&self, now: DateTime<Utc>) {
         let due: Vec<ScheduleTaskId> = {
             let pending = lock(&self.inner.pending);
@@ -1444,7 +1461,17 @@ impl ScheduleService {
                 lock(&self.inner.pending).remove(&task_id);
                 continue;
             };
-            if pause && run.scheduled_for.is_some() && task.next_run_at == run.scheduled_for {
+            if pause
+                && run.scheduled_for.is_some()
+                && task.next_run_at == run.scheduled_for
+                // The pause was staged because the stored settings could not
+                // name the slot after the failed one. Recompute that from the
+                // current row under this write: if the settings name a next
+                // slot now, the person has fixed the schedule, so the pause is
+                // stale. Discard it and leave the slot armed to run once; the
+                // Failed run below is still recorded.
+                && !matches!(self.advance(&task, now), Ok(Some(_)))
+            {
                 task.next_run_at = None;
                 task.enabled = false;
                 task.updated_at = now;
@@ -1812,6 +1839,16 @@ struct PendingWrite {
 fn backoff_for(failures: u32) -> chrono::Duration {
     let factor = 1i64 << failures.saturating_sub(1).min(16);
     chrono::Duration::seconds(RETRY_BASE_SECS.saturating_mul(factor).min(RETRY_CAP_SECS))
+}
+
+/// Whether a run is the failure that disarmed a task: its schedule could not
+/// name the slot after this one.
+fn is_disarm_failure(run: &ScheduleRun) -> bool {
+    run.outcome == ScheduleRunOutcome::Failed
+        && run
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with(DISARM_DETAIL_PREFIX))
 }
 
 /// Whether two task rows name the same destination thread identity.

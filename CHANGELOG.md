@@ -66,9 +66,13 @@ All notable changes to h4rn are recorded here. The format follows
   when the daemon opens it. A schedule that cannot name its next slot is
   disarmed and paused in the same write — it records the reason, offers
   **Resume** instead of **Pause**, and releases its thread's checkout — instead
-  of starting a thread on every backoff; a task disarmed that way by an older
-  daemon is paused when it opens, and an edit that fixes the schedule before the
-  pause is saved wins. Daily and weekly times
+  of starting a thread on every backoff; a failed write retries the pause with
+  its failure, and the retry checks the task's current settings first, so fixing
+  the schedule meanwhile keeps the task enabled and lets that slot run once while
+  the original failure stays in the history. On open, a task is paused only when
+  its newest run is that disarm failure; a row whose timestamp cannot be read and
+  that never failed to run is left as stored, keeping its checkout protected.
+  Daily and weekly times
   run only at the first occurrence in a fall-back hour, cron returns the
   earliest UTC instant among that hour's jobs, and the editor's default zone
   comes from the daemon. The editor also says why when it cannot reveal a

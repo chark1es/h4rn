@@ -8,10 +8,10 @@ use std::time::Duration;
 use chrono::Utc;
 use h4rn_harness::{FakeHarness, Harness, HarnessEvent};
 use h4rn_protocol::{
-    AgentState, HarnessKind, HostId, RuntimeMode, SubagentBudget, SubagentContext,
-    SubagentCredential, SubagentId, SubagentIsolation, SubagentState, SubagentView, ThreadId,
-    ThreadTab, ToolCall, ToolCallStatus, TrackedWorktree, WorktreeAccess, WorktreeOrigin,
-    WorktreeStatus,
+    AgentState, HarnessKind, HostId, RuntimeMode, ScheduleRun, ScheduleRunOutcome, SubagentBudget,
+    SubagentContext, SubagentCredential, SubagentId, SubagentIsolation, SubagentState,
+    SubagentView, ThreadId, ThreadTab, ToolCall, ToolCallStatus, TrackedWorktree, WorktreeAccess,
+    WorktreeOrigin, WorktreeStatus,
 };
 use serde_json::json;
 
@@ -6327,7 +6327,8 @@ async fn a_task_disarmed_on_upgrade_releases_its_checkout() {
     assert_eq!(outcome.skipped[0].reason, "has an enabled scheduled task");
 
     // An older daemon cleared the slot of a schedule it could not compute but
-    // left the task enabled. Opening it pauses it, so the checkout is free.
+    // left the task enabled. Opening it restores the pause it never wrote, so
+    // the checkout is free; its newest run is the disarm failure that says why.
     let mut legacy = schedules.task(&task.task_id).await.expect("the task");
     legacy.enabled = true;
     legacy.next_run_at = None;
@@ -6335,6 +6336,22 @@ async fn a_task_disarmed_on_upgrade_releases_its_checkout() {
         .upsert_schedule(&legacy)
         .await
         .expect("write the legacy row");
+    let mut refusal = ScheduleRun {
+        run_id: 0,
+        task_id: task.task_id.clone(),
+        scheduled_for: Some(Utc::now() - chrono::Duration::minutes(1)),
+        started_at: Utc::now(),
+        thread_id: None,
+        outcome: ScheduleRunOutcome::Failed,
+        detail: Some(
+            "Its schedule has no next run: the task has an invalid time zone. Fix the schedule to run it again."
+                .into(),
+        ),
+    };
+    journal
+        .append_schedule_run(&mut refusal, crate::schedules::HISTORY_LIMIT)
+        .await
+        .expect("write the disarm failure");
     let reopened = Arc::new(
         open(journal, Arc::clone(&threads))
             .await

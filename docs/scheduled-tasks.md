@@ -98,14 +98,17 @@ past slot over and over. If the stored schedule cannot produce the slot after
 the current one (an invalid time zone, for example), the run is not
 dispatched. The task is disarmed and paused in one write: a **Failed** run
 records the reason, and it is committed together with the pause, so the failure
-can never be lost while the task stays paused — or, if the schedule is fixed and
-the task re-enabled before that write is retried, the person's edit wins and the
-pause is dropped. No thread is started for a run that could never be recorded and
+can never be lost while the task stays paused. If that write fails, the pause is
+staged with it and retried; before the retry commits, the task's current settings
+are checked again, so a person who fixes the schedule meanwhile keeps the task
+enabled, still gets the original failure in the history, and the slot runs once.
+No thread is started for a run that could never be recorded and
 no backoff starts another; the toggle reads **Resume** instead of offering to
 pause a task that will never run, and the thread's checkout stops being held
-for worktree cleanup. A task an older daemon disarmed without pausing is paused
-when the task is opened, so an upgrade offers **Resume** and releases the
-checkout too. Fix the schedule and resume the task to run it again. A
+for worktree cleanup. On opening a stored task, the pause is restored only when
+its newest run is that disarm failure and it has no next slot; a row with an
+unreadable timestamp and no such failure is left exactly as stored, so its
+checkout stays protected. Fix the schedule and resume the task to run it again. A
 **Once** task whose run started is spent even when its write is still
 retrying.
 
