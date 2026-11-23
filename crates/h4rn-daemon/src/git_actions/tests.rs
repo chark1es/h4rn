@@ -1390,6 +1390,15 @@ fn a_quote_inside_a_url_does_not_end_the_redaction() {
     assert!(!redacted.contains(&credential), "{redacted}");
     assert!(redacted.contains("?[redacted]"), "{redacted}");
     assert!(redacted.contains(" now"), "{redacted}");
+
+    // A field whose closing quote is missing is still one URL to whitespace:
+    // an internal quote must not cut it and leave the rest of the token behind.
+    let unclosed = format!(
+        "fatal: unable to access 'http://git.example.invalid/repo.git?token=ab'{credential} more"
+    );
+    let redacted = redact_url_credentials(&unclosed);
+    assert!(!redacted.contains(&credential), "{redacted}");
+    assert!(redacted.contains(" more"), "{redacted}");
 }
 
 /// Text the URL parser cannot read is replaced whole: guessing where an

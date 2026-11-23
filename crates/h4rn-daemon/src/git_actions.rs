@@ -931,7 +931,16 @@ fn split_url_field(text: &str, open_quote: Option<char>) -> (&str, &str) {
     if let Some(quote) = open_quote
         && let Some(closing) = text[..end].rfind(quote)
     {
-        end = closing;
+        // Only a quote the message treats as the field's end may close it: if
+        // printable text follows it, the quote was inside the URL (or the
+        // field was never closed), and the whole run to whitespace is the URL.
+        let after_quote = &text[closing + quote.len_utf8()..end];
+        if after_quote
+            .chars()
+            .all(|ch| matches!(ch, ')' | ']' | '}' | ',' | ';' | ':' | '.' | '!' | '?'))
+        {
+            end = closing;
+        }
     }
     // A URL echoed in prose can be followed by `)`, `,` or a full stop. A
     // closing `]` is kept when the URL opens an IPv6 literal with `[`, because
