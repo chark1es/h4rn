@@ -360,7 +360,10 @@ fn map_comment(value: &Value) -> Option<ForgeIssueComment> {
 /// GitHub pages the timeline with a `Link` header; one request only sees the
 /// first hundred events, so an older cross-reference would never appear. The
 /// walk stops after ten pages even if the server keeps advertising a next
-/// one, and a failed later page keeps the links already found.
+/// one, and a failed later page keeps the links already found. A next link must
+/// stay on the API's own origin: a GitHub Enterprise host or a proxy can name
+/// another host, and following it would hand that host the account's
+/// Authorization header.
 const TIMELINE_PAGE_LIMIT: u32 = 10;
 
 async fn linked_pull_requests(
@@ -386,11 +389,26 @@ async fn linked_pull_requests(
             break;
         };
         for pull in map_linked_prs(repo, &value) {
-            if !linked.iter().any(|existing| existing.number == pull.number) {
+            // A pull request is identified by its own URL, not by its number:
+            // a cross-reference can name a pull request in another repository,
+            // whose number may match one already collected here.
+            if !linked
+                .iter()
+                .any(|existing| existing.web_url == pull.web_url)
+            {
                 linked.push(pull);
             }
         }
-        next = following;
+        next = following.filter(|next| {
+            if crate::http::same_origin(next, repo_url) {
+                return true;
+            }
+            tracing::warn!(
+                next = next.as_str(),
+                "GitHub's timeline pointed at another origin; stopped paging"
+            );
+            false
+        });
     }
     linked
 }
@@ -408,7 +426,8 @@ fn map_linked_prs(repo: &ForgeRepoRef, value: &Value) -> Vec<ForgeIssueLinkedPr>
         let Some(number) = source["number"].as_u64().map(|number| number as u32) else {
             continue;
         };
-        if linked.iter().any(|pr| pr.number == number) {
+        let web_url = optional_text(source, "html_url").unwrap_or_else(|| repo.pr_web_url(number));
+        if linked.iter().any(|pr| pr.web_url == web_url) {
             continue;
         }
         linked.push(ForgeIssueLinkedPr {
@@ -421,7 +440,7 @@ fn map_linked_prs(repo: &ForgeRepoRef, value: &Value) -> Vec<ForgeIssueLinkedPr>
             } else {
                 ForgePrState::Open
             }),
-            web_url: optional_text(source, "html_url").unwrap_or_else(|| repo.pr_web_url(number)),
+            web_url,
         });
     }
     linked

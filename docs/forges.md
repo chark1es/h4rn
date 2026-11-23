@@ -396,9 +396,13 @@ asks the tracker (`is:issue`, `search=`, `q=`, WIQL `CONTAINS`), and **Load
 more** reads the next page. A page that fails leaves its continuation alone,
 so **Load more** can try the same page again; hiding a project or changing an
 account starts a new listing, and a page that arrives late for the old one is
-dropped instead of adding rows from a project that is no longer shown. A
+dropped instead of adding rows from a project that is no longer shown. The
+listing is identified by its accounts and, for Linear, its teams as well, so
+switching an account cannot page the old account's rows. A
 project whose repository no connected account serves is named in the page
-("No GitHub account matches this repository") rather than silently missing.
+("No GitHub account matches this repository") rather than silently missing;
+when the account list itself failed to load, the page shows that error and says
+nothing about matching accounts. Bitbucket projects get only their own note.
 Saving an edit refreshes the list behind the open issue but keeps the pane
 mounted, so a comment draft typed before the edit is still there.
 
@@ -427,9 +431,11 @@ requests, so those rows are removed. Issue detail shows the body, state,
 labels, assignees, comments and the pull requests the tracker reports
 (GitHub's timeline, GitLab's related merge requests, Azure's
 `vstfs:///Git/PullRequestId` artifact links). GitHub's timeline is paged: the
-read follows its `Link` header for up to ten pages and keeps every
-cross-referenced pull request it finds, so an older link on a later page is not
-lost. An Azure link names its own
+read follows its `Link` header for up to ten pages, but only while the next
+link stays on the API's own origin, because a GitHub Enterprise host or a proxy
+could name another host and receive the account's credentials. Pull requests
+are deduplicated by their URL, so two repositories whose pull requests share a
+number are both kept. An Azure link names its own
 project and repository ids, which are resolved to that repository's web URL,
 so a pull request in another repository links there rather than to the
 checked-out one. Comment paging carries the provider's continuation through
@@ -452,9 +458,12 @@ Writes are `ForgeCommentIssue` and `ForgeUpdateIssue`: comment, title, body,
 labels, assignees, and close/reopen. Gitea/Forgejo replace labels through
 `PUT /repos/{owner}/{repo}/issues/{index}/labels` with label ids, not through
 the issue PATCH body. Gitea accepts a label owned by the repository or by the
-organization that owns it, so the daemon resolves requested names from the
-repository catalogue and then from `GET /orgs/{org}/labels`; the daemon reads
-each catalogue page by page until every requested name resolves. The daemon
+organization that owns it. The labels already on the issue are read from the
+issue's own label list, which a repository-scoped token can read; a name that
+is not applied yet is looked up in the repository catalogue and then in
+`GET /orgs/{org}/labels`. That organization catalogue needs an
+organization-scoped token, so a `403` from it names the label that could not be
+found instead of failing the whole edit. The daemon
 only sends the fields the caller
 named, so an edit never clears the others. GitHub closes with a
 `state_reason`, and a duplicate close also sends `duplicate_issue_id`; the UI

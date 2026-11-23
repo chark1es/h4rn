@@ -416,6 +416,127 @@ async fn github_timeline_stops_after_ten_pages() {
     assert!(detail.linked_pull_requests.is_empty());
 }
 
+#[tokio::test]
+async fn github_timeline_does_not_send_credentials_to_another_origin() {
+    let server = MockServer::start().await;
+    // A proxy or GitHub Enterprise host could point the next link at another
+    // origin; following it would hand that origin the account's credentials.
+    let elsewhere = MockServer::start().await;
+    let base = server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12"))
+        .respond_with(ok(github_issue()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .respond_with(ok(json!([])).insert_header(
+            "link",
+            format!(
+                "<{}/api/v3/repos/acme/widget/issues/12/timeline?page=2>; rel=\"next\"",
+                elsewhere.uri()
+            ),
+        ))
+        .mount(&server)
+        .await;
+    // Would answer with a linked pull request if it were ever asked.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .respond_with(ok(json!([{
+            "event": "cross-referenced",
+            "source": {"issue": {
+                "number": 7,
+                "title": "Fix flicker",
+                "state": "open",
+                "html_url": "https://github.com/acme/widget/pull/7",
+                "pull_request": {"merged_at": null}
+            }}
+        }])))
+        .mount(&elsewhere)
+        .await;
+
+    let client = GitHubClient::new(&base, &token(), 600).unwrap();
+    let detail = client
+        .get_issue(&repo(ForgeKind::GitHub, &base), 12)
+        .await
+        .unwrap();
+    assert!(detail.linked_pull_requests.is_empty());
+    assert!(
+        elsewhere.received_requests().await.unwrap().is_empty(),
+        "the timeline's next link on another origin got no request"
+    );
+}
+
+#[tokio::test]
+async fn github_timeline_keeps_two_pull_requests_that_share_a_number() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12"))
+        .respond_with(ok(github_issue()))
+        .mount(&server)
+        .await;
+    // Two repositories can both cross-reference this issue with a pull
+    // request called #7. They are different pull requests and both belong in
+    // the detail, keyed by their own URL.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .and(query_param_is_missing("page"))
+        .respond_with(ok(json!([{
+            "event": "cross-referenced",
+            "source": {"issue": {
+                "number": 7,
+                "title": "Fix flicker",
+                "state": "open",
+                "html_url": "https://github.com/acme/api/pull/7",
+                "pull_request": {"merged_at": null}
+            }}
+        }])).insert_header(
+            "link",
+            format!(
+                "<{base}/api/v3/repos/acme/widget/issues/12/timeline?per_page=100&page=2>; rel=\"next\""
+            ),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .and(query_param("page", "2"))
+        .respond_with(ok(json!([{
+            "event": "cross-referenced",
+            "source": {"issue": {
+                "number": 7,
+                "title": "Fix flicker in the web client",
+                "state": "open",
+                "html_url": "https://github.com/acme/web/pull/7",
+                "pull_request": {"merged_at": null}
+            }}
+        }])))
+        .mount(&server)
+        .await;
+
+    let client = GitHubClient::new(&base, &token(), 600).unwrap();
+    let detail = client
+        .get_issue(&repo(ForgeKind::GitHub, &base), 12)
+        .await
+        .unwrap();
+    let urls = detail
+        .linked_pull_requests
+        .iter()
+        .map(|pull| pull.web_url.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        urls,
+        [
+            "https://github.com/acme/api/pull/7",
+            "https://github.com/acme/web/pull/7"
+        ],
+        "same-numbered pull requests from different repositories both appear"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GitLab
 // ---------------------------------------------------------------------------
@@ -652,6 +773,11 @@ async fn gitea_lists_reads_and_writes_issues() {
         .await;
 
     // Labels go through their own replacement endpoint, by label id.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .respond_with(ok(json!([{"id": 1, "name": "feature"}])))
+        .mount(&server)
+        .await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
         .and(body_json(json!({"labels": [2]})))
@@ -778,6 +904,11 @@ async fn gitea_resolves_a_label_on_the_second_catalogue_page() {
         .mount(&server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .respond_with(ok(json!([])))
+        .mount(&server)
+        .await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
         .and(body_json(json!({"labels": [51]})))
@@ -928,6 +1059,11 @@ async fn gitea_finds_a_label_past_a_smaller_catalogue_page() {
         .respond_with(ok_with_total(Value::Array(second_page), 45))
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .respond_with(ok(json!([])))
+        .mount(&server)
+        .await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
         .and(body_json(json!({"labels": [45]})))
@@ -991,6 +1127,11 @@ async fn gitea_replaces_a_label_from_the_organisation_catalogue() {
         .and(path("/api/v1/orgs/acme/labels"))
         .and(query_param("page", "1"))
         .respond_with(ok_with_total(json!([{"id": 51, "name": "release"}]), 1))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .respond_with(ok(json!([{"id": 1, "name": "feature"}])))
         .mount(&server)
         .await;
     Mock::given(method("PUT"))
@@ -1061,6 +1202,11 @@ async fn gitea_stops_label_paging_at_an_empty_page_without_a_count() {
         .respond_with(ok(json!([])))
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .respond_with(ok(json!([])))
+        .mount(&server)
+        .await;
 
     let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
     let error = client
@@ -1093,10 +1239,130 @@ async fn gitea_stops_label_paging_at_an_empty_page_without_a_count() {
     );
 }
 
+#[tokio::test]
+async fn gitea_reuses_an_organization_label_already_on_the_issue() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    // The issue already carries an organization label. Its own label list is
+    // readable with the repository-only token scope h4rn documents, so the id
+    // comes from there and the organization catalogue (which needs an
+    // organization scope) is never requested. Only the new repository label
+    // needs a lookup, and the replacement sends both ids.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .respond_with(ok(json!([{"id": 51, "name": "release"}])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "1"))
+        .respond_with(ok_with_total(json!([{"id": 7, "name": "bug"}]), 1))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .and(body_json(json!({"labels": [51, 7]})))
+        .respond_with(ok(json!([
+            {"id": 51, "name": "release"},
+            {"id": 7, "name": "bug"}
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4"))
+        .respond_with(ok(json!({
+            "number": 4,
+            "title": "Export CSV",
+            "state": "open",
+            "user": {"login": "alice"},
+            "labels": [
+                {"id": 51, "name": "release"},
+                {"id": 7, "name": "bug"}
+            ],
+            "updated_at": "2026-03-02T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
+    let updated = client
+        .update_issue(
+            &repo(ForgeKind::Gitea, &base),
+            4,
+            &ForgeIssueUpdate {
+                labels: Some(vec!["release".into(), "bug".into()]),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.summary.labels.len(), 2);
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.path() == "/api/v1/orgs/acme/labels"),
+        "the organization catalogue was not needed"
+    );
+}
+
+#[tokio::test]
+async fn gitea_names_a_label_it_cannot_look_up() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    // A repository-only token gets 403 from `GET /orgs/{org}/labels`. The
+    // error names the label it could not find instead of only reporting the
+    // permission failure.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .respond_with(ok(json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "1"))
+        .respond_with(ok_with_total(json!([{"id": 1, "name": "feature"}]), 1))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orgs/acme/labels"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    let error = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600)
+        .unwrap()
+        .update_issue(
+            &repo(ForgeKind::Gitea, &base),
+            4,
+            &ForgeIssueUpdate {
+                labels: Some(vec!["release".into()]),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("release"), "{error}");
+    assert!(
+        error.to_string().contains("organization's label catalogue"),
+        "{error}"
+    );
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.method.as_str() == "PUT"),
+        "no replacement is sent without every id"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Bitbucket Cloud
 // ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn bitbucket_reports_issues_as_unavailable_without_calling_it() {
     // Atlassian removed Bitbucket Cloud's issue tracker API in August 2026.

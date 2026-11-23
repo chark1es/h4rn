@@ -281,6 +281,65 @@ describe("linked pull request badge and panel", () => {
     );
   });
 
+  it("names and keys a Linear row without its internal team id", () => {
+    const linked: ThreadIssue = {
+      scope: { tracker: "linear", team_id: "team_uuid_1" },
+      issue_id: "issue_uuid_1",
+      account_id: "lin_1",
+      state: {
+        tracker: "linear",
+        issue: {
+          id: "issue_uuid_1",
+          identifier: "ENG-1",
+          title: "Rate limit the import",
+          state_name: "In Progress",
+          state_type: "started",
+          team_id: "team_uuid_1",
+          team_key: "ENG",
+          assignees: [],
+          labels: [],
+          updated_at: "2026-01-02T00:00:00Z",
+          url: "https://linear.app/acme/issue/ENG-1",
+        },
+      },
+      error: null,
+      linked_at: "2026-01-01T00:00:00Z",
+    };
+    const { rerender } = render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[linked]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    // The team is named the way Linear names it, never by its UUID.
+    expect(screen.getAllByText(/ENG-1 \(ENG\)/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/team_uuid_1/)).toBeNull();
+
+    openBadge();
+    const row = document.querySelector(".q-pr-links");
+    expect(row).not.toBeNull();
+
+    // A failed refresh empties the live state. The row's key comes from the
+    // stored team and issue ids, so the row keeps its place instead of
+    // remounting and closing what the person had open.
+    rerender(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[{ ...linked, state: null, error: "the tracker did not answer" }]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    expect(screen.getByText("Issue unavailable")).toBeTruthy();
+    expect(screen.getByText("the tracker did not answer")).toBeTruthy();
+    expect(document.querySelector(".q-pr-links")).toBe(row);
+    expect(screen.queryByText(/team_uuid_1/)).toBeNull();
+  });
+
   it("says what a watch cannot cover when the forge has no login", () => {
     const notice =
       "Comments and reviews are not watched: this account has no login on the forge, so the daemon cannot tell your own words from someone else's.";

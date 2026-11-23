@@ -32,18 +32,22 @@ function issueScopeLabel(issue: ThreadIssue): string {
     return `${owner}/${repo}#${issue.issue_id}`;
   }
   const state = issue.state;
-  const identifier = state?.tracker === "linear" ? state.issue.identifier : issue.issue_id;
-  return `${identifier} (${issue.scope.team_id})`;
+  if (state?.tracker !== "linear") return issue.issue_id;
+  // Name the team the way Linear shows it (`ENG`), not its internal UUID.
+  return `${state.issue.identifier} (${state.issue.team_key})`;
 }
 
+/**
+ * The row's identity comes from what the link stored (the team and the issue
+ * id), never from the live read: a failed refresh empties the state, and a key
+ * that followed it would remount the row and drop its open menu.
+ */
 function issueScopeKey(issue: ThreadIssue): string {
   if (issue.scope.tracker === "forge") {
     const { base_url, owner, repo } = issue.scope.repo;
     return `forge:${base_url}:${owner}/${repo}#${issue.issue_id}`;
   }
-  const state = issue.state;
-  const identifier = state?.tracker === "linear" ? state.issue.identifier : issue.issue_id;
-  return `linear:${identifier}:${issue.scope.team_id}`;
+  return `linear:${issue.scope.team_id}:${issue.issue_id}`;
 }
 
 function issueLabel(issue: ThreadIssue): string {

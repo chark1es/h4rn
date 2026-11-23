@@ -113,6 +113,8 @@ type Source =
       kind: "linear";
       accountId: string;
       projectId: string;
+      /** The team the project's issues belong to; part of the listing's identity. */
+      teamId: string;
       cursor: string | null;
       hasMore: boolean;
     };
@@ -120,6 +122,8 @@ type Source =
 type Group = TrackerGroup & {
   sources: Source[];
   capabilities: ForgeIssueCapabilities;
+  /** The listing generation this group's rows came from. */
+  generation: number;
 };
 
 function sortRows(rows: IssueRow[]): IssueRow[] {
@@ -166,6 +170,11 @@ export function IssuesPage() {
 
   const [accounts, setAccounts] = useState<ForgeAccount[]>([]);
   const [accountsReady, setAccountsReady] = useState(false);
+  // Whether the forge account list actually arrived. A failed load must not
+  // turn into "no account matches this repository": that note is only true
+  // when the list was read.
+  const [forgeAccountsKnown, setForgeAccountsKnown] = useState(false);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
   const [forgeCapabilities, setForgeCapabilities] = useState<ForgeCapabilityEntry[]>([]);
   // Linear is not a forge, so its capabilities come in their own field.
   const [linearCapabilities, setLinearCapabilities] = useState<ForgeCapabilities | null>(null);
@@ -194,6 +203,9 @@ export function IssuesPage() {
   // Bumped whenever the query changes, so a page that arrives late for a
   // superseded search or filter is discarded instead of spliced in.
   const queryToken = useRef(0);
+  // The generation the rendered groups belong to, in state so the Load more
+  // buttons disable as soon as a listing is superseded.
+  const [generation, setGeneration] = useState(0);
   // The set of sources the current pages were read from. A page that arrives
   // after a project was hidden or an account changed belongs to a listing that
   // no longer exists and is dropped.
@@ -204,12 +216,14 @@ export function IssuesPage() {
   const changeFilter = (next: ForgeIssueFilter) => {
     if (next === filter) return;
     queryToken.current += 1;
+    setGeneration(queryToken.current);
     setGroups([]);
     setFilter(next);
   };
   const runSearch = (term: string) => {
     if (term === search) return;
     queryToken.current += 1;
+    setGeneration(queryToken.current);
     setGroups([]);
     setSearch(term);
   };
@@ -218,22 +232,35 @@ export function IssuesPage() {
   useEffect(() => {
     if (connection === "connecting") return;
     let cancelled = false;
-    Promise.all([api().forgeAccounts(), api().linearAccounts(), api().projectTeams()])
-      .then(([forge, linear, teams]) => {
+    setAccountsError(null);
+    // Each discovery can fail on its own: a Linear sign-in that expired must
+    // not hide the forge accounts that did load, and vice versa.
+    Promise.allSettled([api().forgeAccounts(), api().linearAccounts(), api().projectTeams()]).then(
+      ([forge, linear, teams]) => {
         if (cancelled) return;
-        setAccounts(forge.accounts);
-        setForgeCapabilities(forge.capabilities);
-        setLinearCapabilities(forge.linear);
-        setLinearAccounts(linear);
-        setMappings(teams);
-        setAccountsReady(true);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled) {
-          setError(issueError(cause));
-          setAccountsReady(true);
+        const failures: string[] = [];
+        if (forge.status === "fulfilled") {
+          setAccounts(forge.value.accounts);
+          setForgeCapabilities(forge.value.capabilities);
+          setLinearCapabilities(forge.value.linear);
+          setForgeAccountsKnown(true);
+        } else {
+          failures.push(issueError(forge.reason));
         }
-      });
+        if (linear.status === "fulfilled") {
+          setLinearAccounts(linear.value);
+        } else {
+          failures.push(issueError(linear.reason));
+        }
+        if (teams.status === "fulfilled") {
+          setMappings(teams.value);
+        } else {
+          failures.push(issueError(teams.reason));
+        }
+        setAccountsReady(true);
+        setAccountsError(failures[0] ?? null);
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -318,26 +345,35 @@ export function IssuesPage() {
       });
     }
     const linearSources: Source[] = [];
-    for (const project of visible) {
-      const mapping = mappings.find((candidate) => candidate.project_id === project.id);
-      if (mapping) {
-        linearSources.push({
-          kind: "linear",
-          accountId: mapping.account_id,
-          projectId: project.id,
-          cursor: null,
-          hasMore: false,
-        });
+    // Without Linear's capabilities there is nothing safe to ask it for: the
+    // field is absent unless the daemon knows Linear can read issues.
+    if (linearCapabilities?.issues.read) {
+      for (const project of visible) {
+        const mapping = mappings.find((candidate) => candidate.project_id === project.id);
+        if (mapping) {
+          linearSources.push({
+            kind: "linear",
+            accountId: mapping.account_id,
+            projectId: project.id,
+            teamId: mapping.team_id,
+            cursor: null,
+            hasMore: false,
+          });
+        }
       }
     }
     const sources = [...forgeSources, ...linearSources];
     // A different set of sources starts a new generation. Pages still in
     // flight for the old set are discarded when they land, so a hidden
-    // project's delayed page cannot add its rows back to the list.
-    const signature = sources.map(sourceKey).join("|");
+    // project's delayed page cannot add its rows back to the list. The
+    // signature names the account and, for Linear, the team as well: either
+    // one changing means the rows on screen belong to a listing that no
+    // longer exists.
+    const signature = sources.map(sourceSignatureKey).join("|");
     if (sourceSignature.current !== signature) {
       sourceSignature.current = signature;
       queryToken.current += 1;
+      setGeneration(queryToken.current);
     }
     const token = queryToken.current;
     if (sources.length === 0) {
@@ -411,6 +447,7 @@ export function IssuesPage() {
             loading: false,
             error: null,
             sources: [],
+            generation: token,
             capabilities: issueCapabilitiesFor(
               kind,
               account,
@@ -458,6 +495,7 @@ export function IssuesPage() {
       (filter === "created" && !canCreate)
     ) {
       queryToken.current += 1;
+      setGeneration(queryToken.current);
       setGroups([]);
       setFilter("open");
     }
@@ -465,6 +503,9 @@ export function IssuesPage() {
 
   const loadMore = useCallback(
     async (group: Group) => {
+      // A group from an earlier listing is superseded: page two of it would
+      // belong to rows the page no longer shows.
+      if (group.generation !== queryToken.current) return;
       const token = queryToken.current;
       const active = group.sources.filter((source) => source.hasMore);
       if (active.length === 0) return;
@@ -570,15 +611,22 @@ export function IssuesPage() {
     .filter((project) => repos[project.id]?.forge === "bitbucket");
   // A project whose repository no connected account serves is named like the
   // pull request page names it, instead of silently missing from the list.
-  // Wait for the account list before saying an account is missing.
-  const unmatchedProjects = !accountsReady
-    ? []
-    : projects
-        .filter((project) => !hidden.has(project.id))
-        .filter((project) => {
-          const repo = repos[project.id];
-          return repo !== undefined && accountsForRepo(accounts, repo).length === 0;
-        });
+  // Wait for the account list before saying an account is missing, and say
+  // nothing at all when that list failed to load: an unread list is not an
+  // empty one. Bitbucket is already explained by its own note.
+  const unmatchedProjects =
+    !accountsReady || !forgeAccountsKnown
+      ? []
+      : projects
+          .filter((project) => !hidden.has(project.id))
+          .filter((project) => {
+            const repo = repos[project.id];
+            return (
+              repo !== undefined &&
+              repo.forge !== "bitbucket" &&
+              accountsForRepo(accounts, repo).length === 0
+            );
+          });
 
   return (
     <main className="q-main" aria-label="Issues">
@@ -687,6 +735,11 @@ export function IssuesPage() {
               Reading trackers…
             </p>
           ) : null}
+          {accountsError ? (
+            <div className="q-issues-note q-danger" role="alert">
+              {accountsError}
+            </div>
+          ) : null}
           {error ? (
             <div className="q-issues-note q-danger" role="alert">
               {error}
@@ -710,6 +763,7 @@ export function IssuesPage() {
           })}
           {!loading &&
           !error &&
+          !accountsError &&
           groups.length === 0 &&
           unavailableProjects.length === 0 &&
           unmatchedProjects.length === 0 ? (
@@ -755,7 +809,7 @@ export function IssuesPage() {
                 <button
                   type="button"
                   className="q-btn ghost q-issues-more"
-                  disabled={group.loading}
+                  disabled={group.loading || group.generation !== generation}
                   onClick={() => void loadMore(group)}
                 >
                   {group.loading ? "Loading…" : "Load more"}
@@ -800,6 +854,17 @@ function sourceKey(source: Source): string {
   return source.kind === "forge"
     ? `forge:${source.repo.base_url}:${source.repo.owner}/${source.repo.repo}`
     : `linear:${source.projectId}`;
+}
+
+/**
+ * The identity of a listing. It names the account and, for Linear, the team,
+ * so switching either one starts a new generation even though the source
+ * itself (`sourceKey`) is matched as before.
+ */
+function sourceSignatureKey(source: Source): string {
+  return source.kind === "forge"
+    ? `forge:${source.accountId}:${source.repo.base_url}:${source.repo.owner}/${source.repo.repo}`
+    : `linear:${source.accountId}:${source.projectId}:${source.teamId}`;
 }
 
 function stateTone(state: ForgeIssueState): string {
@@ -1219,7 +1284,7 @@ function IssueDetail({
           <h3>Linked pull requests</h3>
           {linkedPrs.map((pr) => (
             <a
-              key={pr.number}
+              key={pr.web_url}
               className="q-issue-pr"
               href={pr.web_url}
               target="_blank"

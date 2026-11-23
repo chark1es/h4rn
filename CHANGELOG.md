@@ -492,14 +492,17 @@ All notable changes to h4rn are recorded here. The format follows
 - **Issues follow through on the tracker's answers.** An Azure team project whose name has a
   space (`Platform Team`) now reads through percent-encoded paths and links instead of a 404, and
   Gitea/Forgejo finds a label that belongs to the organization as well as one that belongs to the
-  repository. GitHub's "Opened by me" and "Mentioning me" searches stay on open issues, and its
-  timeline is read across up to ten pages so a pull request cross-referenced on a later page still
-  appears. A Linear team attached to two projects stays writable after one project is removed,
-  Settings shows why a Linear account or team list failed to load, and a project whose repository
-  has no matching account is named on the Issues page. On the page itself, a failed "Load more"
-  keeps its button, a page that arrives after its project was hidden is dropped, saving an edit
-  keeps the comment draft, the linked-items panel tells two `#12` issues from different
-  repositories apart, and the filter strip wraps on a phone screen.
+  repository, without needing an organization-scoped token for a label already on the issue. GitHub's
+  "Opened by me" and "Mentioning me" searches stay on open issues, its timeline is read across up
+  to ten pages so a pull request cross-referenced on a later page still appears, and a timeline
+  link to another origin is never followed with the account's credentials. A Linear team attached
+  to two projects stays writable after one project is removed, Settings shows why a Linear account
+  or team list failed to load, and a project whose repository has no matching account is named on
+  the Issues page (or the failed account load is named instead). On the page itself, a failed
+  "Load more" keeps its button, a page that arrives after its project was hidden or its account
+  changed is dropped, saving an edit keeps the comment draft, the linked-items panel tells two
+  `#12` issues from different repositories apart and names a Linear team by its key, and the filter
+  strip wraps on a phone screen with 44 px targets.
 - **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
   the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
   All four sources now show the active tab's file against the source on screen, and the wider
