@@ -238,6 +238,9 @@ pub struct GuestService {
     tokens: Mutex<std::collections::HashMap<String, String>>,
     /// Base URL of the daemon's own listener, set once it binds.
     local_base: Mutex<Option<String>>,
+    /// Serializes the quota check and request insert, so two submissions
+    /// cannot both reserve the last of the pending budget.
+    submit_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for GuestService {
@@ -272,6 +275,7 @@ impl GuestService {
             blobs,
             tokens: Mutex::new(std::collections::HashMap::new()),
             local_base: Mutex::new(None),
+            submit_lock: tokio::sync::Mutex::new(()),
         };
         service.ensure_schema().await?;
         std::fs::create_dir_all(service.guest_root())?;
@@ -1136,9 +1140,12 @@ impl GuestService {
             .map_err(|error| GuestError::Invalid(error.to_string()))?;
         let size_bytes = total.saturating_add(text.len() as u64);
 
-        // Reserve quota and insert in one transaction. The link guard makes a
-        // racing Stop sharing, a new link, an archive or the Labs switch fail
-        // the insert instead of leaving an orphan request.
+        // Reserve quota and insert in one transaction. The in-process lock
+        // makes the check and insert one decision for concurrent submissions;
+        // the link guard makes a racing Stop sharing, a new link, an archive
+        // or the Labs switch fail the insert instead of leaving an orphan
+        // request.
+        let _reservation = self.submit_lock.lock().await;
         let mut transaction = self.pool.begin().await?;
         let pending: (i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM guest_requests

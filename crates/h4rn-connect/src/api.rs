@@ -2209,7 +2209,7 @@ async fn guest_proxy(
         path,
         public_prefix: Some(public_prefix.clone()),
         chunked,
-        headers: forwarded_guest_headers(&headers),
+        headers: forwarded_guest_headers(&headers, state.config.trust_forwarded_for),
         body: Vec::new(),
     };
     let payload = serde_json::to_vec(&request)
@@ -2430,15 +2430,37 @@ fn rebuild_guest_cookie(value: &str, public_prefix: &str, secure: bool) -> Optio
 ///
 /// Connect's own session cookies must never reach a daemon because a guest
 /// loaded the page from Connect's origin.
-fn forwarded_guest_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+fn forwarded_guest_headers(
+    headers: &HeaderMap,
+    trust_forwarded_for: bool,
+) -> Vec<(String, String)> {
     let mut forwarded = Vec::new();
     if let Some(cookie) = guest_only_cookie(headers) {
         forwarded.push(("cookie".to_owned(), cookie));
     }
-    for name in ["accept", "content-type", "origin", "host", "sec-fetch-site"] {
+    for name in ["accept", "content-type", "origin", "sec-fetch-site"] {
         if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
             forwarded.push((name.to_owned(), value.to_owned()));
         }
+    }
+    // The daemon checks a submission's Origin against the Host the browser
+    // used. Behind a trusted proxy that Host is the forwarded one.
+    let host = if trust_forwarded_for {
+        headers
+            .get("x-forwarded-host")
+            .and_then(|value| value.to_str().ok())
+            .or_else(|| {
+                headers
+                    .get(axum::http::header::HOST)
+                    .and_then(|value| value.to_str().ok())
+            })
+    } else {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+    };
+    if let Some(host) = host {
+        forwarded.push(("host".to_owned(), host.to_owned()));
     }
     forwarded
 }
@@ -2634,7 +2656,7 @@ mod tests {
             axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        let forwarded = forwarded_guest_headers(&headers);
+        let forwarded = forwarded_guest_headers(&headers, false);
         assert_eq!(
             forwarded
                 .iter()
