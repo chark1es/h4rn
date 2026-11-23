@@ -7,6 +7,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Threads can commit, push and open a pull request.** The thread menu's **Commit, push and
+  PR…** panel shows the workspace's real branch, upstream, ahead/behind counts and its staged,
+  unstaged and untracked paths, and whether a rebase, merge or cherry-pick is in progress. Commit
+  records the index, or stages tracked and new files first when **Include unstaged changes** is on;
+  it refuses a detached `HEAD`, an in-progress operation or an empty index, runs hooks (never
+  `--no-verify`) and reports a hook's output. Push creates an upstream on `origin` when asked and
+  is never forced: a non-fast-forward rejection or a bad credential is reported as exactly that.
+  **Create pull request…** offers title, body, base branch (the default branch is preselected) and
+  a draft flag; the daemon pushes first when the branch needs it and then opens the request.
+  **Generate** can fill the commit message or the pull request text from a model chosen under
+  Settings → Source control (Off by default, coding agent, or text generator, plus custom
+  instructions); it fills the field only and never commits, pushes or opens anything. Only the
+  staged diff (capped, binary files named), recent subjects, or the branch's commits and diff stat
+  are sent, wrapped as untrusted input. See [docs/git-actions.md](docs/git-actions.md).
 - **Threads remember the pull requests that belong to them, and can watch one for you.** Link a
   PR by pasting its URL or picking it from the repository's open PRs in the command palette
   (`Link pull request…`), or let opening a PR from h4rn link it automatically. Links are stored in
@@ -337,6 +351,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
+  Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
+  relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other
+  branches and a `+` refspec in config cannot force an update; "behind or ahead" is measured against
+  `origin/<branch>`, not whatever upstream a branch happens to track, and a fork layout pushes to the
+  fork. Opening a draft on Gitea or Forgejo now prefixes the title with `WIP:` because those APIs
+  have no draft field, and no forge gets a doubled `Draft:` or `WIP:` prefix. The pull request dialog
+  waits as long as the push may take and cannot submit twice. A commit that names paths records only
+  those paths and leaves other staged work staged. An older app that saves a title model no longer
+  turns the Commit & PR mode off. A rebase, merge or cherry-pick is named in the error before the
+  detached `HEAD` it causes, and a credential-shaped string in push output is redacted. The panel
+  keeps a typed message when generation is off, shows the live branch (a detached `HEAD` disables
+  push and the PR dialog with the reason), never guesses `main` as a base, and shows its busy state on
+  **Commit & push** for the whole commit-and-push. Settings → Source control describes the message
+  model in its footer and says plainly that non-Claude threads need a configured text generator.
 - **A PR watch hears every change since it started, exactly once.** The GitHub
   change probe is gone: the watch reads the PR detail conditionally, so a `304`
   is built from the body the account's shared cache returns rather than from the

@@ -3483,6 +3483,10 @@ fieldset.q-seg-fs {
 .q-field:first-of-type {
   border-top: 1px solid var(--line);
 }
+/* A field whose control sits below its label rather than beside it. */
+.q-field-block {
+  display: block;
+}
 .q-field .lab {
   flex: 0 1 320px;
   min-width: 200px;
@@ -5847,4 +5851,67 @@ fieldset.q-seg-fs {
 }
 .q-plan .q-plan-step[data-status="completed"] .q-plan-mark {
   color: var(--ok);
+}
+
+/* Git actions: the branch's own state, quiet enough to sit in a dialog. */
+.q-git-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+.q-git-status {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.q-git-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-3);
+  font-size: 12px;
+}
+.q-git-changes {
+  display: grid;
+  gap: 8px;
+}
+.q-git-changes-row {
+  display: grid;
+  gap: 4px;
+}
+.q-git-paths {
+  max-height: 84px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+}
+.q-git-paths li {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+.q-git-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.q-git-footer {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.q-git-pr-fields {
+  display: grid;
+  gap: 12px;
+}
+.q-git-draft {
+  font-size: 13px;
 }

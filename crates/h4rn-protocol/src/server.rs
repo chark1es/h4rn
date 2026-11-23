@@ -409,6 +409,33 @@ pub enum ResponseBody {
         /// The new PR.
         pr: crate::forge::ForgePullRequest,
     },
+    /// The thread workspace's git state.
+    GitStatus {
+        /// Branch, upstream, counts and paths.
+        status: crate::git_actions::GitThreadStatus,
+    },
+    /// A commit was created.
+    GitCommitted {
+        /// The commit, and the fresh status after it.
+        result: crate::git_actions::GitCommitResult,
+    },
+    /// A branch was pushed.
+    GitPushed {
+        /// The branch, its upstream and the fresh status.
+        result: crate::git_actions::GitPushResult,
+    },
+    /// A generated commit message. Empty when generation is off.
+    GeneratedCommitMessage {
+        /// The message, or an empty string when the mode is Off.
+        message: String,
+    },
+    /// Generated pull request text. Empty when generation is off.
+    GeneratedPullRequestText {
+        /// One-line title.
+        title: String,
+        /// Markdown body.
+        body: String,
+    },
     /// A PR context block was handed to a thread.
     ForgeHandoff {
         /// Thread, turn and the exact markdown sent.

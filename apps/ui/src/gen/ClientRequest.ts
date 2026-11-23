@@ -28,7 +28,7 @@ import type { SkillConflictResolution } from "./SkillConflictResolution";
 import type { SkillSource } from "./SkillSource";
 import type { SubagentRequest } from "./SubagentRequest";
 import type { TerminalId } from "./TerminalId";
-import type { TextGenerationSettings } from "./TextGenerationSettings";
+import type { TextGenerationSettingsUpdate } from "./TextGenerationSettingsUpdate";
 import type { TextGeneratorDraft } from "./TextGeneratorDraft";
 import type { TextGeneratorId } from "./TextGeneratorId";
 import type { TextGeneratorPatch } from "./TextGeneratorPatch";
@@ -964,7 +964,61 @@ body: string,
 /**
  * Target branch.
  */
-base: string, } | { "type": "forge_hand_pr_to_agent", 
+base: string, 
+/**
+ * Open as a draft.
+ */
+draft: boolean, } | { "type": "git_status", 
+/**
+ * Thread whose workspace is read.
+ */
+thread_id: ThreadId, } | { "type": "git_commit", 
+/**
+ * Thread whose workspace is committed.
+ */
+thread_id: ThreadId, 
+/**
+ * Commit message, used verbatim.
+ */
+message: string, 
+/**
+ * Stage unstaged changes before committing.
+ */
+include_unstaged: boolean, 
+/**
+ * Workspace-relative paths to stage; `None` stages everything.
+ */
+paths: Array<string> | null, } | { "type": "git_push", 
+/**
+ * Thread whose branch is pushed.
+ */
+thread_id: ThreadId, 
+/**
+ * Create an upstream on `origin` when the branch has none.
+ */
+set_upstream: boolean, } | { "type": "generate_git_commit_message", 
+/**
+ * Thread whose workspace the diff comes from.
+ */
+thread_id: ThreadId, 
+/**
+ * Describe the diff that would be committed with unstaged changes
+ * included. Does not stage anything.
+ */
+include_unstaged: boolean, 
+/**
+ * Workspace-relative paths the commit would include.
+ */
+paths: Array<string> | null, } | { "type": "generate_pull_request_text", 
+/**
+ * Thread whose branch is summarised.
+ */
+thread_id: ThreadId, 
+/**
+ * Branch the pull request would target; `None` uses the detected
+ * default branch.
+ */
+base: string | null, } | { "type": "forge_hand_pr_to_agent", 
 /**
  * Account to use.
  */
@@ -1122,7 +1176,7 @@ model: string | null, } | { "type": "get_text_generation_settings" } | { "type":
 /**
  * New settings.
  */
-settings: TextGenerationSettings, } | { "type": "rename_thread", 
+settings: TextGenerationSettingsUpdate, } | { "type": "rename_thread", 
 /**
  * Thread to rename.
  */

@@ -721,6 +721,26 @@ impl Connection {
             return None;
         }
 
+        // A commit hook, a remote or a model can take a while. Answer git
+        // actions from their own task so this socket keeps serving frames.
+        if handlers::Service::of(&body) == Some(handlers::Service::GitActions)
+            && handlers::git_actions::defers_reply(&body)
+        {
+            let state = self.state.clone();
+            let origin = self.origin.clone();
+            let tx = self.tx.clone();
+            let frame_limit = self.frame_limit();
+            tokio::spawn(async move {
+                let frame =
+                    match handlers::git_actions::handle_deferred(&state, &origin, body).await {
+                        Ok(body) => response_frame(id, body, frame_limit),
+                        Err(error) => error_frame(id, error),
+                    };
+                let _ = tx.send(Outbound::Text(frame)).await;
+            });
+            return None;
+        }
+
         let result: Result<ResponseBody, ProtoError> = match handlers::Service::of(&body) {
             // A probe starts a process and can take seconds. It answers from its
             // own task, so this socket keeps serving frames meanwhile.
@@ -1821,6 +1841,11 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::ForgeReply { .. } => "forge_reply",
         ClientRequest::ForgeComment { .. } => "forge_comment",
         ClientRequest::ForgeOpenPr { .. } => "forge_open_pr",
+        ClientRequest::GitStatus { .. } => "git_status",
+        ClientRequest::GitCommit { .. } => "git_commit",
+        ClientRequest::GitPush { .. } => "git_push",
+        ClientRequest::GenerateGitCommitMessage { .. } => "generate_git_commit_message",
+        ClientRequest::GeneratePullRequestText { .. } => "generate_pull_request_text",
         ClientRequest::ForgeHandPrToAgent { .. } => "forge_hand_pr_to_agent",
         ClientRequest::GetNetworkAccess => "get_network_access",
         ClientRequest::SetNetworkAccess { .. } => "set_network_access",

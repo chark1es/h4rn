@@ -609,7 +609,7 @@ impl Forge for GitHubClient {
                     "body": request.body,
                     "head": request.head,
                     "base": request.base,
-                    "draft": false,
+                    "draft": request.draft,
                 }),
             )
             .await?;

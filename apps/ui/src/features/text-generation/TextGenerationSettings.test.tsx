@@ -100,6 +100,13 @@ describe("the coding-agent choice", () => {
     resetTextGenerationForTests({
       settings: {
         title: { mode: "coding_agent", harness: null, generator_id: null, model: null },
+        source_control: {
+          mode: "off",
+          harness: null,
+          generator_id: null,
+          model: null,
+          instructions: null,
+        },
       },
       settingsLoaded: true,
       loaded: true,
@@ -127,6 +134,13 @@ describe("the coding-agent choice", () => {
         type: "set_text_generation_settings",
         settings: {
           title: { mode: "coding_agent", harness: "claude_code", generator_id: null, model: null },
+          source_control: {
+            mode: "off",
+            harness: null,
+            generator_id: null,
+            model: null,
+            instructions: null,
+          },
         },
       }),
     );

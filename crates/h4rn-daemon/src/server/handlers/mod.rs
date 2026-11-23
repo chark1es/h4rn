@@ -13,6 +13,7 @@ use crate::server::Connection;
 
 pub(super) mod acp_agents;
 pub(super) mod forge;
+pub(super) mod git_actions;
 pub(super) mod harness_versions;
 pub(super) mod mcp;
 pub(super) mod network_access;
@@ -76,6 +77,7 @@ macro_rules! declare_services {
 declare_services! {
     Proxy => proxy,
     Forge => forge,
+    GitActions => git_actions,
     Skills => skills,
     Mcp => mcp,
     Subagents => subagents,

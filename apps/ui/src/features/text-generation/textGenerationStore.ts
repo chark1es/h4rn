@@ -281,7 +281,9 @@ export function installedTitleAgents<T extends { harness: string; installed: str
 }
 
 /** The one-line description under the picker. */
-export function titleModelSummary(settings: TextGenerationSettings | null): string {
+export function titleModelSummary(
+  settings: { title: TextGenerationSettings["title"] } | null,
+): string {
   if (!settings) return "Reading the title model…";
   const title = settings.title;
   if (title.mode === "off") return "Titles are the first line of the first prompt.";
