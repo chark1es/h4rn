@@ -112,7 +112,12 @@ fn local_instants(tz: Tz, naive: NaiveDateTime) -> Vec<chrono::DateTime<Utc>> {
     }
 }
 
-/// The earliest matching instant strictly after `after`.
+/// The earliest matching instant on `date`, when it is strictly after `after`.
+///
+/// A wall-clock time in the repeated fall-back hour names two instants; the
+/// first is the one the schedule runs. Once it has passed, the same local date
+/// names nothing newer, so a daily or weekly task moves to its next date
+/// instead of running the second occurrence.
 fn first_after(
     tz: Tz,
     date: NaiveDate,
@@ -121,7 +126,8 @@ fn first_after(
 ) -> Option<chrono::DateTime<Utc>> {
     local_instants(tz, date.and_time(time))
         .into_iter()
-        .find(|instant| *instant > after)
+        .next()
+        .filter(|instant| *instant > after)
 }
 
 /// The next instant a schedule names, strictly after `after`.
@@ -689,11 +695,34 @@ mod tests {
         // 02:30 CEST first, then 02:30 CET. The first is chosen.
         assert_eq!(next, utc("2026-10-25T00:30:00Z"));
 
-        // If the first occurrence already passed, the second one is next.
+        // Once the first occurrence passed, the repeated hour is not a second
+        // run for the same day; the next run is the next day's 02:30 CET.
         let later = next_after(&spec, berlin(), after, utc("2026-10-25T00:45:00Z"))
             .expect("next")
             .expect("a run");
-        assert_eq!(later, utc("2026-10-25T01:30:00Z"));
+        assert_eq!(later, utc("2026-10-26T01:30:00Z"));
+    }
+
+    #[test]
+    fn a_weekly_time_in_the_repeated_hour_runs_only_at_the_first_occurrence() {
+        // 2026-10-25 is a Sunday and Berlin's fall-back day.
+        let spec = ScheduleSpec::Weekly {
+            days: vec![7],
+            time: "02:30".into(),
+        };
+        let anchor = utc("2026-10-01T00:00:00Z");
+        let first = next_after(&spec, berlin(), anchor, utc("2026-10-24T12:00:00Z"))
+            .expect("next")
+            .expect("a run");
+        assert_eq!(first, utc("2026-10-25T00:30:00Z"));
+        let next = next_after(&spec, berlin(), anchor, utc("2026-10-25T00:45:00Z"))
+            .expect("next")
+            .expect("a run");
+        assert_eq!(
+            next,
+            utc("2026-11-01T01:30:00Z"),
+            "the second 02:30 that Sunday is not a second run"
+        );
     }
 
     #[test]
@@ -739,6 +768,17 @@ mod tests {
         assert_eq!(cron.minutes, vec![0]);
         // A step at the top of the field range still terminates.
         assert!(CronExpr::parse("*/4294967295 * * * *").is_ok());
+    }
+
+    #[test]
+    fn a_huge_cron_step_from_a_nonzero_start_does_not_overflow() {
+        // `5-59/4294967295` must name only 5. `5 + u32::MAX` overflows, so an
+        // unchecked step would panic here instead of stopping at the range end.
+        let cron = CronExpr::parse("5-59/4294967295 * * * *").expect("cron");
+        assert_eq!(cron.minutes, vec![5]);
+        let cron = CronExpr::parse("10-30/4294967290 9 * * *").expect("cron");
+        assert_eq!(cron.minutes, vec![10]);
+        assert_eq!(cron.hours, vec![9]);
     }
 
     #[test]

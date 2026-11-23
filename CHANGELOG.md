@@ -15,8 +15,8 @@ All notable changes to h4rn are recorded here. The format follows
   session each time. The daemon owns the timer and stores tasks and the newest
   100 runs in the journal, so they survive a restart; a slot missed while the
   daemon was down runs once, and a slot whose previous run is still working is
-  skipped and recorded. **Run now** starts a task by hand, and History links to
-  the threads it created. A webhook task gets a random path with Copy and Rotate;
+  skipped and recorded. **Run now** starts a task by hand, even while it is
+  paused, and History links to the threads it created. A webhook task gets a random path with Copy and Rotate;
   the path is a secret, so lists and change events carry only a "has a URL" flag
   and an admin request reveals it. It accepts POST only, checks the path before
   reading the body, caps the body at 64 KiB, allows 30 deliveries a minute and
@@ -25,11 +25,15 @@ All notable changes to h4rn are recorded here. The format follows
   is wrapped as untrusted request data, and the secret path and credential
   headers are redacted from everything a prompt or transcript sees. Admission is
   atomic, so one slot starts one run even across a pause or two simultaneous
-  deliveries; run history and the advanced clock commit together; and a run that
-  cannot be recorded backs off instead of retrying every instant. Calendar math
-  returns the earliest UTC instant in a fall-back hour, a spent Once task stays
-  spent across edits and resumes, and the editor's default zone comes from the
-  daemon. Webhooks answer only on the loopback and explicitly configured binds.
+  deliveries; run history and the advanced clock commit together; and a failed
+  journal write retries only that run while the real next slot is kept, so a
+  retry never becomes a second run. A once slot is taken when it is admitted, so
+  a pause during the run cannot arm it again, and a spent Once task stays spent
+  across edits and resumes. Daily and weekly times run only at the first
+  occurrence in a fall-back hour, cron returns the earliest UTC instant among
+  that hour's jobs, and the editor's default zone comes from the daemon.
+  Webhooks follow the configured `--bind` and any extra bind, never the tailnet
+  or LAN listeners.
   A thread with an enabled task keeps its worktree through a clear. See
   [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**

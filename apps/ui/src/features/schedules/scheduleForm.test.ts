@@ -27,7 +27,7 @@ const task: ScheduleTask = {
   enabled: true,
   thread_id: null,
   webhook_path_set: false,
-  once_consumed: false,
+  once_consumed: null,
   next_run_at: "2026-11-24T08:00:00.000Z",
   last_run: null,
   created_at: "2026-11-20T10:00:00.000Z",

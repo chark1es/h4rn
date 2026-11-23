@@ -434,6 +434,7 @@ impl SqliteJournal {
                 thread_id      TEXT,
                 webhook_secret TEXT,
                 once_consumed  INTEGER NOT NULL DEFAULT 0,
+                once_slot      TEXT,
                 next_run_at    TEXT,
                 created_at     TEXT NOT NULL,
                 updated_at     TEXT NOT NULL
@@ -450,6 +451,10 @@ impl SqliteJournal {
             "INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // The spent marker now carries the slot's identity; a database from
+        // before that column derives it from the stored schedule on read.
+        self.ensure_column("daemon_schedules", "once_slot", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS daemon_schedule_runs (
@@ -831,7 +836,7 @@ impl Journal for SqliteJournal {
         let rows = sqlx::query(
             "SELECT task_id, name, host, workspace_path, harness, agent_id, model,
                     runtime_mode, prompt, schedule_json, timezone, destination, enabled,
-                    thread_id, webhook_secret, once_consumed, next_run_at, created_at, updated_at
+                    thread_id, webhook_secret, once_consumed, once_slot, next_run_at, created_at, updated_at
              FROM daemon_schedules ORDER BY created_at ASC, rowid ASC",
         )
         .fetch_all(&self.pool)
@@ -852,7 +857,7 @@ impl Journal for SqliteJournal {
         let row = sqlx::query(
             "SELECT task_id, name, host, workspace_path, harness, agent_id, model,
                     runtime_mode, prompt, schedule_json, timezone, destination, enabled,
-                    thread_id, webhook_secret, once_consumed, next_run_at, created_at, updated_at
+                    thread_id, webhook_secret, once_consumed, once_slot, next_run_at, created_at, updated_at
              FROM daemon_schedules WHERE task_id = ?",
         )
         .bind(task_id.as_str())
@@ -996,8 +1001,8 @@ async fn upsert_schedule_row(
         "INSERT INTO daemon_schedules
             (task_id, name, host, workspace_path, harness, agent_id, model,
              runtime_mode, prompt, schedule_json, timezone, destination, enabled,
-             thread_id, webhook_secret, once_consumed, next_run_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             thread_id, webhook_secret, once_consumed, once_slot, next_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(task_id) DO UPDATE SET
             name = excluded.name,
             host = excluded.host,
@@ -1014,6 +1019,7 @@ async fn upsert_schedule_row(
             thread_id = excluded.thread_id,
             webhook_secret = excluded.webhook_secret,
             once_consumed = excluded.once_consumed,
+            once_slot = excluded.once_slot,
             next_run_at = excluded.next_run_at,
             updated_at = excluded.updated_at",
     )
@@ -1032,7 +1038,8 @@ async fn upsert_schedule_row(
     .bind(task.enabled as i64)
     .bind(task.thread_id.as_ref().map(ThreadId::as_str))
     .bind(webhook_secret_of(task))
-    .bind(task.once_consumed as i64)
+    .bind(task.once_consumed.is_some() as i64)
+    .bind(task.once_consumed.as_deref())
     .bind(task.next_run_at.map(|at| at.to_rfc3339()))
     .bind(task.created_at.to_rfc3339())
     .bind(task.updated_at.to_rfc3339())
@@ -1073,6 +1080,18 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
     let webhook_path_set = webhook_secret
         .as_deref()
         .is_some_and(|secret| !secret.is_empty());
+    let schedule = serde_json::from_str::<ScheduleSpec>(&schedule_json)?;
+    // A row written before the slot identity existed only has the flag; the
+    // stored schedule names the slot it spent.
+    let once_slot: Option<String> = row.try_get("once_slot")?;
+    let legacy_consumed: i64 = row.try_get("once_consumed")?;
+    let once_consumed = once_slot.or_else(|| {
+        if legacy_consumed == 0 {
+            None
+        } else {
+            schedule.once_slot()
+        }
+    });
     Ok(ScheduleTask {
         task_id: ScheduleTaskId::new(task_id),
         name: row.try_get("name")?,
@@ -1083,7 +1102,7 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
         model: row.try_get("model")?,
         runtime_mode: decode_enum(&runtime_mode, "daemon_schedules.runtime_mode")?,
         prompt: row.try_get("prompt")?,
-        schedule: serde_json::from_str::<ScheduleSpec>(&schedule_json)?,
+        schedule,
         timezone: row.try_get("timezone")?,
         destination: serde_json::from_str::<ScheduleDestination>(&format!("\"{destination}\""))
             .map_err(|error| {
@@ -1099,7 +1118,7 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
             .filter(|secret| !secret.is_empty())
             .map(|secret| format!("/webhooks/{secret}")),
         webhook_path_set,
-        once_consumed: row.try_get::<i64, _>("once_consumed")? != 0,
+        once_consumed,
         next_run_at: next_run_at.and_then(|at| {
             DateTime::parse_from_rfc3339(&at)
                 .ok()

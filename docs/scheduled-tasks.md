@@ -29,12 +29,15 @@ laptop you happen to be typing on. The editor offers a searchable list of IANA
 names. Intervals are absolute durations, so "every 6 hours" stays six hours
 across a daylight-saving change; a daily or weekly time follows the wall clock,
 so 09:30 stays 09:30. A time the spring-forward gap skips runs at the first
-valid minute after the gap. A time in the repeated fall-back hour runs at the
-first occurrence. A cron expression with several jobs in that hour returns the
-earliest UTC instant among them, so 02:00 and 02:30 jobs in Berlin both run in
-the first pass. A **Once** task is consumed by its one run: it never matches
-again in the repeated hour, and neither an edit nor a pause and resume re-arms
-the same date and time.
+valid minute after the gap. A **Daily** or **Weekly** time in the repeated
+fall-back hour runs at the first occurrence only, so 02:30 in Berlin runs once
+on the fall-back day; the same clock time a week later is the next run. A cron
+expression with several jobs in that hour returns the earliest UTC instant
+among them, so 02:00 and 02:30 jobs in Berlin both run in the first pass. A
+**Once** slot is taken when it is admitted, before the harness is asked to
+start: it never matches again in the repeated hour, and neither an edit nor a
+pause during the run followed by a resume re-arms the same date and time.
+Naming a different date or time in an edit does arm a new slot.
 
 Cron accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `1-30/2`) and comma
 lists. Weekdays are 0 (Sunday) through 6, with 7 also accepted as Sunday. When
@@ -78,13 +81,19 @@ started, skips its slot and records the skip in the history. Admission is
 atomic: it rechecks that the task is still enabled, still due and not already
 in flight before any harness is asked to start, so a pause or an edit that
 lands first wins. A manual **Run now** on a busy task is refused with a reason
-instead of queuing a second prompt. Enabling a paused task computes its next
-run from now; it does not catch up on slots from while it was paused.
+instead of queuing a second prompt. **Run now** also works while a task is
+paused: the person asked for that run, and it leaves the schedule and the
+enabled state alone. Enabling a paused task computes its next run from now; it
+does not catch up on slots from while it was paused.
 
-If a run cannot be recorded (the journal or the stored time zone fails), the
-daemon backs off instead of retrying every instant: the next run moves 30
-seconds out, doubling up to an hour, and the same slot is never started twice.
-A **Once** task whose run started but could not be recorded is marked spent.
+If a run's journal write fails, only that write is retried, on its own
+backoff deadline (30 seconds, doubling up to an hour). The task's real next
+slot is kept, the failed slot is never admitted again, and a webhook or manual
+run does not acquire a clock time. If the stored schedule itself cannot
+produce an instant (an invalid time zone, for example), the task backs off 30
+seconds, doubling up to an hour, so the runner does not retry every instant. A
+**Once** task whose run started is spent even when its write is still
+retrying.
 
 The history keeps the newest 100 runs per task, and a run and the task's
 advanced clock are committed in one journal transaction. Each entry records the time, the
@@ -135,16 +144,19 @@ Which listener answers a webhook is explicit:
 
 | Listener | Webhooks? | Who can reach it |
 |---|---|---|
-| The loopback bind (`--bind`, default `127.0.0.1`) | Yes | This machine only. |
+| The primary bind (`--bind`, default `127.0.0.1`) | Yes | This machine only while the default is loopback; a non-loopback `--bind` serves webhooks on that address instead. |
 | An extra bind you name (`--extra-bind`) | Yes | Whatever that address exposes. |
 | The tailnet address Tailscale auto mode discovers | No | Paired devices for `/secure`; plain HTTP webhooks are absent. |
 | The Settings → Network access LAN listener | No | Paired devices for the Noise routes only. |
 | The Connect relay | No | It carries the typed WebSocket, not plain HTTP. |
 
-A public URL therefore needs a tunnel in front of the loopback or extra-bind
-port, such as Tailscale Funnel, Cloudflare Tunnel, ngrok or a reverse proxy. An
-explicit extra bind is the way to serve webhooks on a LAN address without a
-tunnel. The editor shows the path and not a host because the daemon cannot know
+Exposure follows the address you configured: the default loopback bind is
+reachable only from this machine, while a `--bind` on a LAN or tunnel address
+serves its webhook paths to whoever can reach that address. A public URL
+therefore needs a tunnel in front of the bind port, such as Tailscale Funnel,
+Cloudflare Tunnel, ngrok or a reverse proxy, unless the bind itself already
+names a reachable address. An explicit extra bind is the way to serve webhooks
+on a LAN address without a tunnel. The editor shows the path and not a host because the daemon cannot know
 which public name you use.
 
 ## Protocol

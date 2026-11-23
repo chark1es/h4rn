@@ -78,12 +78,15 @@ thread_id: ThreadId | null,
  */
 webhook_path_set: boolean, 
 /**
- * Whether a once schedule has already used its single slot.
+ * The once slot that has already been taken, when this is a once task.
  *
- * A completed once task stays spent across edits and a pause/resume, so
- * a repeated fall-back hour cannot run it a second time.
+ * This is the slot's identity (its local date and time), not a bare flag:
+ * it is persisted when the slot is admitted, so pausing during the run and
+ * resuming cannot arm the same slot again, while naming a different date
+ * or time in an edit arms a new one. Both occurrences of a repeated
+ * fall-back hour are the same slot.
  */
-once_consumed: boolean, 
+once_consumed: string | null, 
 /**
  * The next clock run, in UTC. Absent for webhook tasks, a spent once
  * task, and a disabled task.

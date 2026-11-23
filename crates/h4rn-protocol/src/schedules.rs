@@ -95,6 +95,19 @@ impl ScheduleSpec {
     pub fn is_webhook(&self) -> bool {
         matches!(self, Self::Webhook)
     }
+
+    /// The identity of this schedule's one slot, when it is a once schedule.
+    ///
+    /// A once task has exactly one slot, so the slot is identified by its local
+    /// date and time. Both occurrences of a repeated fall-back hour share that
+    /// identity, while naming a different date or time in an edit names a new
+    /// slot.
+    pub fn once_slot(&self) -> Option<String> {
+        match self {
+            Self::Once { date, time } => Some(format!("{date}T{time}")),
+            _ => None,
+        }
+    }
 }
 
 /// Where a run's prompt goes.
@@ -222,12 +235,15 @@ pub struct ScheduleTask {
     #[serde(skip)]
     #[ts(skip)]
     pub webhook_path: Option<String>,
-    /// Whether a once schedule has already used its single slot.
+    /// The once slot that has already been taken, when this is a once task.
     ///
-    /// A completed once task stays spent across edits and a pause/resume, so
-    /// a repeated fall-back hour cannot run it a second time.
+    /// This is the slot's identity (its local date and time), not a bare flag:
+    /// it is persisted when the slot is admitted, so pausing during the run and
+    /// resuming cannot arm the same slot again, while naming a different date
+    /// or time in an edit arms a new one. Both occurrences of a repeated
+    /// fall-back hour are the same slot.
     #[serde(default)]
-    pub once_consumed: bool,
+    pub once_consumed: Option<String>,
     /// The next clock run, in UTC. Absent for webhook tasks, a spent once
     /// task, and a disabled task.
     pub next_run_at: Option<DateTime<Utc>>,
