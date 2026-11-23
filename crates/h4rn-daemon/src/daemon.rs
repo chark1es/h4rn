@@ -660,7 +660,7 @@ impl Daemon {
             .await
             .map_err(|error| anyhow::anyhow!("bind {}: {error}", self.config.bind))?;
         addrs.push(primary.local_addr()?);
-        listeners.push(primary);
+        listeners.push((primary, server::ListenerKind::Loopback));
 
         if let Some(extra) = self.config.extra_bind
             && extra != self.config.bind
@@ -669,12 +669,13 @@ impl Daemon {
                 .await
                 .map_err(|error| anyhow::anyhow!("bind extra address {extra}: {error}"))?;
             addrs.push(listener.local_addr()?);
-            listeners.push(listener);
+            listeners.push((listener, server::ListenerKind::ExtraBind));
         }
 
         // The secure transport is the only remote path worth exposing on a
-        // tailnet, so the extra listener shares the primary port. A bind
-        // failure is not fatal: the relay and any LAN address still work.
+        // tailnet, so the extra listener shares the primary port. It does not
+        // serve webhook paths: those stay on the loopback and explicit binds.
+        // A bind failure is not fatal: the relay and any LAN address still work.
         if self.config.tailscale == TailscaleMode::Auto
             && let Some(ip) = crate::remote::tailscale::tailnet_ip_async().await
         {
@@ -683,7 +684,7 @@ impl Daemon {
                 match TcpListener::bind(addr).await {
                     Ok(listener) => {
                         addrs.push(listener.local_addr()?);
-                        listeners.push(listener);
+                        listeners.push((listener, server::ListenerKind::Tailnet));
                         tracing::info!(%addr, "listening on the tailnet address");
                     }
                     Err(error) => tracing::warn!(
@@ -808,7 +809,7 @@ impl Daemon {
         }
 
         Ok(BoundDaemon {
-            app: server::router(state),
+            state,
             network,
             listeners,
             addrs,
@@ -829,10 +830,10 @@ impl Daemon {
 
 /// A daemon with sockets bound, ready for [`BoundDaemon::serve`].
 pub struct BoundDaemon {
-    app: axum::Router,
+    state: AppState,
     /// The dedicated LAN/tailnet listener, when network access is on.
     network: Arc<NetworkAccess>,
-    listeners: Vec<TcpListener>,
+    listeners: Vec<(TcpListener, server::ListenerKind)>,
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
@@ -890,7 +891,7 @@ impl BoundDaemon {
         shutdown: impl std::future::Future<Output = ()>,
     ) -> anyhow::Result<()> {
         let Self {
-            app,
+            state,
             network,
             listeners,
             addrs,
@@ -913,7 +914,11 @@ impl BoundDaemon {
             "h4rn daemon listening"
         );
 
-        server::serve_all(listeners, app, shutdown).await?;
+        let routes: Vec<(TcpListener, axum::Router)> = listeners
+            .into_iter()
+            .map(|(listener, kind)| (listener, kind.router(state.clone())))
+            .collect();
+        server::serve_all(routes, shutdown).await?;
         // Close the LAN/tailnet listener before the services it routes to go
         // away, so no new remote session starts during shutdown.
         network.shutdown().await;

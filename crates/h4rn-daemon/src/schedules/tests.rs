@@ -1,6 +1,7 @@
 //! Runner, persistence and validation tests for scheduled tasks.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,7 +9,7 @@ use chrono::{DateTime, Utc};
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     HarnessKind, HostId, IntervalUnit, RuntimeMode, ScheduleDestination, ScheduleDraft,
-    ScheduleRunOutcome, ScheduleSpec, ScheduleTaskId, ThreadId,
+    ScheduleRunOutcome, ScheduleSpec, ScheduleTaskId, ThreadId, ThreadTab,
 };
 
 use super::*;
@@ -69,6 +70,14 @@ async fn fixture_with_journal(
     clock: Arc<ManualClock>,
     journal: Option<Arc<dyn Journal>>,
 ) -> Fixture {
+    fixture_with_harnesses(vec![harness], clock, journal).await
+}
+
+async fn fixture_with_harnesses(
+    harnesses: Vec<FakeHarness>,
+    clock: Arc<ManualClock>,
+    journal: Option<Arc<dyn Journal>>,
+) -> Fixture {
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_path = workspace.path().to_path_buf();
     let journal = match journal {
@@ -76,10 +85,14 @@ async fn fixture_with_journal(
         None => Arc::new(SqliteJournal::in_memory().await.expect("journal")),
     };
     let host = HostId::new("host_schedule_test");
+    let mut catalog = StaticHarnessCatalog::new();
+    for harness in harnesses {
+        catalog.register(Arc::new(harness));
+    }
     let manager = Arc::new(
         ThreadManager::open(
             Arc::clone(&journal),
-            Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
+            Arc::new(catalog),
             host.clone(),
             ThreadManagerOptions {
                 tick_interval: Duration::from_secs(3600),
@@ -163,6 +176,21 @@ async fn wait_runs(
     })
     .await
     .expect("run history did not reach the expected length")
+}
+
+/// The two-phase delivery a server performs, for tests.
+async fn deliver(
+    service: &ScheduleService,
+    secret: &str,
+    request: WebhookRequest,
+) -> WebhookOutcome {
+    match service.begin_webhook(secret).await {
+        WebhookStart::Start(admission) => service.deliver_webhook(*admission, request).await,
+        WebhookStart::NotFound => WebhookOutcome::NotFound,
+        WebhookStart::RateLimited => WebhookOutcome::RateLimited,
+        WebhookStart::Skipped => WebhookOutcome::Skipped,
+        WebhookStart::Rejected(message) => WebhookOutcome::Rejected(message),
+    }
 }
 
 #[tokio::test]
@@ -433,29 +461,32 @@ async fn a_webhook_delivery_starts_a_run_and_rotation_kills_the_old_path() {
         query: Default::default(),
         headers,
         body: r#"{"ref":"main"}"#.into(),
+        secret: Some(old_secret.clone()),
     };
     assert_eq!(
-        fixture.service.deliver_webhook(&old_secret, request).await,
+        deliver(&fixture.service, &old_secret, request).await,
         WebhookOutcome::Accepted
     );
     let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
     assert_eq!(runs[0].outcome, ScheduleRunOutcome::Started);
 
-    let rotated = fixture
+    let (rotated, rotated_path) = fixture
         .service
         .rotate_webhook(&task.task_id)
         .await
         .expect("rotate");
-    assert_ne!(rotated.webhook_path, Some(old_path));
+    assert_ne!(rotated_path, Some(old_path));
+    assert_eq!(rotated.webhook_path, rotated_path);
     let request = WebhookRequest {
         method: "POST".into(),
         path: "".into(),
         query: Default::default(),
         headers: Default::default(),
         body: String::new(),
+        secret: Some(old_secret.clone()),
     };
     assert_eq!(
-        fixture.service.deliver_webhook(&old_secret, request).await,
+        deliver(&fixture.service, &old_secret, request).await,
         WebhookOutcome::NotFound
     );
 }
@@ -648,4 +679,673 @@ async fn a_spent_once_task_still_saves_an_edit() {
         .expect("rename a spent once task");
     assert_eq!(saved.name, "Renamed once");
     assert!(saved.next_run_at.is_none());
+}
+
+#[tokio::test]
+async fn a_rotated_path_and_an_edit_survive_a_run_that_was_already_starting() {
+    let (harness, gate) = FakeHarness::new().with_start_gate();
+    let (harness, sessions) = harness.with_session_count();
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(harness, clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Webhook,
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    let old_path = task.webhook_path.clone().expect("path");
+    let secret = old_path
+        .strip_prefix(WEBHOOK_PREFIX)
+        .expect("prefix")
+        .to_owned();
+    let request = WebhookRequest {
+        method: "POST".into(),
+        path: old_path,
+        query: Default::default(),
+        headers: Default::default(),
+        body: "{}".into(),
+        secret: Some(secret.clone()),
+    };
+
+    // The delivery is accepted, then blocks inside the harness start, which is
+    // exactly the window a rotation or an edit can race.
+    assert_eq!(
+        deliver(&fixture.service, &secret, request).await,
+        WebhookOutcome::Accepted
+    );
+    sessions.wait_for(1).await;
+
+    let (_, new_path) = fixture
+        .service
+        .rotate_webhook(&task.task_id)
+        .await
+        .expect("rotate during the run");
+    let mut edit = task.draft();
+    edit.name = "Renamed while running".into();
+    fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("edit during the run");
+
+    gate.release();
+    wait_runs(&fixture.service, &task.task_id, 1).await;
+    let stored = fixture.service.task(&task.task_id).await.expect("task");
+    assert_eq!(
+        stored.webhook_path, new_path,
+        "the run's snapshot must not restore the rotated path"
+    );
+    assert_eq!(
+        stored.name, "Renamed while running",
+        "the run's snapshot must not undo an edit"
+    );
+}
+
+#[tokio::test]
+async fn two_simultaneous_webhook_deliveries_start_one_run() {
+    let (harness, gate) = FakeHarness::new().with_start_gate();
+    let (harness, sessions) = harness.with_session_count();
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(harness, clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Webhook,
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    let path = task.webhook_path.clone().expect("path");
+    let secret = path
+        .strip_prefix(WEBHOOK_PREFIX)
+        .expect("prefix")
+        .to_owned();
+    let request = || WebhookRequest {
+        method: "POST".into(),
+        path: path.clone(),
+        query: Default::default(),
+        headers: Default::default(),
+        body: "{}".into(),
+        secret: Some(secret.clone()),
+    };
+
+    assert_eq!(
+        deliver(&fixture.service, &secret, request()).await,
+        WebhookOutcome::Accepted
+    );
+    sessions.wait_for(1).await;
+    assert_eq!(
+        deliver(&fixture.service, &secret, request()).await,
+        WebhookOutcome::Skipped,
+        "the second delivery is skipped while the first is starting"
+    );
+
+    gate.release();
+    let runs = wait_runs(&fixture.service, &task.task_id, 2).await;
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run.outcome == ScheduleRunOutcome::Started)
+            .count(),
+        1,
+        "only one delivery starts a run"
+    );
+    let skipped = runs
+        .iter()
+        .find(|run| run.outcome == ScheduleRunOutcome::Skipped)
+        .expect("the skipped delivery is recorded");
+    assert!(
+        skipped
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("already starting"))
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_slot_picked_before_a_pause_is_not_dispatched() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    let slot = task.next_run_at.expect("due slot");
+
+    fixture
+        .service
+        .set_enabled(&task.task_id, false)
+        .await
+        .expect("pause");
+    // This is the runner admitting a slot it collected before the pause.
+    assert!(matches!(
+        fixture
+            .service
+            .admit(&task.task_id, Trigger::Scheduled, Some(slot))
+            .await,
+        Err(AdmissionError::Disabled)
+    ));
+    fixture.service.run_due().await;
+    assert!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_continuing_run_uses_the_tasks_saved_permissions() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let mut first = draft(
+        &fixture.workspace_path,
+        every_minute(),
+        ScheduleDestination::ContinueThread,
+    );
+    first.runtime_mode = RuntimeMode::FullAccess;
+    let task = fixture.service.create(first).await.expect("create");
+
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
+    let thread_id = runs[0].thread_id.clone().expect("thread");
+    assert!(wait_idle(&fixture.manager, &thread_id).await);
+    assert_eq!(
+        fixture
+            .manager
+            .thread_meta(&thread_id)
+            .await
+            .expect("meta")
+            .runtime_mode,
+        RuntimeMode::FullAccess
+    );
+
+    // Changing the task to Approval Required must change the next run, not
+    // just the task row.
+    let mut edit = fixture
+        .service
+        .task(&task.task_id)
+        .await
+        .expect("task")
+        .draft();
+    edit.runtime_mode = RuntimeMode::ApprovalRequired;
+    fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("update");
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    wait_runs(&fixture.service, &task.task_id, 2).await;
+    assert!(wait_idle(&fixture.manager, &thread_id).await);
+    assert_eq!(
+        fixture
+            .manager
+            .thread_meta(&thread_id)
+            .await
+            .expect("meta")
+            .runtime_mode,
+        RuntimeMode::ApprovalRequired,
+        "the run must use the settings the task was saved with"
+    );
+}
+
+#[tokio::test]
+async fn changing_the_harness_starts_a_new_destination_thread() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture_with_harnesses(
+        vec![
+            FakeHarness::new(),
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+        ],
+        clock,
+        None,
+    )
+    .await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::ContinueThread,
+        ))
+        .await
+        .expect("create");
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
+    let first_thread = runs[0].thread_id.clone().expect("thread");
+    assert!(wait_idle(&fixture.manager, &first_thread).await);
+
+    let mut edit = fixture
+        .service
+        .task(&task.task_id)
+        .await
+        .expect("task")
+        .draft();
+    edit.harness = HarnessKind::Codex;
+    edit.model = "fake-model".into();
+    fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("change the harness");
+    assert!(
+        fixture
+            .service
+            .task(&task.task_id)
+            .await
+            .expect("task")
+            .thread_id
+            .is_none(),
+        "a harness change drops the old destination thread"
+    );
+
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 2).await;
+    let second_thread = runs[0].thread_id.clone().expect("thread");
+    assert_ne!(first_thread, second_thread);
+}
+
+#[tokio::test]
+async fn a_completed_once_task_is_never_run_again_in_the_repeated_hour() {
+    let clock = Arc::new(ManualClock::at(
+        "2026-10-24T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("clock"),
+    ));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Once {
+                date: "2026-10-25".into(),
+                time: "02:30".into(),
+            },
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    assert_eq!(
+        task.next_run_at,
+        Some(
+            "2026-10-25T00:30:00Z"
+                .parse::<DateTime<Utc>>()
+                .expect("slot")
+        )
+    );
+
+    fixture
+        .clock
+        .advance(chrono::Duration::minutes(12 * 60 + 31));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
+    assert_eq!(runs[0].outcome, ScheduleRunOutcome::Started);
+    let spent = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(spent.once_consumed);
+    assert!(spent.next_run_at.is_none());
+
+    // The second 02:30 (CET) is 01:30 UTC. It must not match again.
+    fixture.clock.advance(chrono::Duration::hours(1));
+    fixture.service.run_due().await;
+    assert_eq!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .len(),
+        1
+    );
+
+    // An edit keeps the slot spent, and re-enabling does not re-arm it.
+    let mut edit = spent.draft();
+    edit.name = "Renamed once".into();
+    fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("edit");
+    assert!(
+        fixture
+            .service
+            .task(&task.task_id)
+            .await
+            .expect("task")
+            .once_consumed
+    );
+    fixture
+        .service
+        .set_enabled(&task.task_id, false)
+        .await
+        .expect("pause");
+    assert!(
+        fixture
+            .service
+            .set_enabled(&task.task_id, true)
+            .await
+            .is_err(),
+        "a spent once task cannot be re-armed"
+    );
+    fixture.service.run_due().await;
+    assert_eq!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_failed_recording_backs_off_instead_of_retrying_every_millisecond() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.fail_next_commit();
+    fixture.service.run_due().await;
+
+    let after = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        after.next_run_at.is_some_and(|at| at > fixture.clock.now()),
+        "a failed recording must move the clock forward"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1
+    );
+
+    // One second later the task is still inside its backoff, so the runner
+    // must not start a second thread for the same slot.
+    fixture.clock.advance(chrono::Duration::seconds(1));
+    fixture.service.run_due().await;
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1,
+        "a failed recording must not start a second thread for the slot"
+    );
+    assert!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .is_empty(),
+        "the rolled-back run is not in the history"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_stored_zone_backs_off_instead_of_retrying() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    // Model a row written by an older or corrupted daemon.
+    fixture
+        .service
+        .inner
+        .tasks
+        .lock()
+        .await
+        .get_mut(&task.task_id)
+        .expect("task")
+        .timezone = "Mars/Olympus_Mons".into();
+
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let after = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        after.next_run_at.is_some_and(|at| at > fixture.clock.now()),
+        "a broken zone must not leave the task permanently due"
+    );
+    fixture.clock.advance(chrono::Duration::seconds(1));
+    fixture.service.run_due().await;
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_thread_pinned_to_working_but_idle_is_not_busy() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
+    let first_thread = runs[0].thread_id.clone().expect("thread");
+    assert!(wait_idle(&fixture.manager, &first_thread).await);
+    fixture
+        .manager
+        .set_thread_tab(&first_thread, ThreadTab::Working, true)
+        .await
+        .expect("pin");
+    assert!(
+        !fixture.manager.thread_is_busy(&first_thread).await,
+        "a pinned but idle thread has nothing to overlap"
+    );
+
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 2).await;
+    assert_eq!(runs[0].outcome, ScheduleRunOutcome::Started);
+    assert_ne!(runs[0].thread_id.as_ref(), Some(&first_thread));
+}
+
+#[tokio::test]
+async fn a_recorded_run_survives_a_restart() {
+    let dir = tempfile::tempdir().expect("dir");
+    let db = dir.path().join("journal.db");
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let first = fixture_with_journal(
+        FakeHarness::new(),
+        clock.clone(),
+        Some(Arc::new(
+            SqliteJournal::connect(&db).await.expect("journal"),
+        )),
+    )
+    .await;
+    let task = first
+        .service
+        .create(draft(
+            &first.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    clock.advance(chrono::Duration::seconds(61));
+    first.service.run_due().await;
+    let runs = wait_runs(&first.service, &task.task_id, 1).await;
+    let run_id = runs[0].run_id;
+    drop(first);
+
+    let second = fixture_with_journal(
+        FakeHarness::new(),
+        clock,
+        Some(Arc::new(
+            SqliteJournal::connect(&db).await.expect("journal"),
+        )),
+    )
+    .await;
+    let restored = second
+        .service
+        .task(&task.task_id)
+        .await
+        .expect("task survived");
+    assert_eq!(
+        restored.last_run.as_ref().map(|run| run.run_id),
+        Some(run_id)
+    );
+    let runs = second
+        .service
+        .runs(&task.task_id)
+        .await
+        .expect("runs survived");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_id, run_id);
+}
+
+#[tokio::test]
+async fn a_task_body_and_event_never_carry_the_webhook_path() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Webhook,
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    let secret = task
+        .webhook_path
+        .as_deref()
+        .expect("path")
+        .strip_prefix(WEBHOOK_PREFIX)
+        .expect("prefix")
+        .to_owned();
+
+    let json = serde_json::to_string(&task).expect("serialise task");
+    assert!(!json.contains(&secret), "a task body leaked the path");
+    assert!(!json.contains("webhook_path\""));
+    assert!(json.contains("\"webhook_path_set\":true"));
+
+    let event = ScheduleEvent::Upserted {
+        task: Box::new(task.clone()),
+    };
+    let json = serde_json::to_string(&event).expect("serialise event");
+    assert!(!json.contains(&secret), "a change event leaked the path");
+
+    // The admin request still reveals it.
+    assert_eq!(
+        fixture
+            .service
+            .webhook_url(&task.task_id)
+            .await
+            .expect("url"),
+        task.webhook_path
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_webhook_path_is_refused_before_the_body_is_read() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Webhook,
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    let reads = Arc::new(AtomicUsize::new(0));
+    let body = |reads: Arc<AtomicUsize>| {
+        axum::body::Body::from_stream(futures::stream::once(async move {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Err::<axum::body::Bytes, std::io::Error>(std::io::Error::other(
+                "the body must not be read",
+            ))
+        }))
+    };
+
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/webhooks/not-the-secret")
+        .body(body(Arc::clone(&reads)))
+        .expect("request");
+    let response = crate::server::serve_webhook_request(
+        &fixture.service,
+        "not-the-secret".to_owned(),
+        request,
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "a wrong path must not cost a body read"
+    );
+
+    // The real path reads the body, so the assertion above is not vacuous.
+    let secret = task
+        .webhook_path
+        .as_deref()
+        .expect("path")
+        .strip_prefix(WEBHOOK_PREFIX)
+        .expect("prefix")
+        .to_owned();
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("{WEBHOOK_PREFIX}{secret}"))
+        .body(body(Arc::clone(&reads)))
+        .expect("request");
+    let response = crate::server::serve_webhook_request(&fixture.service, secret, request).await;
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 }

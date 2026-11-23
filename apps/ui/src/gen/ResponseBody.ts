@@ -58,6 +58,7 @@ import type { Resets } from "./Resets";
 import type { ResumeSchedule } from "./ResumeSchedule";
 import type { ScheduleRun } from "./ScheduleRun";
 import type { ScheduleTask } from "./ScheduleTask";
+import type { ScheduleTaskId } from "./ScheduleTaskId";
 import type { SeqEvent } from "./SeqEvent";
 import type { SkillConflict } from "./SkillConflict";
 import type { SkillDetail } from "./SkillDetail";
@@ -118,7 +119,16 @@ local_host: HostId,
 /**
  * Hosts this daemon can route to.
  */
-hosts: Array<HostSummary>, } | { "type": "hosts", 
+hosts: Array<HostSummary>, 
+/**
+ * The daemon machine's IANA time zone, such as `Europe/Berlin`.
+ *
+ * An editor that creates a schedule uses this as the default, so a
+ * floating date and time mean the daemon's wall clock rather than a
+ * phone in another zone. An older daemon omits it; the client falls
+ * back to its own zone.
+ */
+daemon_timezone: string, } | { "type": "hosts", 
 /**
  * Reachable hosts.
  */
@@ -614,7 +624,15 @@ task: ScheduleTask, } | { "type": "schedule_runs",
 /**
  * Recorded runs, at most the daemon's history bound.
  */
-runs: Array<ScheduleRun>, } | { "type": "thread_renamed", 
+runs: Array<ScheduleRun>, } | { "type": "schedule_webhook_url", 
+/**
+ * The task the path belongs to.
+ */
+task_id: ScheduleTaskId, 
+/**
+ * The path to post to, absent when the task has no webhook URL.
+ */
+path: string | null, } | { "type": "thread_renamed", 
 /**
  * The thread with its new title.
  */

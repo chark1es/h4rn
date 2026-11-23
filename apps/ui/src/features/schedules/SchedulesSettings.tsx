@@ -37,6 +37,7 @@ import {
   getSchedulesState,
   loadScheduleRuns,
   loadSchedules,
+  loadScheduleWebhookUrl,
   localTimezone,
   nextRunText,
   outcomeWord,
@@ -245,9 +246,21 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
   const live = useSchedules((state) =>
     task ? (state.tasks.find((entry) => entry.task_id === task.task_id) ?? task) : null,
   );
+  const path = useSchedules((state) => (task ? (state.webhookPaths[task.task_id] ?? null) : null));
+  const loading = useSchedules((state) =>
+    task ? state.webhookPathLoading === task.task_id : false,
+  );
   const [copied, setCopied] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
-  const path = live?.webhook_path ?? null;
+  const hasPath = live?.webhook_path_set ?? false;
+
+  // The list never carries the secret; ask for it when the panel opens.
+  const taskId = task?.task_id ?? null;
+  useEffect(() => {
+    if (!taskId) return;
+    void loadScheduleWebhookUrl(taskId);
+  }, [taskId]);
+
   const copy = async () => {
     if (!path) return;
     try {
@@ -266,14 +279,16 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
         <div className="lab">
           <div className="t">URL path</div>
           <div className="s">
-            {path
-              ? "Anyone with this path can start a run. Rotate it if it leaks."
-              : "Save the task to create its URL."}
+            {!live
+              ? "Save the task to create its URL."
+              : hasPath
+                ? "Anyone with this path can start a run. Rotate it if it leaks."
+                : "No URL yet."}
           </div>
         </div>
         <div className="ctl">
           <span className="q-mono q-muted" title={path ?? undefined} style={{ maxWidth: 360 }}>
-            {path ?? "—"}
+            {path ?? (hasPath && loading ? "Loading…" : hasPath ? "Hidden" : "—")}
           </span>
           <button
             type="button"
@@ -336,14 +351,16 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
 function ScheduleEditor({
   task,
   host,
+  timezone,
   onClose,
 }: {
   task: ScheduleTask | null;
   host: string;
+  timezone: string;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<ScheduleDraft>(() =>
-    task ? draftOf(task) : emptyDraft(host, localTimezone()),
+    task ? draftOf(task) : emptyDraft(host, timezone),
   );
   const [errors, setErrors] = useState<ScheduleFormErrors>({});
   const saving = useSchedules((state) => state.saving);
@@ -425,7 +442,7 @@ function ScheduleEditor({
             style={{ width: 220 }}
           />
           <datalist id="schedule-timezones">
-            {timezoneOptions().map((name) => (
+            {timezoneOptions(timezone).map((name) => (
               <option key={name} value={name} />
             ))}
           </datalist>
@@ -616,11 +633,11 @@ function ScheduleEditor({
   );
 }
 
-function timezoneOptions(): string[] {
+function timezoneOptions(preferred: string): string[] {
   try {
     return Intl.supportedValuesOf("timeZone");
   } catch {
-    return [localTimezone()];
+    return [preferred];
   }
 }
 
@@ -753,6 +770,8 @@ function TaskRow({
 export function SchedulesSettings() {
   const online = useApp((state) => state.connection.status) === "online";
   const host = useApp((state) => state.localHostId);
+  const daemonTimezone = useApp((state) => state.daemonTimezone);
+  const timezone = daemonTimezone || localTimezone();
   const tasks = useSchedules((state) => state.tasks);
   const loaded = useSchedules((state) => state.loaded);
   const loading = useSchedules((state) => state.loading);
@@ -827,6 +846,7 @@ export function SchedulesSettings() {
           key={editing === "new" ? "new" : editing.task_id}
           task={editing === "new" ? null : editing}
           host={host ?? ""}
+          timezone={timezone}
           onClose={() => setEditing(null)}
         />
       ) : null}

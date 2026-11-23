@@ -207,11 +207,27 @@ pub struct ScheduleTask {
     pub enabled: bool,
     /// The one thread a continuing destination uses, once its first run exists.
     pub thread_id: Option<ThreadId>,
+    /// Whether a webhook URL exists for this task.
+    ///
+    /// The path itself is a secret. It is never part of a listed task or a
+    /// change event; an admin reads it with
+    /// [`crate::ClientRequest::GetScheduleWebhookUrl`] and rotating it
+    /// invalidates every earlier URL.
+    pub webhook_path_set: bool,
     /// The daemon path a webhook posts to, when this is a webhook task.
     ///
-    /// The path is the secret: it is shown only to clients that may read the
-    /// task, and rotating it invalidates every earlier URL.
+    /// This is the secret, so it never travels in a task body. The daemon
+    /// keeps it for routing and journal columns; the wire carries only
+    /// [`Self::webhook_path_set`].
+    #[serde(skip)]
+    #[ts(skip)]
     pub webhook_path: Option<String>,
+    /// Whether a once schedule has already used its single slot.
+    ///
+    /// A completed once task stays spent across edits and a pause/resume, so
+    /// a repeated fall-back hour cannot run it a second time.
+    #[serde(default)]
+    pub once_consumed: bool,
     /// The next clock run, in UTC. Absent for webhook tasks, a spent once
     /// task, and a disabled task.
     pub next_run_at: Option<DateTime<Utc>>,

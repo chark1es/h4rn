@@ -2,19 +2,28 @@
 
 use std::time::Duration;
 
+use futures::{SinkExt, StreamExt};
+use h4rn_daemon::auth::TokenStore;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
+use h4rn_daemon::network_access::NetworkAccess;
 use h4rn_daemon::schedules::ScheduleService;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
-    Event, HarnessKind, IntervalUnit, Item, MAX_WEBHOOK_BODY_BYTES, MessageRole, RuntimeMode,
+    ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, IntervalUnit, Item,
+    MAX_WEBHOOK_BODY_BYTES, MessageRole, ProtoError, ResponseBody, RuntimeMode,
     ScheduleDestination, ScheduleDraft, ScheduleRunOutcome, ScheduleSpec, ScheduleTaskId,
+    ServerFrame,
 };
 use reqwest::StatusCode;
 use tokio::sync::oneshot;
+use tokio_tungstenite::tungstenite::Message;
 
 struct HttpDaemon {
     addr: std::net::SocketAddr,
+    extra: Option<std::net::SocketAddr>,
+    token: String,
+    network: std::sync::Arc<NetworkAccess>,
     schedules: std::sync::Arc<ScheduleService>,
     manager: std::sync::Arc<h4rn_daemon::threads::ThreadManager>,
     host: h4rn_protocol::HostId,
@@ -25,15 +34,26 @@ struct HttpDaemon {
 }
 
 async fn boot() -> HttpDaemon {
+    boot_with(None, None).await
+}
+
+/// Boots a daemon with the listener configuration a test needs.
+///
+/// `network_access` resolves the persisted LAN-listener setting; `None` leaves
+/// it off.
+async fn boot_with(
+    extra_bind: Option<std::net::SocketAddr>,
+    network_access: Option<bool>,
+) -> HttpDaemon {
     let dir = tempfile::tempdir().expect("dir");
     let workspace = tempfile::tempdir().expect("workspace");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         bind: "127.0.0.1:0".parse().expect("bind"),
-        extra_bind: None,
+        extra_bind,
         log_level: "off".to_owned(),
-        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
-        network_access: None,
+        tailscale: h4rn_daemon::remote::TailscaleMode::Off,
+        network_access,
         network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
@@ -42,11 +62,17 @@ async fn boot() -> HttpDaemon {
         .build()
         .await
         .expect("build");
+    let token = TokenStore::new(dir.path())
+        .load()
+        .expect("read token")
+        .expect("token exists");
     let schedules = daemon.schedules();
     let manager = daemon.manager();
     let host = daemon.local_host();
     let bound = daemon.bind().await.expect("bind");
     let addr = bound.local_addr();
+    let extra = bound.addrs().get(1).copied();
+    let network = bound.network();
     let (shutdown, rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         bound
@@ -57,6 +83,9 @@ async fn boot() -> HttpDaemon {
     });
     HttpDaemon {
         addr,
+        extra,
+        token,
+        network,
         schedules,
         manager,
         host,
@@ -179,12 +208,12 @@ async fn only_post_runs_and_a_rotated_path_404s() {
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
-    let rotated = daemon
+    let (_, new_path) = daemon
         .schedules
         .rotate_webhook(&task.task_id)
         .await
         .expect("rotate");
-    let new_path = rotated.webhook_path.expect("new path");
+    let new_path = new_path.expect("new path");
     assert_ne!(old_path, new_path);
 
     let old = client
@@ -289,6 +318,208 @@ async fn list_create_and_history_travel_over_the_protocol() {
             .await
             .expect("runs")
             .is_empty()
+    );
+    daemon.stop().await;
+}
+
+/// A minimal protocol client for the socket-level tests.
+struct WsClient {
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    next_id: u64,
+}
+
+impl WsClient {
+    async fn connect(daemon: &HttpDaemon) -> Self {
+        let url = format!("ws://{}/ws?token={}", daemon.addr, daemon.token);
+        let (ws, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect the socket");
+        Self { ws, next_id: 1 }
+    }
+
+    async fn request(&mut self, body: ClientRequest) -> Result<ResponseBody, ProtoError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let text = serde_json::to_string(&ClientFrame { id, body }).expect("serialise");
+        self.ws
+            .send(Message::Text(text.into()))
+            .await
+            .expect("send frame");
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(10), self.ws.next())
+                .await
+                .expect("timed out waiting for a reply")
+                .expect("socket closed")
+                .expect("socket error");
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let frame: ServerFrame = serde_json::from_str(&text).expect("parse frame");
+            if let ServerFrame::Response {
+                id: response_id,
+                result,
+            } = frame
+                && response_id == id
+            {
+                return result;
+            }
+        }
+    }
+
+    async fn hello(&mut self) {
+        self.request(ClientRequest::Hello {
+            protocol_version: h4rn_protocol::PROTOCOL_VERSION,
+            device: DeviceInfo {
+                device_id: DeviceId::new("dev_schedules"),
+                name: "schedules integration test".into(),
+                platform: "linux".into(),
+                app_version: "0.1.0".into(),
+            },
+        })
+        .await
+        .expect("hello");
+    }
+}
+
+#[tokio::test]
+async fn the_socket_lists_creates_and_reads_history_without_exposing_the_secret() {
+    let daemon = boot().await;
+    let mut client = WsClient::connect(&daemon).await;
+    client.hello().await;
+
+    let mut draft = webhook_draft(&daemon.host, daemon.workspace.path());
+    draft.prompt = "Review {{body.ref}}".into();
+    let created = client
+        .request(ClientRequest::CreateSchedule { task: draft })
+        .await
+        .expect("create over the socket");
+    let webhook_task = match created {
+        ResponseBody::ScheduleTask { task } => task,
+        other => panic!("unexpected create answer: {other:?}"),
+    };
+    assert!(webhook_task.webhook_path_set);
+    let path = daemon
+        .schedules
+        .webhook_url(&webhook_task.task_id)
+        .await
+        .expect("url")
+        .expect("path");
+    let secret = path.strip_prefix("/webhooks/").expect("prefix").to_owned();
+
+    // A view read of the list never carries the secret.
+    let listed = client
+        .request(ClientRequest::ListSchedules)
+        .await
+        .expect("list");
+    let wire = serde_json::to_string(&listed).expect("serialise list");
+    assert!(!wire.contains(&secret), "a list answer leaked the path");
+    match listed {
+        ResponseBody::Schedules { tasks } => {
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].name, "PR review");
+        }
+        other => panic!("unexpected list answer: {other:?}"),
+    }
+
+    // A clock task runs by hand, and its history comes back over the socket.
+    let mut clock_draft = webhook_draft(&daemon.host, daemon.workspace.path());
+    clock_draft.schedule = ScheduleSpec::Every {
+        count: 2,
+        unit: IntervalUnit::Minutes,
+    };
+    let created = client
+        .request(ClientRequest::CreateSchedule { task: clock_draft })
+        .await
+        .expect("create a clock task");
+    let clock_task = match created {
+        ResponseBody::ScheduleTask { task } => task,
+        other => panic!("unexpected create answer: {other:?}"),
+    };
+    client
+        .request(ClientRequest::RunScheduleNow {
+            task_id: clock_task.task_id.clone(),
+        })
+        .await
+        .expect("run now");
+    let runs = client
+        .request(ClientRequest::ListScheduleRuns {
+            task_id: clock_task.task_id.clone(),
+        })
+        .await
+        .expect("history");
+    match runs {
+        ResponseBody::ScheduleRuns { runs } => {
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].outcome, ScheduleRunOutcome::Started);
+            assert!(runs[0].thread_id.is_some());
+        }
+        other => panic!("unexpected history answer: {other:?}"),
+    }
+
+    // The secret is still revealable through the explicit admin request.
+    let revealed = client
+        .request(ClientRequest::GetScheduleWebhookUrl {
+            task_id: webhook_task.task_id,
+        })
+        .await
+        .expect("reveal");
+    match revealed {
+        ResponseBody::ScheduleWebhookUrl { path, .. } => {
+            assert_eq!(path, Some(format!("/webhooks/{secret}")));
+        }
+        other => panic!("unexpected reveal answer: {other:?}"),
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn webhook_paths_are_served_only_on_the_loopback_and_explicit_binds() {
+    let extra = "0.0.0.0:0".parse().expect("extra bind");
+    let daemon = boot_with(Some(extra), Some(true)).await;
+    let extra = daemon.extra.expect("the extra bind has a listener");
+    let task = daemon
+        .schedules
+        .create(webhook_draft(&daemon.host, daemon.workspace.path()))
+        .await
+        .expect("create");
+    let path = task.webhook_path.clone().expect("path");
+    let client = reqwest::Client::new();
+
+    let loopback = client
+        .post(format!("http://{}{path}", daemon.addr))
+        .body("{}")
+        .send()
+        .await
+        .expect("loopback");
+    assert_eq!(loopback.status(), StatusCode::ACCEPTED);
+
+    let extra_addr = std::net::SocketAddr::new("127.0.0.1".parse().expect("ip"), extra.port());
+    let explicit = client
+        .post(format!("http://{extra_addr}{path}"))
+        .body("{}")
+        .send()
+        .await
+        .expect("explicit bind");
+    assert_eq!(
+        explicit.status(),
+        StatusCode::ACCEPTED,
+        "an explicitly configured bind serves webhooks"
+    );
+
+    let snapshot = daemon.network.snapshot();
+    assert!(snapshot.enabled && snapshot.listening);
+    let lan = client
+        .post(format!("http://127.0.0.1:{}{path}", snapshot.port))
+        .body("{}")
+        .send()
+        .await
+        .expect("network listener");
+    assert_eq!(
+        lan.status(),
+        StatusCode::NOT_FOUND,
+        "the LAN listener must not serve webhook paths"
     );
     daemon.stop().await;
 }

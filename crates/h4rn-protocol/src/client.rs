@@ -834,8 +834,16 @@ pub enum ClientRequest {
         task_id: crate::ScheduleTaskId,
     },
     /// Replace a webhook task's URL path, invalidating the old one.
+    ///
+    /// The answer carries the new path, because a path is only ever revealed
+    /// through this admin request or [`Self::GetScheduleWebhookUrl`].
     RotateScheduleWebhook {
         /// Task to rotate.
+        task_id: crate::ScheduleTaskId,
+    },
+    /// Reveal a webhook task's secret URL path to an admin.
+    GetScheduleWebhookUrl {
+        /// Task whose path to read.
         task_id: crate::ScheduleTaskId,
     },
     // ------------------------------------------------------------------
@@ -1500,7 +1508,8 @@ impl ClientRequest {
             | Self::DeleteSchedule { .. }
             | Self::SetScheduleEnabled { .. }
             | Self::RunScheduleNow { .. }
-            | Self::RotateScheduleWebhook { .. } => Admin,
+            | Self::RotateScheduleWebhook { .. }
+            | Self::GetScheduleWebhookUrl { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers
                 | crate::mcp::McpRequest::ListTools { .. }

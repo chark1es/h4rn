@@ -41,34 +41,45 @@ pub fn parse_timezone(name: &str) -> Result<Tz, ScheduleError> {
     })
 }
 
+/// The longest interval a schedule may express, in minutes (ten years).
+///
+/// An interval beyond this cannot be represented safely in the daemon's
+/// calendar arithmetic, so it is refused when the task is saved.
+pub const MAX_INTERVAL_MINUTES: u64 = 10 * 366 * 24 * 60;
+
 /// The daemon's own time zone, falling back to UTC.
 ///
 /// `TZ` is read first so a service can pin a zone; otherwise the system zone
-/// is used. An unreadable or unknown zone falls back to UTC instead of making
-/// the daemon refuse to start.
+/// is used, through `iana-time-zone` (which reads `/etc/localtime`, the
+/// `localtime` file, or the Windows registry and maps it to an IANA name). An
+/// unreadable or unknown zone falls back to UTC instead of making the daemon
+/// refuse to start.
 pub fn daemon_timezone() -> (Tz, String) {
-    let from_env = std::env::var("TZ")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .and_then(|value| parse_timezone(&value).ok());
-    let tz = from_env
-        .or_else(|| iana_local_timezone().and_then(|name| parse_timezone(&name).ok()))
-        .unwrap_or(chrono_tz::UTC);
-    (tz, tz.name().to_owned())
+    let from_env = std::env::var("TZ").ok();
+    let system = iana_time_zone::get_timezone().ok();
+    resolve_timezone(from_env.as_deref(), system.as_deref())
 }
 
-/// The system's IANA zone name, when the platform reports one.
-fn iana_local_timezone() -> Option<String> {
-    if let Ok(path) = std::fs::read_link("/etc/localtime")
-        && let Some(name) = path.to_str()
-        && let Some((_, zone)) = name.split_once("zoneinfo/")
-    {
-        return Some(zone.to_owned());
-    }
-    std::fs::read_to_string("/etc/timezone")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+/// Chooses a zone from an explicit `TZ` value and the platform's zone.
+///
+/// This is the testable half of [`daemon_timezone`]: no process environment is
+/// read, so a test can name both candidates directly.
+pub fn resolve_timezone(tz_env: Option<&str>, system: Option<&str>) -> (Tz, String) {
+    let chosen = tz_env
+        .map(normalize_zone_name)
+        .and_then(|name| parse_timezone(name).ok())
+        .or_else(|| {
+            system
+                .map(normalize_zone_name)
+                .and_then(|name| parse_timezone(name).ok())
+        })
+        .unwrap_or(chrono_tz::UTC);
+    (chosen, chosen.name().to_owned())
+}
+
+/// Strips the leading `:` a POSIX `TZ` value may carry and trims blanks.
+fn normalize_zone_name(name: &str) -> &str {
+    name.trim().trim_start_matches(':').trim()
 }
 
 /// Every instant a local wall clock names.
@@ -139,6 +150,16 @@ pub fn next_after(
             if *count == 0 {
                 return Err(ScheduleError::new("An interval needs at least one unit."));
             }
+            let minutes = match unit {
+                IntervalUnit::Minutes => u64::from(*count),
+                IntervalUnit::Hours => u64::from(*count) * 60,
+            };
+            if minutes > MAX_INTERVAL_MINUTES {
+                return Err(ScheduleError::new(format!(
+                    "An interval is at most {} hours.",
+                    MAX_INTERVAL_MINUTES / 60
+                )));
+            }
             let step = match unit {
                 IntervalUnit::Minutes => Duration::minutes(i64::from(*count)),
                 IntervalUnit::Hours => Duration::hours(i64::from(*count)),
@@ -149,9 +170,16 @@ pub fn next_after(
             } else {
                 elapsed.num_seconds() / step.num_seconds() + 1
             };
-            Ok(Some(
-                anchor + step * i32::try_from(steps).unwrap_or(i32::MAX),
-            ))
+            let steps = i32::try_from(steps).map_err(|_| {
+                ScheduleError::new("The next interval run is too far in the future to compute.")
+            })?;
+            let offset = step
+                .checked_mul(steps)
+                .ok_or_else(|| ScheduleError::new("The interval is too large to schedule."))?;
+            let next = anchor.checked_add_signed(offset).ok_or_else(|| {
+                ScheduleError::new("The next interval run is past the supported calendar.")
+            })?;
+            Ok(Some(next))
         }
         ScheduleSpec::Daily { time } => {
             let time = parse_schedule_time(time).ok_or_else(|| {
@@ -220,12 +248,21 @@ pub fn validate(spec: &ScheduleSpec) -> Result<(), ScheduleError> {
                 .ok_or_else(|| ScheduleError::new("The time must be HH:MM."))?;
             Ok(())
         }
-        ScheduleSpec::Every { count, .. } => {
+        ScheduleSpec::Every { count, unit } => {
             if *count == 0 {
-                Err(ScheduleError::new("An interval needs at least one unit."))
-            } else {
-                Ok(())
+                return Err(ScheduleError::new("An interval needs at least one unit."));
             }
+            let minutes = match unit {
+                IntervalUnit::Minutes => u64::from(*count),
+                IntervalUnit::Hours => u64::from(*count) * 60,
+            };
+            if minutes > MAX_INTERVAL_MINUTES {
+                return Err(ScheduleError::new(format!(
+                    "An interval is at most {} hours.",
+                    MAX_INTERVAL_MINUTES / 60
+                )));
+            }
+            Ok(())
         }
         ScheduleSpec::Daily { time } => parse_schedule_time(time)
             .map(|_| ())
@@ -317,6 +354,12 @@ impl CronExpr {
     }
 
     /// The next matching minute strictly after `after` in `tz`.
+    ///
+    /// Every candidate on a matching date is resolved to its instants and the
+    /// earliest one after `after` wins. A date is only skipped once no
+    /// candidate on it is still ahead, which is what keeps a fall-back evening
+    /// with jobs at 02:00 and 02:30 from skipping the 00:30 UTC occurrence
+    /// while it looks at 02:00 first.
     pub fn next_after(
         &self,
         tz: Tz,
@@ -332,18 +375,21 @@ impl CronExpr {
             if !self.matches_date(date) {
                 continue;
             }
+            let mut earliest: Option<chrono::DateTime<Utc>> = None;
             for hour in &self.hours {
                 for minute in &self.minutes {
                     let naive = date.and_hms_opt(*hour, *minute, 0).ok_or_else(|| {
                         ScheduleError::new("The cron expression names an invalid time.")
                     })?;
-                    if let Some(next) = local_instants(tz, naive)
-                        .into_iter()
-                        .find(|instant| *instant > after)
-                    {
-                        return Ok(Some(next));
+                    for instant in local_instants(tz, naive) {
+                        if instant > after && earliest.is_none_or(|best| instant < best) {
+                            earliest = Some(instant);
+                        }
                     }
                 }
+            }
+            if earliest.is_some() {
+                return Ok(earliest);
             }
         }
         Err(ScheduleError::new(
@@ -393,9 +439,15 @@ fn parse_field(
             (value, value)
         };
         let mut value = start;
-        while value <= end {
+        loop {
             values.push(value);
-            value += step;
+            let Some(next) = value.checked_add(step) else {
+                break;
+            };
+            if next > end {
+                break;
+            }
+            value = next;
         }
     }
     values.sort_unstable();
@@ -642,6 +694,70 @@ mod tests {
             .expect("next")
             .expect("a run");
         assert_eq!(later, utc("2026-10-25T01:30:00Z"));
+    }
+
+    #[test]
+    fn cron_on_the_fall_back_hour_returns_the_earliest_utc_instant() {
+        // Berlin falls back on 2026-10-25: 02:00 CEST -> 01:00 UTC, and
+        // 02:00 CET -> 02:00 UTC. Jobs run at 02:00 and 02:30 local.
+        let cron = CronExpr::parse("0,30 2 * * *").expect("cron");
+        let next = cron
+            .next_after(berlin(), utc("2026-10-25T00:00:00Z"))
+            .expect("next")
+            .expect("a next run");
+        // 02:30 CEST is 00:30 UTC; it must not be skipped because 02:00 was
+        // resolved to its later CET occurrence first.
+        assert_eq!(next, utc("2026-10-25T00:30:00Z"));
+
+        let after = cron
+            .next_after(berlin(), utc("2026-10-25T00:30:00Z"))
+            .expect("next")
+            .expect("a next run");
+        assert_eq!(after, utc("2026-10-25T01:00:00Z"));
+    }
+
+    #[test]
+    fn huge_intervals_are_rejected_instead_of_overflowing() {
+        for (count, unit) in [
+            (u32::MAX, IntervalUnit::Minutes),
+            (u32::MAX, IntervalUnit::Hours),
+            (200_000, IntervalUnit::Hours),
+        ] {
+            let spec = ScheduleSpec::Every { count, unit };
+            assert!(validate(&spec).is_err(), "{spec:?} should be refused");
+            assert!(
+                next_after(&spec, chrono_tz::UTC, Utc::now(), Utc::now()).is_err(),
+                "{spec:?} must not panic or wrap"
+            );
+        }
+    }
+
+    #[test]
+    fn a_huge_cron_step_does_not_overflow() {
+        // `0-59/4294967295` names only minute 0; the step must not wrap.
+        let cron = CronExpr::parse("0-59/4294967295 * * * *").expect("cron");
+        assert_eq!(cron.minutes, vec![0]);
+        // A step at the top of the field range still terminates.
+        assert!(CronExpr::parse("*/4294967295 * * * *").is_ok());
+    }
+
+    #[test]
+    fn the_daemon_zone_prefers_tz_then_the_platform_zone() {
+        assert_eq!(
+            resolve_timezone(Some("Europe/Berlin"), Some("America/New_York")).1,
+            "Europe/Berlin"
+        );
+        assert_eq!(
+            resolve_timezone(Some(":Asia/Tokyo"), Some("America/New_York")).1,
+            "Asia/Tokyo"
+        );
+        assert_eq!(
+            resolve_timezone(Some("Mars/Olympus_Mons"), Some("America/New_York")).1,
+            "America/New_York"
+        );
+        assert_eq!(resolve_timezone(None, Some("Asia/Tokyo")).1, "Asia/Tokyo");
+        assert_eq!(resolve_timezone(None, None).1, "UTC");
+        assert_eq!(resolve_timezone(Some("  "), None).1, "UTC");
     }
 
     #[test]

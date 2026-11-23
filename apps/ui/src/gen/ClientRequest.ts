@@ -865,6 +865,10 @@ task_id: ScheduleTaskId, } | { "type": "rotate_schedule_webhook",
 /**
  * Task to rotate.
  */
+task_id: ScheduleTaskId, } | { "type": "get_schedule_webhook_url", 
+/**
+ * Task whose path to read.
+ */
 task_id: ScheduleTaskId, } | { "type": "forge_list_accounts" } | { "type": "forge_add_account", 
 /**
  * Forge implementation.

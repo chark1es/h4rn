@@ -133,6 +133,14 @@ pub enum ResponseBody {
         local_host: HostId,
         /// Hosts this daemon can route to.
         hosts: Vec<HostSummary>,
+        /// The daemon machine's IANA time zone, such as `Europe/Berlin`.
+        ///
+        /// An editor that creates a schedule uses this as the default, so a
+        /// floating date and time mean the daemon's wall clock rather than a
+        /// phone in another zone. An older daemon omits it; the client falls
+        /// back to its own zone.
+        #[serde(default)]
+        daemon_timezone: String,
     },
     /// Host list.
     Hosts {
@@ -681,6 +689,13 @@ pub enum ResponseBody {
     ScheduleRuns {
         /// Recorded runs, at most the daemon's history bound.
         runs: Vec<crate::ScheduleRun>,
+    },
+    /// A webhook task's secret URL path, revealed to an admin.
+    ScheduleWebhookUrl {
+        /// The task the path belongs to.
+        task_id: crate::ScheduleTaskId,
+        /// The path to post to, absent when the task has no webhook URL.
+        path: Option<String>,
     },
     /// A thread row after the owner renamed it.
     ThreadRenamed {

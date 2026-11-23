@@ -61,7 +61,7 @@ export const WEEKDAYS: Array<{ day: number; short: string; long: string }> = [
 
 /** The webhook placeholders, with one example each. */
 export const WEBHOOK_PLACEHOLDERS = [
-  { token: "{{body.path}}", hint: "A JSON or form field, such as {{body.pull_request.html_url}}" },
+  { token: "{{body.path}}", hint: "A JSON field, such as {{body.pull_request.html_url}}" },
   { token: "{{headers.name}}", hint: "A request header, such as {{headers.x-github-event}}" },
   { token: "{{query.name}}", hint: "A query value, such as {{query.ref}}" },
   { token: "{{body}}", hint: "The raw body" },

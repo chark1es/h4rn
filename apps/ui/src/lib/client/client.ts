@@ -846,6 +846,7 @@ export class H4rnClient {
         reconnected,
         hosts: hello.hosts,
         localHostId: hello.local_host,
+        daemonTimezone: hello.daemon_timezone ?? "",
         serverVersion: hello.server_version,
         deviceId: hello.device_id,
         // A daemon older than this field answers without it, and a signed-out

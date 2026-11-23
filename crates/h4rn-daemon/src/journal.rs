@@ -260,6 +260,18 @@ pub trait Journal: Send + Sync {
         keep: usize,
     ) -> Result<(), JournalError>;
 
+    /// Appends one run and replaces the task's scheduling state in one
+    /// transaction.
+    ///
+    /// A run and the advancement it describes land together or not at all, so
+    /// a crash cannot leave a slot either double-run or lost.
+    async fn commit_schedule_run(
+        &self,
+        run: &mut ScheduleRun,
+        task: &ScheduleTask,
+        keep: usize,
+    ) -> Result<(), JournalError>;
+
     /// A task's runs, newest first, at most `limit`.
     async fn schedule_runs(
         &self,
@@ -421,12 +433,22 @@ impl SqliteJournal {
                 enabled        INTEGER NOT NULL,
                 thread_id      TEXT,
                 webhook_secret TEXT,
+                once_consumed  INTEGER NOT NULL DEFAULT 0,
                 next_run_at    TEXT,
                 created_at     TEXT NOT NULL,
                 updated_at     TEXT NOT NULL
             )",
         )
         .execute(&self.pool)
+        .await?;
+
+        // A database written before the once-consumed marker exists needs the
+        // column added; the default keeps every stored task re-runnable.
+        self.ensure_column(
+            "daemon_schedules",
+            "once_consumed",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         .await?;
 
         sqlx::query(
@@ -809,7 +831,7 @@ impl Journal for SqliteJournal {
         let rows = sqlx::query(
             "SELECT task_id, name, host, workspace_path, harness, agent_id, model,
                     runtime_mode, prompt, schedule_json, timezone, destination, enabled,
-                    thread_id, webhook_secret, next_run_at, created_at, updated_at
+                    thread_id, webhook_secret, once_consumed, next_run_at, created_at, updated_at
              FROM daemon_schedules ORDER BY created_at ASC, rowid ASC",
         )
         .fetch_all(&self.pool)
@@ -830,7 +852,7 @@ impl Journal for SqliteJournal {
         let row = sqlx::query(
             "SELECT task_id, name, host, workspace_path, harness, agent_id, model,
                     runtime_mode, prompt, schedule_json, timezone, destination, enabled,
-                    thread_id, webhook_secret, next_run_at, created_at, updated_at
+                    thread_id, webhook_secret, once_consumed, next_run_at, created_at, updated_at
              FROM daemon_schedules WHERE task_id = ?",
         )
         .bind(task_id.as_str())
@@ -845,57 +867,9 @@ impl Journal for SqliteJournal {
     }
 
     async fn upsert_schedule(&self, task: &ScheduleTask) -> Result<(), JournalError> {
-        let harness = serde_json::to_string(&task.harness)?;
-        let harness = harness.trim_matches('"').to_owned();
-        let runtime_mode = serde_json::to_string(&task.runtime_mode)?;
-        let runtime_mode = runtime_mode.trim_matches('"').to_owned();
-        let destination = serde_json::to_string(&task.destination)?;
-        let destination = destination.trim_matches('"').to_owned();
-        let schedule_json = serde_json::to_string(&task.schedule)?;
-        sqlx::query(
-            "INSERT INTO daemon_schedules
-                (task_id, name, host, workspace_path, harness, agent_id, model,
-                 runtime_mode, prompt, schedule_json, timezone, destination, enabled,
-                 thread_id, webhook_secret, next_run_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(task_id) DO UPDATE SET
-                name = excluded.name,
-                host = excluded.host,
-                workspace_path = excluded.workspace_path,
-                harness = excluded.harness,
-                agent_id = excluded.agent_id,
-                model = excluded.model,
-                runtime_mode = excluded.runtime_mode,
-                prompt = excluded.prompt,
-                schedule_json = excluded.schedule_json,
-                timezone = excluded.timezone,
-                destination = excluded.destination,
-                enabled = excluded.enabled,
-                thread_id = excluded.thread_id,
-                webhook_secret = excluded.webhook_secret,
-                next_run_at = excluded.next_run_at,
-                updated_at = excluded.updated_at",
-        )
-        .bind(task.task_id.as_str())
-        .bind(&task.name)
-        .bind(task.host.as_str())
-        .bind(&task.workspace_path)
-        .bind(harness)
-        .bind(task.agent_id.as_deref())
-        .bind(&task.model)
-        .bind(runtime_mode)
-        .bind(&task.prompt)
-        .bind(schedule_json)
-        .bind(&task.timezone)
-        .bind(destination)
-        .bind(task.enabled as i64)
-        .bind(task.thread_id.as_ref().map(ThreadId::as_str))
-        .bind(webhook_secret_of(task))
-        .bind(task.next_run_at.map(|at| at.to_rfc3339()))
-        .bind(task.created_at.to_rfc3339())
-        .bind(task.updated_at.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
+        let mut tx = self.pool.begin().await?;
+        upsert_schedule_row(&mut tx, task).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -920,35 +894,24 @@ impl Journal for SqliteJournal {
         run: &mut ScheduleRun,
         keep: usize,
     ) -> Result<(), JournalError> {
-        let outcome = serde_json::to_string(&run.outcome)?;
-        let outcome = outcome.trim_matches('"').to_owned();
-        let result = sqlx::query(
-            "INSERT INTO daemon_schedule_runs
-                (task_id, scheduled_for, started_at, thread_id, outcome, detail)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(run.task_id.as_str())
-        .bind(run.scheduled_for.map(|at| at.to_rfc3339()))
-        .bind(run.started_at.to_rfc3339())
-        .bind(run.thread_id.as_ref().map(ThreadId::as_str))
-        .bind(outcome)
-        .bind(run.detail.as_deref())
-        .execute(&self.pool)
-        .await?;
-        run.run_id = result.last_insert_rowid() as u64;
-        let keep = i64::try_from(keep.max(1)).unwrap_or(i64::MAX);
-        sqlx::query(
-            "DELETE FROM daemon_schedule_runs
-             WHERE task_id = ? AND run_id NOT IN (
-                SELECT run_id FROM daemon_schedule_runs
-                WHERE task_id = ? ORDER BY run_id DESC LIMIT ?
-             )",
-        )
-        .bind(run.task_id.as_str())
-        .bind(run.task_id.as_str())
-        .bind(keep)
-        .execute(&self.pool)
-        .await?;
+        let mut tx = self.pool.begin().await?;
+        insert_schedule_run(&mut tx, run).await?;
+        trim_schedule_runs(&mut tx, &run.task_id, keep).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn commit_schedule_run(
+        &self,
+        run: &mut ScheduleRun,
+        task: &ScheduleTask,
+        keep: usize,
+    ) -> Result<(), JournalError> {
+        let mut tx = self.pool.begin().await?;
+        insert_schedule_run(&mut tx, run).await?;
+        trim_schedule_runs(&mut tx, &run.task_id, keep).await?;
+        upsert_schedule_row(&mut tx, task).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -969,6 +932,113 @@ impl Journal for SqliteJournal {
         .await?;
         rows.into_iter().map(schedule_run_from_row).collect()
     }
+}
+
+/// Inserts one run row inside a transaction and fills in its durable id.
+async fn insert_schedule_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run: &mut ScheduleRun,
+) -> Result<(), JournalError> {
+    let outcome = serde_json::to_string(&run.outcome)?;
+    let outcome = outcome.trim_matches('"').to_owned();
+    let result = sqlx::query(
+        "INSERT INTO daemon_schedule_runs
+            (task_id, scheduled_for, started_at, thread_id, outcome, detail)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(run.task_id.as_str())
+    .bind(run.scheduled_for.map(|at| at.to_rfc3339()))
+    .bind(run.started_at.to_rfc3339())
+    .bind(run.thread_id.as_ref().map(ThreadId::as_str))
+    .bind(outcome)
+    .bind(run.detail.as_deref())
+    .execute(&mut **tx)
+    .await?;
+    run.run_id = result.last_insert_rowid() as u64;
+    Ok(())
+}
+
+/// Keeps only the newest `keep` runs of one task inside a transaction.
+async fn trim_schedule_runs(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &ScheduleTaskId,
+    keep: usize,
+) -> Result<(), JournalError> {
+    let keep = i64::try_from(keep.max(1)).unwrap_or(i64::MAX);
+    sqlx::query(
+        "DELETE FROM daemon_schedule_runs
+         WHERE task_id = ? AND run_id NOT IN (
+            SELECT run_id FROM daemon_schedule_runs
+            WHERE task_id = ? ORDER BY run_id DESC LIMIT ?
+         )",
+    )
+    .bind(task_id.as_str())
+    .bind(task_id.as_str())
+    .bind(keep)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Inserts or replaces one task row inside a transaction.
+async fn upsert_schedule_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: &ScheduleTask,
+) -> Result<(), JournalError> {
+    let harness = serde_json::to_string(&task.harness)?;
+    let harness = harness.trim_matches('"').to_owned();
+    let runtime_mode = serde_json::to_string(&task.runtime_mode)?;
+    let runtime_mode = runtime_mode.trim_matches('"').to_owned();
+    let destination = serde_json::to_string(&task.destination)?;
+    let destination = destination.trim_matches('"').to_owned();
+    let schedule_json = serde_json::to_string(&task.schedule)?;
+    sqlx::query(
+        "INSERT INTO daemon_schedules
+            (task_id, name, host, workspace_path, harness, agent_id, model,
+             runtime_mode, prompt, schedule_json, timezone, destination, enabled,
+             thread_id, webhook_secret, once_consumed, next_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(task_id) DO UPDATE SET
+            name = excluded.name,
+            host = excluded.host,
+            workspace_path = excluded.workspace_path,
+            harness = excluded.harness,
+            agent_id = excluded.agent_id,
+            model = excluded.model,
+            runtime_mode = excluded.runtime_mode,
+            prompt = excluded.prompt,
+            schedule_json = excluded.schedule_json,
+            timezone = excluded.timezone,
+            destination = excluded.destination,
+            enabled = excluded.enabled,
+            thread_id = excluded.thread_id,
+            webhook_secret = excluded.webhook_secret,
+            once_consumed = excluded.once_consumed,
+            next_run_at = excluded.next_run_at,
+            updated_at = excluded.updated_at",
+    )
+    .bind(task.task_id.as_str())
+    .bind(&task.name)
+    .bind(task.host.as_str())
+    .bind(&task.workspace_path)
+    .bind(harness)
+    .bind(task.agent_id.as_deref())
+    .bind(&task.model)
+    .bind(runtime_mode)
+    .bind(&task.prompt)
+    .bind(schedule_json)
+    .bind(&task.timezone)
+    .bind(destination)
+    .bind(task.enabled as i64)
+    .bind(task.thread_id.as_ref().map(ThreadId::as_str))
+    .bind(webhook_secret_of(task))
+    .bind(task.once_consumed as i64)
+    .bind(task.next_run_at.map(|at| at.to_rfc3339()))
+    .bind(task.created_at.to_rfc3339())
+    .bind(task.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// The webhook secret embedded in a task's public path.
@@ -1000,6 +1070,9 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
     let updated_at: String = row.try_get("updated_at")?;
     let next_run_at: Option<String> = row.try_get("next_run_at")?;
     let webhook_secret: Option<String> = row.try_get("webhook_secret")?;
+    let webhook_path_set = webhook_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty());
     Ok(ScheduleTask {
         task_id: ScheduleTaskId::new(task_id),
         name: row.try_get("name")?,
@@ -1025,6 +1098,8 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
         webhook_path: webhook_secret
             .filter(|secret| !secret.is_empty())
             .map(|secret| format!("/webhooks/{secret}")),
+        webhook_path_set,
+        once_consumed: row.try_get::<i64, _>("once_consumed")? != 0,
         next_run_at: next_run_at.and_then(|at| {
             DateTime::parse_from_rfc3339(&at)
                 .ok()

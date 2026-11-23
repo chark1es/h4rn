@@ -36,6 +36,7 @@ h4rn-skills.workspace = true
 h4rn-transport.workspace = true
 h4rn-vt.workspace = true
 hex.workspace = true
+iana-time-zone.workspace = true
 ignore.workspace = true
 image.workspace = true
 infer.workspace = true

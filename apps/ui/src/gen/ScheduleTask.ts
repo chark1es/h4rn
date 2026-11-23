@@ -69,12 +69,21 @@ enabled: boolean,
  */
 thread_id: ThreadId | null, 
 /**
- * The daemon path a webhook posts to, when this is a webhook task.
+ * Whether a webhook URL exists for this task.
  *
- * The path is the secret: it is shown only to clients that may read the
- * task, and rotating it invalidates every earlier URL.
+ * The path itself is a secret. It is never part of a listed task or a
+ * change event; an admin reads it with
+ * [`crate::ClientRequest::GetScheduleWebhookUrl`] and rotating it
+ * invalidates every earlier URL.
  */
-webhook_path: string | null, 
+webhook_path_set: boolean, 
+/**
+ * Whether a once schedule has already used its single slot.
+ *
+ * A completed once task stays spent across edits and a pause/resume, so
+ * a repeated fall-back hour cannot run it a second time.
+ */
+once_consumed: boolean, 
 /**
  * The next clock run, in UTC. Absent for webhook tasks, a spent once
  * task, and a disabled task.

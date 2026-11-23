@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::SEC_WEBSOCKET_PROTOCOL};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -112,12 +112,64 @@ pub struct AppState {
     pub started: Instant,
 }
 
+/// Which socket accepted a request.
+///
+/// Routing is explicit per listener: a webhook path is a bearer secret, so only
+/// the loopback bind and binds the operator named carry it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ListenerKind {
+    /// The primary loopback bind (`--bind`).
+    Loopback,
+    /// An extra address the operator named (`--extra-bind`).
+    ExtraBind,
+    /// The address discovered on the tailnet by Tailscale auto mode.
+    Tailnet,
+    /// The opt-in LAN listener from Settings → Network access.
+    NetworkAccess,
+}
+
+impl ListenerKind {
+    /// Whether this listener serves `/webhooks/{secret}`.
+    ///
+    /// Only the loopback bind and an explicitly configured extra bind do. The
+    /// tailnet address and the LAN listener carry the encrypted session routes
+    /// only, so a webhook secret never leaves the listeners the operator chose.
+    pub fn serves_webhooks(self) -> bool {
+        matches!(self, Self::Loopback | Self::ExtraBind)
+    }
+
+    /// The router this listener serves.
+    pub fn router(self, state: AppState) -> Router {
+        match self {
+            Self::Loopback | Self::ExtraBind => router(state),
+            Self::Tailnet => core_router(state),
+            Self::NetworkAccess => network_router(state),
+        }
+    }
+}
+
 /// Builds the daemon router.
 ///
-/// `/secure` is always registered so a remote client gets a clear "not enabled"
-/// response instead of a 404, while plain WebSocket access stays loopback-only
-/// (ADR-009).
+/// This is the loopback and explicit-bind router: it carries the webhook
+/// endpoint because the operator chose where it listens. `/secure` is always
+/// registered so a remote client gets a clear "not enabled" response instead
+/// of a 404, while plain WebSocket access stays loopback-only (ADR-009).
 pub fn router(state: AppState) -> Router {
+    core_routes()
+        .route("/webhooks/{secret}", post(webhook_post))
+        .with_state(state)
+}
+
+/// Every route except the webhook endpoint.
+///
+/// The tailnet address serves this so the typed socket still works there while
+/// a webhook bearer path does not.
+fn core_router(state: AppState) -> Router {
+    core_routes().with_state(state)
+}
+
+/// The route table before a state is attached.
+fn core_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
@@ -129,11 +181,6 @@ pub fn router(state: AppState) -> Router {
                 .post(mcp_http_post)
                 .delete(mcp_http_delete),
         )
-        .route(
-            "/webhooks/{secret}",
-            post(webhook_post).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)),
-        )
-        .with_state(state)
 }
 
 /// Router for the network listener: liveness plus the encrypted routes only.
@@ -165,16 +212,71 @@ async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> R
 /// One webhook delivery.
 ///
 /// The path is the secret, the method is POST (axum answers every other method
-/// with 405), and the body is capped by the route layer. The run starts on its
-/// own task, so a harness that takes seconds to start never delays the 202.
+/// with 405), and the body is capped below. The path is checked and a rate
+/// slot taken *before* the body is read, the query is parsed or the headers
+/// are copied, so a wrong path costs no body read. The run starts on its own
+/// task, so a harness that takes seconds to start never delays the 202.
 async fn webhook_post(
     State(state): State<AppState>,
     Path(secret): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: axum::http::Request<axum::body::Body>,
 ) -> Response {
-    let headers = headers
+    serve_webhook_request(&state.schedules, secret, request).await
+}
+
+/// The webhook handler's logic, without axum's shared state.
+///
+/// Exposed to the crate so a test can hand it a body that fails if it is ever
+/// read and prove a wrong path is refused before that happens.
+pub(crate) async fn serve_webhook_request(
+    schedules: &crate::schedules::ScheduleService,
+    secret: String,
+    request: axum::http::Request<axum::body::Body>,
+) -> Response {
+    let admission = match schedules.begin_webhook(&secret).await {
+        crate::schedules::WebhookStart::Start(admission) => *admission,
+        crate::schedules::WebhookStart::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no webhook task owns this path" })),
+            )
+                .into_response();
+        }
+        crate::schedules::WebhookStart::RateLimited => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": "too many deliveries; try again later" })),
+            )
+                .into_response();
+        }
+        crate::schedules::WebhookStart::Skipped => {
+            return (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "status": "skipped",
+                    "reason": "another delivery for this task was already starting",
+                })),
+            )
+                .into_response();
+        }
+        crate::schedules::WebhookStart::Rejected(reason) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": reason }))).into_response();
+        }
+    };
+
+    // Only now read the request: the secret is known good and a delivery slot
+    // is held.
+    let query: std::collections::BTreeMap<String, String> = request
+        .uri()
+        .query()
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let headers = request
+        .headers()
         .iter()
         .filter_map(|(name, value)| {
             value
@@ -183,16 +285,39 @@ async fn webhook_post(
                 .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
         })
         .collect();
+    let body = match axum::body::to_bytes(request.into_body(), MAX_WEBHOOK_BODY_BYTES + 1).await {
+        Ok(body) if body.len() <= MAX_WEBHOOK_BODY_BYTES => {
+            String::from_utf8_lossy(&body).into_owned()
+        }
+        Ok(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({ "error": "the body is larger than the webhook allows" })),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "the request body could not be read" })),
+            )
+                .into_response();
+        }
+    };
     let request = crate::schedules::WebhookRequest {
         method: "POST".to_owned(),
         path: format!("{}{secret}", crate::schedules::WEBHOOK_PREFIX),
-        query: query.into_iter().collect(),
+        query,
         headers,
-        body: String::from_utf8_lossy(&body).into_owned(),
+        body,
+        secret: Some(secret),
     };
-    match state.schedules.deliver_webhook(&secret, request).await {
+    match schedules.deliver_webhook(admission, request).await {
         crate::schedules::WebhookOutcome::Accepted => {
             (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" }))).into_response()
+        }
+        crate::schedules::WebhookOutcome::Skipped => {
+            (StatusCode::ACCEPTED, Json(json!({ "status": "skipped" }))).into_response()
         }
         crate::schedules::WebhookOutcome::NotFound => (
             StatusCode::NOT_FOUND,
@@ -844,6 +969,7 @@ impl Connection {
                                 .and_then(|remote| remote.machine_id()),
                             local_host: self.state.hosts.local_id(),
                             hosts: self.state.hosts.summaries(),
+                            daemon_timezone: crate::schedules::daemon_timezone().1,
                         })
                     }
                 }
@@ -1998,15 +2124,16 @@ pub fn bound_addr(listener: &TcpListener) -> Option<SocketAddr> {
 }
 
 /// Spawns one axum server per listener and waits for a shutdown signal.
+///
+/// Each listener carries its own router, because which routes a socket serves
+/// depends on the kind of listener it is (see [`ListenerKind`]).
 pub(crate) async fn serve_all(
-    listeners: Vec<TcpListener>,
-    app: Router,
+    listeners: Vec<(TcpListener, Router)>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     let (tx, rx) = watch::channel(false);
     let mut handles: Vec<JoinHandle<std::io::Result<()>>> = Vec::new();
-    for listener in listeners {
-        let app = app.clone();
+    for (listener, app) in listeners {
         let mut rx = rx.clone();
         handles.push(tokio::spawn(async move {
             serve_listener(listener, app, async move {
@@ -2031,6 +2158,14 @@ pub(crate) async fn serve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_routes_are_exposed_only_on_operator_chosen_listeners() {
+        assert!(ListenerKind::Loopback.serves_webhooks());
+        assert!(ListenerKind::ExtraBind.serves_webhooks());
+        assert!(!ListenerKind::Tailnet.serves_webhooks());
+        assert!(!ListenerKind::NetworkAccess.serves_webhooks());
+    }
 
     #[test]
     fn resume_hint_names_the_exact_sequence() {

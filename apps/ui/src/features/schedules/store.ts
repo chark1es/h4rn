@@ -30,6 +30,15 @@ export type SchedulesState = {
   runs: Record<string, ScheduleRun[]>;
   runsLoading: string | null;
   runsError: string | null;
+  /**
+   * Webhook paths by task, fetched only through the admin request.
+   *
+   * A listed task never carries its path; the editor asks for it when a
+   * webhook panel opens.
+   */
+  webhookPaths: Record<string, string>;
+  webhookPathLoading: string | null;
+  webhookPathError: string | null;
 };
 
 const initialState: SchedulesState = {
@@ -42,6 +51,9 @@ const initialState: SchedulesState = {
   runs: {},
   runsLoading: null,
   runsError: null,
+  webhookPaths: {},
+  webhookPathLoading: null,
+  webhookPathError: null,
 };
 
 let state: SchedulesState = initialState;
@@ -83,7 +95,8 @@ type ScheduleRequest = Extract<
       | "set_schedule_enabled"
       | "run_schedule_now"
       | "list_schedule_runs"
-      | "rotate_schedule_webhook";
+      | "rotate_schedule_webhook"
+      | "get_schedule_webhook_url";
   }
 >;
 
@@ -166,7 +179,11 @@ export async function deleteSchedule(taskId: ScheduleTaskId): Promise<boolean> {
   try {
     const response = await send({ type: "delete_schedule", task_id: taskId });
     if (response.type !== "ack") return false;
-    set({ tasks: state.tasks.filter((task) => task.task_id !== taskId) });
+    const { [taskId]: _removedPath, ...webhookPaths } = state.webhookPaths;
+    set({
+      tasks: state.tasks.filter((task) => task.task_id !== taskId),
+      webhookPaths,
+    });
     return true;
   } catch (error) {
     set({ saveError: describe(error) });
@@ -223,13 +240,40 @@ export async function loadScheduleRuns(taskId: ScheduleTaskId): Promise<void> {
   }
 }
 
+/**
+ * Reads a webhook task's secret path.
+ *
+ * The list never carries it, so the editor asks through this admin request
+ * when the panel opens or after a rotation.
+ */
+export async function loadScheduleWebhookUrl(taskId: ScheduleTaskId): Promise<void> {
+  set({ webhookPathLoading: taskId, webhookPathError: null });
+  try {
+    const response = await send({ type: "get_schedule_webhook_url", task_id: taskId });
+    if (response.type !== "schedule_webhook_url" || !response.path) {
+      set({ webhookPathLoading: null });
+      return;
+    }
+    set({
+      webhookPaths: { ...state.webhookPaths, [taskId]: response.path },
+      webhookPathLoading: null,
+    });
+  } catch (error) {
+    set({ webhookPathLoading: null, webhookPathError: describe(error) });
+  }
+}
+
 /** Replaces a webhook task's path; every earlier URL stops working. */
 export async function rotateScheduleWebhook(taskId: ScheduleTaskId): Promise<boolean> {
   set({ saveError: null });
   try {
     const response = await send({ type: "rotate_schedule_webhook", task_id: taskId });
-    if (response.type !== "schedule_task") return false;
-    upsert(response.task);
+    if (response.type !== "schedule_webhook_url" || !response.path) return false;
+    set({
+      webhookPaths: { ...state.webhookPaths, [taskId]: response.path },
+      webhookPathLoading: null,
+      webhookPathError: null,
+    });
     return true;
   } catch (error) {
     set({ saveError: describe(error) });
@@ -240,7 +284,11 @@ export async function rotateScheduleWebhook(taskId: ScheduleTaskId): Promise<boo
 /** Applies one live change from the runner. */
 export function applyScheduleEvent(event: ScheduleEvent): void {
   if (event.kind === "removed") {
-    set({ tasks: state.tasks.filter((task) => task.task_id !== event.task_id) });
+    const { [event.task_id]: _removedPath, ...webhookPaths } = state.webhookPaths;
+    set({
+      tasks: state.tasks.filter((task) => task.task_id !== event.task_id),
+      webhookPaths,
+    });
     return;
   }
   upsert(event.task);

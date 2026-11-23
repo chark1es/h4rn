@@ -26,7 +26,8 @@ const task: ScheduleTask = {
   destination: "new_thread",
   enabled: true,
   thread_id: null,
-  webhook_path: null,
+  webhook_path_set: false,
+  once_consumed: false,
   next_run_at: "2026-11-24T08:00:00.000Z",
   last_run: null,
   created_at: "2026-11-20T10:00:00.000Z",
@@ -88,8 +89,8 @@ describe("scheduled task form", () => {
   it("shows the real next run and pauses a disabled task", () => {
     expect(nextRunText(task, new Date("2026-11-23T00:00:00Z"))).toContain("Next");
     expect(nextRunText({ ...task, enabled: false })).toBe("Paused");
-    expect(
-      nextRunText({ ...task, schedule: { kind: "webhook" }, webhook_path: "/webhooks/x" }),
-    ).toBe("Runs when its URL is called");
+    expect(nextRunText({ ...task, schedule: { kind: "webhook" }, webhook_path_set: true })).toBe(
+      "Runs when its URL is called",
+    );
   });
 });

@@ -1856,7 +1856,8 @@ impl ThreadManager {
     /// a thread waiting on the person, queued behind a session start, or
     /// armed for an auto-resume after a limit is still the previous run, and
     /// a scheduled task must skip its slot rather than pile another prompt on
-    /// top. Idle, done, failed and unreachable threads are not busy.
+    /// top. A thread merely *placed* on Working is not busy: a manual move is
+    /// a placement, and an idle thread there has nothing to overlap.
     pub async fn thread_is_busy(&self, thread_id: &ThreadId) -> bool {
         let Ok(handle) = self.inner.handle(thread_id).await else {
             return false;
@@ -1866,19 +1867,18 @@ impl ThreadManager {
             return true;
         }
         let summary = record.summary(&self.inner.options.settings, self.now());
-        (summary.tab == ThreadTab::Working && summary.agent_state == AgentState::Idle)
-            || matches!(
-                summary.agent_state,
-                AgentState::Queued
-                    | AgentState::Scheduled
-                    | AgentState::Thinking
-                    | AgentState::Searching
-                    | AgentState::Reading
-                    | AgentState::Editing
-                    | AgentState::RunningTool
-                    | AgentState::AwaitingApproval
-                    | AgentState::RateLimited
-            )
+        matches!(
+            summary.agent_state,
+            AgentState::Queued
+                | AgentState::Scheduled
+                | AgentState::Thinking
+                | AgentState::Searching
+                | AgentState::Reading
+                | AgentState::Editing
+                | AgentState::RunningTool
+                | AgentState::AwaitingApproval
+                | AgentState::RateLimited
+        )
     }
 
     /// The turn a thread would attach a new item to.
@@ -7777,6 +7777,15 @@ mod tests {
             keep: usize,
         ) -> Result<(), crate::journal::JournalError> {
             self.inner.append_schedule_run(run, keep).await
+        }
+
+        async fn commit_schedule_run(
+            &self,
+            run: &mut h4rn_protocol::ScheduleRun,
+            task: &h4rn_protocol::ScheduleTask,
+            keep: usize,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.commit_schedule_run(run, task, keep).await
         }
 
         async fn schedule_runs(

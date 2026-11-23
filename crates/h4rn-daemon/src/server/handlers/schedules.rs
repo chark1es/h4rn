@@ -21,6 +21,7 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
             | ClientRequest::RunScheduleNow { .. }
             | ClientRequest::ListScheduleRuns { .. }
             | ClientRequest::RotateScheduleWebhook { .. }
+            | ClientRequest::GetScheduleWebhookUrl { .. }
     )
 }
 
@@ -75,7 +76,12 @@ pub(super) async fn handle(
         ClientRequest::RotateScheduleWebhook { task_id } => service
             .rotate_webhook(&task_id)
             .await
-            .map(|task| ResponseBody::ScheduleTask { task })
+            .map(|(_, path)| ResponseBody::ScheduleWebhookUrl { task_id, path })
+            .map_err(|error| error.into_proto()),
+        ClientRequest::GetScheduleWebhookUrl { task_id } => service
+            .webhook_url(&task_id)
+            .await
+            .map(|path| ResponseBody::ScheduleWebhookUrl { task_id, path })
             .map_err(|error| error.into_proto()),
         other => Err(crate::server::not_implemented(&other)),
     }
