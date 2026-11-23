@@ -200,6 +200,13 @@ pub struct AcpSessionInfo {
     /// The `configOptions` id a mode selection must use, when the agent
     /// advertises modes through the ACP v1 session config.
     pub mode_config_id: Option<String>,
+    /// The `configOptions` id that selects reasoning effort, when the agent
+    /// exposes one.
+    pub effort_config_id: Option<String>,
+    /// Effort values the agent offers; empty when it has no effort control.
+    pub efforts: Vec<String>,
+    /// The effort selected when the session opened.
+    pub current_effort: Option<String>,
     /// Select options the agent exposes (model, thought level, mode, ...).
     pub config_options: Value,
     /// The raw reply, for diagnostics.
@@ -248,6 +255,31 @@ impl AcpSessionInfo {
             options.iter().find(|option| {
                 string_field(option, &["category"]).as_deref() == Some("mode")
                     && string_field(option, &["type"]).as_deref() == Some("select")
+            })
+        });
+        // Effort moved into the ACP v1 session config under the
+        // `thought_level` category. Some agents name the option rather than
+        // categorising it, so the id and label are checked too.
+        let effort_option = config_array.and_then(|options| {
+            options.iter().find(|option| {
+                if string_field(option, &["type"]).as_deref() != Some("select") {
+                    return false;
+                }
+                let category = string_field(option, &["category"])
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let id = string_field(option, &["id"])
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let name = string_field(option, &["name"])
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                category == "thought_level"
+                    || category == "effort"
+                    || id.contains("effort")
+                    || id.contains("thought")
+                    || name.contains("effort")
+                    || name.contains("thinking")
             })
         });
 
@@ -304,6 +336,20 @@ impl AcpSessionInfo {
             legacy_current_mode.or(config_current_mode)
         };
 
+        let efforts = effort_option
+            .map(|option| {
+                config_choices(option)
+                    .into_iter()
+                    .filter_map(|choice| string_field(choice, &["value"]))
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let effort_config_id = effort_option.and_then(|option| string_field(option, &["id"]));
+        let current_effort = effort_option
+            .and_then(|option| string_field(option, &["currentValue", "current_value"]))
+            .or_else(|| (!efforts.is_empty()).then(|| efforts[0].clone()));
+
         Self {
             session_id: string_field(result, &["sessionId", "session_id"])
                 .filter(|id| !id.is_empty())
@@ -314,6 +360,9 @@ impl AcpSessionInfo {
             modes: available_modes,
             current_mode_id,
             mode_config_id,
+            effort_config_id,
+            efforts,
+            current_effort,
             config_options,
             raw: result.clone(),
         }
@@ -1677,5 +1726,37 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_thought_level_config_option_is_the_effort_control() {
+        let result = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "high",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "high", "name": "High"}
+                    ]
+                }
+            ]
+        });
+        let info = AcpSessionInfo::from_value(&result, "");
+        assert_eq!(info.effort_config_id.as_deref(), Some("reasoning_effort"));
+        assert_eq!(info.efforts, vec!["low", "high"]);
+        assert_eq!(info.current_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn an_agent_without_a_thought_level_option_has_no_effort_control() {
+        let result = json!({"sessionId": "s-1", "configOptions": []});
+        let info = AcpSessionInfo::from_value(&result, "");
+        assert_eq!(info.effort_config_id, None);
+        assert!(info.efforts.is_empty());
     }
 }

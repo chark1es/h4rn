@@ -17,13 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
-import {
-  acpModeChoices,
-  acpModelChoices,
-  acpPickerOptions,
-  acpRuntimeModeChoices,
-  THREAD_RUNTIME_MODES,
-} from "@/features/harnesses/acpForm";
+import { acpModeChoices, acpModelChoices, acpPickerOptions } from "@/features/harnesses/acpForm";
 import {
   probeAcpAgent,
   useAcpAgents,
@@ -37,6 +31,7 @@ import {
   useProxy,
   useProxyCatalog,
 } from "@/features/proxy/proxyStore";
+import { useThreadSettings } from "@/features/threads/settings";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { DEFAULT_NEW_THREAD_WORKSPACE, drafts } from "@/lib/drafts";
@@ -45,6 +40,13 @@ import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
 import { NewThreadDraftSession, type NewThreadDraftSnapshot } from "@/lib/newThreadDraft";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
+import {
+  effortLabel,
+  fastSupported,
+  newThreadModel,
+  threadEffortChoices,
+  threadModeChoices,
+} from "@/lib/threadControls";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_MODELS = Object.fromEntries(
@@ -84,6 +86,8 @@ export function NewThreadDialog() {
   const probeErrors = useHarnesses((value) => value.probeErrors);
   const probingAgents = useHarnesses((value) => value.probing);
   const harnessRows = useHarnesses((value) => (value.loaded ? value.rows : null));
+  const threadList = useApp((state) => state.threads);
+  const threadValues = useMemo(() => Object.values(threadList), [threadList]);
   const installed = useMemo(
     () => harnessRows?.filter((row) => row.installed !== null).map((row) => row.harness) ?? null,
     [harnessRows],
@@ -106,7 +110,10 @@ export function NewThreadDialog() {
   const [agentId, setAgentId] = useState<string | null>(null);
   const [model, setModel] = useState(DEFAULT_MODELS.claude_code);
   const [workspace, setWorkspace] = useState(DEFAULT_NEW_THREAD_WORKSPACE);
-  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("approval_required");
+  const threadSettings = useThreadSettings();
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(threadSettings.defaultPermissionMode);
+  const [reasoningEffort, setReasoningEffort] = useState<string>("default");
+  const [fast, setFast] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   /** Host + folder slot the prompt box is showing; one per dialog open. */
@@ -177,7 +184,10 @@ export function NewThreadDialog() {
           detectedHarnesses(HARNESSES, installed, first.harnesses)[0] ?? "claude_code";
         setHarness(nextHarness);
         setAgentId(null);
-        setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
+        setModel(
+          proxyDefaultModel(nextHarness) ??
+            newThreadModel(nextHarness, first.host_id, threadValues),
+        );
       } else if (
         // A host the user picked stays only while it is still a valid choice;
         // when it is gone (another daemon, or the host went offline) fall back
@@ -190,7 +200,17 @@ export function NewThreadDialog() {
       }
     }
     setStarting(false);
-  }, [open, onlineHosts, localHostId, installed, preset, draftSession, showDraft, hostEligible]);
+  }, [
+    open,
+    onlineHosts,
+    localHostId,
+    installed,
+    preset,
+    draftSession,
+    showDraft,
+    hostEligible,
+    threadValues,
+  ]);
 
   // "New thread in <project>" starts in that project's folder.
   useEffect(() => {
@@ -208,19 +228,26 @@ export function NewThreadDialog() {
     showDraft(session.commitWorkspace(preset.workspace));
   }, [open, preset, hosts, draftSession, showDraft]);
 
-  // The catalogue can arrive after the dialog opens; adopt its default only
-  // while the user has not chosen a model of their own.
+  // The live catalogue can arrive after the dialog opens; adopt its default
+  // only while the user has not chosen a model of their own. The static (or,
+  // once a thread reported one on this host, the live) default counts as
+  // unchosen; anything else is a value the person typed and is left alone.
+  // This is the field's one source of truth, so a stale static default can
+  // never be what Start sends.
   const proxyActive = proxyOverrideFor(harness);
   const proxyModels = proxyModelsFor(harness);
   const proxyProfileId = proxyActive?.profile.id ?? null;
   const proxyDefault = proxyDefaultModel(harness);
-  const proxyModelKey = proxyModels.map((model) => model.id).join("|");
+  const harnessDefault = newThreadModel(harness, boundHost, threadValues);
+  const defaultModel = proxyDefault ?? harnessDefault;
   useEffect(() => {
-    if (!open || proxyProfileId === null || proxyModelKey === "") return;
+    if (!open) return;
     setModel((current) =>
-      current === DEFAULT_MODELS[harness] ? (proxyDefault ?? current) : current,
+      current === DEFAULT_MODELS[harness] || (proxyProfileId !== null && current === harnessDefault)
+        ? defaultModel
+        : current,
     );
-  }, [open, harness, proxyDefault, proxyModelKey, proxyProfileId]);
+  }, [open, harness, harnessDefault, defaultModel, proxyProfileId]);
 
   const selectedHost = boundHost ? hosts[boundHost] : undefined;
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
@@ -237,16 +264,23 @@ export function NewThreadDialog() {
   // move to one that is rather than leave an undetected harness selected.
   const firstChoice = harnessChoices[0];
   const agentGone = harness === "acp" && !selectedAgent;
+  // Until a host is bound the dialog has not chosen a harness yet, so the
+  // first host's harness (picked above) is not "missing".
   const harnessMissing =
-    harness !== "acp" && harnessChoices.length > 0 && !harnessChoices.includes(harness);
+    boundHost !== "" &&
+    harness !== "acp" &&
+    harnessChoices.length > 0 &&
+    !harnessChoices.includes(harness);
   useEffect(() => {
     if (!open) return;
     if (!harnessMissing && !agentGone) return;
     if (!firstChoice) return;
     setHarness(firstChoice);
     setAgentId(null);
-    setModel(proxyDefaultModel(firstChoice) ?? DEFAULT_MODELS[firstChoice]);
-  }, [open, harnessMissing, agentGone, firstChoice]);
+    setModel(
+      proxyDefaultModel(firstChoice) ?? newThreadModel(firstChoice, boundHost, threadValues),
+    );
+  }, [open, harnessMissing, agentGone, firstChoice, boundHost, threadValues]);
 
   // The model list comes from the agent's own handshake. Probe once when the
   // picker selects it; the daemon starts the command once and stops it. A
@@ -267,11 +301,32 @@ export function NewThreadDialog() {
   const agentModels = acpModelChoices(probe, probeFailed, selectedAgent?.models);
   // Only a mode h4rn can actually select is offered. An agent that names its
   // own modes is left alone: the dialog says so instead of promising an
-  // "Approval required" mode the agent never advertised.
+  // "Approval required" mode the agent never advertised. The same mapping the
+  // composer uses reads the agent's ids, so `acceptEdits` and
+  // `bypassPermissions` are the modes they name, and a plan mode is offered
+  // wherever the harness or agent really has one.
   const agentModes = acpModeChoices(probe, probeFailed, selectedAgent?.modes);
   const runtimeModeChoices =
-    harness === "acp" ? acpRuntimeModeChoices(agentModes) : THREAD_RUNTIME_MODES;
+    harness === "acp" ? threadModeChoices("acp", agentModes) : threadModeChoices(harness);
   const modeManagedByAgent = harness === "acp" && runtimeModeChoices.length === 0;
+  // Open on this device's default for new threads; a harness that cannot honour
+  // it falls back to the first mode it offers below.
+  useEffect(() => {
+    if (!open) return;
+    setRuntimeMode(threadSettings.defaultPermissionMode);
+  }, [open, threadSettings.defaultPermissionMode]);
+  // Effort and fast belong to one harness: switching harnesses keeps a value
+  // the new one offers and otherwise returns to its default.
+  const effortKey = threadEffortChoices(harness).join(",");
+  useEffect(() => {
+    const offered = effortKey.split(",").filter(Boolean);
+    setReasoningEffort((current) =>
+      current === "default" || offered.includes(current) ? current : "default",
+    );
+    setFast(false);
+  }, [effortKey]);
+  const efforts = threadEffortChoices(harness);
+  const fastAvailable = fastSupported(harness);
   useEffect(() => {
     if (!open) return;
     // An agent that manages its own mode gets no choice from this dialog, so
@@ -341,6 +396,8 @@ export function NewThreadDialog() {
       prompt: draft.text.trim(),
       attachments: attachments.attachments,
       runtimeMode,
+      reasoningEffort: reasoningEffort === "default" ? null : reasoningEffort,
+      fast,
     });
     setStarting(false);
     if (ok) {
@@ -390,13 +447,23 @@ export function NewThreadDialog() {
               onChange={(value) => {
                 if (value === "") return;
                 const nextHost = hosts[value];
+                const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
+                // Reselecting the host that is already bound changes nothing:
+                // ChipSelect fires on every pick, including the current one, and
+                // the harness and model the person chose there (even one that
+                // is not the host's first harness) must survive it. A real host
+                // change starts from what that host's live catalogue offers,
+                // never the static table.
+                const hostChanged = value !== boundHost;
                 hostChosen.current = true;
                 showDraft(draftSession().selectHost(value));
-                const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
-                if (nextHarness && harness !== "acp") {
+                if (nextHarness && harness !== "acp" && hostChanged) {
                   setHarness(nextHarness);
                   setAgentId(null);
-                  setModel(DEFAULT_MODELS[nextHarness]);
+                  setModel(
+                    proxyDefaultModel(nextHarness) ??
+                      newThreadModel(nextHarness, value, threadValues),
+                  );
                 }
               }}
             />
@@ -430,7 +497,7 @@ export function NewThreadDialog() {
                 const kind = next as HarnessKind;
                 setHarness(kind);
                 setAgentId(null);
-                setModel(proxyDefaultModel(kind) ?? DEFAULT_MODELS[kind]);
+                setModel(proxyDefaultModel(kind) ?? newThreadModel(kind, boundHost, threadValues));
               }}
             />
           </div>
@@ -464,12 +531,8 @@ export function NewThreadDialog() {
                           : "No models read yet. Type one or leave `default`."}
               </span>
             ) : modelInfo.thinking ? (
-              <span className="text-small text-fg-3">
-                {modelInfo.thinking.kind}: {modelInfo.thinking.levels.join(", ")}
-              </span>
-            ) : (
-              <span className="text-small text-fg-3">No thinking modes.</span>
-            )}
+              <span className="text-small text-fg-3">{modelInfo.thinking.kind}</span>
+            ) : null}
             {proxyActive ? (
               <span className="text-small text-fg-3">
                 {proxyModels.length} models from {proxyActive.profile.name}; the harness routes
@@ -478,6 +541,44 @@ export function NewThreadDialog() {
             ) : null}
           </div>
         </div>
+
+        {efforts.length > 0 || fastAvailable ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {efforts.length > 0 ? (
+              <div className="flex flex-col gap-1">
+                <FieldLabel htmlFor="new-thread-effort" hint="the harness default when unset">
+                  Reasoning effort
+                </FieldLabel>
+                <ChipSelect
+                  id="new-thread-effort"
+                  block
+                  label="Reasoning effort"
+                  value={reasoningEffort}
+                  options={[
+                    { value: "default", label: "Default" },
+                    ...efforts.map((effort) => ({ value: effort, label: effortLabel(effort) })),
+                  ]}
+                  onChange={setReasoningEffort}
+                />
+              </div>
+            ) : null}
+            {fastAvailable ? (
+              <div className="flex flex-col gap-1">
+                <FieldLabel htmlFor="new-thread-fast">Speed</FieldLabel>
+                <button
+                  type="button"
+                  id="new-thread-fast"
+                  className="q-switch"
+                  role="switch"
+                  aria-checked={fast}
+                  aria-label="Fast mode"
+                  onClick={() => setFast((value) => !value)}
+                />
+                <span className="text-small text-fg-3">Priority service tier. Higher usage.</span>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-[1fr_1.2fr]">
           <div className="flex flex-col gap-1">
@@ -501,7 +602,9 @@ export function NewThreadDialog() {
                   options={runtimeModeChoices}
                   onChange={setRuntimeMode}
                 />
-                <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
+                <span className="text-small text-fg-3">
+                  Can be changed later from the composer.
+                </span>
               </>
             )}
           </div>

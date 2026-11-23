@@ -109,6 +109,8 @@ async fn live_cliproxyapi_detects_lists_and_runs_claude_code() {
         workspace: PathBuf::from("/tmp"),
         model: applied.model.clone(),
         runtime_mode: RuntimeMode::ApprovalRequired,
+        reasoning_effort: None,
+        fast: false,
         resume_id: None,
         mcp_endpoint: None,
         env_overrides: applied.env.clone(),
