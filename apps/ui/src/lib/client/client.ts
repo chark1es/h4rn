@@ -10,7 +10,7 @@ import type {
 } from "@/gen";
 
 import { H4rnRequestError, protoError } from "./errors";
-import { emitHarnessFrame, emitProxyFrame, emitUsageFrame } from "./frames";
+import { emitHarnessFrame, emitProxyFrame, emitScheduleFrame, emitUsageFrame } from "./frames";
 import type {
   ClientOptions,
   ConnectionSnapshot,
@@ -864,6 +864,7 @@ export class H4rnClient {
         reconnected,
         hosts: hello.hosts,
         localHostId: hello.local_host,
+        daemonTimezone: hello.daemon_timezone ?? "",
         serverVersion: hello.server_version,
         deviceId: hello.device_id,
         // A daemon older than this field answers without it, and a signed-out
@@ -984,6 +985,13 @@ export class H4rnClient {
     // reconnecting view re-reads the versions instead of replaying it.
     if (frame.kind === "harness_event") {
       emitHarnessFrame(frame.event);
+      return;
+    }
+
+    // A scheduled task changed after a run, an edit or a rotation. A
+    // reconnecting view re-reads the list instead of replaying this.
+    if (frame.kind === "schedule_event") {
+      emitScheduleFrame(frame.event);
       return;
     }
 

@@ -49,6 +49,10 @@ commit compares against the empty tree, so every file reads as added. A rename i
 old path in the parent, so moving a file reads as a rename with a real diff, not as a deletion plus
 an addition. A commit review reads the commit's two blobs; a large working copy does not affect it.
 
+The commit range reuses the base chosen for Branch, or the repository default when none was chosen.
+The diff header names that base (`since main`), so a review against a non-default base is never
+implicit.
+
 In a shallow clone the oldest commit has no parent object. Selecting it says that the parent is not
 in the clone instead of pretending every file was added; fetch more history and try again.
 
@@ -105,8 +109,16 @@ until you press Send. The comments then leave the pane.
   otherwise. A diff outlives its tab, so closing the tab still shows the file it was comparing. A
   file picked inside the pane (the phone File picker, a Branch or Commits row) stays until you pick
   another one, switch editor tabs, or switch the diff source; switching tabs is what makes the pane
-  follow. A reply that arrives after a newer pick is dropped, so a slow list never replaces a file
-  or source chosen later.
+  follow, in every mode. A reply that arrives after a newer pick is dropped, so a slow list never
+  replaces a file or source chosen later. The abandoned request's spinner and body go with it:
+  picking Branch while an Uncommitted diff is still out shows the Branch list loading rather than
+  the old diff, and a newer base or commit never shows the previous comparison's lines under its
+  own name. A Branch or Commits tab switch keeps the scope and re-reads its file list when that
+  list is still out, so the list is not lost. An older branch-list reply never stops the newer
+  read's spinner. A failed read — a dropped connection, for example — clears its spinner and shows
+  the daemon's error. Leaving a workspace mid-read and coming back clears the cached spinner, and a
+  branch list or diff reply from the workspace you left is ignored: the branch list's generation
+  moves with the workspace.
 - Binary files and files over the 2 MiB read limit say so instead of showing mojibake, in the diff
   body only: the file list, source bar and comment actions stay usable, so another file or source
   is one click away. Both sides of `HEAD` and commit diffs are size-checked before they are read.

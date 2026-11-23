@@ -31,8 +31,8 @@ const GENERATE_TIMEOUT_MS = 40_000;
 export const ACTION_TIMEOUT_MS = 200_000;
 
 /**
- * Opening a pull request can push first (up to 180 s) and then calls the forge
- * (up to 30 s), so it waits longer than a plain git action.
+ * Opening a pull request shares one 220 s budget on the daemon (lookup, push
+ * and forge call); this leaves a 20 s transport margin around it.
  */
 export const OPEN_PR_TIMEOUT_MS = 240_000;
 

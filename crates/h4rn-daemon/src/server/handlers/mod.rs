@@ -20,6 +20,7 @@ pub(super) mod mcp;
 pub(super) mod network_access;
 pub(super) mod projects;
 pub(super) mod proxy;
+pub(super) mod schedules;
 pub(super) mod skills;
 pub(super) mod subagents;
 pub(super) mod text_generation;
@@ -90,6 +91,7 @@ declare_services! {
     NetworkAccess => network_access,
     TextGeneration => text_generation,
     Guest => guest,
+    Schedules => schedules,
 }
 
 /// Spawns every registered service's forwarder for one connection.

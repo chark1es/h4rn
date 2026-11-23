@@ -110,6 +110,11 @@ string_id!(
     TerminalId,
     "term_"
 );
+string_id!(
+    /// Identifies one scheduled task.
+    ScheduleTaskId,
+    "sch_"
+);
 
 /// The BLAKE3 content address of an attachment blob (ADR-008).
 ///

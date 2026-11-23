@@ -23,6 +23,41 @@ All notable changes to h4rn are recorded here. The format follows
   hashes of the link token and the browser cookie, only an admin device may copy
   the URL, and the page through Connect never runs on Connect's origin with
   daemon HTML.
+- **A prompt can run on a schedule or when a webhook fires.** Settings →
+  Scheduled tasks creates a task with a workspace, harness, model, permissions
+  and prompt, then runs it once, every N minutes or hours, daily or weekly at a
+  local time, or on a five-field cron expression in a chosen time zone. A run
+  can start a new thread, continue one thread, or keep one thread with a fresh
+  session each time. The daemon owns the timer and stores tasks and the newest
+  100 runs in the journal, so they survive a restart; a slot missed while the
+  daemon was down runs once, and a slot whose previous run is still working is
+  skipped and recorded. **Run now** starts a task by hand, even while it is
+  paused, and History links to the threads it created. A webhook task gets a random path with Copy and Rotate;
+  the path is a secret, so lists and change events carry only a "has a URL" flag
+  and an admin request reveals it. It accepts POST only, checks the path before
+  reading the body, caps the body at 64 KiB, allows 30 deliveries a minute and
+  answers 202 before the run starts. Prompts can use `{{body.path}}`,
+  `{{headers.name}}`, `{{query.name}}`, `{{body}}` and `{{request}}`; each value
+  is wrapped as untrusted request data, and the secret path and credential
+  headers are redacted from everything a prompt or transcript sees. Admission is
+  atomic, so one slot starts one run even across a pause or two simultaneous
+  deliveries; run history and the advanced clock commit together; and a failed
+  journal write retries only that run while the real next slot is kept, so a
+  retry never becomes a second run and a slot waiting for its retry is never
+  read as due again. A once slot is taken when it is admitted, so a pause
+  during the run cannot arm it again, and a spent Once task stays spent across
+  edits and resumes; only a different date, time or time zone names a new slot,
+  and a run is refused until that marker is durable, so a crash cannot re-arm
+  it. A schedule that cannot name its next slot is disarmed and records the
+  reason instead of starting a thread on every backoff. Daily and weekly times
+  run only at the first occurrence in a fall-back hour, cron returns the
+  earliest UTC instant among that hour's jobs, and the editor's default zone
+  comes from the daemon. The editor also says why when it cannot reveal a
+  webhook URL.
+  Webhooks follow the configured `--bind` and any extra bind, never the tailnet
+  or LAN listeners.
+  A thread with an enabled task keeps its worktree through a clear. See
+  [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the
@@ -49,7 +84,9 @@ All notable changes to h4rn are recorded here. The format follows
   `--no-verify`) and reports a hook's output. Push creates an upstream on `origin` when asked and
   is never forced: a non-fast-forward rejection or a bad credential is reported as exactly that.
   **Create pull request…** offers title, body, base branch (the default branch is preselected) and
-  a draft flag; the daemon pushes first when the branch needs it and then opens the request.
+  a draft flag; the daemon checks the remote without running any hook (or submodule recursion) and
+  then pushes first when the branch needs it and opens the request. When the real push does run,
+  its hooks run as usual and a hook failure stops the open, exactly as a push from the panel.
   **Generate** can fill the commit message or the pull request text from a model chosen under
   Settings → Source control (Off by default, coding agent, or text generator, plus custom
   instructions); it fills the field only and never commits, pushes or opens anything. Only the
@@ -455,6 +492,50 @@ All notable changes to h4rn are recorded here. The format follows
   `Content-Security-Policy: sandbox; default-src 'none'` on every relayed answer, downloads PDFs and
   opaque files, and forgets a guest waiter on every failure. Reading a guest link's URL is audited.
   The custom-journal fallback uses one in-memory SQLite connection, so its tables do not vanish.
+- **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
+  the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
+  All four sources now show the active tab's file against the source on screen, and the wider
+  file lists stay one click away.
+- **Commit mode names the base it reuses.** The commit range has always followed the base chosen
+  for Branch (or the repository default), but the pane never said so. The diff header now reads
+  `since main` — or whichever base — beside the commit, so a review against a non-default base is
+  never implicit.
+- **A superseded diff never speaks for the newer choice.** Starting a newer diff or list request
+  drops the abandoned one's body as well as its spinner, so changing the base, the commit or the
+  lists while a file is still loading never shows the previous comparison's lines under the new
+  one. A Branch or Commits tab switch keeps the scope and re-reads its file list when that list is
+  still out, so the list and the empty commit range survive the switch. A stale branch-list reply
+  no longer stops the newer read's spinner. The revisited-workspace spinner reset and the branch
+  generation's move with the workspace already shipped on main; tests now cover them, so a reply
+  from the workspace you left is still ignored.
+- **Commit, push and pull request follow what git and the forge really say.** A
+  branch deleted on the forge no longer skips the push a pull request needs just
+  because the local remote-tracking ref is stale: the daemon asks the remote with
+  a dry run of the exact push the real push will run, so a separate `pushurl` or
+  an `insteadOf` rewrite cannot make it check a different repository. Every
+  `pushurl` must report the branch up to date before the push is skipped. That
+  dry run skips the pre-push hook, so a failing, slow or side-effecting hook
+  cannot block or delay opening the request; the real push still runs it. A
+  failing lookup is classified and redacted like a push, so a 403 that echoes a
+  credential shows "sign in to the git remote" without the credential, whatever
+  the URL's shape (IPv4, IPv6, hostname or port, userinfo or query): the URL is
+  parsed and its userinfo, query and fragment removed, with a conservative
+  fallback when it cannot be parsed. A URL git prints with raw whitespace inside
+  its quoted field is replaced whole — no real URL contains whitespace, and
+  splitting at it would leave the rest of the token in the message. A rejected
+  non-fast-forward is still named as one when git's advice is turned off,
+  because the push's porcelain record is read. A path-limited commit message
+  describes the working-tree content `--only` will record, including an edit
+  that was never staged, and works in a repository with no commits yet. A push
+  result names the remote branch it wrote (still sent as `upstream`, so older
+  clients read it) and no longer claims the branch's tracking upstream changed
+  when `set_upstream` was false. Opening a pull request gives the lookup, the
+  push and the forge call one 220-second budget, inside the dialog's 240-second
+  wait, and the forge call fails fast with "rate limited; try again in Ns"
+  rather than sleeping past it. An ordinary request keeps its own timing: a
+  documented rate-limit reset is waited out before the transfer's timeout
+  starts, so a wait longer than one transfer no longer fails a viewer or a
+  lookup. See [docs/git-actions.md](docs/git-actions.md).
 - **A terminal's reply owner still answers after a resync.** With an old client attached, the first
   viewer to answer owns every reply. But another client that held the query's bytes raw could make
   the owner's snapshot-only claim give way, and the old client's copy was dropped too, so the shell

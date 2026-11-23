@@ -1,4 +1,4 @@
-import type { HarnessUpdateEvent, ProxyEvent, UsageStreamEvent } from "@/gen";
+import type { HarnessUpdateEvent, ProxyEvent, ScheduleEvent, UsageStreamEvent } from "@/gen";
 
 /**
  * Ephemeral server frames do not belong to the journal, so they bypass the
@@ -7,9 +7,11 @@ import type { HarnessUpdateEvent, ProxyEvent, UsageStreamEvent } from "@/gen";
  */
 type UsageListener = (event: UsageStreamEvent) => void;
 type ProxyListener = (event: ProxyEvent) => void;
+type ScheduleListener = (event: ScheduleEvent) => void;
 
 const usageListeners = new Set<UsageListener>();
 const proxyListeners = new Set<ProxyListener>();
+const scheduleListeners = new Set<ScheduleListener>();
 
 export function onUsageFrame(listener: UsageListener): () => void {
   usageListeners.add(listener);
@@ -46,4 +48,15 @@ export function onHarnessFrame(listener: HarnessListener): () => void {
 
 export function emitHarnessFrame(event: HarnessUpdateEvent): void {
   for (const listener of harnessListeners) listener(event);
+}
+
+export function onScheduleFrame(listener: ScheduleListener): () => void {
+  scheduleListeners.add(listener);
+  return () => {
+    scheduleListeners.delete(listener);
+  };
+}
+
+export function emitScheduleFrame(event: ScheduleEvent): void {
+  for (const listener of scheduleListeners) listener(event);
 }

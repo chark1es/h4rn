@@ -1872,6 +1872,37 @@ impl ThreadManager {
         Some(record.summary(&self.inner.options.settings, self.now()))
     }
 
+    /// Whether a thread still has work a new run must not overlap.
+    ///
+    /// A turn in flight is always busy. Beyond that the projection is used:
+    /// a thread waiting on the person, queued behind a session start, or
+    /// armed for an auto-resume after a limit is still the previous run, and
+    /// a scheduled task must skip its slot rather than pile another prompt on
+    /// top. A thread merely *placed* on Working is not busy: a manual move is
+    /// a placement, and an idle thread there has nothing to overlap.
+    pub async fn thread_is_busy(&self, thread_id: &ThreadId) -> bool {
+        let Ok(handle) = self.inner.handle(thread_id).await else {
+            return false;
+        };
+        let record = handle.lock().await;
+        if record.active.is_some() {
+            return true;
+        }
+        let summary = record.summary(&self.inner.options.settings, self.now());
+        matches!(
+            summary.agent_state,
+            AgentState::Queued
+                | AgentState::Scheduled
+                | AgentState::Thinking
+                | AgentState::Searching
+                | AgentState::Reading
+                | AgentState::Editing
+                | AgentState::RunningTool
+                | AgentState::AwaitingApproval
+                | AgentState::RateLimited
+        )
+    }
+
     /// The turn a thread would attach a new item to.
     pub async fn thread_turn_id(&self, thread_id: &ThreadId) -> Option<TurnId> {
         let handle = self.inner.handle(thread_id).await.ok()?;
@@ -2507,6 +2538,54 @@ impl ThreadManager {
             turn_id,
             seq,
         })
+    }
+
+    /// Appends a message and starts a fresh harness session for its turn.
+    ///
+    /// The thread's transcript stays readable, but the next session does not
+    /// resume the old conversation: the stored resume id and agent fingerprint
+    /// are cleared and a live session is shut down before the message is sent.
+    /// This is the scheduled task's "one thread, fresh session each run" mode.
+    ///
+    /// A thread whose previous turn is still running is refused rather than
+    /// queued, so two scheduled runs can never overlap.
+    pub async fn send_message_fresh(
+        &self,
+        thread_id: &ThreadId,
+        text: String,
+    ) -> Result<AcceptedMessage, ManagerError> {
+        let handle = self.inner.handle(thread_id).await?;
+        let detached = {
+            let mut record = handle.lock().await;
+            if record.closed {
+                return Err(ManagerError::NotFound(format!(
+                    "thread {thread_id} is closed"
+                )));
+            }
+            if record.active.is_some() {
+                return Err(ManagerError::Conflict(format!(
+                    "thread {thread_id} is still working"
+                )));
+            }
+            let generation = match &record.session {
+                SessionSlot::Live { generation, .. } => Some(*generation),
+                SessionSlot::Starting(_) => {
+                    return Err(ManagerError::Conflict(format!(
+                        "thread {thread_id} is starting a session"
+                    )));
+                }
+                SessionSlot::None => None,
+            };
+            record.meta.resume_id = None;
+            record.meta.agent_fingerprint = None;
+            generation.and_then(|generation| record.detach_session(generation))
+        };
+        if let Some(session) = detached
+            && let Err(error) = session.lock().await.shutdown().await
+        {
+            tracing::warn!(%thread_id, %error, "harness shutdown before a fresh scheduled run failed");
+        }
+        self.send_message(thread_id, text, Vec::new()).await
     }
 
     /// Whether any thread on `kind` has a turn in flight.
@@ -7762,6 +7841,58 @@ mod tests {
             number: u32,
         ) -> Result<Vec<crate::pr_links::PrLinkRecord>, crate::journal::JournalError> {
             self.inner.pr_links_for_pr(repo, number).await
+        }
+
+        async fn list_schedules(
+            &self,
+        ) -> Result<Vec<h4rn_protocol::ScheduleTask>, crate::journal::JournalError> {
+            self.inner.list_schedules().await
+        }
+
+        async fn schedule(
+            &self,
+            task_id: &h4rn_protocol::ScheduleTaskId,
+        ) -> Result<Option<h4rn_protocol::ScheduleTask>, crate::journal::JournalError> {
+            self.inner.schedule(task_id).await
+        }
+
+        async fn upsert_schedule(
+            &self,
+            task: &h4rn_protocol::ScheduleTask,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.upsert_schedule(task).await
+        }
+
+        async fn delete_schedule(
+            &self,
+            task_id: &h4rn_protocol::ScheduleTaskId,
+        ) -> Result<bool, crate::journal::JournalError> {
+            self.inner.delete_schedule(task_id).await
+        }
+
+        async fn append_schedule_run(
+            &self,
+            run: &mut h4rn_protocol::ScheduleRun,
+            keep: usize,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.append_schedule_run(run, keep).await
+        }
+
+        async fn commit_schedule_run(
+            &self,
+            run: &mut h4rn_protocol::ScheduleRun,
+            task: &h4rn_protocol::ScheduleTask,
+            keep: usize,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.commit_schedule_run(run, task, keep).await
+        }
+
+        async fn schedule_runs(
+            &self,
+            task_id: &h4rn_protocol::ScheduleTaskId,
+            limit: usize,
+        ) -> Result<Vec<h4rn_protocol::ScheduleRun>, crate::journal::JournalError> {
+            self.inner.schedule_runs(task_id, limit).await
         }
     }
 

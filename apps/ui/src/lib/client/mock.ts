@@ -2227,6 +2227,7 @@ class MockDaemon {
           daemon_machine_id: null,
           local_host: "atlas",
           hosts: this.hosts,
+          daemon_timezone: "Europe/Berlin",
         });
         return;
       case "list_hosts":

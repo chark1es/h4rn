@@ -2202,6 +2202,58 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
     ) -> Result<Vec<h4rn_daemon::pr_links::PrLinkRecord>, h4rn_daemon::journal::JournalError> {
         self.0.pr_links_for_pr(repo, number).await
     }
+
+    async fn list_schedules(
+        &self,
+    ) -> Result<Vec<h4rn_protocol::ScheduleTask>, h4rn_daemon::journal::JournalError> {
+        self.0.list_schedules().await
+    }
+
+    async fn schedule(
+        &self,
+        task_id: &h4rn_protocol::ScheduleTaskId,
+    ) -> Result<Option<h4rn_protocol::ScheduleTask>, h4rn_daemon::journal::JournalError> {
+        self.0.schedule(task_id).await
+    }
+
+    async fn upsert_schedule(
+        &self,
+        task: &h4rn_protocol::ScheduleTask,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.upsert_schedule(task).await
+    }
+
+    async fn delete_schedule(
+        &self,
+        task_id: &h4rn_protocol::ScheduleTaskId,
+    ) -> Result<bool, h4rn_daemon::journal::JournalError> {
+        self.0.delete_schedule(task_id).await
+    }
+
+    async fn append_schedule_run(
+        &self,
+        run: &mut h4rn_protocol::ScheduleRun,
+        keep: usize,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.append_schedule_run(run, keep).await
+    }
+
+    async fn commit_schedule_run(
+        &self,
+        run: &mut h4rn_protocol::ScheduleRun,
+        task: &h4rn_protocol::ScheduleTask,
+        keep: usize,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.commit_schedule_run(run, task, keep).await
+    }
+
+    async fn schedule_runs(
+        &self,
+        task_id: &h4rn_protocol::ScheduleTaskId,
+        limit: usize,
+    ) -> Result<Vec<h4rn_protocol::ScheduleRun>, h4rn_daemon::journal::JournalError> {
+        self.0.schedule_runs(task_id, limit).await
+    }
 }
 
 #[tokio::test]
