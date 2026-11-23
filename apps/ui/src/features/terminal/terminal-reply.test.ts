@@ -820,6 +820,49 @@ describe("terminal query replies", () => {
     }
   });
 
+  it("gives a resynced viewer the same identities after the snapshot at every cut", async () => {
+    // A lagging viewer parses a prefix raw, is resynced from a snapshot at the
+    // sequence of the first chunk it missed, then parses the rest raw. Every
+    // answer it gives after the snapshot must carry the same identity as the
+    // viewer that kept up, so the shell never gets a second report. Fixed
+    // seeds keep CI deterministic; bytes are cut, never JS strings.
+    for (const seed of RESYNC_FUZZ_SEEDS) {
+      const random = seededRandom(seed);
+      const fragments: Uint8Array[] = [];
+      const count = 2 + Math.floor(random() * 3);
+      for (let index = 0; index < count; index += 1) {
+        fragments.push(
+          FUZZ_FRAGMENTS[Math.floor(random() * FUZZ_FRAGMENTS.length)] ?? new Uint8Array(),
+        );
+      }
+      const stream = concat(...fragments);
+      const chunks: ViewerChunk[] = [];
+      let offset = 0;
+      let seq = 1;
+      while (offset < stream.length) {
+        const size = 2 + Math.floor(random() * 7);
+        chunks.push({ seq, bytes: stream.slice(offset, offset + size) });
+        offset += size;
+        seq += 1;
+      }
+
+      const early = await runViewer(chunks);
+      for (let cut = 1; cut < chunks.length; cut += 1) {
+        const snapshotSeq = chunks[cut]?.seq ?? 0;
+        const late = await runViewer([
+          ...chunks.slice(0, cut),
+          { seq: snapshotSeq, bytes: RESYNC_SNAPSHOT, resync: true },
+          ...chunks.slice(cut + 1),
+        ]);
+        const expected = early.filter((reply) => reply.position > snapshotSeq);
+        expect(
+          late.filter((reply) => reply.position > snapshotSeq),
+          `seed ${seed} resync at chunk ${snapshotSeq}`,
+        ).toEqual(expected);
+      }
+    }
+  }, 300_000);
+
   it("gives every late viewer the same identities at every byte split", async () => {
     // Cut encoded bytes, never JS strings, so a multi-byte character or a C1
     // opener can be split inside. A fixed seed list keeps CI deterministic;
@@ -944,6 +987,17 @@ const FUZZ_FRAGMENTS: Uint8Array[] = [
 
 /** Fixed seeds, so the byte-cut fuzz is the same on every run. */
 const FUZZ_SEEDS = Array.from({ length: 2000 }, (_, index) => index);
+
+/** Fixed seeds for the resync fuzz; a lagging viewer is resynced mid-stream. */
+const RESYNC_FUZZ_SEEDS = Array.from({ length: 500 }, (_, index) => index);
+
+/**
+ * A resync snapshot's real shape: a reset, a home cursor and rendered text.
+ *
+ * The leading `ESC[0m` matters: xterm's reset keeps the escape parser, so a
+ * chunk that ended inside an OSC or DCS query is completed by these bytes.
+ */
+const RESYNC_SNAPSHOT = bytes("\x1b[0m\x1b[Hh4rn$ ls\x1b[0m");
 
 /** A small deterministic PRNG (mulberry32). */
 function seededRandom(seed: number): () => number {

@@ -211,19 +211,25 @@ position that has not been answered yet is accepted, because it can only rescue 
 reply naming a position the daemon never sent to that viewer is ignored and leaves the record
 untouched, so a bogus claim cannot suppress a real answer.
 
-The identity comes from the output stream, so the position a viewer may claim is the output it
-parsed as raw bytes: anything above the last chunk folded into a snapshot it was handed. Positions
-at or below that snapshot (`snapshot_through`) reached it only as rendered state, never as that
-chunk's bytes, so its claim is dropped whenever any other viewer has received output: that viewer has
-the raw chunk and answers the query, while one still taking its attach snapshot has received nothing
-and cannot answer. A viewer that stalled before a chunk and catches up later therefore
-names the answers exactly as a viewer that kept up does: the query it missed stays unseen, and the
-queries it saw are written once between them, in arrival order. The one exception is a viewer with
-no other parser to fall back on: xterm can complete a query with the snapshot's leading bytes, and
-with nobody else able to answer it its claim on the snapshot chunk itself is written and the shell
-is never left without an answer. The old per-viewer attach floor guarded chunk-local
-numbering, and that numbering is gone; this snapshot bound is about which bytes the viewer actually
-parsed.
+The identity comes from the output stream, so the position a viewer may claim is one the daemon
+sent it, with one narrow exception for bytes it never parsed. Each viewer records the ranges it
+received as raw output. A position at or below its last snapshot that lies outside those ranges is
+snapshot-only for that viewer: it arrived as rendered state, never as that chunk's bytes. A snapshot
+does not unsee what came before it, so a chunk the viewer parsed raw and a later resync replaced
+stays its own to claim. The daemon drops a claim only when both hold: the position is snapshot-only
+for that viewer, and another attached viewer received **that position** raw. That other viewer has
+the bytes and answers the query, and its answer must be the one written. Everything else is
+accepted: a chunk the viewer parsed raw, a position no other viewer parsed raw, and the case where
+every viewer saw the query only through a snapshot, where the shared `(position, ordinal)` record
+still reduces the replies to one write. A viewer still taking its attach snapshot has received
+nothing, so it never makes another viewer's claim give way. A viewer that stalled before a chunk and
+catches up later therefore names the answers exactly as a viewer that kept up does: the query it
+missed stays unseen, and the queries it saw are written once between them, in arrival order. The one
+exception is a query xterm completes with a snapshot's leading bytes: the viewer that owns those
+bytes may claim them, and with nobody else able to answer the shell is never left without an answer.
+The old per-viewer attach floor guarded chunk-local numbering, and that numbering is gone; this
+snapshot rule is about which bytes the viewer actually parsed, and the answer record is what keeps
+the reply count at one.
 
 Clients declare reply-position support in the attach request with `reply_positions_v2` (default
 false). The field is new rather than the first `reply_positions` flag because the numbering changed

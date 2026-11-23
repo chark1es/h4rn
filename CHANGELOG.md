@@ -843,7 +843,12 @@ All notable changes to h4rn are recorded here. The format follows
   the session keeps a cloned child handle that terminates the shell even while the reader thread
   holds the child in `wait()`, which is the only way a Windows console ends when its handle is
   busy. A handle kill that fails falls back to the same cloned handle, so a console that refuses
-  the first termination still ends without the child lock. The close path also drops the PTY
+  the first termination still ends without the child lock. Once the close wait has reaped the shell,
+  the pid-based fallbacks are skipped: a failed handle kill no longer sends SIGHUP or SIGKILL to a
+  pid that may already belong to another process. The Windows handle kill still runs, because it
+  owns a duplicated process handle rather than a bare pid. The Windows close test now also waits for
+  the exit report, so a leaked blocked reader fails it instead of passing on the child handle alone.
+  The close path also drops the PTY
   master: a killed Windows ConPTY client leaves the pseudoconsole open, which would keep the
   reader thread blocked and the session alive, so closing the master ends the console, releases
   the reader, and lets the exit report run.
@@ -887,12 +892,15 @@ All notable changes to h4rn are recorded here. The format follows
   for an older position that has not been answered yet is accepted, because it can only rescue a
   pending query. A reply naming output the daemon never sent to that viewer is ignored, so a bogus
   position cannot suppress a real answer, and acceptance and the PTY write happen under one lock so
-  accepted replies cannot reach the shell out of order. A viewer may claim only a chunk it parsed as
-  raw output, above the last chunk folded into a snapshot it was handed; a claim on the snapshot
-  chunk itself is dropped while another viewer has output, because that viewer has the raw bytes
-  and answers the query. A viewer with no other parser to fall back on may still answer such a
-  query (xterm completes it with the snapshot's bytes), so the shell is never left without an
-  answer. The old per-viewer
+  accepted replies cannot reach the shell out of order. A viewer may claim any position it was sent
+  as raw output, including a chunk it parsed raw before a later resync replaced it, and a position
+  only inside its snapshot when no other attached viewer received that position raw: the daemon
+  drops a claim only when it is snapshot-only for this viewer **and** another viewer has that
+  position's bytes, so that viewer's answer is the one written. When every viewer saw the query only
+  through a snapshot the claim still stands, because xterm completes it with the snapshot's bytes
+  and the answer record keeps the reply count at one; the shell is never left without an answer. The
+  byte-split fuzz also resyncs a lagging viewer mid-stream through a snapshot and checks that every
+  answer after it keeps the identity the viewer that kept up gave it. The old per-viewer
   attach floor is gone, because there is no chunk-local numbering left for it to protect: a sole or
   resynced viewer answers its first raw chunk, and so does a positioned viewer in mixed-version mode
   after a resync. The sent bound advances only when a frame is really handed to the outbound
