@@ -64,13 +64,14 @@ is left empty and the panel asks you to name the target rather than guessing
 `main`. **Generate** fills the title and body and does nothing else.
 
 The daemon pushes the branch first when `<remote>/<branch>` does not exist or is
-behind, then asks the forge to open the request. On GitHub, Bitbucket and Azure
-DevOps the draft flag travels in its own field; GitLab and Gitea have no such
-field on the create request and mark a draft with a `Draft:` or `WIP:` title
-prefix (a title that already carries one is sent as it is). The open request
-waits as long as the push may take, and the dialog cannot submit twice. A PR
-opened this way is linked to its thread, so the header badge, the PR page and a
-watch all find it. Opening a request is never done silently from Generate.
+behind the local branch, then asks the forge to open the request. On GitHub,
+Bitbucket and Azure DevOps the draft flag travels in its own field; GitLab and
+Gitea have no such field on the create request and mark a draft with a `Draft:`
+or `WIP:` title prefix (a title that already carries one is sent as it is). The
+open request waits as long as the push may take, and the dialog cannot submit
+twice. A PR opened this way is linked to its thread, so the header badge, the PR
+page and a watch all find it. Opening a request is never done silently from
+Generate.
 
 ## Generated messages
 
