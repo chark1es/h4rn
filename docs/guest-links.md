@@ -50,10 +50,11 @@ you are comfortable showing to that person.
 
 ## One browser
 
-The first browser that opens the link claims it with an HttpOnly cookie. Opening
-the same link in another browser shows "This link was opened in another
-browser" instead of the thread. Clearing that browser's cookies loses the link;
-ask for a new one.
+The first browser that opens the link claims it with an HttpOnly cookie scoped
+to that one link. Opening the same link in another browser shows "This link was
+opened in another browser" instead of the thread. Clearing that browser's
+cookies loses the link; ask for a new one. Two different links can be open in
+the same browser at once, because each has its own cookie.
 
 The daemon stores only a hash of the link token and of the browser cookie, never
 the raw values. The price is that after a daemon restart the link keeps working

@@ -642,7 +642,7 @@ impl GuestService {
         let queried_thumbnail = input.path.contains("thumbnail=1");
         match (input.method, rest.as_slice()) {
             (Method::Get, []) => match self.resolve(token, cookie, true).await {
-                Ok(resolved) => self.page(resolved),
+                Ok(resolved) => self.page(resolved, path),
                 Err(error) => self.error(error),
             },
             (Method::Get, ["state"]) => match self.resolve(token, cookie, false).await {
@@ -701,10 +701,13 @@ impl GuestService {
         GuestHttpOutput::text(error.status(), &error.to_string())
     }
 
-    fn page(&self, resolved: Resolved) -> GuestHttpOutput {
+    fn page(&self, resolved: Resolved, path: &str) -> GuestHttpOutput {
+        // Scope the cookie to this one link, so two guest links opened in the
+        // same browser do not overwrite each other's binding.
+        let cookie_path = path.trim_end_matches('/');
         let cookie = resolved.bind_cookie.map(|binding| {
             format!(
-                "{GUEST_COOKIE}={binding}; HttpOnly; SameSite=Lax; Path=/guest/; Max-Age={}",
+                "{GUEST_COOKIE}={binding}; HttpOnly; SameSite=Lax; Path={cookie_path}; Max-Age={}",
                 GUEST_LINK_TTL_HOURS * 3600
             )
         });
