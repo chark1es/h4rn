@@ -11,6 +11,7 @@
 //! something the reviewer would care about changed.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -451,11 +452,15 @@ impl PrLinkService {
         let key = PrKey::from_record(&record);
         let generation = {
             let mut watches = self.lock_watches();
+            let fresh = watches.allocate_generation();
             let watched = watches.prs.entry(key.clone()).or_default();
             watched
                 .watchers
                 .entry(thread_id.as_str().to_owned())
-                .or_default()
+                .or_insert_with(|| ThreadWatch {
+                    generation: fresh,
+                    ..ThreadWatch::default()
+                })
                 .generation
         };
 
@@ -464,6 +469,7 @@ impl PrLinkService {
         // The first poll after the pause takes the baseline instead.
         if self.paused(&key) {
             let mut watches = self.lock_watches();
+            let fresh = watches.allocate_generation();
             if let Some(watch) = watches
                 .prs
                 .get_mut(&key)
@@ -473,7 +479,7 @@ impl PrLinkService {
                 watch.failure_seen = false;
                 watch.comment_only_wakes = 0;
                 watch.failed_reads = 0;
-                watch.generation = watch.generation.wrapping_add(1);
+                watch.generation = fresh;
             }
             tracing::debug!(
                 repo = %repo.full_name(),
@@ -525,8 +531,11 @@ impl PrLinkService {
             }
             Ok(snapshot) => {
                 let mut watches = self.lock_watches();
-                if let Some(watch) = watches
-                    .prs
+                let WatchRegistry {
+                    prs,
+                    next_generation,
+                } = &mut *watches;
+                if let Some(watch) = prs
                     .get_mut(&key)
                     .and_then(|watched| watched.watchers.get_mut(thread_id.as_str()))
                 {
@@ -546,7 +555,7 @@ impl PrLinkService {
                     watch.comment_only_wakes = 0;
                     watch.failed_reads = 0;
                     watch.baseline = Some(snapshot);
-                    watch.generation = watch.generation.wrapping_add(1);
+                    watch.generation = next_generation.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(error) => {
@@ -721,7 +730,11 @@ impl PrLinkService {
 
             let wakes = {
                 let mut watches = self.lock_watches();
-                let Some(watched) = watches.prs.get_mut(&key) else {
+                let WatchRegistry {
+                    prs,
+                    next_generation,
+                } = &mut *watches;
+                let Some(watched) = prs.get_mut(&key) else {
                     continue;
                 };
                 for thread in &inactive {
@@ -730,7 +743,7 @@ impl PrLinkService {
                 if watched.watchers.is_empty() {
                     continue;
                 }
-                watched.observe(snapshot, viewer.as_deref(), &generations)
+                watched.observe(snapshot, viewer.as_deref(), &generations, next_generation)
             };
 
             for wake in wakes {
@@ -738,15 +751,20 @@ impl PrLinkService {
                     thread_id,
                     message,
                     ends_watch,
+                    generation,
                     previous,
                     previous_failure_seen,
                     previous_comment_only_wakes,
                 } = wake;
                 match self.sink.wake(&thread_id, message).await {
                     Ok(()) => {
-                        self.note_wake_delivered(&key, &thread_id);
+                        self.note_wake_delivered(&key, &thread_id, generation);
                         if ends_watch {
-                            self.remove_watch(&key, &thread_id);
+                            // Remove only the watcher this wake was computed
+                            // for. A re-watch can complete while delivery is
+                            // in flight; that newer watcher was not part of
+                            // this event and must not be deleted.
+                            self.remove_watch_if(&key, &thread_id, generation);
                         }
                     }
                     Err(error) => {
@@ -761,6 +779,7 @@ impl PrLinkService {
                         self.restore_failed_wake(
                             &key,
                             &thread_id,
+                            generation,
                             previous,
                             previous_failure_seen,
                             previous_comment_only_wakes,
@@ -788,6 +807,34 @@ impl PrLinkService {
         }
     }
 
+    /// Removes a watcher only while it is still the one the caller saw.
+    ///
+    /// A wake spans the whole `send_message`, which can take a while. The
+    /// thread may unwatch and watch again in that window, and the new watcher
+    /// did not see this wake's events; it must survive the delivery.
+    fn remove_watch_if(&self, key: &PrKey, thread_id: &ThreadId, generation: u64) {
+        let mut watches = self.lock_watches();
+        let Some(watched) = watches.prs.get_mut(key) else {
+            return;
+        };
+        let same = watched
+            .watchers
+            .get(thread_id.as_str())
+            .is_some_and(|watch| watch.generation == generation);
+        if !same {
+            tracing::debug!(
+                thread = %thread_id,
+                pr = key.number,
+                "keeping a re-watched PR watch that a delivered wake did not belong to"
+            );
+            return;
+        }
+        watched.watchers.remove(thread_id.as_str());
+        if watched.watchers.is_empty() {
+            watches.prs.remove(key);
+        }
+    }
+
     /// Whether the poller is waiting out a rate limit for this PR.
     fn paused(&self, key: &PrKey) -> bool {
         self.lock_watches()
@@ -808,7 +855,7 @@ impl PrLinkService {
         }
     }
 
-    fn note_wake_delivered(&self, key: &PrKey, thread_id: &ThreadId) {
+    fn note_wake_delivered(&self, key: &PrKey, thread_id: &ThreadId, generation: u64) {
         let mut watches = self.lock_watches();
         let Some(watch) = watches
             .prs
@@ -817,7 +864,9 @@ impl PrLinkService {
         else {
             return;
         };
-        watch.failed_wakes = 0;
+        if watch.generation == generation {
+            watch.failed_wakes = 0;
+        }
     }
 
     /// Puts a watcher back where it was so an undelivered wake is retried.
@@ -830,21 +879,37 @@ impl PrLinkService {
         &self,
         key: &PrKey,
         thread_id: &ThreadId,
+        generation: u64,
         previous: PrSnapshot,
         previous_failure_seen: bool,
         previous_comment_only_wakes: u32,
     ) {
         let mut watches = self.lock_watches();
-        let Some(watched) = watches.prs.get_mut(key) else {
+        let WatchRegistry {
+            prs,
+            next_generation,
+        } = &mut *watches;
+        let Some(watched) = prs.get_mut(key) else {
             return;
         };
         let Some(watch) = watched.watchers.get_mut(thread_id.as_str()) else {
             return;
         };
+        if watch.generation != generation {
+            // The thread re-watched while this wake was being delivered. Its
+            // new baseline is fresher than the snapshot this poll was about,
+            // so there is nothing to restore or retry for that watcher.
+            tracing::debug!(
+                thread = %thread_id,
+                pr = key.number,
+                "discarding a failed PR wake a re-watch overtook"
+            );
+            return;
+        }
         watch.baseline = Some(previous);
         watch.failure_seen = previous_failure_seen;
         watch.comment_only_wakes = previous_comment_only_wakes;
-        watch.generation = watch.generation.wrapping_add(1);
+        watch.generation = next_generation.fetch_add(1, Ordering::Relaxed);
         watch.failed_wakes += 1;
         if watch.failed_wakes >= MAX_FAILED_WAKES {
             tracing::debug!(
@@ -916,6 +981,18 @@ impl PrKey {
 #[derive(Default)]
 struct WatchRegistry {
     prs: HashMap<PrKey, WatchedPr>,
+    /// Every watcher generation, and every bump to one, is drawn from this one
+    /// service-wide counter. A generation therefore identifies one watcher's
+    /// state at one moment and is never handed to another watcher: an
+    /// in-flight poll or re-watch that captured an older generation can never
+    /// match the watcher that replaced the one it was reading for.
+    next_generation: AtomicU64,
+}
+
+impl WatchRegistry {
+    fn allocate_generation(&self) -> u64 {
+        self.next_generation.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 #[derive(Default)]
@@ -948,6 +1025,10 @@ struct Wake {
     thread_id: ThreadId,
     message: String,
     ends_watch: bool,
+    /// The watcher's generation when this wake was computed. Delivery spans a
+    /// whole `send_message`, and a re-watch in that window creates a watcher
+    /// this wake must not end or touch.
+    generation: u64,
     /// The watcher's snapshot before this poll, kept so a failed wake can be
     /// retried by the next poll.
     previous: PrSnapshot,
@@ -966,6 +1047,7 @@ impl WatchedPr {
         snapshot: PrSnapshot,
         viewer: Option<&str>,
         generations: &HashMap<String, u64>,
+        next_generation: &AtomicU64,
     ) -> Vec<Wake> {
         let terminal = matches!(
             snapshot.summary.state,
@@ -988,7 +1070,7 @@ impl WatchedPr {
                 );
                 continue;
             }
-            watch.generation = watch.generation.wrapping_add(1);
+            watch.generation = next_generation.fetch_add(1, Ordering::Relaxed);
             watch.failed_reads = 0;
             let failure_now = snapshot.checks.pending > 0 && snapshot.checks.failed > 0;
             let Some(previous) = watch.baseline.take() else {
@@ -1035,6 +1117,7 @@ impl WatchedPr {
                 thread_id: ThreadId::new(thread.clone()),
                 message: wake_message(&events, &snapshot),
                 ends_watch: terminal || last_comment,
+                generation: watch.generation,
                 previous,
                 previous_failure_seen,
                 previous_comment_only_wakes,
@@ -1436,7 +1519,7 @@ impl PrSource for ForgePrSource {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
 
     use chrono::TimeZone;
     use h4rn_protocol::{
@@ -1597,9 +1680,9 @@ mod tests {
     struct MockSource {
         state: Mutex<MockState>,
         logins: Mutex<HashMap<String, String>>,
-        /// One checks read held between the re-watch's start and this test's
-        /// release, so a poll can overtake it.
-        gated_checks: Mutex<Option<GatedChecks>>,
+        /// Checks reads held between a watch's or poll's start and this test's
+        /// release, so another read can overtake them. Served in call order.
+        gated_checks: Mutex<VecDeque<GatedChecks>>,
     }
 
     struct GatedChecks {
@@ -1628,14 +1711,15 @@ mod tests {
                     check_calls: 0,
                 }),
                 logins: Mutex::new(HashMap::from([("acct_1".into(), "me".into())])),
-                gated_checks: Mutex::new(None),
+                gated_checks: Mutex::new(VecDeque::new()),
             })
         }
 
         /// Holds the next checks read with the current body until released.
         ///
+        /// Each call queues one read; reads take their gates in call order.
         /// The caller gets a signal when that read is waiting and a sender
-        /// that lets it finish, so a poll can be run in between.
+        /// that lets it finish, so another read can be run in between.
         fn gate_next_checks(
             &self,
         ) -> (
@@ -1645,14 +1729,14 @@ mod tests {
             let (started, started_rx) = tokio::sync::oneshot::channel();
             let (release, release_rx) = tokio::sync::oneshot::channel();
             let value = self.state().checks.clone();
-            *self
-                .gated_checks
+            self.gated_checks
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(GatedChecks {
-                value,
-                started,
-                release: release_rx,
-            });
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_back(GatedChecks {
+                    value,
+                    started,
+                    release: release_rx,
+                });
             (started_rx, release)
         }
 
@@ -1744,7 +1828,7 @@ mod tests {
                 .gated_checks
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
+                .pop_front();
             if let Some(GatedChecks {
                 value,
                 started,
@@ -1773,6 +1857,14 @@ mod tests {
         /// One specific wake attempt (1-based) that fails.
         fail_wake_at: Mutex<Option<usize>>,
         wake_attempts: Mutex<usize>,
+        /// The next wake held between its start and this test's release, so a
+        /// re-watch can complete while delivery is in flight.
+        gated_wake: Mutex<Option<GatedWake>>,
+    }
+
+    struct GatedWake {
+        started: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
     }
 
     impl MockSink {
@@ -1815,6 +1907,26 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(attempt);
         }
+
+        /// Holds the next wake until the returned sender releases it, and
+        /// signals the returned receiver when the delivery is waiting.
+        fn gate_next_wake(
+            &self,
+        ) -> (
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (started, started_rx) = tokio::sync::oneshot::channel();
+            let (release, release_rx) = tokio::sync::oneshot::channel();
+            *self
+                .gated_wake
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(GatedWake {
+                started,
+                release: release_rx,
+            });
+            (started_rx, release)
+        }
     }
 
     #[async_trait]
@@ -1835,6 +1947,15 @@ mod tests {
         }
 
         async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String> {
+            let gate = self
+                .gated_wake
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(GatedWake { started, release }) = gate {
+                let _ = started.send(());
+                let _ = release.await;
+            }
             let attempt = {
                 let mut attempts = self
                     .wake_attempts
@@ -3099,6 +3220,172 @@ mod tests {
         }
         assert!(service.watching_threads(&repo(), 7).is_empty());
         assert!(sink.wakes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_poll_that_overtakes_an_unwatch_and_rewatch_cannot_seed_the_new_watcher() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_generation_reuse");
+        sink.add(&thread_id);
+        service
+            .link_known(&thread_id, "acct_1", &repo(), 7)
+            .await
+            .expect("link");
+
+        // The first watch is slow in checks. Its watcher exists with a fresh
+        // generation and no baseline; its read holds the passing body.
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Success,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        let (first_started, release_first) = source.gate_next_checks();
+        let service_for_first = Arc::clone(&service);
+        let thread_for_first = thread_id.clone();
+        let first_watch = tokio::spawn(async move {
+            service_for_first
+                .watch(&thread_for_first, &repo(), 7)
+                .await
+                .expect("watch");
+        });
+        first_started
+            .await
+            .expect("the first watch read is waiting");
+
+        // A poll starts, captures that watcher's generation and is held in
+        // checks with an older, still-running body.
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::InProgress,
+                    Some(true),
+                    None,
+                )],
+            );
+        });
+        let (poll_started, release_poll) = source.gate_next_checks();
+        let service_for_poll = Arc::clone(&service);
+        let poll = tokio::spawn(async move { service_for_poll.poll_once().await });
+        poll_started.await.expect("the poll read is waiting");
+
+        // The thread unwatches and watches again while that poll is in flight.
+        // The replacement's read is held too, so it is still at its fresh
+        // generation when the older poll is released.
+        service.unwatch(&thread_id, &repo(), 7);
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Success,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        let (second_started, release_second) = source.gate_next_checks();
+        let service_for_second = Arc::clone(&service);
+        let thread_for_second = thread_id.clone();
+        let second_watch = tokio::spawn(async move {
+            service_for_second
+                .watch(&thread_for_second, &repo(), 7)
+                .await
+                .expect("re-watch");
+        });
+        second_started.await.expect("the re-watch read is waiting");
+
+        // The in-flight poll finishes first, with the older body.
+        release_poll.send(()).expect("release the poll read");
+        poll.await.expect("poll finished");
+
+        // Then the two watch reads finish.
+        release_first
+            .send(())
+            .expect("release the first watch read");
+        release_second.send(()).expect("release the re-watch read");
+        first_watch.await.expect("first watch finished");
+        second_watch.await.expect("re-watch finished");
+
+        // The replacement's baseline is its own fresh read, never the older
+        // body a poll captured under the generation of the watcher it
+        // replaced.
+        let baseline = service
+            .lock_watches()
+            .prs
+            .values()
+            .flat_map(|watched| watched.watchers.values())
+            .find_map(|watch| {
+                watch
+                    .baseline
+                    .as_ref()
+                    .map(|baseline| baseline.checks.state)
+            });
+        assert_eq!(
+            baseline,
+            Some(ForgeChecksState::Passing),
+            "the new watcher's baseline must come from its own read"
+        );
+
+        // And the passing body is not reported as news.
+        service.poll_once().await;
+        assert!(sink.wakes().is_empty(), "{:?}", sink.wakes());
+    }
+
+    #[tokio::test]
+    async fn a_delivered_terminal_wake_does_not_delete_a_rewatched_watcher() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_wake_rewatch");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.pr = detail(ForgePrState::Merged, "sha-1", ForgeMergeable::Mergeable);
+        });
+
+        // The merge wake is held inside delivery, where a re-watch can happen.
+        let (started, release) = sink.gate_next_wake();
+        let service_for_poll = Arc::clone(&service);
+        let poll = tokio::spawn(async move { service_for_poll.poll_once().await });
+        started.await.expect("the merge wake is waiting");
+
+        // The thread re-watches while that wake is in flight. Its read fails
+        // (the forge is briefly unavailable), so the replacement waits for its
+        // first poll instead of ending on a merged body it could not read.
+        source.set(|state| {
+            state.error = Some(PrSourceError::Other("network down".into()));
+        });
+        service.unwatch(&thread_id, &repo(), 7);
+        service
+            .watch(&thread_id, &repo(), 7)
+            .await
+            .expect("re-watch");
+        source.set(|state| state.error = None);
+
+        // The delivery finishes. It may end only the watcher it was for.
+        release.send(()).expect("release the merge wake");
+        poll.await.expect("poll finished");
+
+        assert_eq!(
+            service.watching_threads(&repo(), 7).len(),
+            1,
+            "a delivered merge wake must not delete a watcher a re-watch created"
+        );
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].1.contains("was merged"), "{wakes:?}");
+
+        // The replacement now reads the merged PR and ends as a fresh watch
+        // would, without repeating the merge as news.
+        service.poll_once().await;
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+        assert_eq!(sink.wakes().len(), 1);
     }
 
     fn wiremock_repo(server: &wiremock::MockServer) -> ForgeRepoRef {
