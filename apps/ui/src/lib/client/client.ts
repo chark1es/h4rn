@@ -10,7 +10,13 @@ import type {
 } from "@/gen";
 
 import { H4rnRequestError, protoError } from "./errors";
-import { emitHarnessFrame, emitProxyFrame, emitScheduleFrame, emitUsageFrame } from "./frames";
+import {
+  emitHarnessFrame,
+  emitImportFrame,
+  emitProxyFrame,
+  emitScheduleFrame,
+  emitUsageFrame,
+} from "./frames";
 import type {
   ClientOptions,
   ConnectionSnapshot,
@@ -974,6 +980,13 @@ export class H4rnClient {
     // reconnecting view re-reads the list instead of replaying this.
     if (frame.kind === "schedule_event") {
       emitScheduleFrame(frame.event);
+      return;
+    }
+
+    // An import run's progress; a reconnecting client asks the daemon for the
+    // current run instead of replaying this.
+    if (frame.kind === "import_event") {
+      emitImportFrame(frame.event);
       return;
     }
 
