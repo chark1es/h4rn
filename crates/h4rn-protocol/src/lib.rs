@@ -70,9 +70,10 @@ pub use common::{
 pub use connect::*;
 pub use forge::*;
 pub use fs::{
-    DiffAgainst, FileEntry, FileEntryKind, FsChangeKind, FsCreateKind, FsDeleteResult, FsDiff,
-    FsFileContent, FsListing, FsOmitted, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,
-    FsWriteConflict, FsWriteResult, GitFileStatus,
+    DiffAgainst, FileEntry, FileEntryKind, FsBranchList, FsChangeKind, FsCreateKind,
+    FsDeleteResult, FsDiff, FsDiffCommit, FsDiffCommitList, FsDiffFile, FsDiffFiles, FsFileContent,
+    FsListing, FsOmitted, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile, FsWriteConflict,
+    FsWriteResult, GitFileStatus,
 };
 pub use git_actions::{
     GitChangeSet, GitCommitResult, GitOperation, GitPushResult, GitThreadStatus, MAX_GIT_PATHS,

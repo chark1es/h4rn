@@ -77,6 +77,51 @@ All notable changes to h4rn are recorded here. The format follows
   on an unexpected response) and a Test no longer blocks other requests on the same connection, and
   OpenAI-compatible requests send no `max_tokens` (OpenAI's own API gets
   `max_completion_tokens`).
+- **Review a branch or one commit, and send line comments to the agent.** The IDE diff pane's
+  source picker now offers Uncommitted (HEAD), the turn, Branch and Commits. Branch review compares
+  the working tree with the merge base of a base branch, so commits made on the base after the fork
+  stay out of the review; the base is the upstream's default branch, then `main`, then `master`,
+  and can be changed from the repository's branches. A remote `HEAD` that no longer resolves is
+  skipped rather than becoming a dead base. The file list carries git status, added and removed
+  line counts, renames and untracked files, and stops at 2,000 entries with a visible truncation
+  note; the daemon stops reading `git ls-files` at the first entry inside the workspace past that
+  cap and ends git, so a tree full of build output is not walked to the end (a workspace below the
+  repository root skips paths outside it, so it may read further down the listing). Untracked line
+  counts stop at a byte budget and say `no counts`, and an unreadable or binary new file is marked
+  instead of reading as an empty addition. Commits lists the newest 100 commits in the branch range
+  and shows one commit's files against its first parent (a root commit against the empty tree),
+  following a rename to the parent's old path and reading only the committed blobs, so a large
+  working copy does not hide a small commit. A shallow clone's boundary commit says its parent is
+  missing instead of pretending every file was added. Commit ids are validated before git sees
+  them; a tag or branch name is refused, while an annotated tag's object id is peeled to its
+  commit. Both wider lists re-read when entered and on Refresh, and the base-branch list loads for
+  the repository rather than the open file, so a slow one still fills the picker after the file
+  list and the diff have appeared. The daemon resolves the default base to a branch name and the
+  pane keeps it, so the default and that branch picked by name are one comparison. With no base,
+  the pane says why and **Compare with HEAD** switches to Uncommitted. Every file still shows the
+  existing binary and too-large states, with the file list and comment actions left usable.
+- **The diff pane follows the editor tab and stays on the file you pick.** Entering the diff shows
+  the active tab's file, and switching tabs follows the new one, but a file chosen inside the pane
+  — the phone Turn picker or a Branch or Commits row — stays until you choose another, switch
+  editor tabs, or switch the diff source. A reply that arrives after a newer pick is dropped, so a
+  slow Branch file list or an older diff answer never replaces what you chose; the base-branch
+  picker's own list belongs to the repository, so it still arrives after the diff. The picker shows
+  the new source while it loads. The path bar always names the file on screen, including a diff
+  whose tab was closed since the diff outlives its tab. Replies for a previous workspace are
+  dropped too, so switching threads never shows one project's diff in another.
+- **Line review comments go to the thread's composer as plain context.** Select a line or range in
+  any diff mode (click, Shift-click, or the keyboard) and write a comment. Each comment remembers
+  the exact diff it was written on — the turn's id, the commit's sha, the resolved base's name —
+  and the label printed above the diff is display text only. The daemon prints a short one (a
+  turn's trailing id characters, a commit's short sha, the base's name) for people to read; it may
+  repeat or change without moving a comment, because the full request is what matches. A branch
+  comparison is keyed on the base the daemon resolved, so the default base and that branch picked
+  by name keep the same comment inline. Pending comments sit under their lines while that scope is
+  open and are listed with their source when it is not, survive switching files and modes for the
+  thread (in page memory; a reload clears them), and can be edited or deleted. **Send to agent**
+  appends one quoted block per comment (path, side, line range, the quoted lines, the comment and
+  the diff source) to the composer draft; nothing is sent until the person presses Send. There is
+  no mock data behind any of it: every list and diff comes from git in the thread's workspace.
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and

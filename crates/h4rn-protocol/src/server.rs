@@ -240,6 +240,21 @@ pub enum ResponseBody {
         /// Turn change set.
         changes: crate::fs::FsTurnChanges,
     },
+    /// The files a branch or commit range changed.
+    FsDiffFiles {
+        /// File list.
+        files: crate::fs::FsDiffFiles,
+    },
+    /// The newest commits in the branch comparison.
+    FsDiffCommits {
+        /// Commit list.
+        commits: crate::fs::FsDiffCommitList,
+    },
+    /// Branch names a diff can be compared against.
+    FsBranches {
+        /// Branch list.
+        branches: crate::fs::FsBranchList,
+    },
     /// The skill registry and the per-harness install matrix.
     Skills {
         /// Inventory the Skills screen renders.
