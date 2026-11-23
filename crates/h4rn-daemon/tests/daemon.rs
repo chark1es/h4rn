@@ -3551,6 +3551,8 @@ async fn opening_a_pr_from_a_thread_links_it() {
             prompt: "first".into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
