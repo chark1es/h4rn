@@ -26,8 +26,9 @@ commit:
 A commit is refused, with the reason, when a rebase, merge or cherry-pick is in
 progress (that is named first, even though a rebase also leaves a detached
 `HEAD`), when the workspace has a detached `HEAD`, or when the index is empty.
-Git hooks run as usual: h4rn never passes `--no-verify`. A hook that fails stops
-the commit, and its last lines are shown in the panel.
+Hooks run for the real commit and the real push: h4rn never passes
+`--no-verify` to them. A hook that fails stops the commit, and its last lines are
+shown in the panel.
 
 A request that names `paths` commits only those paths: h4rn stages nothing else,
 uses `git commit --only`, and leaves work staged for other paths in the index. Its
@@ -72,23 +73,28 @@ the repository's default branch when git reports one; when it does not, the fiel
 is left empty and the panel asks you to name the target rather than guessing
 `main`. **Generate** fills the title and body and does nothing else.
 
-The daemon asks the remote which commit its branch points at, then pushes first
-when `<remote>/<branch>` is missing or does not name the local `HEAD`. The
-question is a dry-run push of the exact refspec and remote the real push will
-use, so a separate `pushurl` or an `insteadOf` rewrite cannot make the check ask
-a different repository, and it does not trust the local remote-tracking ref: a
-branch deleted on the forge leaves a stale `refs/remotes/<remote>/<branch>`
-until a prune, and the pull request would otherwise name a head branch that no
-longer exists. Then it asks the forge to open the request. On GitHub, Bitbucket
+The daemon asks the remote whether the push would update anything, then pushes
+first when `<remote>/<branch>` is missing or does not name the local `HEAD`. The
+question is a dry run of the exact refspec and remote the real push will use, so
+a separate `pushurl` or an `insteadOf` rewrite cannot make it ask a different
+repository. It does not trust the local remote-tracking ref: a branch deleted on
+the forge leaves a stale `refs/remotes/<remote>/<branch>` until a prune, and the
+pull request would otherwise name a head branch that no longer exists. It also
+names every destination, so a branch up to date on one remote but missing on
+another is still pushed. The dry run skips the pre-push hook (`--no-verify`), so
+a failing, slow or side-effecting hook cannot block or delay the open; the real
+push, when it happens, runs the hook as usual. Then it asks the forge to open the
+request. On GitHub, Bitbucket
 and Azure DevOps the draft flag travels in its own field; GitLab and Gitea have
 no such field on the create request and mark a draft with a `Draft:` or `WIP:`
 title prefix (a title that already carries one is sent as it is). The lookup,
 the push and the forge call share one 220-second budget — the lookup may use at
-most 30 seconds and the push at most 160, leaving the forge client's 30-second
-timeout — so the whole request answers within the dialog's 240-second wait. The
-dialog cannot submit twice. A PR opened this way is linked to its thread, so the
-header badge, the PR page and a watch all find it. Opening a request is never
-done silently from Generate.
+most 30 seconds and the push at most 160. The forge call gets whatever is left
+and includes its wait for a rate limit in that time: a wait the remaining budget
+cannot cover fails at once with "rate limited; try again in Ns" instead of
+outliving the dialog's 240-second wait. The dialog cannot submit twice. A PR
+opened this way is linked to its thread, so the header badge, the PR page and a
+watch all find it. Opening a request is never done silently from Generate.
 
 ## Generated messages
 

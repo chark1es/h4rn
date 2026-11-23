@@ -1635,6 +1635,29 @@ where
     ))
 }
 
+/// Runs git with a deadline and reports whether it succeeded, with its stdout
+/// and stderr either way.
+///
+/// A porcelain push prints the fate of every ref on stdout and still exits
+/// non-zero when one is rejected, so a caller that must read that record
+/// cannot use the helpers that throw stdout away on failure.
+pub fn run_combined_with_timeout<I, S>(
+    dir: &Path,
+    args: I,
+    limit: Duration,
+) -> Result<(bool, String, String), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let (status, stdout, stderr) = run_raw(dir, args, limit)?;
+    Ok((
+        status.success(),
+        String::from_utf8_lossy(&stdout).trim().to_owned(),
+        String::from_utf8_lossy(&stderr).trim().to_owned(),
+    ))
+}
+
 /// `git status --porcelain` in `worktree`, as clearing's dirty check runs it.
 ///
 /// Untracked files always count, whatever the user's `status.showUntrackedFiles`

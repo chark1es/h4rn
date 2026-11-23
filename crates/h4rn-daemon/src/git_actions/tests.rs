@@ -111,6 +111,84 @@ fn bare_head(path: &Path, name: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// Advances a bare remote from another clone, so a local branch is behind it.
+/// Returns the remote's new head.
+fn advance_remote(bare: &Bare) -> String {
+    let clone = tempfile::tempdir().expect("clone dir");
+    let path = clone.path().join("clone");
+    let output = Command::new("git")
+        .args(["clone"])
+        .arg(bare.path())
+        .arg(&path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("clone");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["config", "user.name", "Someone Else"]);
+    git(&["config", "user.email", "else@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(path.join("remote.txt"), "from the other clone\n").expect("write");
+    git(&["add", "remote.txt"]);
+    git(&["commit", "-m", "Remote change"]);
+    git(&["push", "origin", "main"]);
+    git(&["rev-parse", "HEAD"])
+}
+
+/// Writes an executable hook in a repository.
+fn write_hook(repo: &Path, name: &str, body: &str) {
+    let hooks = repo.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).expect("hooks dir");
+    let hook = hooks.join(name);
+    std::fs::write(&hook, body).expect("hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+/// A throwaway HTTP server on the IPv6 loopback that answers every request
+/// with 403, so git echoes the whole push URL in its failure.
+fn ipv6_forbidden_server() -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("[::1]:0").expect("bind [::1]");
+    let address = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        // git may open one connection for the ref advertisement and another
+        // for the push; answer each until the test process ends.
+        for stream in listener.incoming().take(8) {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            let _ = stream.flush();
+        }
+    });
+    address
+}
+
 #[test]
 fn status_counts_staged_unstaged_and_untracked_paths() {
     let repo = Repo::new();
@@ -970,7 +1048,8 @@ async fn a_credential_in_the_push_url_never_reaches_the_client() {
 /// The lookup must ask the repository the push will write. `get-url --push`
 /// expands `insteadOf` once, and passing that result to `ls-remote` can expand
 /// a second rule and query another repository. A dry-run push resolves the
-/// push URL exactly once, so it sees the real target.
+/// push URL exactly once, so it sees the real target; the decoy stays on its
+/// older commit, so a push that lands there is caught.
 #[tokio::test]
 async fn the_lookup_asks_the_actual_push_target() {
     let repo = Repo::new();
@@ -981,18 +1060,21 @@ async fn the_lookup_asks_the_actual_push_target() {
     repo.write("feature.txt", "first\n");
     repo.git(&["add", "feature.txt"]);
     repo.git(&["commit", "-m", "First feature"]);
-    // The real target already has the first commit; the decoy will get the
-    // second one only, and the local tracking ref will claim the second.
+    let first = repo.head();
+    // Both repositories hold the first commit; the local branch then moves to
+    // a second one, so the decoy is genuinely behind.
     repo.git(&[
         "push",
         real.path().to_str().unwrap(),
         "refs/heads/feature/widget:refs/heads/feature/widget",
     ]);
+    repo.git(&["push", "origin", "feature/widget"]);
+    assert_eq!(bare_head(decoy.path(), "feature/widget"), first);
     repo.write("feature.txt", "second\n");
     repo.git(&["add", "feature.txt"]);
     repo.git(&["commit", "-m", "Second feature"]);
     let head = repo.head();
-    repo.git(&["push", "origin", "feature/widget"]);
+    // The local tracking ref claims the pushed head, as a fetch-less push does.
     repo.git(&["update-ref", "refs/remotes/origin/feature/widget", &head]);
 
     // The push URL is one rewrite away from the real target, and the expanded
@@ -1023,8 +1105,8 @@ async fn the_lookup_asks_the_actual_push_target() {
     );
     assert_eq!(
         bare_head(decoy.path(), "feature/widget"),
-        head,
-        "the decoy is untouched here"
+        first,
+        "the decoy stayed on its older commit"
     );
 }
 
@@ -1069,4 +1151,238 @@ fn a_plain_credential_in_a_url_is_redacted() {
     assert!(!shown.contains(&credential), "{shown}");
     assert!(!shown.contains("token="), "{shown}");
     assert!(shown.contains("[redacted]@"), "{shown}");
+}
+
+/// A real 403 from an IPv6 push URL is a credential problem, and neither the
+/// userinfo nor the query token reaches the client.
+#[tokio::test]
+async fn an_ipv6_push_url_never_leaks_its_credential() {
+    let address = ipv6_forbidden_server();
+    // Built at runtime so no credential-shaped literal lives in the tree.
+    let credential = format!("{}{}", "fake", "credential-9a4d");
+    let repo = Repo::new();
+    let url = format!(
+        "http://git:{credential}@[{ip}]:{port}/repo.git?access_token={credential}",
+        ip = address.ip(),
+        port = address.port()
+    );
+    repo.git(&["remote", "add", "origin", &url]);
+
+    let error = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect_err("403");
+    assert!(
+        matches!(error, GitActionError::Unauthorized(_)),
+        "{error:?}"
+    );
+    let shown = error.to_string();
+    assert!(
+        !shown.contains(&credential),
+        "the credential is removed: {shown}"
+    );
+    assert!(
+        !shown.contains("access_token"),
+        "the query is removed: {shown}"
+    );
+    assert!(shown.contains("::1"), "the host is still named: {shown}");
+}
+
+/// Every host shape a remote URL can use gives up its userinfo, query and
+/// fragment, while the host and port stay readable.
+#[test]
+fn every_url_shape_loses_its_credentials() {
+    let credential = format!("{}{}", "plain", "secret-7c1f");
+    let ipv4 = format!(
+        "fatal: unable to access 'https://user:{credential}@192.0.2.10:8443/acme/widget.git?token={credential}'"
+    );
+    let ipv6 = format!(
+        "fatal: unable to access 'http://[2001:db8::7]:8080/acme/widget.git?token={credential}#part-{credential}'"
+    );
+    let ipv6_userinfo = format!(
+        "fatal: unable to access 'https://user:{credential}@[::1]:1234/acme/widget.git?access_token={credential}'"
+    );
+    let hostname = format!(
+        "fatal: unable to access 'https://git.example.invalid/acme/widget.git?private_token={credential}'"
+    );
+
+    let cases = [
+        (ipv4, "192.0.2.10:8443", true),
+        (ipv6.clone(), "[2001:db8::7]:8080", false),
+        (ipv6_userinfo, "[::1]:1234", true),
+        (hostname, "git.example.invalid", false),
+    ];
+    for (text, host, userinfo) in cases {
+        let redacted = redact_url_credentials(&text);
+        assert!(!redacted.contains(&credential), "{redacted}");
+        assert!(!redacted.contains("token="), "{redacted}");
+        assert!(
+            redacted.contains(host),
+            "the host {host} is kept: {redacted}"
+        );
+        assert_eq!(
+            redacted.contains("[redacted]@"),
+            userinfo,
+            "userinfo marker: {redacted}"
+        );
+        assert!(redacted.contains("?[redacted]"), "{redacted}");
+    }
+
+    let fragment = redact_url_credentials(&ipv6);
+    assert!(fragment.contains("#[redacted]"), "{fragment}");
+}
+
+/// Text the URL parser cannot read still loses everything after the userinfo
+/// and from the first query marker; a fallback must never be a leak.
+#[test]
+fn an_unparseable_url_still_loses_its_credential() {
+    let credential = format!("{}{}", "plain", "secret-3e58");
+    let text = format!(
+        "fatal: cannot access https://user:{credential}@host:notaport/acme/widget.git?token={credential}"
+    );
+    let redacted = redact_url_credentials(&text);
+    assert!(!redacted.contains(&credential), "{redacted}");
+    assert!(!redacted.contains("token="), "{redacted}");
+    assert!(redacted.contains("[redacted]@"), "{redacted}");
+}
+
+/// The dry-run check before a pull request skips the pre-push hook. A hook
+/// that fails, or is slow, must not stop an already-published branch from
+/// opening its request.
+#[tokio::test]
+async fn a_failing_pre_push_hook_does_not_stop_an_up_to_date_pull_request() {
+    let (repo, _bare) = repo_with_remote();
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect("first push")
+    );
+    write_hook(
+        repo.path(),
+        "pre-push",
+        "#!/bin/sh\necho 'the hook says no' >&2\nexit 1\n",
+    );
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect("the check does not run hooks");
+    assert!(!pushed, "the branch is already published");
+}
+
+#[tokio::test]
+async fn a_slow_pre_push_hook_cannot_delay_an_up_to_date_pull_request() {
+    let (repo, _bare) = repo_with_remote();
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect("first push")
+    );
+    write_hook(repo.path(), "pre-push", "#!/bin/sh\nsleep 8\n");
+
+    let started = Instant::now();
+    let pushed = push_for_pull_request_until(
+        repo.path(),
+        "origin",
+        "main",
+        Deadline::after(Duration::from_secs(2)),
+    )
+    .await
+    .expect("the check does not run hooks");
+    assert!(!pushed, "the branch is already published");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the hook did not run: {:?}",
+        started.elapsed()
+    );
+}
+
+/// A push writes every configured `pushurl`. One destination missing the
+/// branch means the push must run, even when another already has it.
+#[tokio::test]
+async fn a_branch_missing_at_any_push_destination_is_pushed() {
+    let repo = Repo::new();
+    let first = Bare::new();
+    let second = Bare::new();
+    let first_path = first.path().to_str().unwrap();
+    let second_path = second.path().to_str().unwrap();
+    repo.git(&["remote", "add", "origin", first_path]);
+    repo.git(&["config", "--add", "remote.origin.pushurl", first_path]);
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect("first push")
+    );
+
+    // A second destination appears after the branch was published to the first.
+    repo.git(&["config", "--add", "remote.origin.pushurl", second_path]);
+    let pushed = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect("push to the new destination");
+    assert!(pushed, "one destination lacks the branch, so the push runs");
+    assert_eq!(bare_head(second.path(), "main"), repo.head());
+    assert_eq!(bare_head(first.path(), "main"), repo.head());
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect("no-op");
+    assert!(!pushed, "every destination is up to date");
+}
+
+/// A non-fast-forward rejection is still named when `advice.pushUpdateRejected`
+/// is off: git then prints the record on stdout, not stderr.
+#[tokio::test]
+async fn a_rejected_push_is_named_even_when_git_advice_is_off() {
+    let (repo, bare) = repo_with_remote();
+    push_blocking(repo.path(), true).expect("first push");
+    let remote_head = advance_remote(&bare);
+
+    repo.write("local.txt", "local\n");
+    repo.git(&["add", "local.txt"]);
+    repo.git(&["commit", "-m", "Local change"]);
+    repo.git(&["config", "advice.pushUpdateRejected", "false"]);
+
+    let error = push_blocking(repo.path(), false).expect_err("rejected");
+    assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+    assert!(error.to_string().contains("never force-pushes"), "{error}");
+    assert_eq!(
+        bare_head(bare.path(), "main"),
+        remote_head,
+        "the remote was not moved"
+    );
+
+    let error = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect_err("the lookup is rejected too");
+    assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+}
+
+/// A repository with no commits has no `HEAD`; a path-limited message still
+/// describes what the first commit would record.
+#[test]
+fn a_message_for_named_paths_works_before_the_first_commit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workspace = dir.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "h4rn test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    std::fs::write(workspace.join("first.txt"), "hello\n").expect("write");
+    git(&["add", "first.txt"]);
+
+    let input =
+        commit_input_blocking(workspace, false, Some(&["first.txt".to_owned()])).expect("input");
+    assert!(input.diff.contains("+hello"), "{}", input.diff);
+    assert!(input.recent_subjects.is_empty());
 }

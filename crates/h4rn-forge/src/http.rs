@@ -31,6 +31,9 @@ use crate::error::{ForgeError, Result};
 /// Default local request budget per account, requests per minute.
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
 
+/// Default time one request may take, including a rate-limit wait.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How long a cached ETag response is trusted before an unconditional GET.
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -86,7 +89,7 @@ impl ForgeHttp {
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("h4rn-forge/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
             .map_err(|error| ForgeError::Network(error.to_string()))?;
         let auth = match auth {
@@ -111,7 +114,7 @@ impl ForgeHttp {
             secrets,
             accept: accept.to_owned(),
             cache: Mutex::new(HashMap::new()),
-            limiter: RateLimiter::new(requests_per_minute.max(1)),
+            limiter: RateLimiter::new(forge, requests_per_minute.max(1)),
         })
     }
 
@@ -133,7 +136,34 @@ impl ForgeHttp {
         body: Option<&Value>,
         conditional: bool,
     ) -> Result<HttpResponse> {
-        self.limiter.acquire().await?;
+        self.request_within(method, url, body, conditional, DEFAULT_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Performs a request that must finish inside `budget`.
+    ///
+    /// The budget covers the rate-limit wait as well as the transfer, so a
+    /// caller with a shared deadline (opening a pull request) cannot have a
+    /// wait sleep past it. A wait the budget cannot cover fails at once with
+    /// [`ForgeError::RateLimited`] naming when the forge resets, rather than
+    /// sleeping into the transport timeout.
+    pub async fn request_within(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        conditional: bool,
+        budget: Duration,
+    ) -> Result<HttpResponse> {
+        let started = Instant::now();
+        self.limiter.acquire_within(budget).await?;
+        let left = budget.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Err(ForgeError::Network(
+                "the forge request had no time left in its budget".into(),
+            ));
+        }
+        let timeout = left.min(DEFAULT_REQUEST_TIMEOUT);
 
         let mut request = self.client.request(method.clone(), url).header(
             reqwest::header::ACCEPT,
@@ -159,6 +189,7 @@ impl ForgeHttp {
         }
 
         let response = request
+            .timeout(timeout)
             .send()
             .await
             .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
@@ -250,6 +281,19 @@ impl ForgeHttp {
     /// POSTs JSON and maps the response.
     pub async fn post_json(&self, url: &str, body: &Value) -> Result<Value> {
         let response = self.request(Method::POST, url, Some(body), false).await?;
+        self.json(response)
+    }
+
+    /// POSTs JSON inside `budget`, for a caller with a shared deadline.
+    pub async fn post_json_within(
+        &self,
+        url: &str,
+        body: &Value,
+        budget: Duration,
+    ) -> Result<Value> {
+        let response = self
+            .request_within(Method::POST, url, Some(body), false, budget)
+            .await?;
         self.json(response)
     }
 
@@ -681,6 +725,7 @@ fn json_escaped(secret: &str) -> String {
 
 /// A local token bucket plus the forge's documented remaining quota.
 struct RateLimiter {
+    forge: ForgeKind,
     budget: Mutex<Budget>,
     capacity: f64,
     refill_per_second: f64,
@@ -694,9 +739,10 @@ struct Budget {
 }
 
 impl RateLimiter {
-    fn new(requests_per_minute: u32) -> Self {
+    fn new(forge: ForgeKind, requests_per_minute: u32) -> Self {
         let capacity = f64::from(requests_per_minute);
         Self {
+            forge,
             budget: Mutex::new(Budget {
                 tokens: capacity,
                 last_refill: Instant::now(),
@@ -708,8 +754,16 @@ impl RateLimiter {
         }
     }
 
-    async fn acquire(&self) -> Result<()> {
+    /// Takes one request's token, waiting no longer than `budget` in total.
+    ///
+    /// A documented reset further away than the budget is not slept through:
+    /// the request fails at once with [`ForgeError::RateLimited`] and the
+    /// seconds until the reset, so the caller's deadline is kept and the person
+    /// is told when to try again.
+    async fn acquire_within(&self, budget: Duration) -> Result<()> {
+        let started = Instant::now();
         loop {
+            let left = budget.saturating_sub(started.elapsed());
             let wait = {
                 let Ok(mut budget) = self.budget.lock() else {
                     return Err(ForgeError::Network("rate limiter poisoned".into()));
@@ -727,16 +781,7 @@ impl RateLimiter {
                             budget.reset_at = None;
                         }
                         Some(reset) => {
-                            let wait = reset.saturating_duration_since(Instant::now());
-                            if wait > Duration::from_secs(60) {
-                                return Err(ForgeError::RateLimited {
-                                    forge: ForgeKind::GitHub,
-                                    retry_after_secs: Some(wait.as_secs()),
-                                    retry_at: None,
-                                    message: "the request budget is exhausted".into(),
-                                });
-                            }
-                            retry_wait = Some(wait);
+                            retry_wait = Some(reset.saturating_duration_since(Instant::now()));
                         }
                         None => {}
                     }
@@ -755,6 +800,14 @@ impl RateLimiter {
             };
 
             match wait {
+                Some(wait) if wait >= left => {
+                    return Err(ForgeError::RateLimited {
+                        forge: self.forge,
+                        retry_after_secs: Some(wait.as_secs().max(1)),
+                        retry_at: None,
+                        message: "the request budget cannot cover the rate-limit wait".into(),
+                    });
+                }
                 Some(wait) if !wait.is_zero() => tokio::time::sleep(wait).await,
                 _ => tokio::task::yield_now().await,
             }
@@ -1174,5 +1227,59 @@ mod tests {
             "a credential that is not this account's is still hidden: {message}"
         );
         assert!(!message.contains(&outsider), "{message}");
+    }
+
+    /// A rate-limit reset further away than the caller's budget is refused at
+    /// once, naming the wait, instead of sleeping past the deadline or into the
+    /// transport timeout.
+    #[tokio::test]
+    async fn a_rate_limit_wait_longer_than_the_budget_fails_at_once() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(429).append_header("retry-after", "10"))
+            .mount(&server)
+            .await;
+        let client = ForgeHttp::new(
+            ForgeKind::GitHub,
+            &server.uri(),
+            auth_header("authorization", "Bearer test-token-value"),
+            "application/json",
+            120,
+        )
+        .unwrap();
+        let url = format!("{}/repos/acme/widget/pulls", server.uri());
+
+        // The first answer is the 429 itself and records the reset in the
+        // limiter, so the next call knows the wait before it starts.
+        let error = client.post_json(&url, &Value::Null).await.expect_err("429");
+        assert!(matches!(error, ForgeError::RateLimited { .. }), "{error:?}");
+
+        let started = Instant::now();
+        let error = client
+            .post_json_within(&url, &Value::Null, Duration::from_secs(1))
+            .await
+            .expect_err("the wait does not fit the budget");
+        assert!(
+            matches!(
+                error,
+                ForgeError::RateLimited {
+                    retry_after_secs: Some(seconds),
+                    ..
+                } if seconds >= 9
+            ),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("rate limited"), "{message}");
+        assert!(message.contains("try again in"), "{message}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the request slept instead of failing fast: {:?}",
+            started.elapsed()
+        );
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1, "the second call never reached the forge");
     }
 }

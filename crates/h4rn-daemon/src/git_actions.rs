@@ -12,7 +12,10 @@
 //!   `-m`, and paths are validated as workspace-relative, then passed after
 //!   `--` with literal pathspec parsing, so a name like `--amend` or `:(top)`
 //!   is only ever a path;
-//! - hooks run (`--no-verify` is never passed), and a hook's failure is shown;
+//! - the real commit and push run hooks (`--no-verify` is never passed to
+//!   them), and a hook's failure is shown; the read-only check that runs
+//!   before opening a pull request skips hooks, so it has no side effects and
+//!   cannot block or slow the open;
 //! - a push is never forced.
 
 use std::path::{Component, Path, PathBuf};
@@ -39,7 +42,8 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(180);
 pub const OPEN_PR_BUDGET: Duration = Duration::from_secs(220);
 /// The pre-pull-request lookup may take at most this much of that budget.
 const PR_LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
-/// The forge client's own request timeout, reserved inside the budget.
+/// Time reserved for the forge request inside the budget, so a slow push
+/// cannot leave the forge call with nothing.
 const PR_FORGE_RESERVE: Duration = Duration::from_secs(30);
 /// Deadline for the reads that build model input.
 const INPUT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -57,6 +61,9 @@ const DIFF_STAT_MAX_CHARS: usize = 4_000;
 const RECENT_SUBJECTS: usize = 20;
 /// Longest recent subject kept.
 const SUBJECT_MAX_CHARS: usize = 120;
+/// The empty tree's object id: the commit a diff starts from in a repository
+/// that has no commits yet.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// One deadline shared by the lookup, the push and the forge request that
 /// open a pull request, so no step can push the whole request past the
@@ -243,10 +250,11 @@ pub async fn pull_request_input(
 
 /// Pushes a branch before a pull request when the remote needs it.
 ///
-/// Nothing is pushed when the remote's own branch already points at `HEAD`.
-/// The remote is asked directly, with the same dry-run push the real push
-/// would run, so a stale remote-tracking ref cannot skip a needed push or hide
-/// one that moved. A missing branch is created on `remote`.
+/// Nothing is pushed when every destination's branch already points at
+/// `HEAD`. The remote is asked directly, with a dry run of the exact push the
+/// real push will run (same remote and refspec, hooks skipped), so a stale
+/// remote-tracking ref cannot skip a needed push or hide one that moved. A
+/// missing branch is created on `remote`.
 pub async fn push_for_pull_request(
     workspace: &Path,
     remote: &str,
@@ -668,17 +676,19 @@ fn remote_branch_head(workspace: &Path, remote: &str, branch: &str) -> Option<St
     .filter(|value| !value.is_empty())
 }
 
-/// Whether the remote's own branch already points at `HEAD`.
+/// Whether every push destination already has this branch at `HEAD`.
 ///
 /// `refs/remotes/<remote>/<branch>` is only what the last fetch saw. A branch
 /// deleted on the forge keeps that ref until `fetch --prune`, so a decision
 /// made from it can skip the push a pull request needs; a ref that a fetch has
 /// not advanced can hide a remote that moved. A dry-run push asks the exact
-/// target the real push will use — the named remote, its `pushurl` and any
+/// targets the real push will use — the named remote, every `pushurl` and any
 /// `insteadOf` rewrite resolved once, the same way `git push` resolves them —
-/// so it cannot query a different repository than the one about to be written.
-/// It also answers through [`classify_push_error`], so a rejected credential is
-/// reported as one instead of as raw git output.
+/// so it cannot query a different repository than the ones about to be
+/// written. Every destination must report the branch as up to date; one
+/// `[new branch]` among several is still a push the pull request needs.
+/// It also answers through [`classify_push_failure`], so a rejected credential
+/// or branch is reported as one instead of as raw git output.
 fn remote_is_up_to_date(
     workspace: &Path,
     remote: &str,
@@ -687,22 +697,40 @@ fn remote_is_up_to_date(
 ) -> Result<bool, GitActionError> {
     let args = dry_run_push_args(branch, remote);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = match git::run_with_timeout(workspace, &args, limit) {
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let (success, stdout, stderr) = match git::run_combined_with_timeout(workspace, &args, limit) {
         Ok(output) => output,
         Err(error) => return Err(classify_push_error(&error)),
     };
-    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    // Porcelain prints `<flag>\t<from>:<to>\t<summary>`; `=` means up to date.
-    Ok(output.lines().any(|line| {
-        let mut fields = line.split('\t');
-        fields.next() == Some("=") && fields.next() == Some(refspec.as_str())
-    }))
+    let flags = push_record_flags(&stdout, &refspec);
+    if !success {
+        return Err(classify_push_failure(&stdout, &stderr));
+    }
+    Ok(!flags.is_empty() && flags.iter().all(|flag| *flag == "="))
+}
+
+/// The porcelain flag of every record for one refspec in a push's stdout.
+///
+/// `git push --porcelain` prints one `<flag>\t<from>:<to>\t<summary>` record
+/// per ref and destination, so two `pushurl`s report the branch twice. An
+/// empty answer means git said nothing about the branch.
+fn push_record_flags<'a>(stdout: &'a str, refspec: &str) -> Vec<&'a str> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let flag = fields.next()?;
+            (fields.next()? == refspec).then_some(flag)
+        })
+        .collect()
 }
 
 /// The exact push h4rn runs: one branch, named remote, never forced.
 ///
 /// The refspec has no `+`, and it is on the command line, so neither
-/// `push.default` nor `remote.<name>.push` can widen or force it.
+/// `push.default` nor `remote.<name>.push` can widen or force it. Porcelain
+/// output is requested so a rejection's record is read from the run itself,
+/// even when git's advice is turned off.
 fn push_args(branch: &str, remote: &str, set_upstream: bool) -> Vec<String> {
     let mut args = push_command_args(branch, remote);
     if set_upstream {
@@ -712,19 +740,25 @@ fn push_args(branch: &str, remote: &str, set_upstream: bool) -> Vec<String> {
 }
 
 /// The same push as a dry run, in porcelain form, for the pre-PR decision.
+///
+/// `--no-verify` belongs to this probe only: a dry run has no business running
+/// the pre-push hook, which can fail, be slow, or change something. The real
+/// push still runs it.
 fn dry_run_push_args(branch: &str, remote: &str) -> Vec<String> {
     let mut args = push_command_args(branch, remote);
     args.insert(3, "--dry-run".to_owned());
-    args.insert(4, "--porcelain".to_owned());
+    args.insert(4, "--no-verify".to_owned());
     args
 }
 
-/// The push every caller shares: config hardening, the remote and the refspec.
+/// The push every caller shares: config hardening, porcelain, the remote and
+/// the refspec.
 fn push_command_args(branch: &str, remote: &str) -> Vec<String> {
     vec![
         "-c".to_owned(),
         "push.default=nothing".to_owned(),
         "push".to_owned(),
+        "--porcelain".to_owned(),
         "--".to_owned(),
         remote.to_owned(),
         format!("refs/heads/{branch}:refs/heads/{branch}"),
@@ -765,13 +799,33 @@ fn run_push(workspace: &Path, args: &[String]) -> Result<(), GitActionError> {
 /// [`run_push`] with the time that step is allowed inside a shared budget.
 fn run_push_with(workspace: &Path, args: &[String], limit: Duration) -> Result<(), GitActionError> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match git::run_with_timeout(workspace, &args, limit) {
-        Ok(_) => Ok(()),
+    match git::run_combined_with_timeout(workspace, &args, limit) {
+        Ok((true, _stdout, _stderr)) => Ok(()),
+        Ok((false, stdout, stderr)) => Err(classify_push_failure(&stdout, &stderr)),
         Err(error) => Err(classify_push_error(&error)),
     }
 }
 
-/// Turns git's push stderr into the class the person needs to act on.
+/// Classifies a push or dry-run push from both of its streams.
+///
+/// A porcelain push prints each ref's fate on stdout, and exits non-zero when
+/// one is rejected. With `advice.pushUpdateRejected=false` stderr then carries
+/// only "failed to push some refs", so a rejection is invisible without the
+/// stdout record. The two streams are joined for the decision and for the
+/// detail, with stderr last because that is where the human-facing error is.
+fn classify_push_failure(stdout: &str, stderr: &str) -> GitActionError {
+    let mut combined = String::with_capacity(stdout.len() + stderr.len() + 1);
+    combined.push_str(stdout.trim());
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(stderr.trim());
+    }
+    classify_push_error(&combined)
+}
+
+/// Turns git's push output into the class the person needs to act on.
 ///
 /// The text is redacted first: git can echo a credential-shaped URL back, both
 /// a token in the URL and the userinfo or query that carried it, and an error
@@ -819,37 +873,119 @@ fn classify_push_error(error: &str) -> GitActionError {
 /// Git echoes a failing URL whole, and a push URL can carry a credential in
 /// its userinfo (`user:token@host`) or in its query (`?access_token=…`). The
 /// token shapes [`h4rn_forge::redact`] knows are covered there; this covers
-/// credentials with no recognisable shape by dropping the userinfo and the
-/// whole query, which never carries anything the message needs.
+/// credentials with no recognisable shape by dropping the userinfo, the query
+/// and the fragment, which never carry anything the message needs.
+///
+/// The host is kept, because it is what tells the person which remote failed,
+/// and it may be an IPv4 address, an IPv6 literal in brackets, a hostname, or
+/// any of those with a port. A real URL parser decides the shape; text it
+/// cannot parse falls back to dropping everything after the userinfo and from
+/// the first `?` or `#`, so an unparsed URL never keeps a token.
 fn redact_url_credentials(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(index) = rest.find("://") {
-        let scheme_end = index + 3;
-        output.push_str(&rest[..scheme_end]);
-        let after = &rest[scheme_end..];
-        let end = after
-            .find(|ch: char| ch.is_whitespace() || matches!(ch, '\'' | '"' | ')' | ']' | '}' | '>'))
-            .unwrap_or(after.len());
-        output.push_str(&redact_one_url(&after[..end]));
-        rest = &after[end..];
+        // The scheme starts at the run of scheme characters before `://`;
+        // everything earlier in the string is prose.
+        let scheme_start = rest[..index]
+            .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')))
+            .map_or(0, |start| start + 1);
+        output.push_str(&rest[..scheme_start]);
+        let after = &rest[scheme_start..];
+        let end = after.find(ends_url).unwrap_or(after.len());
+        let (candidate, trailing) = split_trailing_prose(&after[..end]);
+        output.push_str(&redact_one_url(candidate));
+        rest = &after[end - trailing.len()..];
     }
     output.push_str(rest);
     output
 }
 
-/// One URL without its userinfo and query.
+/// Characters that always end a URL in a message, even inside one.
+fn ends_url(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\'' | '"' | '<' | '>' | '`')
+}
+
+/// Splits sentence punctuation off the end of a URL.
+///
+/// A URL echoed in prose can be followed by `)`, `,` or a full stop. A closing
+/// `]` is kept when the URL opens an IPv6 literal with `[`, because it is part
+/// of the host there.
+fn split_trailing_prose(candidate: &str) -> (&str, &str) {
+    let mut end = candidate.len();
+    while let Some((index, ch)) = candidate[..end].char_indices().next_back() {
+        let prose = match ch {
+            ')' | ',' | ';' | ':' | '.' | '}' | '!' | '?' => true,
+            ']' => !candidate[..end].contains('['),
+            _ => false,
+        };
+        if !prose {
+            break;
+        }
+        end = index;
+    }
+    candidate.split_at(end)
+}
+
+/// One URL without its userinfo, query and fragment.
 fn redact_one_url(url: &str) -> String {
-    let authority_end = url.find(['/', '?', '#']).unwrap_or(url.len());
-    let (prefix, rest) = match url[..authority_end].rfind('@') {
-        Some(at) => ("[redacted]@", &url[at + 1..]),
-        None => ("", url),
+    match url::Url::parse(url) {
+        Ok(parsed) => redact_parsed_url(&parsed),
+        Err(_) => redact_url_fallback(url),
+    }
+}
+
+/// A parsed URL rebuilt from the parts that can be shown: scheme, host, port
+/// and path; the userinfo, query and fragment become markers.
+fn redact_parsed_url(parsed: &url::Url) -> String {
+    let mut output = String::with_capacity(parsed.as_str().len());
+    output.push_str(parsed.scheme());
+    output.push_str("://");
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        output.push_str("[redacted]@");
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv6(address)) => {
+            output.push('[');
+            output.push_str(&address.to_string());
+            output.push(']');
+        }
+        Some(url::Host::Ipv4(address)) => output.push_str(&address.to_string()),
+        Some(url::Host::Domain(domain)) => output.push_str(domain),
+        None => {}
+    }
+    if let Some(port) = parsed.port() {
+        output.push(':');
+        output.push_str(&port.to_string());
+    }
+    output.push_str(parsed.path());
+    if parsed.query().is_some() {
+        output.push_str("?[redacted]");
+    }
+    if parsed.fragment().is_some() {
+        output.push_str("#[redacted]");
+    }
+    output
+}
+
+/// The most this can do without a parser: drop the userinfo and everything
+/// from the first `?` or `#`, which is where a query token lives.
+fn redact_url_fallback(url: &str) -> String {
+    let Some(scheme_end) = url.find("://").map(|index| index + 3) else {
+        return url.to_owned();
     };
-    let rest = match rest.find('?') {
-        Some(query) => format!("{}?[redacted]", &rest[..query]),
+    let (scheme, after) = url.split_at(scheme_end);
+    let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let (authority, rest) = after.split_at(authority_end);
+    let authority = match authority.rfind('@') {
+        Some(at) => format!("[redacted]@{}", &authority[at + 1..]),
+        None => authority.to_owned(),
+    };
+    let rest = match rest.find(['?', '#']) {
+        Some(marker) => format!("{}?[redacted]", &rest[..marker]),
         None => rest.to_owned(),
     };
-    format!("{prefix}{rest}")
+    format!("{scheme}{authority}{rest}")
 }
 
 /// Pushes a branch before a PR, blocking; returns whether it pushed.
@@ -1006,6 +1142,21 @@ fn validate_path(workspace: &Path, path: &str) -> Result<String, GitActionError>
     Ok(path.to_owned())
 }
 
+/// The revision a working-tree diff starts from.
+fn diff_base(workspace: &Path) -> &'static str {
+    if git_opt(
+        workspace,
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        STATUS_TIMEOUT,
+    )
+    .is_some()
+    {
+        "HEAD"
+    } else {
+        EMPTY_TREE
+    }
+}
+
 /// Builds the commit-message input, blocking.
 fn commit_input_blocking(
     workspace: &Path,
@@ -1018,8 +1169,10 @@ fn commit_input_blocking(
     let mut args = vec!["--literal-pathspecs", "diff"];
     // A named path is committed with `--only`, which records its working-tree
     // content whether or not it was staged. Describe that, not just the index.
+    // A repository with no commits has no `HEAD` to compare with; the empty
+    // tree is the same baseline git uses for a first commit.
     if include_unstaged || paths.is_some() {
-        args.push("HEAD");
+        args.push(diff_base(workspace));
     } else {
         args.push("--cached");
     }
