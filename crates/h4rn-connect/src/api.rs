@@ -2152,6 +2152,48 @@ async fn guest_proxy(
         state.config.rate_limits.per_ip_per_minute,
         Duration::from_secs(60),
     )?;
+    let request_id = Uuid::now_v7().to_string();
+    // Any failure after the waiter is registered must forget it, or a request
+    // id would keep its oneshot (and a chunked body) forever.
+    let outcome = guest_proxy_exchange(
+        &state,
+        machine_id,
+        token,
+        rest,
+        method,
+        uri,
+        headers,
+        body,
+        &request_id,
+    )
+    .await;
+    discard_failed_exchange(&state.relay, &request_id, outcome).await
+}
+
+/// Forgets a guest waiter when its exchange failed, and passes the result on.
+async fn discard_failed_exchange<T>(
+    relay: &crate::relay::RelayHub,
+    request_id: &str,
+    outcome: Result<T>,
+) -> Result<T> {
+    if outcome.is_err() {
+        relay.forget_guest(request_id).await;
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn guest_proxy_exchange(
+    state: &AppState,
+    machine_id: String,
+    token: String,
+    rest: String,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: axum::body::Body,
+    request_id: &str,
+) -> Result<Response> {
     let machine_id = Uuid::parse_str(&machine_id)
         .map_err(|_| AppError::bad_request("machine_invalid", "machine_id is not a UUID"))?;
     if token.is_empty()
@@ -2201,10 +2243,9 @@ async fn guest_proxy(
         path.push_str(query);
     }
     let public_prefix = format!("/guest/{machine_id}/{token}");
-    let request_id = Uuid::now_v7().to_string();
     let chunked = method == axum::http::Method::POST;
     let request = GuestHttpRequest {
-        request_id: request_id.clone(),
+        request_id: request_id.to_owned(),
         method: method.as_str().to_owned(),
         path,
         public_prefix: Some(public_prefix.clone()),
@@ -2214,7 +2255,7 @@ async fn guest_proxy(
     };
     let payload = serde_json::to_vec(&request)
         .map_err(|_| AppError::internal("serialise the guest request"))?;
-    let waiter = state.relay.expect_guest(&request_id, daemon).await;
+    let waiter = state.relay.expect_guest(request_id, daemon).await;
     let frame = RelayFrame {
         conn_id: format!("guest-{request_id}"),
         kind: RelayFrameKind::GuestHttp,
@@ -2230,27 +2271,25 @@ async fn guest_proxy(
         .await?;
 
     if chunked {
-        stream_guest_body(&state, daemon, &request_id, body).await?;
+        stream_guest_body(state, daemon, request_id, body).await?;
     }
 
     let answer = match tokio::time::timeout(Duration::from_secs(120), waiter).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(_)) => {
-            state.relay.forget_guest(&request_id).await;
             return Err(AppError::unavailable(
                 "guest_closed",
                 "the machine stopped before answering",
             ));
         }
         Err(_) => {
-            state.relay.forget_guest(&request_id).await;
             return Err(AppError::unavailable(
                 "guest_timeout",
                 "the machine did not answer in time",
             ));
         }
     };
-    guest_answer_response(&state, answer, &public_prefix)
+    guest_answer_response(state, answer, &public_prefix)
 }
 
 /// Streams a guest upload to its daemon in frames that stay small.
@@ -2270,7 +2309,6 @@ async fn stream_guest_body(
         })?;
         total = total.saturating_add(chunk.len());
         if total > h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES {
-            state.relay.forget_guest(request_id).await;
             return Err(AppError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "guest_body_too_large",
@@ -2355,9 +2393,16 @@ fn build_guest_response(
             "the machine answered with a type a guest page may not show",
         ));
     };
+    let download = matches!(content_type, "application/pdf" | "application/octet-stream");
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(answer.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header(CONTENT_TYPE, content_type)
+        // Even a JSON answer is inert: it may never run script, load a
+        // subresource or frame the page, whatever type the daemon named.
+        .header(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static("sandbox; default-src 'none'"),
+        )
         .header(
             HeaderName::from_static("x-content-type-options"),
             HeaderValue::from_static("nosniff"),
@@ -2366,6 +2411,13 @@ fn build_guest_response(
             HeaderName::from_static("referrer-policy"),
             HeaderValue::from_static("no-referrer"),
         );
+    if download {
+        // A PDF or an opaque file opens as a download, never in Connect's tab.
+        builder = builder.header(
+            axum::http::header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+    }
     for (name, value) in &answer.headers {
         match name.to_ascii_lowercase().as_str() {
             "cache-control" if value == "no-store" || value == "private, max-age=3600" => {
@@ -2558,6 +2610,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_pairing_request_cannot_ask_for_guest_access() {
+        // A guest link is not a device scope (ADR-044): a client that asks for
+        // one is refused at deserialisation instead of being quietly narrowed.
+        let refused = serde_json::from_str::<h4rn_protocol::PairingCreateRequest>(
+            r#"{"machine_id":"0199aaaa-0000-7000-8000-000000000000","scopes":["guest"]}"#,
+        );
+        assert!(
+            refused.is_err(),
+            "pairing accepted a request for the removed guest scope"
+        );
+        let accepted = serde_json::from_str::<h4rn_protocol::PairingCreateRequest>(
+            r#"{"machine_id":"0199aaaa-0000-7000-8000-000000000000","scopes":["view","files"]}"#,
+        );
+        assert!(accepted.is_ok(), "a normal pairing request was refused");
+    }
+
+    #[test]
     fn the_linked_filter_is_named_only_when_it_applied() {
         // The client treats a missing marker as "an older relay ignored the
         // query", so an unfiltered list must never claim the linked scope.
@@ -2623,8 +2692,15 @@ mod tests {
         };
         let response =
             build_guest_response(answer, "/guest/machine_1/token", true).expect("answer");
-        // The daemon's CSP and framing headers are gone.
-        assert!(response.headers().get("content-security-policy").is_none());
+        // The daemon's CSP and framing headers are gone; Connect sets its own
+        // sandbox policy instead of trusting the machine.
+        assert_eq!(
+            response
+                .headers()
+                .get("content-security-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("sandbox; default-src 'none'")
+        );
         assert!(response.headers().get("x-frame-options").is_none());
         assert_eq!(
             response
@@ -2705,6 +2781,61 @@ mod tests {
             HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
         assert!(same_origin_guest_post(&form, false).is_err());
+    }
+
+    #[test]
+    fn every_guest_answer_is_sandboxed_and_files_download() {
+        let answer = |content_type: &str| h4rn_protocol::GuestHttpResponse {
+            request_id: "g1".into(),
+            status: 200,
+            chunked: false,
+            headers: vec![("content-type".into(), content_type.into())],
+            body: b"x".to_vec(),
+        };
+        let json = build_guest_response(answer("application/json"), "/guest/m/t", true)
+            .expect("json answer");
+        assert_eq!(
+            json.headers()
+                .get("content-security-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("sandbox; default-src 'none'")
+        );
+        assert!(json.headers().get("content-disposition").is_none());
+
+        for content_type in ["application/pdf", "application/octet-stream"] {
+            let response = build_guest_response(answer(content_type), "/guest/m/t", true)
+                .expect("file answer");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-disposition")
+                    .and_then(|value| value.to_str().ok()),
+                Some("attachment"),
+                "{content_type} must download"
+            );
+        }
+        let image =
+            build_guest_response(answer("image/png"), "/guest/m/t", true).expect("image answer");
+        assert!(image.headers().get("content-disposition").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_guest_exchange_forgets_its_waiter() {
+        let hub = crate::relay::RelayHub::new();
+        let daemon = Uuid::now_v7();
+        let _waiter = hub.expect_guest("g1", daemon).await;
+        let failed = Err::<(), AppError>(AppError::internal("the daemon went away"));
+        assert!(discard_failed_exchange(&hub, "g1", failed).await.is_err());
+        assert_eq!(
+            hub.pending_guests().await,
+            0,
+            "a failed exchange kept its waiter"
+        );
+
+        // A successful exchange is left alone for its answer to arrive.
+        let _waiter = hub.expect_guest("g2", daemon).await;
+        assert!(discard_failed_exchange(&hub, "g2", Ok(())).await.is_ok());
+        assert_eq!(hub.pending_guests().await, 1);
     }
 
     #[test]

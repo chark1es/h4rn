@@ -440,6 +440,14 @@ impl RelayHub {
         self.guest_bodies.write().await.remove(request_id);
     }
 
+    /// How many guest exchanges are waiting for a daemon answer.
+    ///
+    /// A health check and its tests use this: a failed exchange must leave no
+    /// waiter behind.
+    pub async fn pending_guests(&self) -> usize {
+        self.guests.read().await.len()
+    }
+
     /// Whether a daemon for this machine is connected right now.
     pub async fn daemon_for(&self, machine_id: Uuid) -> Option<Uuid> {
         self.daemon_for_machine(machine_id).await
