@@ -262,7 +262,7 @@ impl DaemonBuilder {
             Arc::clone(&blobs) as Arc<dyn AttachmentResolver>;
         let manager = Arc::new(
             ThreadManager::open(
-                journal,
+                Arc::clone(&journal),
                 Arc::clone(&catalog),
                 hosts.local_id(),
                 self.options,
@@ -342,6 +342,12 @@ impl DaemonBuilder {
 
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
+        let pr_links = crate::pr_links::PrLinkService::new(
+            journal,
+            Arc::new(crate::pr_links::ForgePrSource::new(Arc::clone(&forge))),
+            Arc::new(crate::pr_links::ThreadWakeSink::new(Arc::clone(&manager))),
+        );
+        pr_links.start();
 
         let tokens = TokenStore::new(&self.config.data_dir);
         // Provision on first serve so a client has a token to read.
@@ -517,6 +523,7 @@ impl DaemonBuilder {
             tokens,
             fs,
             forge,
+            pr_links,
             skills,
             secure,
             remote,
@@ -544,6 +551,7 @@ pub struct Daemon {
     tokens: TokenStore,
     fs: Arc<FsService>,
     forge: Arc<ForgeService>,
+    pr_links: Arc<crate::pr_links::PrLinkService>,
     skills: Arc<h4rn_skills::SkillsService>,
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
@@ -695,6 +703,7 @@ impl Daemon {
             tokens: self.tokens,
             fs: self.fs,
             forge: Arc::clone(&self.forge),
+            pr_links: Arc::clone(&self.pr_links),
             skills: Arc::clone(&self.skills),
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
@@ -777,6 +786,7 @@ impl Daemon {
             worktrees: self.worktrees,
             terminals: self.terminals,
             forge: self.forge,
+            pr_links: self.pr_links,
             mcp: self.mcp,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
@@ -797,6 +807,7 @@ pub struct BoundDaemon {
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
+    pr_links: Arc<crate::pr_links::PrLinkService>,
     mcp: Arc<McpService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
@@ -855,6 +866,7 @@ impl BoundDaemon {
             worktrees,
             terminals,
             forge,
+            pr_links,
             mcp,
             supervisor,
             data_dir,
@@ -877,6 +889,7 @@ impl BoundDaemon {
             task.abort();
         }
         forge.shutdown();
+        pr_links.shutdown();
         mcp.shutdown().await;
         worktrees.shutdown().await;
         subagents.shutdown().await;

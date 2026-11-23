@@ -7330,6 +7330,37 @@ mod tests {
         ) -> Result<Vec<ThreadEvent>, crate::journal::JournalError> {
             self.inner.read_domain(thread_id).await
         }
+
+        async fn upsert_pr_link(
+            &self,
+            link: &crate::pr_links::PrLinkRecord,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.upsert_pr_link(link).await
+        }
+
+        async fn remove_pr_link(
+            &self,
+            thread_id: &ThreadId,
+            repo: &h4rn_protocol::ForgeRepoRef,
+            number: u32,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.remove_pr_link(thread_id, repo, number).await
+        }
+
+        async fn pr_links_for_thread(
+            &self,
+            thread_id: &ThreadId,
+        ) -> Result<Vec<crate::pr_links::PrLinkRecord>, crate::journal::JournalError> {
+            self.inner.pr_links_for_thread(thread_id).await
+        }
+
+        async fn pr_links_for_pr(
+            &self,
+            repo: &h4rn_protocol::ForgeRepoRef,
+            number: u32,
+        ) -> Result<Vec<crate::pr_links::PrLinkRecord>, crate::journal::JournalError> {
+            self.inner.pr_links_for_pr(repo, number).await
+        }
     }
 
     fn new_thread(host: HostId, workspace: &std::path::Path, prompt: &str) -> NewThread {

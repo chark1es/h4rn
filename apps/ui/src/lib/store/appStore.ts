@@ -57,6 +57,8 @@ export type UiState = {
   paletteOpen: boolean;
   shortcutsOpen: boolean;
   newThreadOpen: boolean;
+  /** The Link pull request dialog is open for the focused thread. */
+  linkPrOpen: boolean;
   theme: Theme;
   snoozedOpen: boolean;
   filter: ThreadFilterState;
@@ -232,6 +234,7 @@ function createInitialState(): AppState {
       paletteOpen: false,
       shortcutsOpen: false,
       newThreadOpen: false,
+      linkPrOpen: false,
       theme: initialTheme(),
       snoozedOpen: false,
       filter: { host: null, harness: null, needsAttention: false, unread: false },
@@ -447,6 +450,15 @@ export function closeShortcuts(): void {
 /** Opens New thread, optionally starting in one project's folder. */
 export function openNewThread(preset?: { host: string; workspace: string }): void {
   setUi({ newThreadOpen: true, paletteOpen: false, newThreadPreset: preset ?? null });
+}
+
+/** Opens the "Link pull request" dialog for the focused thread. */
+export function openLinkPullRequest(): void {
+  setUi({ linkPrOpen: true, paletteOpen: false });
+}
+
+export function closeLinkPullRequest(): void {
+  setUi({ linkPrOpen: false });
 }
 
 export function openAddProject(): void {

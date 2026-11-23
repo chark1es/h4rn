@@ -27,6 +27,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
 import { useThreadSettings } from "@/features/threads/settings";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -282,6 +283,7 @@ export function ThreadHeader({
             />
             <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
             <span className="grow" />
+            <ThreadPullRequestBadge threadId={summary.thread_id} />
             <span className={cn("q-th-state", summary.needs_attention && "q-accent")}>
               <AgentGlyph glyph={glyph} size={14} />
               <span>{stateLabel}</span>
@@ -340,6 +342,7 @@ export function ThreadHeader({
       </div>
 
       <div className="q-th-actions">
+        <ThreadPullRequestBadge threadId={summary.thread_id} />
         {working && !stale && !unreachable ? (
           <button
             type="button"

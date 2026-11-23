@@ -3233,6 +3233,7 @@ class MockDaemon {
           err: (code, message, hint) => this.err(frame.id, code, message, hint),
           later: (ms, fn) => this.later(ms, fn),
           transient: (event) => this.sendTransient(event),
+          threadTitle: (threadId) => this.threads.get(threadId)?.summary.title ?? null,
         });
         if (forgeHandled) return;
         const handled = this.fs.handle(body, {
