@@ -51,7 +51,7 @@ export const PTY_INPUT_POSITION_MAX = 2 ** PTY_INPUT_POSITION_BITS - 1;
  * Shift of the answer ordinal in a reply input frame's `seq` flag word.
  *
  * One chunk can carry several queries and xterm answers each separately, so
- * the ordinal keeps two answers for the same chunk distinct.
+ * the ordinal keeps two queries that start in the same chunk distinct.
  */
 export const PTY_INPUT_ORDINAL_SHIFT = PTY_INPUT_POSITION_SHIFT + PTY_INPUT_POSITION_BITS;
 
@@ -65,9 +65,11 @@ export const PTY_INPUT_ORDINAL_MAX = 2 ** PTY_INPUT_ORDINAL_BITS - 1;
  * Packs a marked reply's output position and answer ordinal into an input
  * frame's `seq` field.
  *
- * `position` is the output chunk whose bytes xterm was parsing when it saw the
- * query; a query split across chunks uses the chunk that contained its end.
- * `ordinal` is the answer's index among the answers expected for that chunk.
+ * `position` is the output chunk that carried the query's first byte, so every
+ * viewer that parsed that chunk names the answer the same way; a viewer whose
+ * snapshot already contained the query's first byte never saw the query and
+ * cannot answer it. `ordinal` is the answer's index among the queries that
+ * start in that chunk.
  * Both fields stay within `Number.MAX_SAFE_INTEGER`.
  *
  * A value outside the encoding's range falls back to an unpositioned reply

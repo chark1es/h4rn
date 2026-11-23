@@ -1060,7 +1060,7 @@ impl Connection {
                     terminal_id,
                     cols,
                     rows,
-                    reply_positions,
+                    reply_positions_v2,
                 } => self
                     .state
                     .terminals
@@ -1070,7 +1070,7 @@ impl Connection {
                         self.tx.clone(),
                         cols,
                         rows,
-                        reply_positions,
+                        reply_positions_v2,
                     )
                     .map(|attached| {
                         let Attached {
@@ -1625,10 +1625,11 @@ impl Connection {
                 }
                 // `seq` is a flag word for input: bit 0 marks xterm's own
                 // answer to a terminal query, bits 1-32 name the output chunk
-                // that carried the query and bits 33-52 name the answer's
-                // ordinal within that chunk. An old client sends only bit 0;
-                // an old daemon ignored `seq` altogether and wrote the frame
-                // as ordinary input, which still works.
+                // that carried the query's first byte and bits 33-52 name the
+                // query's index among the queries that start there. An old
+                // client sends only bit 0; an old daemon ignored `seq`
+                // altogether and wrote the frame as ordinary input, which
+                // still works.
                 let reply = if frame.seq & h4rn_protocol::PTY_INPUT_REPLY == 0 {
                     QueryReply::No
                 } else {
