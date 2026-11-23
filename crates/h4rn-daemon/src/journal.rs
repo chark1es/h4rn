@@ -15,8 +15,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
 use h4rn_protocol::{
-    Event, ForgeKind, ForgeRepoRef, HarnessKind, HostId, RuntimeMode, SubagentId, ThreadId, Usage,
-    WorktreeRequest,
+    Event, ForgeKind, ForgeRepoRef, HarnessKind, HostId, RuntimeMode, ScheduleDestination,
+    ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask, ScheduleTaskId, SubagentId,
+    ThreadId, Usage, WorktreeRequest,
 };
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
@@ -235,6 +236,48 @@ pub trait Journal: Send + Sync {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<Vec<PrLinkRecord>, JournalError>;
+
+    /// Every scheduled task, oldest first, with its most recent run.
+    async fn list_schedules(&self) -> Result<Vec<ScheduleTask>, JournalError>;
+
+    /// One scheduled task, when it exists.
+    async fn schedule(
+        &self,
+        task_id: &ScheduleTaskId,
+    ) -> Result<Option<ScheduleTask>, JournalError>;
+
+    /// Inserts or replaces one scheduled task.
+    async fn upsert_schedule(&self, task: &ScheduleTask) -> Result<(), JournalError>;
+
+    /// Deletes one task and its run history, returning whether the task existed.
+    async fn delete_schedule(&self, task_id: &ScheduleTaskId) -> Result<bool, JournalError>;
+
+    /// Appends one run, fills in its durable id, and trims the task's history
+    /// to the newest `keep` entries.
+    async fn append_schedule_run(
+        &self,
+        run: &mut ScheduleRun,
+        keep: usize,
+    ) -> Result<(), JournalError>;
+
+    /// Appends one run and replaces the task's scheduling state in one
+    /// transaction.
+    ///
+    /// A run and the advancement it describes land together or not at all, so
+    /// a crash cannot leave a slot either double-run or lost.
+    async fn commit_schedule_run(
+        &self,
+        run: &mut ScheduleRun,
+        task: &ScheduleTask,
+        keep: usize,
+    ) -> Result<(), JournalError>;
+
+    /// A task's runs, newest first, at most `limit`.
+    async fn schedule_runs(
+        &self,
+        task_id: &ScheduleTaskId,
+        limit: usize,
+    ) -> Result<Vec<ScheduleRun>, JournalError>;
 }
 
 /// SQLite-backed journal.
@@ -367,6 +410,69 @@ impl SqliteJournal {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_pr_links_pr
              ON daemon_pr_links (forge, base_url, owner, repo, number)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Scheduled tasks live in the same journal file as threads so a
+        // restart restores the timer, the webhook secret and the run history.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_schedules (
+                task_id        TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                host           TEXT NOT NULL,
+                workspace_path TEXT NOT NULL,
+                harness        TEXT NOT NULL,
+                agent_id       TEXT,
+                model          TEXT NOT NULL,
+                runtime_mode   TEXT NOT NULL,
+                prompt         TEXT NOT NULL,
+                schedule_json  TEXT NOT NULL,
+                timezone       TEXT NOT NULL,
+                destination    TEXT NOT NULL,
+                enabled        INTEGER NOT NULL,
+                thread_id      TEXT,
+                webhook_secret TEXT,
+                once_consumed  INTEGER NOT NULL DEFAULT 0,
+                once_slot      TEXT,
+                next_run_at    TEXT,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // A database written before the once-consumed marker exists needs the
+        // column added; the default keeps every stored task re-runnable.
+        self.ensure_column(
+            "daemon_schedules",
+            "once_consumed",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        // The spent marker now carries the slot's identity; a database from
+        // before that column derives it from the stored schedule on read.
+        self.ensure_column("daemon_schedules", "once_slot", "TEXT")
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_schedule_runs (
+                run_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id       TEXT NOT NULL,
+                scheduled_for TEXT,
+                started_at    TEXT NOT NULL,
+                thread_id     TEXT,
+                outcome       TEXT NOT NULL,
+                detail        TEXT
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_daemon_schedule_runs_task
+             ON daemon_schedule_runs (task_id, run_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -725,6 +831,352 @@ impl Journal for SqliteJournal {
         .await?;
         rows.into_iter().map(pr_link_from_row).collect()
     }
+
+    async fn list_schedules(&self) -> Result<Vec<ScheduleTask>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT task_id, name, host, workspace_path, harness, agent_id, model,
+                    runtime_mode, prompt, schedule_json, timezone, destination, enabled,
+                    thread_id, webhook_secret, once_consumed, once_slot, next_run_at, created_at, updated_at
+             FROM daemon_schedules ORDER BY created_at ASC, rowid ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut task = schedule_task_from_row(row)?;
+            task.last_run = self.schedule_runs(&task.task_id, 1).await?.pop();
+            tasks.push(task);
+        }
+        Ok(tasks)
+    }
+
+    async fn schedule(
+        &self,
+        task_id: &ScheduleTaskId,
+    ) -> Result<Option<ScheduleTask>, JournalError> {
+        let row = sqlx::query(
+            "SELECT task_id, name, host, workspace_path, harness, agent_id, model,
+                    runtime_mode, prompt, schedule_json, timezone, destination, enabled,
+                    thread_id, webhook_secret, once_consumed, once_slot, next_run_at, created_at, updated_at
+             FROM daemon_schedules WHERE task_id = ?",
+        )
+        .bind(task_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut task = schedule_task_from_row(row)?;
+        task.last_run = self.schedule_runs(task_id, 1).await?.pop();
+        Ok(Some(task))
+    }
+
+    async fn upsert_schedule(&self, task: &ScheduleTask) -> Result<(), JournalError> {
+        let mut tx = self.pool.begin().await?;
+        upsert_schedule_row(&mut tx, task).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn delete_schedule(&self, task_id: &ScheduleTaskId) -> Result<bool, JournalError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM daemon_schedule_runs WHERE task_id = ?")
+            .bind(task_id.as_str())
+            .execute(&mut *tx)
+            .await?;
+        let deleted = sqlx::query("DELETE FROM daemon_schedules WHERE task_id = ?")
+            .bind(task_id.as_str())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    async fn append_schedule_run(
+        &self,
+        run: &mut ScheduleRun,
+        keep: usize,
+    ) -> Result<(), JournalError> {
+        let mut tx = self.pool.begin().await?;
+        insert_schedule_run(&mut tx, run).await?;
+        trim_schedule_runs(&mut tx, &run.task_id, keep).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn commit_schedule_run(
+        &self,
+        run: &mut ScheduleRun,
+        task: &ScheduleTask,
+        keep: usize,
+    ) -> Result<(), JournalError> {
+        let mut tx = self.pool.begin().await?;
+        insert_schedule_run(&mut tx, run).await?;
+        trim_schedule_runs(&mut tx, &run.task_id, keep).await?;
+        upsert_schedule_row(&mut tx, task).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn schedule_runs(
+        &self,
+        task_id: &ScheduleTaskId,
+        limit: usize,
+    ) -> Result<Vec<ScheduleRun>, JournalError> {
+        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+        let rows = sqlx::query(
+            "SELECT run_id, task_id, scheduled_for, started_at, thread_id, outcome, detail
+             FROM daemon_schedule_runs WHERE task_id = ?
+             ORDER BY run_id DESC LIMIT ?",
+        )
+        .bind(task_id.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(schedule_run_from_row).collect()
+    }
+}
+
+/// Inserts one run row inside a transaction and fills in its durable id.
+async fn insert_schedule_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run: &mut ScheduleRun,
+) -> Result<(), JournalError> {
+    let outcome = serde_json::to_string(&run.outcome)?;
+    let outcome = outcome.trim_matches('"').to_owned();
+    let result = sqlx::query(
+        "INSERT INTO daemon_schedule_runs
+            (task_id, scheduled_for, started_at, thread_id, outcome, detail)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(run.task_id.as_str())
+    .bind(run.scheduled_for.map(|at| at.to_rfc3339()))
+    .bind(run.started_at.to_rfc3339())
+    .bind(run.thread_id.as_ref().map(ThreadId::as_str))
+    .bind(outcome)
+    .bind(run.detail.as_deref())
+    .execute(&mut **tx)
+    .await?;
+    run.run_id = result.last_insert_rowid() as u64;
+    Ok(())
+}
+
+/// Keeps only the newest `keep` runs of one task inside a transaction.
+async fn trim_schedule_runs(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &ScheduleTaskId,
+    keep: usize,
+) -> Result<(), JournalError> {
+    let keep = i64::try_from(keep.max(1)).unwrap_or(i64::MAX);
+    sqlx::query(
+        "DELETE FROM daemon_schedule_runs
+         WHERE task_id = ? AND run_id NOT IN (
+            SELECT run_id FROM daemon_schedule_runs
+            WHERE task_id = ? ORDER BY run_id DESC LIMIT ?
+         )",
+    )
+    .bind(task_id.as_str())
+    .bind(task_id.as_str())
+    .bind(keep)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Inserts or replaces one task row inside a transaction.
+async fn upsert_schedule_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: &ScheduleTask,
+) -> Result<(), JournalError> {
+    let harness = serde_json::to_string(&task.harness)?;
+    let harness = harness.trim_matches('"').to_owned();
+    let runtime_mode = serde_json::to_string(&task.runtime_mode)?;
+    let runtime_mode = runtime_mode.trim_matches('"').to_owned();
+    let destination = serde_json::to_string(&task.destination)?;
+    let destination = destination.trim_matches('"').to_owned();
+    let schedule_json = serde_json::to_string(&task.schedule)?;
+    sqlx::query(
+        "INSERT INTO daemon_schedules
+            (task_id, name, host, workspace_path, harness, agent_id, model,
+             runtime_mode, prompt, schedule_json, timezone, destination, enabled,
+             thread_id, webhook_secret, once_consumed, once_slot, next_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(task_id) DO UPDATE SET
+            name = excluded.name,
+            host = excluded.host,
+            workspace_path = excluded.workspace_path,
+            harness = excluded.harness,
+            agent_id = excluded.agent_id,
+            model = excluded.model,
+            runtime_mode = excluded.runtime_mode,
+            prompt = excluded.prompt,
+            schedule_json = excluded.schedule_json,
+            timezone = excluded.timezone,
+            destination = excluded.destination,
+            enabled = excluded.enabled,
+            thread_id = excluded.thread_id,
+            webhook_secret = excluded.webhook_secret,
+            once_consumed = excluded.once_consumed,
+            once_slot = excluded.once_slot,
+            next_run_at = excluded.next_run_at,
+            updated_at = excluded.updated_at",
+    )
+    .bind(task.task_id.as_str())
+    .bind(&task.name)
+    .bind(task.host.as_str())
+    .bind(&task.workspace_path)
+    .bind(harness)
+    .bind(task.agent_id.as_deref())
+    .bind(&task.model)
+    .bind(runtime_mode)
+    .bind(&task.prompt)
+    .bind(schedule_json)
+    .bind(&task.timezone)
+    .bind(destination)
+    .bind(task.enabled as i64)
+    .bind(task.thread_id.as_ref().map(ThreadId::as_str))
+    .bind(webhook_secret_of(task))
+    .bind(task.once_consumed as i64)
+    .bind(task.once_consumed_slot.as_deref())
+    .bind(task.next_run_at.map(|at| at.to_rfc3339()))
+    .bind(task.created_at.to_rfc3339())
+    .bind(task.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The webhook secret embedded in a task's public path.
+fn webhook_secret_of(task: &ScheduleTask) -> Option<&str> {
+    task.webhook_path
+        .as_deref()
+        .and_then(|path| path.strip_prefix("/webhooks/"))
+        .filter(|secret| !secret.is_empty())
+}
+
+fn decode_enum<T: serde::de::DeserializeOwned>(
+    value: &str,
+    column: &str,
+) -> Result<T, JournalError> {
+    serde_json::from_str(&format!("\"{value}\"")).map_err(|error| {
+        JournalError::Database(sqlx::Error::Protocol(format!(
+            "unknown value {value:?} in {column}: {error}"
+        )))
+    })
+}
+
+fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, JournalError> {
+    let task_id: String = row.try_get("task_id")?;
+    let harness: String = row.try_get("harness")?;
+    let runtime_mode: String = row.try_get("runtime_mode")?;
+    let destination: String = row.try_get("destination")?;
+    let schedule_json: String = row.try_get("schedule_json")?;
+    let created_at: String = row.try_get("created_at")?;
+    let updated_at: String = row.try_get("updated_at")?;
+    let next_run_at: Option<String> = row.try_get("next_run_at")?;
+    let webhook_secret: Option<String> = row.try_get("webhook_secret")?;
+    let webhook_path_set = webhook_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty());
+    let schedule = serde_json::from_str::<ScheduleSpec>(&schedule_json)?;
+    // A row written before the slot identity existed only has the flag; the
+    // stored schedule names the slot it spent. The zone joins the identity in
+    // `ScheduleService::open`, which migrates this older form.
+    let once_slot: Option<String> = row.try_get("once_slot")?;
+    let legacy_consumed: i64 = row.try_get("once_consumed")?;
+    let once_consumed_slot = once_slot.or_else(|| {
+        if legacy_consumed == 0 {
+            None
+        } else {
+            schedule.legacy_once_slot()
+        }
+    });
+    let once_consumed = once_consumed_slot.is_some();
+    let timezone: String = row.try_get("timezone")?;
+    Ok(ScheduleTask {
+        task_id: ScheduleTaskId::new(task_id),
+        name: row.try_get("name")?,
+        host: HostId::new(row.try_get::<String, _>("host")?),
+        workspace_path: row.try_get("workspace_path")?,
+        harness: decode_enum(&harness, "daemon_schedules.harness")?,
+        agent_id: row.try_get("agent_id")?,
+        model: row.try_get("model")?,
+        runtime_mode: decode_enum(&runtime_mode, "daemon_schedules.runtime_mode")?,
+        prompt: row.try_get("prompt")?,
+        schedule,
+        timezone,
+        destination: serde_json::from_str::<ScheduleDestination>(&format!("\"{destination}\""))
+            .map_err(|error| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unknown destination {destination:?}: {error}"
+                )))
+            })?,
+        enabled: row.try_get::<i64, _>("enabled")? != 0,
+        thread_id: row
+            .try_get::<Option<String>, _>("thread_id")?
+            .map(ThreadId::new),
+        webhook_path: webhook_secret
+            .filter(|secret| !secret.is_empty())
+            .map(|secret| format!("/webhooks/{secret}")),
+        webhook_path_set,
+        once_consumed,
+        once_consumed_slot,
+        next_run_at: next_run_at.and_then(|at| {
+            DateTime::parse_from_rfc3339(&at)
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        }),
+        last_run: None,
+        created_at: DateTime::parse_from_rfc3339(&created_at)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unparsable created_at {created_at:?} in daemon_schedules: {error}"
+                )))
+            })?,
+        updated_at: DateTime::parse_from_rfc3339(&updated_at)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unparsable updated_at {updated_at:?} in daemon_schedules: {error}"
+                )))
+            })?,
+    })
+}
+
+fn schedule_run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleRun, JournalError> {
+    let run_id: i64 = row.try_get("run_id")?;
+    let task_id: String = row.try_get("task_id")?;
+    let scheduled_for: Option<String> = row.try_get("scheduled_for")?;
+    let started_at: String = row.try_get("started_at")?;
+    let outcome: String = row.try_get("outcome")?;
+    Ok(ScheduleRun {
+        run_id: u64::try_from(run_id).map_err(|_| {
+            JournalError::Database(sqlx::Error::Protocol(format!(
+                "run id {run_id} does not fit in daemon_schedule_runs"
+            )))
+        })?,
+        task_id: ScheduleTaskId::new(task_id),
+        scheduled_for: scheduled_for.and_then(|at| {
+            DateTime::parse_from_rfc3339(&at)
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        }),
+        started_at: DateTime::parse_from_rfc3339(&started_at)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unparsable started_at {started_at:?} in daemon_schedule_runs: {error}"
+                )))
+            })?,
+        thread_id: row
+            .try_get::<Option<String>, _>("thread_id")?
+            .map(ThreadId::new),
+        outcome: decode_enum::<ScheduleRunOutcome>(&outcome, "daemon_schedule_runs.outcome")?,
+        detail: row.try_get("detail")?,
+    })
 }
 
 fn pr_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<PrLinkRecord, JournalError> {

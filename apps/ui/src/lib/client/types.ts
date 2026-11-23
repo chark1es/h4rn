@@ -42,6 +42,13 @@ export type ReadyInfo = {
   hosts: HostSummary[];
   /** Host id of the daemon's own machine, for host-scoped requests. */
   localHostId: HostId;
+  /**
+   * The daemon machine's IANA time zone, from its `hello`.
+   *
+   * A scheduled task defaults to this zone so a floating time means the
+   * daemon's wall clock, not this device's.
+   */
+  daemonTimezone: string;
   serverVersion: string;
   deviceId: string;
   /**

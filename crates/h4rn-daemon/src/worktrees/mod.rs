@@ -113,6 +113,8 @@ struct Inner {
     recent: std::sync::Mutex<HashMap<(String, String), Instant>>,
     /// Serialises clears so two requests cannot race on one directory.
     clear_lock: Mutex<()>,
+    /// Scheduled tasks whose threads keep their worktrees through a clear.
+    schedules: std::sync::Mutex<Option<Arc<crate::schedules::ScheduleService>>>,
     watcher: std::sync::Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
 }
@@ -305,11 +307,17 @@ enum LiveUse {
     Active(TrackedWorktree),
     /// Nothing is busy, but a bulk clear found a thread working in it.
     ThreadWorkspace,
+    /// A thread with an enabled scheduled task works in it.
+    ScheduledThread,
 }
 
 /// The reason for an entry a bulk clear leaves alone because it is (or holds)
 /// a thread's workspace (never forceable).
 const THREAD_WORKSPACE: &str = "is a thread workspace";
+
+/// The reason for an entry a clear leaves alone because a thread with an
+/// enabled scheduled task works in it (never forceable).
+const SCHEDULED_THREAD: &str = "has an enabled scheduled task";
 
 /// A thread that might still use an entry, gathered from one of the sources a
 /// live re-check consults. Its activity is read only once all are collected.
@@ -366,10 +374,17 @@ impl WorktreeTracker {
                 thread_repos: std::sync::Mutex::new(HashMap::new()),
                 recent: std::sync::Mutex::new(HashMap::new()),
                 clear_lock: Mutex::new(()),
+                schedules: std::sync::Mutex::new(None),
                 watcher: std::sync::Mutex::new(None),
                 closed: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Installs the schedule service so an enabled task protects its thread's
+    /// checkout from a clear.
+    pub fn set_schedule_service(&self, service: Arc<crate::schedules::ScheduleService>) {
+        *lock(&self.inner.schedules) = Some(service);
     }
 
     /// Starts the observation watcher over the thread event stream.
@@ -940,7 +955,7 @@ impl Inner {
         })
         .await
         .unwrap_or_default();
-        for summary in inside {
+        for summary in &inside {
             workspace_thread |= !own_child.contains(&summary.thread_id);
             if seen.insert(summary.thread_id.as_str().to_owned()) {
                 let subagent_id = self
@@ -949,8 +964,8 @@ impl Inner {
                     .await
                     .and_then(|meta| meta.subagent_id);
                 candidates.push(Candidate {
-                    thread_id: summary.thread_id,
-                    title: summary.title,
+                    thread_id: summary.thread_id.clone(),
+                    title: summary.title.clone(),
                     subagent_id,
                     last_seen: summary.last_activity,
                 });
@@ -986,8 +1001,20 @@ impl Inner {
         if view.is_some_and(|view| !view.is_terminal()) {
             active = true;
         }
+        let schedules = lock(&self.schedules).clone();
+        let scheduled = match schedules {
+            Some(schedules) => {
+                let kept = schedules.kept_threads().await;
+                inside
+                    .iter()
+                    .any(|summary| kept.contains(&summary.thread_id))
+            }
+            None => false,
+        };
         if active {
             Some(LiveUse::Active(fresh))
+        } else if scheduled {
+            Some(LiveUse::ScheduledThread)
         } else if bulk && workspace_thread {
             Some(LiveUse::ThreadWorkspace)
         } else {
@@ -2304,6 +2331,7 @@ where
     match inner.still_active(&entry, bulk).await {
         Some(LiveUse::Active(active)) => return Err(in_use_reason(&active)),
         Some(LiveUse::ThreadWorkspace) => return Err(THREAD_WORKSPACE.into()),
+        Some(LiveUse::ScheduledThread) => return Err(SCHEDULED_THREAD.into()),
         None => {}
     }
     let data_dir = inner.data_dir.clone();
