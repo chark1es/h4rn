@@ -38,7 +38,8 @@ export type SchedulesState = {
    */
   webhookPaths: Record<string, string>;
   webhookPathLoading: string | null;
-  webhookPathError: string | null;
+  /** Why the reveal failed, for the task whose panel asked. */
+  webhookPathError: { task_id: ScheduleTaskId; message: string } | null;
 };
 
 const initialState: SchedulesState = {
@@ -259,7 +260,10 @@ export async function loadScheduleWebhookUrl(taskId: ScheduleTaskId): Promise<vo
       webhookPathLoading: null,
     });
   } catch (error) {
-    set({ webhookPathLoading: null, webhookPathError: describe(error) });
+    set({
+      webhookPathLoading: null,
+      webhookPathError: { task_id: taskId, message: describe(error) },
+    });
   }
 }
 

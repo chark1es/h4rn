@@ -218,6 +218,7 @@ struct Inner {
 #[derive(Default)]
 struct TestControl {
     fail_commit: AtomicBool,
+    fail_upsert: AtomicBool,
 }
 
 impl ScheduleService {
@@ -233,10 +234,20 @@ impl ScheduleService {
     ) -> Result<Self, ScheduleServiceError> {
         let mut stored = journal.list_schedules().await?;
         // A once slot that is already spent must not stay armed, even if a
-        // daemon stopped between admitting it and recording its run.
+        // daemon stopped between admitting it and recording its run. A marker
+        // written before the zone joined the slot identity names only the
+        // local date and time; it is migrated in place so the upgrade cannot
+        // arm a spent slot again.
         for task in &mut stored {
+            if let Some(slot) = task.once_consumed_slot.clone()
+                && !slot.contains('@')
+                && task.schedule.legacy_once_slot().as_deref() == Some(slot.as_str())
+                && let Some(identity) = task.schedule.once_slot(&task.timezone)
+            {
+                task.once_consumed_slot = Some(identity);
+            }
             if task.once_consumed_slot.is_some()
-                && task.once_consumed_slot == task.schedule.once_slot()
+                && task.once_consumed_slot == task.schedule.once_slot(&task.timezone)
             {
                 task.next_run_at = None;
             }
@@ -534,6 +545,11 @@ impl ScheduleService {
                     "This task cannot run right now.".into(),
                 ))
             }
+            // A manual run never validates the next clock slot, so this is
+            // only reachable through a scheduled admission.
+            Err(AdmissionError::Uncomputable(reason)) => {
+                Err(ScheduleServiceError::Conflict(reason))
+            }
         }
     }
 
@@ -658,6 +674,12 @@ impl ScheduleService {
                     )
                     .await;
                 }
+                // The schedule cannot name the slot after this one: disarm it
+                // and record why, so no thread is started for a task that
+                // could never record its run.
+                Err(AdmissionError::Uncomputable(reason)) => {
+                    self.record_uncomputable(&task_id, slot, reason).await;
+                }
                 // A pause, an edit, another runner or a pending journal write
                 // already owns this slot. Nothing is dispatched.
                 Err(_) => {}
@@ -666,7 +688,18 @@ impl ScheduleService {
     }
 
     /// The next instant any enabled task is due, if there is one.
+    ///
+    /// A task whose run is waiting for a journal write is left out of the
+    /// scheduled set: the runner wakes on that write's own deadline instead of
+    /// treating a past slot it cannot admit as due right now.
     pub async fn next_due(&self) -> Option<DateTime<Utc>> {
+        let (pending_deadline, pending_ids) = {
+            let pending = lock(&self.inner.pending);
+            (
+                pending.values().map(|pending| pending.due_at).min(),
+                pending.keys().cloned().collect::<HashSet<_>>(),
+            )
+        };
         let scheduled = self
             .inner
             .tasks
@@ -674,13 +707,10 @@ impl ScheduleService {
             .await
             .values()
             .filter(|task| task.enabled && !task.schedule.is_webhook())
+            .filter(|task| !pending_ids.contains(&task.task_id))
             .filter_map(|task| task.next_run_at)
             .min();
-        let pending = lock(&self.inner.pending)
-            .values()
-            .map(|pending| pending.due_at)
-            .min();
-        scheduled.into_iter().chain(pending).min()
+        scheduled.into_iter().chain(pending_deadline).min()
     }
 
     /// Starts the timer.
@@ -816,6 +846,15 @@ impl ScheduleService {
                 if expected > self.inner.clock.now() {
                     return Err(AdmissionError::NotDue);
                 }
+                // The slot after this one has to be known before a thread is
+                // started. Otherwise the run could never be recorded, its
+                // backoff would leave the old slot armed, and every backoff
+                // would start another thread.
+                if !matches!(task.schedule, ScheduleSpec::Once { .. })
+                    && let Err(error) = self.advance(&task, self.inner.clock.now())
+                {
+                    return Err(AdmissionError::Uncomputable(error.to_string()));
+                }
             }
             Trigger::Webhook => {
                 if !task.schedule.is_webhook() {
@@ -843,10 +882,10 @@ impl ScheduleService {
         // A once slot is consumed when it is admitted, not when its run is
         // recorded: a journal failure, a pause or a restart between admission
         // and the write must not make the same slot run twice. The marker is
-        // the slot's identity, so an edit to a different date or time arms a
-        // new slot and the repeated fall-back hour is still one slot.
+        // the slot's identity, so an edit to a different date, time or zone
+        // arms a new slot and the repeated fall-back hour is still one slot.
         if matches!(trigger, Trigger::Scheduled)
-            && let Some(slot_id) = task.schedule.once_slot()
+            && let Some(slot_id) = task.schedule.once_slot(&task.timezone)
         {
             if task.once_consumed_slot.as_deref() == Some(slot_id.as_str()) {
                 // A restart between admission and the run's own write leaves
@@ -864,20 +903,43 @@ impl ScheduleService {
                 lock(&self.inner.in_flight).remove(task_id);
                 return Err(AdmissionError::StaleSlot);
             }
-            task.once_consumed_slot = Some(slot_id);
-            task.once_consumed = true;
+            let previous_slot = task.once_consumed_slot.replace(slot_id);
+            let previous_consumed = std::mem::replace(&mut task.once_consumed, true);
             task.updated_at = self.inner.clock.now();
             self.inner
                 .tasks
                 .lock()
                 .await
                 .insert(task_id.clone(), task.clone());
-            if let Err(error) = self.inner.journal.upsert_schedule(&task).await {
+            if let Err(error) = self.persist_task(&task).await {
+                // The spent marker is not durable, so the run must not start:
+                // a crash before the run's own write would arm the slot again.
+                // Keep the slot blocked in memory and retry on the backoff.
+                let failures = {
+                    let mut retries = lock(&self.inner.retries);
+                    let failures = retries.entry(task_id.clone()).or_insert(0);
+                    *failures = failures.saturating_add(1);
+                    *failures
+                };
+                task.once_consumed_slot = previous_slot;
+                task.once_consumed = previous_consumed;
+                task.next_run_at = Some(self.inner.clock.now() + backoff_for(failures));
+                self.inner
+                    .tasks
+                    .lock()
+                    .await
+                    .insert(task_id.clone(), task.clone());
+                let _ = self.persist_task(&task).await;
+                let _ = self.inner.events.send(ScheduleEvent::Upserted {
+                    task: Box::new(task),
+                });
+                lock(&self.inner.in_flight).remove(task_id);
                 tracing::warn!(
                     task = %task_id,
                     %error,
-                    "could not persist that a once slot was taken"
+                    "refusing a run until the once marker is durable; retrying on the backoff"
                 );
+                return Err(AdmissionError::Pending);
             }
         }
         Ok((
@@ -1072,6 +1134,58 @@ impl ScheduleService {
         task.thread_id.clone()
     }
 
+    /// Disarms a task whose schedule cannot name its next slot, and says why.
+    ///
+    /// The due run is not dispatched: its thread could never be recorded, and
+    /// each backoff of the unrecorded run would start another. The task keeps
+    /// its history and shows the failure until the schedule is fixed and the
+    /// task is resumed.
+    async fn record_uncomputable(
+        &self,
+        task_id: &ScheduleTaskId,
+        slot: DateTime<Utc>,
+        reason: String,
+    ) {
+        let now = self.inner.clock.now();
+        let (task, run) = {
+            let _write = self.write_lock(task_id).await;
+            let Some(mut task) = self.inner.tasks.lock().await.get(task_id).cloned() else {
+                return;
+            };
+            if task.next_run_at != Some(slot) {
+                return;
+            }
+            task.next_run_at = None;
+            task.updated_at = now;
+            self.inner
+                .tasks
+                .lock()
+                .await
+                .insert(task_id.clone(), task.clone());
+            let run = ScheduleRun {
+                run_id: 0,
+                task_id: task_id.clone(),
+                scheduled_for: Some(slot),
+                started_at: now,
+                thread_id: None,
+                outcome: ScheduleRunOutcome::Failed,
+                detail: Some(format!(
+                    "Its schedule has no next run: {reason} Fix the schedule to run it again."
+                )),
+            };
+            (task, run)
+        };
+        // The task is already disarmed in memory, so `record` keeps it that way
+        // and commits the visible failure; a failed write is retried on its own
+        // backoff without admitting the slot again.
+        if let Err(error) = self
+            .record(task_id, &task, run, Trigger::Scheduled, now)
+            .await
+        {
+            tracing::warn!(%task_id, error = %error, "could not record a disarmed schedule");
+        }
+    }
+
     /// Records a slot that was skipped, with its reason.
     async fn record_skip(
         &self,
@@ -1146,7 +1260,7 @@ impl ScheduleService {
             && task.next_run_at == run.scheduled_for
         {
             if matches!(task.schedule, ScheduleSpec::Once { .. }) {
-                task.once_consumed_slot = task.schedule.once_slot();
+                task.once_consumed_slot = task.schedule.once_slot(&task.timezone);
                 task.once_consumed = task.once_consumed_slot.is_some();
                 task.next_run_at = None;
             } else {
@@ -1315,6 +1429,17 @@ impl ScheduleService {
             .await
     }
 
+    /// Writes one task row, with a test-only failure hook.
+    async fn persist_task(&self, task: &ScheduleTask) -> Result<(), JournalError> {
+        #[cfg(test)]
+        if self.inner.test.fail_upsert.swap(false, Ordering::SeqCst) {
+            return Err(JournalError::Io(std::io::Error::other(
+                "test: the schedule upsert failed",
+            )));
+        }
+        self.inner.journal.upsert_schedule(task).await
+    }
+
     /// Moves a task whose schedule cannot produce an instant to a backoff.
     ///
     /// This is only for a stored schedule that cannot be computed (an invalid
@@ -1339,10 +1464,10 @@ impl ScheduleService {
             %reason,
             "a scheduled run has no next time; backing off"
         );
-        if task.schedule.once_slot().is_some() {
+        if task.schedule.once_slot(&task.timezone).is_some() {
             // The run already started a thread. Re-arming the same once slot
             // would start a second thread for it.
-            task.once_consumed_slot = task.schedule.once_slot();
+            task.once_consumed_slot = task.schedule.once_slot(&task.timezone);
             task.once_consumed = task.once_consumed_slot.is_some();
             task.next_run_at = None;
         } else {
@@ -1484,8 +1609,8 @@ impl ScheduleService {
             None
         };
         // A spent once slot stays spent when the task is edited or resumed;
-        // only naming a different once date/time arms it again.
-        let once_slot = draft.schedule.once_slot();
+        // only naming a different once date, time or zone arms it again.
+        let once_slot = draft.schedule.once_slot(&timezone);
         let once_consumed_slot = existing
             .and_then(|task| task.once_consumed_slot.clone())
             .filter(|slot| once_slot.as_deref() == Some(slot.as_str()));
@@ -1541,6 +1666,12 @@ impl ScheduleService {
     pub(crate) fn fail_next_commit(&self) {
         self.inner.test.fail_commit.store(true, Ordering::SeqCst);
     }
+
+    /// Test seam: make the next task-row upsert fail.
+    #[cfg(test)]
+    pub(crate) fn fail_next_upsert(&self) {
+        self.inner.test.fail_upsert.store(true, Ordering::SeqCst);
+    }
 }
 
 /// A task's reserved in-flight slot, released when the run path lets go.
@@ -1556,15 +1687,20 @@ impl Drop for Reservation {
 }
 
 /// Why admission refused a trigger.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AdmissionError {
     NotFound,
     Disabled,
     Busy,
     NotDue,
     StaleSlot,
-    /// The task's previous run is waiting for its journal write to succeed.
+    /// The task's previous write has not landed yet: a run waiting for its own
+    /// retry, or a once marker that could not be made durable. Nothing new is
+    /// dispatched behind it.
     Pending,
+    /// The schedule cannot name the slot after this one, so the run is not
+    /// dispatched and the task is disarmed with a visible reason.
+    Uncomputable(String),
 }
 
 /// What caused a run.

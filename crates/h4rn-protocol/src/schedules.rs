@@ -99,10 +99,22 @@ impl ScheduleSpec {
     /// The identity of this schedule's one slot, when it is a once schedule.
     ///
     /// A once task has exactly one slot, so the slot is identified by its local
-    /// date and time. Both occurrences of a repeated fall-back hour share that
-    /// identity, while naming a different date or time in an edit names a new
-    /// slot.
-    pub fn once_slot(&self) -> Option<String> {
+    /// date and time and the zone that gives them their instant. Both
+    /// occurrences of a repeated fall-back hour share that identity, while
+    /// naming a different date, time or zone in an edit names a new slot.
+    pub fn once_slot(&self, timezone: &str) -> Option<String> {
+        match self {
+            Self::Once { date, time } => Some(format!("{date}T{time}@{timezone}")),
+            _ => None,
+        }
+    }
+
+    /// The identity an earlier daemon stored for this once slot.
+    ///
+    /// Older rows name only the local date and time, so the zone was not part
+    /// of the identity. A stored marker in this form is migrated to
+    /// [`Self::once_slot`] when the daemon opens the task.
+    pub fn legacy_once_slot(&self) -> Option<String> {
         match self {
             Self::Once { date, time } => Some(format!("{date}T{time}")),
             _ => None,
@@ -241,13 +253,13 @@ pub struct ScheduleTask {
     /// a repeated fall-back hour cannot run it a second time.
     #[serde(default)]
     pub once_consumed: bool,
-    /// The spent Once slot's identity (its local date and time).
+    /// The spent Once slot's identity (its local date and time, and its zone).
     ///
     /// The marker belongs to the slot, not a bare flag: it is persisted when
     /// the slot is admitted, so pausing during the run and resuming cannot arm
-    /// the same slot again, while naming a different date or time in an edit
-    /// arms a new one. Both occurrences of a repeated fall-back hour are the
-    /// same slot. This is daemon state and never part of a task body.
+    /// the same slot again, while naming a different date, time or zone in an
+    /// edit arms a new one. Both occurrences of a repeated fall-back hour are
+    /// the same slot. This is daemon state and never part of a task body.
     #[serde(skip)]
     #[ts(skip)]
     pub once_consumed_slot: Option<String>,

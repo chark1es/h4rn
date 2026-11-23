@@ -1082,17 +1082,19 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
         .is_some_and(|secret| !secret.is_empty());
     let schedule = serde_json::from_str::<ScheduleSpec>(&schedule_json)?;
     // A row written before the slot identity existed only has the flag; the
-    // stored schedule names the slot it spent.
+    // stored schedule names the slot it spent. The zone joins the identity in
+    // `ScheduleService::open`, which migrates this older form.
     let once_slot: Option<String> = row.try_get("once_slot")?;
     let legacy_consumed: i64 = row.try_get("once_consumed")?;
     let once_consumed_slot = once_slot.or_else(|| {
         if legacy_consumed == 0 {
             None
         } else {
-            schedule.once_slot()
+            schedule.legacy_once_slot()
         }
     });
     let once_consumed = once_consumed_slot.is_some();
+    let timezone: String = row.try_get("timezone")?;
     Ok(ScheduleTask {
         task_id: ScheduleTaskId::new(task_id),
         name: row.try_get("name")?,
@@ -1104,7 +1106,7 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
         runtime_mode: decode_enum(&runtime_mode, "daemon_schedules.runtime_mode")?,
         prompt: row.try_get("prompt")?,
         schedule,
-        timezone: row.try_get("timezone")?,
+        timezone,
         destination: serde_json::from_str::<ScheduleDestination>(&format!("\"{destination}\""))
             .map_err(|error| {
                 JournalError::Database(sqlx::Error::Protocol(format!(

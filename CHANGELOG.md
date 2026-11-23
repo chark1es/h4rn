@@ -27,11 +27,17 @@ All notable changes to h4rn are recorded here. The format follows
   atomic, so one slot starts one run even across a pause or two simultaneous
   deliveries; run history and the advanced clock commit together; and a failed
   journal write retries only that run while the real next slot is kept, so a
-  retry never becomes a second run. A once slot is taken when it is admitted, so
-  a pause during the run cannot arm it again, and a spent Once task stays spent
-  across edits and resumes. Daily and weekly times run only at the first
-  occurrence in a fall-back hour, cron returns the earliest UTC instant among
-  that hour's jobs, and the editor's default zone comes from the daemon.
+  retry never becomes a second run and a slot waiting for its retry is never
+  read as due again. A once slot is taken when it is admitted, so a pause
+  during the run cannot arm it again, and a spent Once task stays spent across
+  edits and resumes; only a different date, time or time zone names a new slot,
+  and a run is refused until that marker is durable, so a crash cannot re-arm
+  it. A schedule that cannot name its next slot is disarmed and records the
+  reason instead of starting a thread on every backoff. Daily and weekly times
+  run only at the first occurrence in a fall-back hour, cron returns the
+  earliest UTC instant among that hour's jobs, and the editor's default zone
+  comes from the daemon. The editor also says why when it cannot reveal a
+  webhook URL.
   Webhooks follow the configured `--bind` and any extra bind, never the tailnet
   or LAN listeners.
   A thread with an enabled task keeps its worktree through a clear. See

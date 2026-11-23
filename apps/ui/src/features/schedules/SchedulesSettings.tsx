@@ -250,6 +250,11 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
   const loading = useSchedules((state) =>
     task ? state.webhookPathLoading === task.task_id : false,
   );
+  const revealError = useSchedules((state) =>
+    task && state.webhookPathError?.task_id === task.task_id
+      ? state.webhookPathError.message
+      : null,
+  );
   const [copied, setCopied] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
   const hasPath = live?.webhook_path_set ?? false;
@@ -288,7 +293,14 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
         </div>
         <div className="ctl">
           <span className="q-mono q-muted" title={path ?? undefined} style={{ maxWidth: 360 }}>
-            {path ?? (hasPath && loading ? "Loading…" : hasPath ? "Hidden" : "—")}
+            {path ??
+              (hasPath && loading
+                ? "Loading…"
+                : revealError
+                  ? "Unavailable"
+                  : hasPath
+                    ? "Hidden"
+                    : "—")}
           </span>
           <button
             type="button"
@@ -315,6 +327,11 @@ function WebhookPanel({ task }: { task: ScheduleTask | null }) {
           </button>
         </div>
       </div>
+      {revealError ? (
+        <p className="q-muted" role="alert">
+          {revealError}
+        </p>
+      ) : null}
       {copied ? (
         <p className="q-muted" role="status" aria-live="polite">
           {copied}

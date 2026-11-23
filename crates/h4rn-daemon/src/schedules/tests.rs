@@ -1023,7 +1023,7 @@ async fn a_completed_once_task_is_never_run_again_in_the_repeated_hour() {
     assert!(spent.once_consumed);
     assert_eq!(
         spent.once_consumed_slot.as_deref(),
-        Some("2026-10-25T02:30")
+        Some("2026-10-25T02:30@Europe/Berlin")
     );
     assert!(spent.next_run_at.is_none());
 
@@ -1166,6 +1166,82 @@ async fn a_failed_recording_retries_only_that_write_and_keeps_the_real_slot() {
 }
 
 #[tokio::test]
+async fn a_pending_write_is_never_a_due_slot_for_the_runner() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+
+    // The slot fails to record, then its retry fails too.
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.fail_next_commit();
+    fixture.service.run_due().await;
+    fixture.service.fail_next_commit();
+    fixture.clock.advance(chrono::Duration::seconds(31));
+    fixture.service.run_due().await;
+
+    let real_next = fixture
+        .service
+        .task(&task.task_id)
+        .await
+        .expect("task")
+        .next_run_at
+        .expect("the real next slot is kept");
+    // Move past that real slot while the write is still pending.
+    fixture.clock.advance(chrono::Duration::seconds(30));
+    let now = fixture.clock.now();
+    assert!(
+        real_next <= now,
+        "the test needs the real slot to be due behind the pending write"
+    );
+    let pending_due = lock(&fixture.service.inner.pending)
+        .get(&task.task_id)
+        .expect("pending write")
+        .due_at;
+    assert!(pending_due > now, "the retry deadline is still ahead");
+
+    let next = fixture
+        .service
+        .next_due()
+        .await
+        .expect("a pending deadline");
+    assert!(
+        next > now,
+        "a slot that admission refuses must not read as due now: {next} <= {now}"
+    );
+    assert_eq!(next, pending_due);
+
+    // The runner admits nothing for the pending slot, and still wakes on the
+    // retry deadline rather than spinning on the past slot.
+    fixture.service.run_due().await;
+    let after = fixture
+        .service
+        .next_due()
+        .await
+        .expect("the pending deadline");
+    assert!(
+        after > fixture.clock.now(),
+        "run_due must not leave a past instant to busy-loop on"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1,
+        "the pending slot starts no second thread"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_webhook_or_manual_recording_never_writes_a_clock_slot() {
     let clock = Arc::new(ManualClock::at(Utc::now()));
     let fixture = fixture(FakeHarness::new(), clock).await;
@@ -1273,7 +1349,7 @@ async fn wait_pending(service: &ScheduleService, task: &ScheduleTaskId) {
 }
 
 #[tokio::test]
-async fn a_bad_stored_zone_backs_off_instead_of_retrying() {
+async fn a_bad_stored_zone_disarms_the_task_instead_of_starting_more_threads() {
     let clock = Arc::new(ManualClock::at(Utc::now()));
     let fixture = fixture(FakeHarness::new(), clock).await;
     let task = fixture
@@ -1300,18 +1376,51 @@ async fn a_bad_stored_zone_backs_off_instead_of_retrying() {
     fixture.service.run_due().await;
     let after = fixture.service.task(&task.task_id).await.expect("task");
     assert!(
-        after.next_run_at.is_some_and(|at| at > fixture.clock.now()),
-        "a broken zone must not leave the task permanently due"
+        after.next_run_at.is_none(),
+        "a schedule with no computable next run is disarmed"
     );
-    fixture.clock.advance(chrono::Duration::seconds(1));
-    fixture.service.run_due().await;
+    let last = after.last_run.expect("the refusal is recorded");
+    assert_eq!(last.outcome, ScheduleRunOutcome::Failed);
+    assert!(
+        last.detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("time zone")),
+        "the reason is visible: {:?}",
+        last.detail
+    );
     assert_eq!(
         fixture
             .manager
             .list_threads(&Default::default())
             .await
             .len(),
-        1
+        0,
+        "no thread is started for a run that could never be recorded"
+    );
+
+    // Several retry windows later the disarmed task still runs nothing: a
+    // backoff used to leave the slot armed, so every backoff started a thread.
+    for _ in 0..4 {
+        fixture.clock.advance(chrono::Duration::minutes(5));
+        fixture.service.run_due().await;
+    }
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .len(),
+        1,
+        "one visible refusal, not one per backoff"
     );
 }
 
@@ -1738,7 +1847,7 @@ async fn a_paused_once_task_cannot_run_the_same_slot_twice() {
             .expect("task")
             .once_consumed_slot
             .as_deref(),
-        Some("2026-10-25T02:30")
+        Some("2026-10-25T02:30@Europe/Berlin")
     );
     assert_eq!(
         fixture
@@ -1749,7 +1858,7 @@ async fn a_paused_once_task_cannot_run_the_same_slot_twice() {
             .expect("task row")
             .once_consumed_slot
             .as_deref(),
-        Some("2026-10-25T02:30"),
+        Some("2026-10-25T02:30@Europe/Berlin"),
         "the spent slot survives a restart from the moment of admission"
     );
     let write = fixture.service.write_lock(&task.task_id).await;
@@ -1823,6 +1932,181 @@ async fn a_paused_once_task_cannot_run_the_same_slot_twice() {
             .await
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn a_once_slot_whose_marker_cannot_be_written_runs_only_after_it_is_durable() {
+    let clock = Arc::new(ManualClock::at(
+        "2026-10-24T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("clock"),
+    ));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Once {
+                date: "2026-10-25".into(),
+                time: "02:30".into(),
+            },
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    fixture
+        .clock
+        .advance(chrono::Duration::minutes(12 * 60 + 31));
+
+    // The spent marker cannot be written, and a crash lands before the run's
+    // own commit could persist it either.
+    fixture.service.fail_next_upsert();
+    fixture.service.fail_next_commit();
+    fixture.service.run_due().await;
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        0,
+        "a run is refused until its slot marker is durable"
+    );
+    assert!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .is_empty()
+    );
+    let blocked = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        !blocked.once_consumed,
+        "the in-memory marker was rolled back"
+    );
+    assert!(
+        blocked
+            .next_run_at
+            .is_some_and(|at| at > fixture.clock.now()),
+        "the refused slot is retried on a backoff instead of spinning"
+    );
+
+    // A restart forgets the refused admission; the slot is still unspent, so it
+    // runs once after the retry deadline and then never again.
+    let restarted = ScheduleService::open(
+        Arc::clone(&fixture.journal),
+        Arc::clone(&fixture.manager),
+        HostId::new("host_schedule_test"),
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("restart");
+    fixture.clock.advance(chrono::Duration::seconds(31));
+    restarted.run_due().await;
+    let runs = wait_runs(&restarted, &task.task_id, 1).await;
+    assert_eq!(runs[0].outcome, ScheduleRunOutcome::Started);
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1
+    );
+
+    fixture.clock.advance(chrono::Duration::days(90));
+    restarted.run_due().await;
+    assert_eq!(
+        restarted.runs(&task.task_id).await.expect("runs").len(),
+        1,
+        "the slot runs at most once"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_used_once_slot_rearms_when_its_zone_names_another_instant() {
+    let clock = Arc::new(ManualClock::at(
+        "2026-10-24T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("clock"),
+    ));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Once {
+                date: "2026-10-25".into(),
+                time: "02:30".into(),
+            },
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    fixture
+        .clock
+        .advance(chrono::Duration::minutes(12 * 60 + 31));
+    fixture.service.run_due().await;
+    wait_runs(&fixture.service, &task.task_id, 1).await;
+    let spent = fixture.service.task(&task.task_id).await.expect("task");
+    assert_eq!(
+        spent.once_consumed_slot.as_deref(),
+        Some("2026-10-25T02:30@Europe/Berlin")
+    );
+
+    // Renaming the task names the same instant, so the slot stays spent.
+    let mut edit = spent.draft();
+    edit.name = "Renamed once".into();
+    let renamed = fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("rename");
+    assert!(renamed.once_consumed);
+    assert!(renamed.next_run_at.is_none());
+
+    // The same wall clock in another zone is another instant, so it is a new
+    // slot and it runs once.
+    let mut moved = renamed.draft();
+    moved.timezone = "UTC".into();
+    let armed = fixture
+        .service
+        .update(&task.task_id, moved)
+        .await
+        .expect("move the zone");
+    assert!(!armed.once_consumed);
+    assert_eq!(
+        armed.next_run_at,
+        Some(
+            "2026-10-25T02:30:00Z"
+                .parse::<DateTime<Utc>>()
+                .expect("slot")
+        )
+    );
+    fixture.clock.advance(chrono::Duration::hours(2));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 2).await;
+    assert_eq!(runs[0].outcome, ScheduleRunOutcome::Started);
+    assert_eq!(runs[1].outcome, ScheduleRunOutcome::Started);
+    assert_eq!(
+        fixture
+            .service
+            .task(&task.task_id)
+            .await
+            .expect("task")
+            .once_consumed_slot
+            .as_deref(),
+        Some("2026-10-25T02:30@UTC")
     );
 }
 

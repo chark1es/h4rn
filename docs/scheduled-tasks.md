@@ -37,7 +37,7 @@ among them, so 02:00 and 02:30 jobs in Berlin both run in the first pass. A
 **Once** slot is taken when it is admitted, before the harness is asked to
 start: it never matches again in the repeated hour, and neither an edit nor a
 pause during the run followed by a resume re-arms the same date and time.
-Naming a different date or time in an edit does arm a new slot.
+Naming a different date, time or time zone in an edit does arm a new slot.
 
 Cron accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `1-30/2`) and comma
 lists. Weekdays are 0 (Sunday) through 6, with 7 also accepted as Sunday. When
@@ -89,9 +89,13 @@ does not catch up on slots from while it was paused.
 If a run's journal write fails, only that write is retried, on its own
 backoff deadline (30 seconds, doubling up to an hour). The task's real next
 slot is kept, the failed slot is never admitted again, and a webhook or manual
-run does not acquire a clock time. If the stored schedule itself cannot
-produce an instant (an invalid time zone, for example), the task backs off 30
-seconds, doubling up to an hour, so the runner does not retry every instant. A
+run does not acquire a clock time. A slot whose write is still retrying is not
+treated as due: the runner wakes on the retry deadline instead of checking the
+past slot over and over. If the stored schedule cannot produce the slot after
+the current one (an invalid time zone, for example), the run is not
+dispatched. The task is disarmed and a **Failed** run records the reason, so no
+thread is started for a run that could never be recorded and no backoff starts
+another. Fix the schedule and resume the task to run it again. A
 **Once** task whose run started is spent even when its write is still
 retrying.
 
@@ -107,7 +111,9 @@ Choose **On webhook** as the schedule. Saving gives the task a random 256-bit
 path under `/webhooks/`, which **anyone holding it** can use to start a run. The
 path is a secret: a listed task and a change event carry only a "has a URL"
 flag, and the editor reads the path through an admin-only request when its panel
-opens. The editor's **Copy** and **Rotate** controls work on that value. Rotating replaces
+opens. The editor's **Copy** and **Rotate** controls work on that value; when the
+reveal is denied or fails, the editor says why instead of leaving a silent
+"Hidden". Rotating replaces
 the path immediately and the old one answers 404. Every request is a POST;
 other methods receive 405. The path is checked and a delivery slot taken before
 the body is read, parsed or copied, so a wrong path is cheap. The body is capped

@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ResponseBody, ScheduleRun, ScheduleTask } from "@/gen";
+import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import { getState, store } from "@/lib/store/appStore";
 
 import { SchedulesSettings } from "./SchedulesSettings";
@@ -211,6 +212,38 @@ describe("scheduled tasks settings", () => {
 
     expect(await screen.findByText("/webhooks/abc")).toBeTruthy();
     expect(requests).toContain("get_schedule_webhook_url");
+  });
+
+  it("says why a webhook path could not be revealed", async () => {
+    setSchedulesRequesterForTests((request) => {
+      if (request.type === "list_schedules") {
+        return ok({
+          type: "schedules",
+          tasks: [
+            task({
+              schedule: { kind: "webhook" },
+              webhook_path_set: true,
+              next_run_at: null,
+            }),
+          ],
+        });
+      }
+      if (request.type === "get_schedule_webhook_url") {
+        return Promise.reject(
+          new H4rnRequestError(protoError("forbidden", "Only an admin can read the webhook URL.")),
+        );
+      }
+      return ok({ type: "ack" });
+    });
+    render(<SchedulesSettings />);
+
+    await screen.findByText("Nightly review");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Nightly review" }));
+    });
+
+    expect(await screen.findByText("Only an admin can read the webhook URL.")).toBeTruthy();
+    expect(screen.queryByText("Hidden")).toBeNull();
   });
 
   it("pauses a task and asks for history only when opened", async () => {
