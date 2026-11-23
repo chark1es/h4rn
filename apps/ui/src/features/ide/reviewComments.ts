@@ -30,10 +30,11 @@ export type ReviewComment = {
   text: string;
   /**
    * The exact diff this was written on (`diffScopeKey` of its `against`):
-   * `head`, `turn:<thread>:<turn>`, `base:<name>` or `commit:<sha>`.
+   * `head`, `turn:<thread>:<turn>`, `base:<resolved base>` or `commit:<sha>`.
    *
    * Inline placement and the "other source" list match on this, so two turns
-   * whose short labels collide still keep their comments apart.
+   * whose labels collide still keep their comments apart, and a branch
+   * comparison keeps one key whichever way its base was chosen.
    */
   scope: string;
   /** Display text only: "branch vs main", "commit 1a2b3c4". */

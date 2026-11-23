@@ -37,7 +37,12 @@ const mock = vi.hoisted(() => {
   const listeners = new Set<() => void>();
   return {
     state,
-    requests: [] as Array<{ type: string; path?: string; against?: unknown }>,
+    requests: [] as Array<{
+      type: string;
+      path?: string;
+      workspace?: string;
+      against?: unknown;
+    }>,
     phone: false,
     /** The next request of this type waits for `promise` before it answers. */
     hold: null as { type: string; promise: Promise<void> } | null,
@@ -65,7 +70,12 @@ vi.mock("@/lib/store/appStore", async () => {
         () => selector(mock.state),
       ),
     getClient: () => ({
-      request: async (request: { type: string; path?: string; against?: unknown }) => {
+      request: async (request: {
+        type: string;
+        path?: string;
+        workspace?: string;
+        against?: unknown;
+      }) => {
         mock.requests.push(request);
         if (mock.hold && mock.hold.type === request.type) {
           const hold = mock.hold;
@@ -74,7 +84,10 @@ vi.mock("@/lib/store/appStore", async () => {
         }
         switch (request.type) {
           case "fs_list":
-            return { type: "fs_listing", listing: listing(request.path ?? "") };
+            return {
+              type: "fs_listing",
+              listing: listing(request.path ?? "", request.workspace),
+            };
           case "fs_read":
             return { type: "fs_file", file: file(request.path ?? "") };
           case "fs_diff":
@@ -85,14 +98,20 @@ vi.mock("@/lib/store/appStore", async () => {
           case "fs_turn_changes":
             return { type: "fs_turn_changes", changes: changes() };
           case "fs_diff_files":
-            return { type: "fs_diff_files", files: diffFiles() };
+            return {
+              type: "fs_diff_files",
+              files: diffFiles(request.against as FsDiff["against"] | undefined),
+            };
           case "fs_diff_commits":
             return {
               type: "fs_diff_commits",
               commits: { base: "main", merge_base: "abc", commits: [], truncated: false },
             };
           case "fs_branches":
-            return { type: "fs_branches", branches: { branches: ["main"], default_base: "main" } };
+            return {
+              type: "fs_branches",
+              branches: { branches: ["main", "release"], default_base: "main" },
+            };
           default:
             throw new Error(`unexpected request ${request.type}`);
         }
@@ -135,7 +154,14 @@ const turn = "turn_1" as TurnId;
 const host = "host_1" as HostId;
 const harness = "claude_code" as HarnessKind;
 
-/** The daemon's turn label: the first 8 characters of the turn id. */
+/**
+ * The label this mock prints above a diff.
+ *
+ * It deliberately reads the turn id's *first* characters and so is the same
+ * for two turns a moment apart. The daemon now prints the trailing characters,
+ * but a label is display text either way: the test keeps the colliding text to
+ * prove a comment follows the turn id and never the label.
+ */
 function turnLabel(id: TurnId): string {
   return `Turn ${id.replace(/^turn_/, "").slice(0, 8)}`;
 }
@@ -145,9 +171,10 @@ let workspacePath = "/work";
 /** The turn the thread reports as its latest; a test can move it forward. */
 let activeTurn: TurnId = turn;
 
-function listing(path: string): FsListing {
+function listing(path: string, workspace?: string): FsListing {
+  const empty = workspace?.endsWith("-empty") ?? false;
   const entries =
-    path === ""
+    path === "" && !empty
       ? ["a.ts", "b.ts"].map((name) => ({
           name,
           path: name,
@@ -241,9 +268,9 @@ function changes(): FsTurnChanges {
   };
 }
 
-function diffFiles(): FsDiffFiles {
+function diffFiles(against?: FsDiff["against"]): FsDiffFiles {
   return {
-    against: { kind: "base", base: null },
+    against: against ?? { kind: "base", base: null },
     label: "vs main",
     base: "main",
     merge_base: "abc",
@@ -263,32 +290,37 @@ function diffFiles(): FsDiffFiles {
   };
 }
 
+/** One thread row, as the app store would hold it. */
+function threadRow(id: ThreadId, path: string, title: string) {
+  return {
+    thread_id: id,
+    parent_thread_id: null,
+    host,
+    harness,
+    title,
+    workspace_path: path,
+    model: "claude-sonnet-5-5",
+    tab: "done",
+    placed_by_user: false,
+    pinned: false,
+    snoozed_until: null,
+    last_activity: "2026-03-04T12:00:00Z",
+    agent_state: "done",
+    usage: {},
+    ttft_ms: null,
+    context_window: null,
+    context_fill_percent: null,
+    needs_attention: false,
+    unread: false,
+    resume_at: null,
+    limit: null,
+  };
+}
+
 /** A turn-scoped session: the thread reports one turn and its changes. */
 function seed() {
   mock.state.threads = {
-    [thread]: {
-      thread_id: thread,
-      parent_thread_id: null,
-      host,
-      harness,
-      title: "Fix the auth test",
-      workspace_path: workspacePath,
-      model: "claude-sonnet-5-5",
-      tab: "done",
-      placed_by_user: false,
-      pinned: false,
-      snoozed_until: null,
-      last_activity: "2026-03-04T12:00:00Z",
-      agent_state: "done",
-      usage: {},
-      ttft_ms: null,
-      context_window: null,
-      context_fill_percent: null,
-      needs_attention: false,
-      unread: false,
-      resume_at: null,
-      limit: null,
-    },
+    [thread]: threadRow(thread, workspacePath, "Fix the auth test"),
   };
   mock.state.hosts = {
     [host]: {
@@ -598,8 +630,9 @@ describe("a slower reply never overrides a later choice", () => {
 
 describe("comments are keyed on the turn, not its label", () => {
   it("keeps a comment off a second turn whose 8-character label reads the same", async () => {
-    // Two UUIDv7 ids a moment apart: the first 8 characters, and so the
-    // daemon's turn label, are identical.
+    // Two UUIDv7 ids a moment apart: the first 8 characters are identical. The
+    // mock labels them with that prefix on purpose, so the labels collide and
+    // only the turn id can keep the comments apart.
     const first = "0192f0c1-2345-7abc-8def-0123456789ab" as TurnId;
     const second = "0192f0c1-9876-7abc-8def-fedcba987654" as TurnId;
     setTurn(first);
@@ -643,5 +676,97 @@ describe("comments are keyed on the turn, not its label", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send to agent" }));
     await waitFor(() => expect(listReviewComments(thread)).toHaveLength(0));
     expect(readThreadDraft(host, thread)).toContain("turn 0192f0c1");
+  });
+});
+
+describe("one comparison has one branch list and one comment key", () => {
+  it("keeps a slow base-branch list after the file list and diff have opened", async () => {
+    await mount();
+    await openDiff();
+
+    const releaseBranches = holdNext("fs_branches");
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+
+    // The file list and the diff answer while the branch list is still out.
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+
+    await releaseHold(releaseBranches);
+
+    // The branch list does not depend on the open file, so it still arrives
+    // and the picker offers the repository's other branches.
+    const baseChip = await screen.findByRole("button", { name: "Base branch: main" });
+    expect(screen.queryByRole("button", { name: /Loading branches/ })).toBeNull();
+    openChip(baseChip);
+    expect(await screen.findByRole("menuitem", { name: "release" })).toBeTruthy();
+  });
+
+  it("keys a branch comment on the resolved base, not on the request", async () => {
+    await mount();
+    await openDiff();
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    const added = await waitFor(() =>
+      within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ }),
+    );
+    await settle();
+    fireEvent.keyDown(added, { key: "Enter" });
+    fireEvent.change(screen.getByLabelText("Review comment"), {
+      target: { value: "Keep the base honest." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+
+    // The default base was asked for as `null` and resolved to `main`; the
+    // comment is keyed on that branch, not on the empty request.
+    await waitFor(() => expect(listReviewComments(thread)).toHaveLength(1));
+    expect(listReviewComments(thread)[0]?.scope).toBe("base:main");
+
+    // Picking `main` by name is the same comparison, so the comment stays
+    // inline instead of moving to "another diff source".
+    const baseChip = await screen.findByRole("button", { name: "Base branch: main" });
+    openChip(baseChip);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "main" }));
+    await waitFor(() =>
+      expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "main" }),
+    );
+    await settle();
+    expect(within(diffLines()).getByText("Keep the base honest.")).toBeTruthy();
+    expect(screen.queryByText(/another diff source/)).toBeNull();
+  });
+
+  it("drops a diff reply that lands after the workspace changed", async () => {
+    await mount();
+    await openDiff();
+
+    // The editor opens b.ts and its diff reply is held back.
+    const release = holdNext("fs_diff");
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() => expect(diffRequests().at(-1)?.path).toBe("b.ts"));
+
+    // Another thread works in another, empty workspace: it has no file to open
+    // and so asks for no diff of its own. Only the workspace change itself can
+    // keep the held reply out.
+    const other = "th_2" as ThreadId;
+    mock.state.threads = {
+      ...mock.state.threads,
+      [other]: threadRow(other, `${workspacePath}-empty`, "Another task"),
+    };
+    act(() => {
+      mock.state.ui.selectedThreadId = other;
+      mock.notify();
+    });
+    await waitFor(() => expect(screen.getByText("Open a file to compare it.")).toBeTruthy());
+
+    await releaseHold(release);
+
+    // The reply for the previous workspace never paints this one.
+    expect(screen.getByText("Open a file to compare it.")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Diff lines" })).toBeNull();
+    expect(pathBar().textContent).toBe(`${workspacePath}-empty`);
   });
 });

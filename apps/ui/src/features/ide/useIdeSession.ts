@@ -214,6 +214,12 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const loadedKeyRef = useRef<string | null>(null);
   /** The newest diff request; replies for an older counter are dropped. */
   const diffRequestRef = useRef(0);
+  /**
+   * The newest base-branch list request. The list does not depend on the open
+   * file, so it has its own counter: a slower file list or diff reply must not
+   * throw it away, and only a newer branch read (or another workspace) may.
+   */
+  const branchesRequestRef = useRef(0);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
 
@@ -545,8 +551,13 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     // The dropped reply's spinner must not outlive it. A current list request
     // sets its own flag again in the same tick, before its first await.
     setState((current) =>
-      current.filesLoading || current.commitsLoading
-        ? { ...current, filesLoading: false, commitsLoading: false }
+      current.filesLoading || current.commitsLoading || current.branchesLoading
+        ? {
+            ...current,
+            filesLoading: false,
+            commitsLoading: false,
+            branchesLoading: false,
+          }
         : current,
     );
     return diffRequestRef.current;
@@ -652,6 +663,11 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           diffFiles: files,
           filesLoading: false,
           filesError: null,
+          // One comparison has one name. The daemon resolves the default base
+          // (and every abbreviation) to this branch; the pane remembers the
+          // resolved name so the picker, the next requests and the comment key
+          // all name the same comparison however the base was chosen.
+          ...(against.kind === "base" && files.base ? { diffBase: files.base } : {}),
         }));
         return files;
       } catch (error) {
@@ -705,10 +721,19 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     [diffRequestCurrent, setState],
   );
 
+  /**
+   * Loads the branches the base picker offers.
+   *
+   * This reply is not tied to the open file or diff: a slower branch list is
+   * still the answer to the picker's question after the file list and the diff
+   * have opened. Only a newer branch read, or a different workspace, may
+   * replace it.
+   */
   const fetchBranches = useCallback(async (): Promise<FsBranchList | null> => {
     const target = workspaceRef.current;
     if (!target) return null;
-    const token = diffRequestRef.current;
+    branchesRequestRef.current += 1;
+    const token = branchesRequestRef.current;
     setState((current) => ({ ...current, branchesLoading: true, branchesError: null }));
     try {
       const response = await getClient().request({
@@ -716,8 +741,16 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         host: target.host,
         workspace: target.path,
       });
-      if (!diffRequestCurrent(token)) return null;
-      if (response.type !== "fs_branches") return null;
+      if (branchesRequestRef.current !== token) {
+        // A newer read or another workspace owns the picker now. This reply
+        // must not paint over it, and its spinner must not outlive it.
+        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        return null;
+      }
+      if (response.type !== "fs_branches") {
+        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        return null;
+      }
       const branches = response.branches;
       setState((current) => ({
         ...current,
@@ -727,7 +760,10 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }));
       return branches;
     } catch (error) {
-      if (!diffRequestCurrent(token)) return null;
+      if (branchesRequestRef.current !== token) {
+        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        return null;
+      }
       setState((current) => ({
         ...current,
         diffBranches: null,
@@ -736,7 +772,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }));
       return null;
     }
-  }, [diffRequestCurrent, setState]);
+  }, [setState]);
 
   const showDiffForFiles = useCallback(
     async (
@@ -772,7 +808,9 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       void fetchBranches();
       const files = await fetchDiffFiles({ kind: "base", base });
       if (!diffRequestCurrent(token)) return;
-      await showDiffForFiles(files, "branch", preferred, { base });
+      // The list resolves the base (the default included); ask for that name so
+      // the diff, the picker and the comment key all describe one comparison.
+      await showDiffForFiles(files, "branch", preferred, { base: files?.base ?? base });
     },
     [beginDiffRequest, diffRequestCurrent, fetchBranches, fetchDiffFiles, showDiffForFiles],
   );
@@ -866,7 +904,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "base", base });
       if (!diffRequestCurrent(token)) return;
-      await showDiffForFiles(files, "branch", preferred, { base });
+      await showDiffForFiles(files, "branch", preferred, { base: files?.base ?? base });
     },
     [beginDiffRequest, diffRequestCurrent, fetchDiffFiles, showDiffForFiles, setState],
   );
@@ -985,12 +1023,29 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     if (!workspacePath || !workspaceHost || !workspaceKey) return;
     autoOpenedRef.current = null;
     loadedKeyRef.current = workspaceKey;
+    // A reply addressed to the previous workspace must never paint this one:
+    // bump both generations so every request still in flight is dropped.
+    diffRequestRef.current += 1;
+    branchesRequestRef.current += 1;
+    // Nothing is in flight for the state being restored, so a cached spinner
+    // is the leftover of a read that has already been dropped.
+    const idle: Partial<IdeState> = {
+      diffLoading: false,
+      diffError: null,
+      filesLoading: false,
+      filesError: null,
+      commitsLoading: false,
+      commitsError: null,
+      branchesLoading: false,
+      branchesError: null,
+    };
     const cached = IDE_CACHE.get(workspaceKey);
     if (cached) {
       // A project keeps its tabs. Do not auto-open over them; just refresh the
       // root listing so new or deleted files still show up.
       applyState({
         ...cached,
+        ...idle,
         workspaceKey,
         restoredTabs: cached.tabs.tabs.length,
         treeLoading: cached.listings[""] === undefined,
@@ -998,7 +1053,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       });
       if (cached.listings[""] === undefined) void loadListing("");
     } else {
-      applyState({ ...initialState(), workspaceKey });
+      applyState({ ...initialState(), ...idle, workspaceKey });
       void loadListing("");
     }
     const release = retainWorkspaceWatch(workspaceHost, workspacePath);

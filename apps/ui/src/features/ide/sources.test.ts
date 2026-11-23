@@ -9,6 +9,7 @@ import {
   commitLabel,
   diffScopeKey,
   firstDiffPath,
+  resolvedAgainst,
   sourceDescription,
 } from "./sources";
 
@@ -64,8 +65,8 @@ describe("diff sources", () => {
   });
 
   it("identifies a scope by the request, not by its label", () => {
-    // Two UUIDv7 turn ids a moment apart share their first 8 characters, which
-    // is all the pane's turn label shows; their identities must still differ.
+    // Two UUIDv7 turn ids a moment apart share their first characters, which a
+    // label may well print; their identities must still differ.
     const first = "0192f0c1-2345-7abc-8def-0123456789ab";
     const second = "0192f0c1-9876-7abc-8def-fedcba987654";
     expect(diffScopeKey({ kind: "head" })).toBe("head");
@@ -78,6 +79,24 @@ describe("diff sources", () => {
     expect(diffScopeKey({ kind: "base", base: null })).toBe("base:");
     expect(diffScopeKey({ kind: "commit", sha: "1a2b3c4" })).toBe("commit:1a2b3c4");
     expect(diffScopeKey(null)).toBe("none");
+  });
+
+  it("gives a default base and that branch picked by name one key", () => {
+    const defaultBase = resolvedAgainst({ kind: "base", base: null }, "main");
+    const namedBase = resolvedAgainst({ kind: "base", base: "main" }, "main");
+    expect(diffScopeKey(defaultBase)).toBe("base:main");
+    expect(diffScopeKey(namedBase)).toBe("base:main");
+    // Without a resolved name, the request is left as it was.
+    expect(resolvedAgainst({ kind: "base", base: null }, null)).toEqual({
+      kind: "base",
+      base: null,
+    });
+    // Only a branch scope has a base to fill in.
+    expect(resolvedAgainst({ kind: "commit", sha: "1a2b3c4" }, "main")).toEqual({
+      kind: "commit",
+      sha: "1a2b3c4",
+    });
+    expect(resolvedAgainst(null, "main")).toBeNull();
   });
 
   it("keeps the open file when it is still in the range", () => {

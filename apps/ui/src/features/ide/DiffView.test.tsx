@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FsDiff, FsDiffFiles, ThreadId } from "@/gen";
 
 import { DiffView } from "./DiffView";
-import { addReviewComment, resetReviewComments } from "./reviewComments";
+import { addReviewComment, listReviewComments, resetReviewComments } from "./reviewComments";
 import { sourceDescription } from "./sources";
 
 const thread = "th_1" as ThreadId;
@@ -266,10 +266,70 @@ describe("diff review", () => {
     expect(screen.getByText(/branch vs main/)).toBeTruthy();
   });
 
+  it("keys a branch comment on the base the default resolved to", () => {
+    const { rerender } = render(
+      view({
+        source: "branch",
+        files,
+        sourceLabel: "branch vs main",
+        diff: { ...diff, against: { kind: "base", base: null }, label: "vs main" },
+      }),
+    );
+    fireEvent.keyDown(screen.getByRole("button", { name: /Line 2: B/ }), { key: "Enter" });
+    fireEvent.change(screen.getByLabelText("Review comment"), {
+      target: { value: "Keep the base honest." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+
+    // `base: null` asks for the default; the file list resolved it to `main`,
+    // and that resolved branch is what the comment belongs to.
+    expect(listReviewComments(thread)[0]?.scope).toBe("base:main");
+
+    // Picking `main` by name answers with `base: "main"`: one comparison, so
+    // the comment stays inline.
+    rerender(
+      view({
+        source: "branch",
+        files,
+        sourceLabel: "branch vs main",
+        diff: { ...diff, against: { kind: "base", base: "main" }, label: "vs main" },
+      }),
+    );
+    const lines = screen.getByRole("region", { name: "Diff lines" });
+    expect(within(lines).getByText("Keep the base honest.")).toBeTruthy();
+  });
+
+  it("draws a comment written against the picked base under the default one", () => {
+    // The reverse order: the comment was written while `main` was picked by
+    // name, then the pane asks for the default, which is that same branch.
+    addReviewComment({
+      threadId: thread,
+      path: "a.txt",
+      side: "new",
+      startLine: 2,
+      endLine: 2,
+      lines: [{ number: 2, sign: "+", text: "B" }],
+      text: "Keep the base honest.",
+      scope: "base:main",
+      source: "branch vs main",
+    });
+    render(
+      view({
+        source: "branch",
+        files,
+        sourceLabel: "branch vs main",
+        diff: { ...diff, against: { kind: "base", base: null }, label: "vs main" },
+      }),
+    );
+    const lines = screen.getByRole("region", { name: "Diff lines" });
+    expect(within(lines).getByText("Keep the base honest.")).toBeTruthy();
+  });
+
   it("keeps a comment with its turn when two turns share a label", () => {
-    // UUIDv7 turn ids a moment apart share their first 8 characters, so the
-    // pane's labels read the same. The turn id, not the label, is what a
-    // comment belongs to.
+    // UUIDv7 ids a moment apart share their first characters, and this mock
+    // prints that prefix, so the two labels read the same. (The daemon prints
+    // the trailing characters; a label is display text either way.) The turn
+    // id, not the label, is what a comment belongs to.
     const label = "Turn 0192f0c1";
     const first = "0192f0c1-2345-7abc-8def-0123456789ab";
     addReviewComment({

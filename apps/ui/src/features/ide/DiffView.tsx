@@ -34,7 +34,7 @@ import {
   updateReviewComment,
   useReviewComments,
 } from "./reviewComments";
-import { type DiffSource, diffScopeKey } from "./sources";
+import { type DiffSource, diffScopeKey, resolvedAgainst } from "./sources";
 
 type DiffViewProps = {
   path: string | null;
@@ -371,8 +371,10 @@ export function DiffView({
     [comments, path],
   );
   // The identity of the diff on screen. The label above it is text a person
-  // reads; two scopes can share one, so comments are matched on the request.
-  const scopeKey = diffScopeKey(diff?.against ?? null);
+  // reads, so comments are matched on the request instead. A branch request
+  // for the default base is keyed by the branch that default resolved to, so
+  // picking that branch by name is the same comparison.
+  const scopeKey = diffScopeKey(resolvedAgainst(diff?.against ?? null, files?.base ?? null));
   const [selection, setSelection] = useState<LineSelection | null>(null);
   const [draft, setDraft] = useState<LineSelection | null>(null);
   const rowRefs = useRef(new Map<number, HTMLButtonElement>());

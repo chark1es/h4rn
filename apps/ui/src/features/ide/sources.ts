@@ -52,12 +52,13 @@ export function againstForScope(scope: DiffScope): DiffAgainst | null {
 }
 
 /**
- * The identity of a diff scope: exactly what the pane asked the daemon for.
+ * The identity of a diff scope: what the pane asked the daemon for.
  *
  * A review comment is stored against this key, never against the display
- * label. Two turns a moment apart can share their label — the short turn id is
- * a UUIDv7 prefix, which only ticks over once per timestamp step — but their
- * ids are different, so their comments stay apart.
+ * label. The daemon prints a label of its own (the trailing characters of the
+ * turn id, for example), and that text is not unique: it is for people to read.
+ * The full request, turn id and commit sha included, is what keeps two
+ * comments apart, so the label can change without moving a comment.
  */
 export function diffScopeKey(against: DiffAgainst | null | undefined): string {
   if (!against) return "none";
@@ -71,6 +72,25 @@ export function diffScopeKey(against: DiffAgainst | null | undefined): string {
     case "commit":
       return `commit:${against.sha}`;
   }
+}
+
+/**
+ * The scope a diff reply describes, with a branch's base filled in.
+ *
+ * A branch request may ask for the repository default (`base: null`), and the
+ * daemon echoes back exactly that. The file list also reports which branch the
+ * default resolved to. The default and that branch picked by name are one
+ * comparison, so they must produce one comment key.
+ */
+export function resolvedAgainst(
+  against: DiffAgainst | null | undefined,
+  resolvedBase: string | null,
+): DiffAgainst | null {
+  if (!against) return null;
+  if (against.kind === "base" && against.base === null && resolvedBase) {
+    return { kind: "base", base: resolvedBase };
+  }
+  return against;
 }
 
 /**
