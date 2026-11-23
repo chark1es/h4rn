@@ -23,7 +23,11 @@ in this order:
 A `refs/remotes/<remote>/HEAD` that no longer resolves to a commit (its branch was deleted or never
 fetched) is skipped, and the search continues with that remote's `main` or `master`. With no base at
 all — no remote, no `main` or `master`, or an unborn `HEAD` — the pane says why and offers **Compare
-with HEAD**, which switches to Uncommitted. Choose another branch from the base picker, too.
+with HEAD**, which switches to Uncommitted. Choose another branch from the base picker, too. The
+picker offers every local and remote-tracking branch the repository has; the branch list is loaded
+for the repository, not for the file, so a slow one still arrives after the file list and the diff
+are on screen. The daemon resolves the default to a branch name and the pane keeps that name, so
+reviewing against the default and picking that same branch by name are one comparison.
 
 The file list comes from `git diff` against the merge base plus untracked files. It shows the git
 status letter, added and removed line counts, and the old path for a rename. Like every list in
@@ -64,15 +68,18 @@ Select a line in any diff mode. Shift-click or Shift+Arrow extends the range. Pr
 lines on the old side, and a mixed range reports the side where it has line numbers.
 
 A comment sits inline under its line only while the pane shows the diff it was written on. It
-remembers the scope it was written against — the turn's id, the commit's sha, the base's name —
-rather than the label printed above the diff. Two turns a moment apart can read the same label (a
-UUIDv7's first characters cover roughly a minute), so matching on text would put a comment on the
-wrong turn; the id keeps them apart. The source names itself in the comment: `turn 0192f0c1` for a
-turn, `branch vs main` for the branch review, `commit 1a2b3c4` for a commit and `uncommitted
-(HEAD)` for the working tree. A comment written during one turn therefore stays with that turn and
-is not drawn on another turn's diff. Comments for the same file but another scope (or on lines
-hidden by collapsed context) are listed below the diff with the source each was written in, so
-nothing is silently moved to a line it never described. Edit or delete one in place. The pane
+remembers the scope it was written against — the turn's id, the commit's sha, the resolved base's
+name — rather than the label printed above the diff. That label is display text for people to read;
+the daemon prints a short one (the trailing characters of a turn's id, a commit's short sha, the
+base's name), and it may repeat or change without moving a comment. The full request is what
+matches. A branch comparison has one key whichever way its base was chosen: asking for the default
+and picking the branch that default resolved to are both keyed on the resolved name, so a comment
+stays inline when you switch between the two. The source names itself in the comment: `turn
+0192f0c1` for a turn, `branch vs main` for the branch review, `commit 1a2b3c4` for a commit and
+`uncommitted (HEAD)` for the working tree. A comment written during one turn therefore stays with
+that turn and is not drawn on another turn's diff. Comments for the same file but another scope (or
+on lines hidden by collapsed context) are listed below the diff with the source each was written in,
+so nothing is silently moved to a line it never described. Edit or delete one in place. The pane
 header counts the thread's pending comments, so switching files or modes never hides one. Comments
 live in page memory for the thread; a reload clears them, while diff contents are always re-read
 from git.
