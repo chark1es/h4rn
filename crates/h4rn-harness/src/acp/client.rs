@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -25,6 +25,23 @@ use super::protocol::{
 use crate::{TransportCloseKind, TransportHealth};
 
 const DEFAULT_EVENT_CAPACITY: usize = 1_024;
+/// How many ordinary session updates the reader may have queued ahead of the
+/// forwarder, as a multiple of the session event capacity.
+///
+/// The reader must never block on the consumer: a reply behind a flood of
+/// updates still has to be read and resolved, which is why it queues instead of
+/// sending into the session channel itself. That queue needs a bound of its
+/// own, or an agent that streams faster than the bridge drains grows memory
+/// without limit. Four session queues is far more than one turn's live output,
+/// and the history replayed by `session/load` is dropped by the load path
+/// before it reaches here. On overflow the newest ordinary update is dropped and
+/// counted.
+///
+/// The events that decide what a request means or report that the transport is
+/// gone do not share that queue: they have their own reserved path (see
+/// `is_reserved_event`), so a flood of text cannot park a permission handshake,
+/// the close notice or the exit report behind it.
+const READER_QUEUE_MULTIPLE: usize = 4;
 const FRAME_CHANNEL_CAPACITY: usize = 256;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -358,7 +375,30 @@ struct Shared {
     /// reply sitting behind those updates. A forwarder task moves these into
     /// the session's bounded channel in the same order, so delivery can lag
     /// without ever blocking a reply.
+    ///
+    /// Ordinary events share one queue, in the reader's order. Ordinary session
+    /// updates are bounded by [`READER_QUEUE_MULTIPLE`] session queues (see
+    /// `publish`): when that many are waiting, the newest is dropped rather than
+    /// growing this queue.
     reader_events: mpsc::UnboundedSender<AcpEvent>,
+    /// The reserved path: the events that decide what a request means or report
+    /// the transport gone.
+    ///
+    /// A permission handshake, a transport close, stdout's close and the exit
+    /// report are not updates, and they must not wait behind a flood of them.
+    /// When the session channel is blocked or the update backlog is larger than
+    /// one session queue, the forwarder gives one of these the next slot. Such events are at most
+    /// a handful per turn, so this queue is not counted against the update
+    /// bound: the flood that can grow without limit is the update stream, which
+    /// is capped. While the session channel flows, both queues are delivered in
+    /// the reader's order, so a close never arrives before the words read ahead
+    /// of it.
+    reader_control: mpsc::UnboundedSender<AcpEvent>,
+    /// How many ordinary session updates are queued and not yet forwarded.
+    queued_updates: Arc<AtomicUsize>,
+    /// How many ordinary session updates were dropped because that bound was
+    /// reached.
+    dropped_updates: AtomicU64,
     /// How many events the reader has published, in order.
     ///
     /// The load path uses it to know when the forwarder has moved everything
@@ -551,14 +591,91 @@ impl AcpClient {
     {
         let (events_tx, events_rx) = mpsc::channel(config.event_capacity.max(16));
         let (reader_events, mut reader_events_rx) = mpsc::unbounded_channel();
+        let (reader_control, mut reader_control_rx) = mpsc::unbounded_channel();
         // One task owns the bounded channel: the reader only queues here, so a
         // slow consumer can never stop it from reading (and resolving) the
-        // agent's replies.
+        // agent's replies. Ordinary updates are counted against a bound in
+        // `publish`; the forwarder gives each one back as it moves on, so a
+        // stalled consumer drops updates instead of growing memory.
+        //
+        // The reserved queue is used when the session channel has no room or
+        // the waiting updates fill more than one session queue: a permission
+        // request, a close or the exit report then goes next instead of waiting
+        // behind all of them. While the consumer keeps up, delivery keeps the
+        // reader's order, so a close report cannot overtake the turn's last
+        // words that were read before it.
         let relay = events_tx.clone();
+        let session_capacity = config.event_capacity.max(16);
         let forwarded = Arc::new(AtomicU64::new(0));
         let forwarded_count = Arc::clone(&forwarded);
+        let queued = Arc::new(AtomicUsize::new(0));
+        let queued_count = Arc::clone(&queued);
         tokio::spawn(async move {
-            while let Some(event) = reader_events_rx.recv().await {
+            let mut ordinary_open = true;
+            let mut control_open = true;
+            let mut ordinary_slot: Option<AcpEvent> = None;
+            let mut control_slot: Option<AcpEvent> = None;
+            loop {
+                // Fill both slots without blocking, so the choice below can see
+                // what each side has waiting.
+                if ordinary_slot.is_none() && ordinary_open {
+                    match reader_events_rx.try_recv() {
+                        Ok(event) => {
+                            if is_ordinary_update(&event) {
+                                queued_count.fetch_sub(1, Ordering::SeqCst);
+                            }
+                            ordinary_slot = Some(event);
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                        Err(mpsc::error::TryRecvError::Disconnected) => ordinary_open = false,
+                    }
+                }
+                if control_slot.is_none() && control_open {
+                    match reader_control_rx.try_recv() {
+                        Ok(event) => control_slot = Some(event),
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                        Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
+                    }
+                }
+                // The reserved path: a blocked session channel, or an update
+                // backlog larger than one session queue, gives the control
+                // event the next slot. A consumer that is keeping up keeps the
+                // reader's order instead, so a close never overtakes the words
+                // read before it.
+                let control_first = control_slot.is_some()
+                    && (relay.capacity() == 0
+                        || queued_count.load(Ordering::SeqCst) >= session_capacity);
+                let event = if control_first {
+                    control_slot.take()
+                } else if ordinary_slot.is_some() {
+                    ordinary_slot.take()
+                } else if control_slot.is_some() {
+                    control_slot.take()
+                } else {
+                    if !ordinary_open && !control_open {
+                        break;
+                    }
+                    tokio::select! {
+                        biased;
+                        event = reader_control_rx.recv(), if control_open => match event {
+                            Some(event) => control_slot = Some(event),
+                            None => control_open = false,
+                        },
+                        event = reader_events_rx.recv(), if ordinary_open => match event {
+                            Some(event) => {
+                                if is_ordinary_update(&event) {
+                                    queued_count.fetch_sub(1, Ordering::SeqCst);
+                                }
+                                ordinary_slot = Some(event);
+                            }
+                            None => ordinary_open = false,
+                        },
+                    }
+                    continue;
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 if relay.send(event).await.is_err() {
                     break;
                 }
@@ -573,6 +690,9 @@ impl AcpClient {
             pending: Mutex::new(HashMap::new()),
             stdin_tx: Mutex::new(Some(stdin_tx)),
             reader_events,
+            reader_control,
+            queued_updates: queued,
+            dropped_updates: AtomicU64::new(0),
             reader_published: AtomicU64::new(0),
             forwarded,
             events_rx: Mutex::new(Some(events_rx)),
@@ -1324,12 +1444,77 @@ impl Drop for AcpClient {
 /// Never blocks on the consumer: the bounded channel is fed by one forwarder
 /// task, so a slow bridge can delay delivery but never stop the reader from
 /// reading (and resolving) the agent's replies.
+///
+/// Ordinary session updates are bounded: at most `READER_QUEUE_MULTIPLE` session
+/// queues may be waiting for the forwarder, and one that arrives with no room is
+/// dropped and counted. Dropping the newest update keeps the read side
+/// independent of how fast the bridge drains; it is the only loss this queue
+/// makes.
+///
+/// The events that decide what a request means or report the transport gone go
+/// on a reserved queue instead (see `is_reserved_event`). They are never counted
+/// against that bound and never dropped because of it. When the session channel
+/// is blocked, or more than one session queue of updates is waiting, the
+/// forwarder gives one of them the next slot, so a flood of text can never make
+/// a permission hand or the exit report wait behind all of it. While the
+/// consumer keeps up, delivery keeps the reader's order.
 fn publish(shared: &Arc<Shared>, event: AcpEvent) -> bool {
-    let published = shared.reader_events.send(event).is_ok();
+    let ordinary = is_ordinary_update(&event);
+    let reserved = is_reserved_event(&event);
+    if ordinary {
+        let queued = shared.queued_updates.fetch_add(1, Ordering::SeqCst) + 1;
+        if queued > reader_queue_capacity(&shared.config) {
+            shared.queued_updates.fetch_sub(1, Ordering::SeqCst);
+            let dropped = shared.dropped_updates.fetch_add(1, Ordering::SeqCst) + 1;
+            if dropped == 1 || dropped % 1_000 == 0 {
+                tracing::warn!(
+                    dropped,
+                    "the ACP event consumer is not keeping up; dropping session updates"
+                );
+            }
+            return false;
+        }
+    }
+    let queue = if reserved {
+        &shared.reader_control
+    } else {
+        &shared.reader_events
+    };
+    let published = queue.send(event).is_ok();
     if published {
         shared.reader_published.fetch_add(1, Ordering::SeqCst);
+    } else if ordinary {
+        shared.queued_updates.fetch_sub(1, Ordering::SeqCst);
     }
     published
+}
+
+/// Whether `event` is one of the session's ordinary updates, the only kind
+/// `publish` bounds and drops.
+fn is_ordinary_update(event: &AcpEvent) -> bool {
+    matches!(event, AcpEvent::SessionUpdate { .. })
+}
+
+/// Whether `event` takes the reserved path ahead of queued updates.
+///
+/// These are the events that decide what a request means or that the transport
+/// is gone: a permission handshake, a close and the exit report. A settlement
+/// deliberately stays on the ordinary queue: it must follow the updates the
+/// reader had already taken, or a turn's last text would land after its
+/// completion.
+fn is_reserved_event(event: &AcpEvent) -> bool {
+    matches!(
+        event,
+        AcpEvent::PermissionRequest { .. }
+            | AcpEvent::TransportClosed { .. }
+            | AcpEvent::Closed { .. }
+            | AcpEvent::Exited { .. }
+    )
+}
+
+/// The most ordinary updates the reader queue may hold.
+fn reader_queue_capacity(config: &AcpClientConfig) -> usize {
+    config.event_capacity.max(16) * READER_QUEUE_MULTIPLE
 }
 
 fn spawn_writer<W>(
@@ -1690,17 +1875,19 @@ fn teardown_transport(shared: &Arc<Shared>, message: String) {
             kind: TransportCloseKind::Write,
         },
     );
-    if let Err(error) = shared.reader_events.send(AcpEvent::TransportClosed {
-        message,
-        retryable: false,
-        kind: TransportCloseKind::Write,
-    }) {
-        // The unbounded queue only fails once its forwarder and receiver are
-        // gone, which is a client nobody is reading any more; the closed
-        // transport is visible through `is_closed` either way.
+    if !publish(
+        shared,
+        AcpEvent::TransportClosed {
+            message,
+            retryable: false,
+            kind: TransportCloseKind::Write,
+        },
+    ) {
+        // The queue only fails once its forwarder and receiver are gone, which
+        // is a client nobody is reading any more; the closed transport is
+        // visible through `is_closed` either way.
         tracing::debug!(
             target: "h4rn_harness::acp",
-            %error,
             "could not report the torn-down transport"
         );
     }
@@ -3062,6 +3249,177 @@ mod tests {
             assert_eq!(info.agent_name, "Busy Peer", "run {run}");
             client.shutdown().await.expect("shutdown");
         }
+    }
+
+    /// A chatty agent cannot grow the reader's queue past its bound.
+    ///
+    /// The reader publishes into its own queue so a slow consumer can never
+    /// park it before it reads the reply behind the updates. That queue used to
+    /// be unbounded, so an agent that streams faster than the bridge drains grew
+    /// memory without limit. Ordinary updates are now capped at four session
+    /// queues and the excess is dropped. The consumer here never reads, so both
+    /// the session channel and the reader's queue stay full for the whole flood.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_chatty_agent_cannot_grow_a_stalled_consumers_queue() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut config = flooding_peer(workspace.path(), FLOOD, "");
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        // The test never reads these: the session queue and the reader queue
+        // stay full, so anything the reader kept beyond its bound would show.
+        let _events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        assert!(
+            client
+                .wait_for_exit(Duration::from_secs(30))
+                .await
+                .is_some(),
+            "the flooding peer never exited"
+        );
+
+        let cap = reader_queue_capacity(&config);
+        let queued = client.shared.queued_updates.load(Ordering::SeqCst);
+        let dropped = client.shared.dropped_updates.load(Ordering::SeqCst);
+        let published = client.shared.reader_published.load(Ordering::SeqCst);
+        assert!(
+            queued <= cap,
+            "the reader queue grew past its bound: {queued} > {cap}"
+        );
+        assert!(dropped > 0, "a 5,000-update flood dropped nothing");
+        assert!(
+            published <= (config.event_capacity.max(16) + cap + 8) as u64,
+            "more events were queued than the reader's and session's bounds allow: {published}"
+        );
+    }
+
+    /// An exit behind a full reader queue is still delivered first.
+    ///
+    /// The close and exit reports take the reserved path: they are never
+    /// dropped and never wait behind the update queue. The consumer reads
+    /// nothing until the agent is gone, so a full session channel plus a full
+    /// reader queue stand between the consumer and the exit. The exit must still
+    /// arrive after at most one session queue of already-delivered updates, not
+    /// behind the four queues of updates the reader is holding.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_exit_behind_a_full_reader_queue_is_still_delivered() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut config = flooding_peer(workspace.path(), FLOOD, "");
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        let mut events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        wait_for_exit_published(&client).await;
+        assert!(
+            client.shared.dropped_updates.load(Ordering::SeqCst) > 0,
+            "the queue never overflowed, so this proves nothing"
+        );
+
+        let mut seen = 0usize;
+        let exited = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await {
+                    Some(AcpEvent::Exited { .. }) => return true,
+                    Some(_) => seen += 1,
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .expect("the exit report never reached a consumer behind the flood");
+        assert!(exited, "the event stream ended before the exit report");
+        assert!(
+            seen <= config.event_capacity.max(16) + 4,
+            "the exit report waited behind {seen} updates instead of taking the \
+             reserved path"
+        );
+    }
+
+    /// A permission request at the back of a flood is delivered first too.
+    ///
+    /// The request is written after 5,000 updates, with no consumer reading.
+    /// Without the reserved path it would sit behind the session channel and the
+    /// reader queue (about eighty updates); with it, it arrives after at most
+    /// the one session queue already delivered into the channel.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_permission_request_behind_a_flood_is_delivered_first() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let tail = "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"s-1\"}}';";
+        let mut config = flooding_peer(workspace.path(), FLOOD, tail);
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        let mut events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        wait_for_exit_published(&client).await;
+        assert!(
+            client.shared.dropped_updates.load(Ordering::SeqCst) > 0,
+            "the queue never overflowed, so this proves nothing"
+        );
+
+        let mut seen = 0usize;
+        let asked = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await {
+                    Some(AcpEvent::PermissionRequest { .. }) => return true,
+                    Some(_) => seen += 1,
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .expect("the permission request never reached a consumer behind the flood");
+        assert!(
+            asked,
+            "the event stream ended before the permission request"
+        );
+        assert!(
+            seen <= config.event_capacity.max(16) + 4,
+            "the permission request waited behind {seen} updates instead of \
+             taking the reserved path"
+        );
+    }
+
+    /// Waits until the peer has exited *and* its exit report is published.
+    ///
+    /// `wait_for_exit` returns as soon as the report is stored; the supervisor
+    /// publishes it as an event one step later. Draining events before that
+    /// would race the reserved path this test is about.
+    #[cfg(unix)]
+    async fn wait_for_exit_published(client: &AcpClient) {
+        assert!(
+            client
+                .wait_for_exit(Duration::from_secs(30))
+                .await
+                .is_some(),
+            "the flooding peer never exited"
+        );
+        let supervisor = { lock(&client.shared.supervisor).take() };
+        if let Some(supervisor) = supervisor {
+            supervisor.await.expect("the supervisor");
+        }
+    }
+
+    /// A shell peer that answers the first frame, writes `count` session
+    /// updates, then `tail`, then exits.
+    #[cfg(unix)]
+    fn flooding_peer(workspace: &std::path::Path, count: usize, tail: &str) -> AcpClientConfig {
+        let flood = format!(
+            "printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1,\"agentInfo\":{{\"name\":\"Flood Peer\"}}}}}}'; \
+             i=0; while [ \"$i\" -lt {count} ]; do \
+               printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"s-1\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"x\"}}}}}}}}'; \
+               i=$((i+1)); \
+             done;"
+        );
+        let script = format!("read -r line; {flood} {tail} exit 0");
+        AcpClientConfig::new("/bin/sh", workspace).args(["-c", script.as_str()])
     }
 
     #[test]
