@@ -53,9 +53,18 @@ const GUEST_UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// How many guest exchanges may use the surface at once.
 ///
 /// A guest upload, a snapshot and a blob read are all bounded work, but they
-/// must never queue behind each other in the relay loop. The cap only limits
-/// how many of them run together on the daemon.
+/// must never queue behind each other in the relay loop. The cap also bounds
+/// how many uploads may hold buffered bytes, so the relay's memory follows the
+/// same limit as its concurrent work.
 const GUEST_EXCHANGE_CONCURRENCY: usize = 4;
+
+/// How much of an upload may be buffered before its link is authorized.
+///
+/// A chunked submission's body starts arriving while the token and link check
+/// runs. Only a couple of chunks can precede a completed check, so this caps
+/// what an unauthorized or abandoned upload can pin before it is refused;
+/// after authorization the exchange's own 21 MB limit applies.
+const GUEST_PREAUTH_BYTES: usize = 4 * h4rn_protocol::GUEST_CHUNK_BYTES;
 
 /// One guest body that is still arriving in chunks.
 struct PendingGuest {
@@ -146,7 +155,15 @@ impl GuestRelay {
         }
         if request.chunked {
             let checking = guest_method(&request.method) == crate::guest::Method::Post;
-            self.lock().pending.insert(
+            let mut state = self.lock();
+            if checking && state.pending.len() >= GUEST_EXCHANGE_CONCURRENCY {
+                // Every buffer slot is taken, so accepting another upload would
+                // grow memory past the cap the permits already promise.
+                drop(state);
+                self.refuse_busy(frame.conn_id.clone(), request_id);
+                return;
+            }
+            state.pending.insert(
                 request_id.clone(),
                 PendingGuest {
                     conn_id: frame.conn_id.clone(),
@@ -158,6 +175,7 @@ impl GuestRelay {
                     complete: false,
                 },
             );
+            drop(state);
             if checking {
                 self.spawn_check(request_id);
             }
@@ -195,14 +213,20 @@ impl GuestRelay {
             return;
         }
         pending.next_seq += 1;
-        if pending.body.len().saturating_add(chunk.body.len())
-            > h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES
-        {
+        // While the link check runs, only a bounded amount may accumulate: an
+        // unauthorized upload must not be able to buffer its whole body before
+        // it is refused. Once authorized, the exchange limit applies instead.
+        let limit = if pending.checking {
+            GUEST_PREAUTH_BYTES
+        } else {
+            h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES
+        };
+        if pending.body.len().saturating_add(chunk.body.len()) > limit {
             state.pending.remove(&chunk.request_id);
             state
                 .rejected
                 .insert(chunk.request_id.clone(), std::time::Instant::now());
-            self.reply(
+            self.reply_now(
                 frame.conn_id.clone(),
                 chunk.request_id.clone(),
                 413,
@@ -285,7 +309,7 @@ impl GuestRelay {
                             .insert(request_id.clone(), std::time::Instant::now());
                         conn_id
                     };
-                    relay.send_output(conn_id, request_id, &output);
+                    relay.send_output(conn_id, request_id, &output).await;
                 }
             }
         });
@@ -316,12 +340,14 @@ impl GuestRelay {
                 body.unwrap_or(request.body),
             );
             let output = surface.exchange(input).await;
-            relay.send_output(conn_id, request_id, &output);
+            // The permit is held until the last frame is queued: a large
+            // answer is not free simply because the surface call returned.
+            relay.send_output(conn_id, request_id, &output).await;
         });
     }
 
     /// Sends a prepared answer as one frame, plus chunks when it is large.
-    fn send_output(
+    async fn send_output(
         &self,
         conn_id: String,
         request_id: String,
@@ -329,20 +355,39 @@ impl GuestRelay {
     ) {
         let mut headers = vec![("content-type".to_owned(), output.content_type.to_owned())];
         headers.extend(output.headers.clone());
-        self.reply(
+        self.queue_frames(
             conn_id,
             request_id,
             output.status,
             headers,
             output.body.clone(),
+            output.set_cookie.clone(),
+        )
+        .await;
+    }
+
+    /// Refuses an upload that would overfill the buffer slots.
+    fn refuse_busy(&self, conn_id: String, request_id: String) {
+        self.lock()
+            .rejected
+            .insert(request_id.clone(), std::time::Instant::now());
+        self.reply_now(
+            conn_id,
+            request_id,
+            503,
+            vec![(
+                "content-type".to_owned(),
+                "text/plain; charset=utf-8".to_owned(),
+            )],
+            b"This machine is busy with other guest uploads. Try again.".to_vec(),
         );
     }
 
-    /// Sends one answer, chunked when the body is large.
+    /// Queues one answer from the relay loop without waiting on the queue.
     ///
-    /// The frames are produced in a task so the caller never waits on the
-    /// bounded channel it helps drain.
-    fn reply(
+    /// The relay loop drains this same bounded channel, so it must never wait
+    /// on it; the frames are produced in their own task.
+    fn reply_now(
         &self,
         conn_id: String,
         request_id: String,
@@ -350,51 +395,72 @@ impl GuestRelay {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) {
-        let out_tx = self.out_tx.clone();
+        let relay = self.clone();
         tokio::spawn(async move {
-            let chunked = body.len() > h4rn_protocol::GUEST_CHUNK_BYTES;
-            let reply = h4rn_protocol::GuestHttpResponse {
+            relay
+                .queue_frames(conn_id, request_id, status, headers, body, None)
+                .await;
+        });
+    }
+
+    /// Queues one answer's frames, in order.
+    ///
+    /// Awaiting this is safe from a spawned exchange: it waits on the shared
+    /// outbound queue, never on the task that drains it.
+    async fn queue_frames(
+        &self,
+        conn_id: String,
+        request_id: String,
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        set_cookie: Option<String>,
+    ) {
+        let chunked = body.len() > h4rn_protocol::GUEST_CHUNK_BYTES;
+        let reply = h4rn_protocol::GuestHttpResponse {
+            request_id: request_id.clone(),
+            status,
+            chunked,
+            headers,
+            body: if chunked { Vec::new() } else { body.clone() },
+            set_cookie,
+        };
+        let Ok(payload) = serde_json::to_vec(&reply) else {
+            tracing::warn!("could not serialise a guest answer");
+            return;
+        };
+        let _ = self
+            .out_tx
+            .send(RelayFrame {
+                conn_id: conn_id.clone(),
+                kind: RelayFrameKind::GuestHttp,
+                payload,
+            })
+            .await;
+        if !chunked {
+            return;
+        }
+        let chunks: Vec<&[u8]> = body.chunks(h4rn_protocol::GUEST_CHUNK_BYTES).collect();
+        let total = chunks.len();
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let frame = h4rn_protocol::GuestHttpChunk {
                 request_id: request_id.clone(),
-                status,
-                chunked,
-                headers,
-                body: if chunked { Vec::new() } else { body.clone() },
+                seq: index as u64,
+                last: index + 1 == total,
+                body: chunk.to_vec(),
             };
-            let Ok(payload) = serde_json::to_vec(&reply) else {
-                tracing::warn!("could not serialise a guest answer");
-                return;
+            let Ok(payload) = serde_json::to_vec(&frame) else {
+                continue;
             };
-            let _ = out_tx
+            let _ = self
+                .out_tx
                 .send(RelayFrame {
                     conn_id: conn_id.clone(),
-                    kind: RelayFrameKind::GuestHttp,
+                    kind: RelayFrameKind::GuestHttpChunk,
                     payload,
                 })
                 .await;
-            if !chunked {
-                return;
-            }
-            let chunks: Vec<&[u8]> = body.chunks(h4rn_protocol::GUEST_CHUNK_BYTES).collect();
-            let total = chunks.len();
-            for (index, chunk) in chunks.into_iter().enumerate() {
-                let frame = h4rn_protocol::GuestHttpChunk {
-                    request_id: request_id.clone(),
-                    seq: index as u64,
-                    last: index + 1 == total,
-                    body: chunk.to_vec(),
-                };
-                let Ok(payload) = serde_json::to_vec(&frame) else {
-                    continue;
-                };
-                let _ = out_tx
-                    .send(RelayFrame {
-                        conn_id: conn_id.clone(),
-                        kind: RelayFrameKind::GuestHttpChunk,
-                        payload,
-                    })
-                    .await;
-            }
-        });
+        }
     }
 
     /// Drops uploads whose browser went away and old refusal markers.
@@ -1021,6 +1087,10 @@ mod tests {
         refuse: bool,
         body: Vec<u8>,
         exchanges: Arc<AtomicUsize>,
+        /// When set, the link check waits for it, so a test can fill an
+        /// upload's pre-authorization buffer.
+        check_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        check_arrived: tokio::sync::Notify,
     }
 
     impl FakeSurface {
@@ -1029,6 +1099,8 @@ mod tests {
                 refuse: false,
                 body,
                 exchanges: Arc::new(AtomicUsize::new(0)),
+                check_gate: Mutex::new(None),
+                check_arrived: tokio::sync::Notify::new(),
             })
         }
 
@@ -1037,7 +1109,19 @@ mod tests {
                 refuse: true,
                 body: Vec::new(),
                 exchanges: Arc::new(AtomicUsize::new(0)),
+                check_gate: Mutex::new(None),
+                check_arrived: tokio::sync::Notify::new(),
             })
+        }
+
+        /// An unauthorized surface whose check waits at `gate`.
+        fn refusing_at(gate: Arc<tokio::sync::Notify>) -> Arc<Self> {
+            let surface = Self::refusing();
+            *surface
+                .check_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate);
+            surface
         }
     }
 
@@ -1047,6 +1131,15 @@ mod tests {
             &self,
             _input: &crate::guest::GuestHttpInput,
         ) -> Result<(), crate::guest::GuestHttpOutput> {
+            let gate = self
+                .check_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(gate) = gate {
+                self.check_arrived.notify_one();
+                gate.notified().await;
+            }
             if self.refuse {
                 Err(crate::guest::GuestHttpOutput::text(410, "gone"))
             } else {
@@ -1222,6 +1315,74 @@ mod tests {
         }
         handle_unblocked_frame(&ping_frame(), &relay);
         assert!(!relay.lock().rejected.contains_key("g1"));
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_upload_is_refused_before_its_body_is_read() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let surface = FakeSurface::refusing_at(Arc::clone(&gate));
+        let exchanges = Arc::clone(&surface.exchanges);
+        let arrived = {
+            // The surface announces when the check is running.
+            let surface = Arc::clone(&surface);
+            async move { surface.check_arrived.notified().await }
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        let relay = GuestRelay::new(surface, tx);
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        arrived.await;
+
+        // Fill up to the pre-authorization bound; not one byte more may be kept
+        // while the link is still unproven.
+        let chunk = vec![b'x'; h4rn_protocol::GUEST_CHUNK_BYTES];
+        let mut seq = 0;
+        for _ in 0..(GUEST_PREAUTH_BYTES / h4rn_protocol::GUEST_CHUNK_BYTES) {
+            handle_unblocked_frame(&chunk_frame("g1", seq, false, chunk.clone()), &relay);
+            seq += 1;
+        }
+        assert!(
+            relay
+                .lock()
+                .pending
+                .get("g1")
+                .is_some_and(|pending| pending.body.len() <= GUEST_PREAUTH_BYTES),
+            "the pre-authorization buffer exceeded its bound"
+        );
+        // One chunk past the bound is refused and the buffer is released.
+        handle_unblocked_frame(&chunk_frame("g1", seq, false, chunk), &relay);
+        let answer = next_answer(&mut rx).await;
+        let response: h4rn_protocol::GuestHttpResponse =
+            serde_json::from_slice(&answer.payload).expect("answer json");
+        assert_eq!(response.status, 413);
+        assert!(!relay.lock().pending.contains_key("g1"));
+
+        // The check finishes, but the surface never sees the body.
+        gate.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(exchanges.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn uploads_past_the_cap_are_refused_instead_of_buffered() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let surface = FakeSurface::refusing_at(Arc::clone(&gate));
+        let (tx, mut rx) = mpsc::channel(16);
+        let relay = GuestRelay::new(surface, tx);
+        for index in 0..GUEST_EXCHANGE_CONCURRENCY {
+            handle_unblocked_frame(&guest_frame(&format!("g{index}"), true), &relay);
+        }
+        // Every buffer slot is taken by a check in flight.
+        handle_unblocked_frame(&guest_frame("over", true), &relay);
+        assert!(
+            relay.lock().pending.len() <= GUEST_EXCHANGE_CONCURRENCY,
+            "an upload past the cap was buffered"
+        );
+        let answer = next_answer(&mut rx).await;
+        let response: h4rn_protocol::GuestHttpResponse =
+            serde_json::from_slice(&answer.payload).expect("answer json");
+        assert_eq!(response.status, 503);
+        assert!(!relay.lock().pending.contains_key("over"));
+        gate.notify_waiters();
     }
 
     #[tokio::test]
@@ -1415,5 +1576,146 @@ mod tests {
             registry.decide_pending("d1", true).0.is_none(),
             "already decided"
         );
+    }
+
+    /// Builds the real daemon state so this test drives `handle_event`, the
+    /// function the relay loop actually awaits, and not a stand-in for it.
+    async fn real_daemon_state() -> (crate::server::AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("daemon dir");
+        let config = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            extra_bind: None,
+            tailscale: crate::remote::TailscaleMode::Off,
+            network_access: None,
+            network_port: 0,
+            log_level: "off".to_owned(),
+        };
+        let daemon = crate::daemon::DaemonBuilder::new(config)
+            .with_local_host(
+                h4rn_protocol::HostId::new("host_relay_queue_test"),
+                "queue test",
+            )
+            .without_title_agents()
+            .with_harness(Arc::new(h4rn_harness::FakeHarness::new()))
+            .build()
+            .await
+            .expect("build daemon");
+        let bound = daemon.bind().await.expect("bind daemon");
+        (bound.app_state().clone(), dir)
+    }
+
+    #[tokio::test]
+    async fn a_saturated_queue_still_delivers_another_session_frame() {
+        let (state, _dir) = real_daemon_state().await;
+        let surface = FakeSurface::new(vec![b'a'; h4rn_protocol::GUEST_CHUNK_BYTES * 2]);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let guests = GuestRelay::new(surface, out_tx.clone());
+        // The shared relay queue is saturated: a synchronous send from the loop
+        // would deadlock it, because the same task drains this channel.
+        out_tx
+            .send(RelayFrame {
+                conn_id: "existing".to_owned(),
+                kind: RelayFrameKind::Ping,
+                payload: Vec::new(),
+            })
+            .await
+            .expect("fill the relay queue");
+
+        // An independent session has its own inbound queue; its frame must be
+        // routed even while the guest answer is waiting for queue space.
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let (session_tx, mut session_rx) = mpsc::channel(4);
+        connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("other".to_owned(), session_tx);
+
+        let service = Arc::new(SecureService::new(
+            h4rn_transport::server::SecureOptions::new(
+                h4rn_transport::keys::DeviceIdentity::generate().expect("identity"),
+            ),
+        ));
+        let client = Arc::new(
+            ConnectClient::new(
+                _dir.path(),
+                h4rn_transport::keys::DeviceIdentity::generate().expect("identity"),
+            )
+            .expect("connect client"),
+        );
+        let registry = Arc::new(DeviceRegistry::in_memory());
+
+        let request = h4rn_protocol::GuestHttpRequest {
+            request_id: "g1".to_owned(),
+            method: "GET".to_owned(),
+            path: "/guest/tok/blob/abc".to_owned(),
+            public_prefix: None,
+            chunked: false,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let frame = RelayFrame {
+            conn_id: "guest-g1".to_owned(),
+            kind: RelayFrameKind::GuestHttp,
+            payload: serde_json::to_vec(&request).expect("request json"),
+        };
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            handle_event(
+                RelayServerEvent::Frame { frame },
+                &state,
+                &service,
+                &client,
+                &registry,
+                &connections,
+                &out_tx,
+                &guests,
+            ),
+        )
+        .await
+        .expect("the relay loop must not wait for a guest answer")
+        .expect("guest frame handled");
+
+        // The independent session's frame makes progress while the answer is
+        // blocked on the saturated queue.
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            handle_event(
+                RelayServerEvent::Frame {
+                    frame: RelayFrame::data("other", b"progress".to_vec()),
+                },
+                &state,
+                &service,
+                &client,
+                &registry,
+                &connections,
+                &out_tx,
+                &guests,
+            ),
+        )
+        .await
+        .expect("another session must make progress")
+        .expect("data frame handled");
+        match session_rx.recv().await.expect("session frame") {
+            RelayInbound::Data(payload) => assert_eq!(payload, b"progress"),
+            RelayInbound::Error(message) => panic!("unexpected session error: {message}"),
+        }
+
+        // Drain the queue: the guest answer and its chunks arrive once there is
+        // room, so nothing was silently dropped.
+        let mut answer = false;
+        let mut chunked = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !(answer && chunked) {
+                let frame = out_rx.recv().await.expect("relay queue open");
+                match frame.kind {
+                    RelayFrameKind::GuestHttp => answer = true,
+                    RelayFrameKind::GuestHttpChunk => chunked = true,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the guest answer arrives after the queue drains");
     }
 }

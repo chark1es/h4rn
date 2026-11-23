@@ -119,6 +119,13 @@ pub struct GuestHttpResponse {
     #[serde(with = "relay_base64")]
     #[ts(type = "string")]
     pub body: Vec<u8>,
+    /// The daemon's `Set-Cookie`, when this answer binds a guest browser.
+    ///
+    /// It travels in its own field rather than as a header so the relay can
+    /// name it explicitly: only Connect may turn it into a browser response,
+    /// and only after it has checked every attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_cookie: Option<String>,
 }
 
 /// One slice of a guest HTTP body.

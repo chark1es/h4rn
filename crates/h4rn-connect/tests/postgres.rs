@@ -1093,6 +1093,14 @@ fn fake_guest_answer(
         .find(|(name, _)| name == "cookie")
         .map(|(_, value)| value.clone());
     let bound = cookie.as_deref() == Some(format!("h4rn_guest={binding}").as_str());
+    // A relayed daemon scopes its cookie to the public prefix it was told
+    // about, so Connect can check the path exactly.
+    let prefix = request
+        .public_prefix
+        .clone()
+        .unwrap_or_else(|| format!("/guest/{token}"));
+    let set_cookie =
+        format!("h4rn_guest={binding}; Path={prefix}; HttpOnly; Secure; SameSite=Strict");
     let (status, headers, body) = if request.path == format!("/guest/{token}") {
         // The daemon's page is only asked for its page-load cookie; Connect
         // must never return this HTML.
@@ -1100,10 +1108,7 @@ fn fake_guest_answer(
             200,
             vec![
                 ("content-type".to_string(), "text/html".to_string()),
-                (
-                    "set-cookie".to_string(),
-                    format!("h4rn_guest={binding}; Path=/guest/{token}; HttpOnly"),
-                ),
+                ("set-cookie".to_string(), set_cookie.clone()),
             ],
             b"<html>daemon page</html>".to_vec(),
         )
@@ -1119,11 +1124,7 @@ fn fake_guest_answer(
                 200,
                 vec![
                     ("content-type".to_string(), "application/json".to_string()),
-                    // The daemon's own path is internal; Connect must rebuild it.
-                    (
-                        "set-cookie".to_string(),
-                        format!("h4rn_guest={binding}; Path=/guest/{token}; HttpOnly"),
-                    ),
+                    ("set-cookie".to_string(), set_cookie.clone()),
                     (
                         "content-security-policy".to_string(),
                         "default-src *".to_string(),
@@ -1145,6 +1146,7 @@ fn fake_guest_answer(
         chunked: false,
         headers,
         body,
+        set_cookie: Some(set_cookie),
     }
 }
 
@@ -1232,6 +1234,7 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
                                         "application/json".to_string(),
                                     )],
                                     body: format!("{{\"received\":{}}}", body.len()).into_bytes(),
+                                    set_cookie: None,
                                 },
                             )
                             .await;

@@ -66,10 +66,22 @@ pub struct Session {
 pub struct RelayHub {
     peers: RwLock<HashMap<Uuid, Peer>>,
     sessions: RwLock<HashMap<String, Session>>,
-    /// Guest HTTP exchanges waiting on a daemon's answer, by request id.
-    guests: RwLock<HashMap<String, GuestWaiter>>,
-    /// Guest answers whose body is still arriving in chunks.
-    guest_bodies: RwLock<HashMap<String, GuestBody>>,
+    /// Guest HTTP exchanges: the browser request waiting on a daemon's answer
+    /// and any answer whose body is still arriving in chunks.
+    ///
+    /// Both live under one lock because a cleanup that removed the waiter but
+    /// missed its body would leave a chunked answer assembling forever. One
+    /// lock makes a forgotten exchange either wholly present or wholly gone.
+    guests: RwLock<GuestBook>,
+}
+
+/// A browser request and the chunked answers being assembled for it.
+#[derive(Debug, Default)]
+struct GuestBook {
+    /// Exchanges waiting for a daemon's answer, by request id.
+    waiters: HashMap<String, GuestWaiter>,
+    /// Answers whose body is still arriving in chunks, by request id.
+    bodies: HashMap<String, GuestBody>,
 }
 
 /// One browser request waiting for a specific daemon's answer.
@@ -339,7 +351,7 @@ impl RelayHub {
         daemon_device_id: Uuid,
     ) -> oneshot::Receiver<h4rn_protocol::GuestHttpResponse> {
         let (tx, rx) = oneshot::channel();
-        self.guests.write().await.insert(
+        self.guests.write().await.waiters.insert(
             request_id.to_owned(),
             GuestWaiter {
                 daemon_device_id,
@@ -358,18 +370,17 @@ impl RelayHub {
         from_device: Uuid,
         response: h4rn_protocol::GuestHttpResponse,
     ) -> bool {
-        let allowed = self
-            .guests
-            .read()
-            .await
+        let mut book = self.guests.write().await;
+        if !book
+            .waiters
             .get(&response.request_id)
-            .is_some_and(|waiter| waiter.daemon_device_id == from_device);
-        if !allowed {
+            .is_some_and(|waiter| waiter.daemon_device_id == from_device)
+        {
             tracing::warn!("ignored a guest answer from a device that was not asked");
             return false;
         }
         if response.chunked {
-            self.guest_bodies.write().await.insert(
+            book.bodies.insert(
                 response.request_id.clone(),
                 GuestBody {
                     daemon_device_id: from_device,
@@ -379,9 +390,10 @@ impl RelayHub {
             );
             return true;
         }
-        let Some(waiter) = self.guests.write().await.remove(&response.request_id) else {
+        let Some(waiter) = book.waiters.remove(&response.request_id) else {
             return false;
         };
+        drop(book);
         let _ = waiter.tx.send(response);
         true
     }
@@ -392,52 +404,48 @@ impl RelayHub {
         from_device: Uuid,
         chunk: h4rn_protocol::GuestHttpChunk,
     ) -> bool {
-        let mut complete = None;
+        let mut book = self.guests.write().await;
+        let Some(body) = book.bodies.get_mut(&chunk.request_id) else {
+            return false;
+        };
+        if body.daemon_device_id != from_device {
+            tracing::warn!("ignored a guest chunk from the wrong device");
+            return false;
+        }
+        if chunk.seq != body.next_seq {
+            book.bodies.remove(&chunk.request_id);
+            return false;
+        }
+        body.next_seq += 1;
+        if body.response.body.len().saturating_add(chunk.body.len())
+            > h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES
         {
-            let mut bodies = self.guest_bodies.write().await;
-            let Some(body) = bodies.get_mut(&chunk.request_id) else {
-                return false;
-            };
-            if body.daemon_device_id != from_device {
-                tracing::warn!("ignored a guest chunk from the wrong device");
-                return false;
-            }
-            if chunk.seq != body.next_seq {
-                bodies.remove(&chunk.request_id);
-                return false;
-            }
-            body.next_seq += 1;
-            if body.response.body.len().saturating_add(chunk.body.len())
-                > h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES
-            {
-                bodies.remove(&chunk.request_id);
-                complete = Some(h4rn_protocol::GuestHttpResponse {
-                    request_id: chunk.request_id.clone(),
-                    status: 413,
-                    chunked: false,
-                    headers: vec![("content-type".into(), "text/plain; charset=utf-8".into())],
-                    body: b"That answer is larger than a guest link may carry.".to_vec(),
-                });
-            } else {
-                body.response.body.extend_from_slice(&chunk.body);
-                if chunk.last {
-                    complete = bodies.remove(&chunk.request_id).map(|body| body.response);
-                }
-            }
+            // The answer is unusable; drop both halves together so no chunk can
+            // keep assembling and no waiter holds a body that will never finish.
+            book.bodies.remove(&chunk.request_id);
+            book.waiters.remove(&chunk.request_id);
+            return false;
         }
-        if let Some(response) = complete {
-            let request_id = response.request_id.clone();
-            if let Some(waiter) = self.guests.write().await.remove(&request_id) {
-                let _ = waiter.tx.send(response);
-            }
+        body.response.body.extend_from_slice(&chunk.body);
+        if !chunk.last {
+            return true;
         }
+        let Some(body) = book.bodies.remove(&chunk.request_id) else {
+            return false;
+        };
+        let Some(waiter) = book.waiters.remove(&chunk.request_id) else {
+            return false;
+        };
+        drop(book);
+        let _ = waiter.tx.send(body.response);
         true
     }
 
-    /// Drops a waiter that will never get an answer.
+    /// Drops a waiter and any half-arrived body that will never be answered.
     pub async fn forget_guest(&self, request_id: &str) {
-        self.guests.write().await.remove(request_id);
-        self.guest_bodies.write().await.remove(request_id);
+        let mut book = self.guests.write().await;
+        book.waiters.remove(request_id);
+        book.bodies.remove(request_id);
     }
 
     /// How many guest exchanges are waiting for a daemon answer.
@@ -445,7 +453,7 @@ impl RelayHub {
     /// A health check and its tests use this: a failed exchange must leave no
     /// waiter behind.
     pub async fn pending_guests(&self) -> usize {
-        self.guests.read().await.len()
+        self.guests.read().await.waiters.len()
     }
 
     /// Whether a daemon for this machine is connected right now.
@@ -1088,6 +1096,7 @@ mod tests {
                     chunked: false,
                     headers: Vec::new(),
                     body: b"stolen".to_vec(),
+                    set_cookie: None,
                 }
             )
             .await
@@ -1114,6 +1123,7 @@ mod tests {
                     chunked: false,
                     headers: Vec::new(),
                     body: b"hello".to_vec(),
+                    set_cookie: None,
                 }
             )
             .await
@@ -1137,6 +1147,7 @@ mod tests {
                     chunked: true,
                     headers: Vec::new(),
                     body: Vec::new(),
+                    set_cookie: None,
                 }
             )
             .await
@@ -1174,10 +1185,88 @@ mod tests {
                     chunked: false,
                     headers: Vec::new(),
                     body: Vec::new(),
+                    set_cookie: None,
                 }
             )
             .await
         );
         assert!(dropped.await.is_err(), "the forgotten waiter got an answer");
+    }
+
+    fn chunked_answer(request_id: &str) -> h4rn_protocol::GuestHttpResponse {
+        h4rn_protocol::GuestHttpResponse {
+            request_id: request_id.into(),
+            status: 200,
+            chunked: true,
+            headers: Vec::new(),
+            body: Vec::new(),
+            set_cookie: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_half_arrived_chunked_answer_leaves_no_body() {
+        let hub = RelayHub::new();
+        let daemon = Uuid::now_v7();
+        let waiter = hub.expect_guest("g1", daemon).await;
+        assert!(
+            hub.complete_guest(daemon, chunked_answer("g1")).await,
+            "the chunked answer did not start"
+        );
+        assert!(
+            hub.complete_guest_chunk(
+                daemon,
+                h4rn_protocol::GuestHttpChunk {
+                    request_id: "g1".into(),
+                    seq: 0,
+                    last: false,
+                    body: b"half".to_vec(),
+                }
+            )
+            .await
+        );
+
+        // Both proxy error paths call `forget_guest`; the second call is the
+        // other path racing the same exchange.
+        hub.forget_guest("g1").await;
+        hub.forget_guest("g1").await;
+        assert_eq!(hub.pending_guests().await, 0);
+        assert!(
+            hub.guests.read().await.bodies.is_empty(),
+            "a forgotten answer kept its half-arrived body"
+        );
+        // A late chunk cannot resurrect the exchange.
+        assert!(
+            !hub.complete_guest_chunk(
+                daemon,
+                h4rn_protocol::GuestHttpChunk {
+                    request_id: "g1".into(),
+                    seq: 1,
+                    last: true,
+                    body: b"rest".to_vec(),
+                }
+            )
+            .await
+        );
+        assert!(waiter.await.is_err(), "a forgotten waiter got an answer");
+    }
+
+    #[tokio::test]
+    async fn an_answer_arriving_after_the_cleanup_is_dropped_whole() {
+        let hub = RelayHub::new();
+        let daemon = Uuid::now_v7();
+        let waiter = hub.expect_guest("g3", daemon).await;
+        // The cleanup runs first: the error path that failed before the daemon
+        // could answer wins the race.
+        hub.forget_guest("g3").await;
+        assert!(
+            !hub.complete_guest(daemon, chunked_answer("g3")).await,
+            "an answer started after its exchange was forgotten"
+        );
+        assert!(
+            hub.guests.read().await.bodies.is_empty(),
+            "the forgotten exchange still holds a body"
+        );
+        assert!(waiter.await.is_err(), "the forgotten waiter got an answer");
     }
 }

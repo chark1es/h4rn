@@ -71,6 +71,7 @@ libc.workspace = true
 blake2.workspace = true
 ed25519-dalek.workspace = true
 h4rn-connect.workspace = true
+reqwest = { workspace = true, features = ["cookies"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 wiremock.workspace = true

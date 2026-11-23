@@ -1991,11 +1991,13 @@ async fn pending_binding_cookie(state: &AppState, machine_id: Uuid, token: &str)
             return None;
         }
     };
-    let cookie = answer
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
-        .map(|(_, value)| value.clone())?;
+    let cookie = answer.set_cookie.clone().or_else(|| {
+        answer
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, value)| value.clone())
+    })?;
     rebuild_guest_cookie(
         &cookie,
         &public_prefix,
@@ -2431,6 +2433,14 @@ fn build_guest_response(
             _ => {}
         }
     }
+    // A daemon carries its binding cookie in the frame's own field; the header
+    // form is accepted too for an older answer. Either way only a complete,
+    // well-formed cookie is rebuilt for Connect's public path.
+    if let Some(value) = answer.set_cookie.as_deref()
+        && let Some(cookie) = rebuild_guest_cookie(value, public_prefix, secure)
+    {
+        builder = builder.header(axum::http::header::SET_COOKIE, cookie);
+    }
     builder
         .body(axum::body::Body::from(answer.body))
         .map_err(|_| AppError::internal("build the guest response"))
@@ -2454,14 +2464,18 @@ fn allowed_guest_content_type(value: &str) -> Option<&'static str> {
 
 /// Rebuilds the daemon's binding cookie for Connect's public path.
 ///
-/// The daemon's own `Path` names its internal route and cannot be used here.
-/// Only the guest cookie name and its opaque value are accepted.
+/// The daemon's own `Path` names its internal route and cannot be used here, so
+/// Connect accepts only the cookie it knows: the guest name, an opaque value,
+/// the exact public path, and the three attributes that make it a binding
+/// cookie (`HttpOnly`, `Secure`, `SameSite=Strict`). Anything else is dropped
+/// rather than repaired.
 fn rebuild_guest_cookie(value: &str, public_prefix: &str, secure: bool) -> Option<String> {
-    let (name, rest) = value.split_once('=')?;
+    let mut parts = value.split(';');
+    let (name, token) = parts.next()?.split_once('=')?;
     if name.trim() != h4rn_protocol::GUEST_COOKIE {
         return None;
     }
-    let token = rest.split(';').next()?.trim();
+    let token = token.trim();
     if token.is_empty()
         || token.len() > 128
         || !token.chars().all(|character| {
@@ -2470,9 +2484,30 @@ fn rebuild_guest_cookie(value: &str, public_prefix: &str, secure: bool) -> Optio
     {
         return None;
     }
+    let expected_path = public_prefix.trim_end_matches('/');
+    let mut path = None;
+    let mut http_only = false;
+    let mut secure_attr = false;
+    let mut same_site = None;
+    for attribute in parts {
+        let (key, value) = attribute.split_once('=').unwrap_or((attribute, ""));
+        match key.trim().to_ascii_lowercase().as_str() {
+            "path" => path = Some(value.trim().to_owned()),
+            "httponly" => http_only = true,
+            "secure" => secure_attr = true,
+            "samesite" => same_site = Some(value.trim().to_owned()),
+            _ => {}
+        }
+    }
+    if path.as_deref() != Some(expected_path) || !http_only || !secure_attr {
+        return None;
+    }
+    if same_site.as_deref() != Some("Strict") {
+        return None;
+    }
     let secure = if secure { "; Secure" } else { "" };
     Some(format!(
-        "{}={token}; Path={public_prefix}; HttpOnly; SameSite=Strict{secure}; Max-Age={}",
+        "{}={token}; Path={expected_path}; HttpOnly; SameSite=Strict{secure}; Max-Age={}",
         h4rn_protocol::GUEST_COOKIE,
         h4rn_protocol::GUEST_LINK_TTL_HOURS * 3600
     ))
@@ -2652,6 +2687,7 @@ mod tests {
             chunked: false,
             headers: vec![("content-type".into(), "application/json".into())],
             body: b"{}".to_vec(),
+            set_cookie: None,
         };
         let response = build_guest_response(json, "/guest/m/t", true).expect("json answer");
         assert_eq!(
@@ -2669,6 +2705,7 @@ mod tests {
             chunked: false,
             headers: vec![("content-type".into(), "text/html".into())],
             body: b"<script>alert(1)</script>".to_vec(),
+            set_cookie: None,
         };
         assert!(build_guest_response(html, "/guest/m/t", true).is_err());
     }
@@ -2683,12 +2720,14 @@ mod tests {
                 ("content-type".into(), "application/json".into()),
                 ("content-security-policy".into(), "default-src *".into()),
                 ("x-frame-options".into(), "ALLOWALL".into()),
-                (
-                    "set-cookie".into(),
-                    "h4rn_guest=binding_1; Path=/guest/token; HttpOnly".into(),
-                ),
             ],
             body: b"{}".to_vec(),
+            // The daemon scopes its own cookie to the public prefix the relay
+            // told it about, so Connect can check it exactly.
+            set_cookie: Some(
+                "h4rn_guest=binding_1; HttpOnly; Secure; SameSite=Strict; Path=/guest/machine_1/token; Max-Age=86400"
+                    .into(),
+            ),
         };
         let response =
             build_guest_response(answer, "/guest/machine_1/token", true).expect("answer");
@@ -2719,6 +2758,44 @@ mod tests {
         assert!(cookie.contains("Path=/guest/machine_1/token"), "{cookie}");
         assert!(cookie.contains("SameSite=Strict"), "{cookie}");
         assert!(cookie.contains("Secure"), "{cookie}");
+    }
+
+    #[test]
+    fn only_a_complete_binding_cookie_is_rebuilt() {
+        let prefix = "/guest/machine_1/token";
+        let good = rebuild_guest_cookie(
+            "h4rn_guest=binding_1; HttpOnly; Secure; SameSite=Strict; Path=/guest/machine_1/token",
+            prefix,
+            true,
+        );
+        assert!(good.is_some(), "a complete binding cookie was refused");
+        for (reason, value) in [
+            (
+                "a foreign name",
+                "other=1; HttpOnly; Secure; SameSite=Strict; Path=/guest/machine_1/token",
+            ),
+            (
+                "the daemon's internal path",
+                "h4rn_guest=1; HttpOnly; Secure; SameSite=Strict; Path=/guest/token",
+            ),
+            (
+                "a missing HttpOnly",
+                "h4rn_guest=1; Secure; SameSite=Strict; Path=/guest/machine_1/token",
+            ),
+            (
+                "a missing Secure",
+                "h4rn_guest=1; HttpOnly; SameSite=Strict; Path=/guest/machine_1/token",
+            ),
+            (
+                "a lax SameSite",
+                "h4rn_guest=1; HttpOnly; Secure; SameSite=Lax; Path=/guest/machine_1/token",
+            ),
+        ] {
+            assert!(
+                rebuild_guest_cookie(value, prefix, true).is_none(),
+                "Connect rebuilt a cookie with {reason}: {value}"
+            );
+        }
     }
 
     #[test]
@@ -2791,6 +2868,7 @@ mod tests {
             chunked: false,
             headers: vec![("content-type".into(), content_type.into())],
             body: b"x".to_vec(),
+            set_cookie: None,
         };
         let json = build_guest_response(answer("application/json"), "/guest/m/t", true)
             .expect("json answer");

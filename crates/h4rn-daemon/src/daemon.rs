@@ -940,6 +940,15 @@ impl BoundDaemon {
         self.addrs[0]
     }
 
+    /// The shared state the routers and the relay loop use.
+    ///
+    /// Exposed to a unit test that has to drive the real relay loop rather than
+    /// a reimplementation of it.
+    #[doc(hidden)]
+    pub fn app_state(&self) -> &AppState {
+        &self.state
+    }
+
     /// Every bound address, primary first.
     pub fn addrs(&self) -> &[SocketAddr] {
         &self.addrs
