@@ -56,14 +56,15 @@ same push against the named remote, which resolves its `pushurl` and any
 `<remote>/<branch>` or whatever upstream a branch happens to track (the panel's
 ahead/behind counts still follow the branch's tracking upstream): a branch that
 tracks `origin/main` is still published as `origin/<branch>`, and a fork with
-two remotes pushes to `origin`. The push result names the remote branch it
-wrote (sent as `upstream`, the protocol 1 key, so an older client still reads
-it); the branch's tracking upstream changes only when the request asked for it
-(`set_upstream`). A push is **never forced**: when the remote has commits the
-branch does not, the panel says so and asks you to pull or rebase. A rejected
-credential is reported as a credential problem, not a generic failure, and any
-credential-shaped text git prints — including the userinfo or query of an
-echoed URL — is redacted.
+two remotes pushes to `origin`. The check is a dry run without hooks or
+submodule recursion, so it has no side effects. The push result names the
+remote branch it wrote (sent as `upstream`, the protocol 1 key, so an older
+client still reads it); the branch's tracking upstream changes only when the
+request asked for it (`set_upstream`). A push is **never forced**: when the
+remote has commits the branch does not, the panel says so and asks you to pull
+or rebase. A rejected credential is reported as a credential problem, not a
+generic failure, and any credential-shaped text git prints — including the
+userinfo or query of an echoed URL — is redacted.
 
 ## Pull request
 
@@ -81,9 +82,12 @@ repository. It does not trust the local remote-tracking ref: a branch deleted on
 the forge leaves a stale `refs/remotes/<remote>/<branch>` until a prune, and the
 pull request would otherwise name a head branch that no longer exists. It also
 names every destination, so a branch up to date on one remote but missing on
-another is still pushed. The dry run skips the pre-push hook (`--no-verify`), so
-a failing, slow or side-effecting hook cannot block or delay the open; the real
-push, when it happens, runs the hook as usual. Then it asks the forge to open the
+another is still pushed. The check runs no hook, including a submodule's
+(`--no-verify` and `--recurse-submodules=no`): it cannot block or delay the
+open, and it cannot push an unpublished submodule commit as a side effect. When
+the branch does need a push, the real push runs the pre-push hook as usual, and
+a hook that fails stops the open exactly as it stops a push from the panel.
+Then it asks the forge to open the
 request. On GitHub, Bitbucket
 and Azure DevOps the draft flag travels in its own field; GitLab and Gitea have
 no such field on the create request and mark a draft with a `Draft:` or `WIP:`

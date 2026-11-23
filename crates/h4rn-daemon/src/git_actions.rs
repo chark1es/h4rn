@@ -14,8 +14,8 @@
 //!   is only ever a path;
 //! - the real commit and push run hooks (`--no-verify` is never passed to
 //!   them), and a hook's failure is shown; the read-only check that runs
-//!   before opening a pull request skips hooks, so it has no side effects and
-//!   cannot block or slow the open;
+//!   before opening a pull request skips hooks and submodule recursion, so it
+//!   has no side effects and cannot block or slow the open;
 //! - a push is never forced.
 
 use std::path::{Component, Path, PathBuf};
@@ -61,9 +61,16 @@ const DIFF_STAT_MAX_CHARS: usize = 4_000;
 const RECENT_SUBJECTS: usize = 20;
 /// Longest recent subject kept.
 const SUBJECT_MAX_CHARS: usize = 120;
-/// The empty tree's object id: the commit a diff starts from in a repository
-/// that has no commits yet.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+/// The empty tree's object id in a SHA-1 repository: the commit a diff starts
+/// from in a repository that has no commits yet.
+const SHA1_EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+/// The empty tree's object id in a SHA-256 repository.
+const SHA256_EMPTY_TREE: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
+/// A path that always reads as an empty file, for `git hash-object`.
+#[cfg(not(windows))]
+const EMPTY_FILE: &str = "/dev/null";
+#[cfg(windows)]
+const EMPTY_FILE: &str = "NUL";
 
 /// One deadline shared by the lookup, the push and the forge request that
 /// open a pull request, so no step can push the whole request past the
@@ -743,11 +750,16 @@ fn push_args(branch: &str, remote: &str, set_upstream: bool) -> Vec<String> {
 ///
 /// `--no-verify` belongs to this probe only: a dry run has no business running
 /// the pre-push hook, which can fail, be slow, or change something. The real
-/// push still runs it.
+/// push still runs it. `--recurse-submodules=no` is here for the same reason:
+/// with `push.recurseSubmodules=on-demand` a dry run otherwise pushes
+/// unpublished submodule commits for real, and the submodule's own pre-push
+/// hook runs even though this command asks not to verify. The real push keeps
+/// whatever recursion the repository configured.
 fn dry_run_push_args(branch: &str, remote: &str) -> Vec<String> {
     let mut args = push_command_args(branch, remote);
     args.insert(3, "--dry-run".to_owned());
     args.insert(4, "--no-verify".to_owned());
+    args.insert(5, "--recurse-submodules=no".to_owned());
     args
 }
 
@@ -878,9 +890,11 @@ fn classify_push_error(error: &str) -> GitActionError {
 ///
 /// The host is kept, because it is what tells the person which remote failed,
 /// and it may be an IPv4 address, an IPv6 literal in brackets, a hostname, or
-/// any of those with a port. A real URL parser decides the shape; text it
-/// cannot parse falls back to dropping everything after the userinfo and from
-/// the first `?` or `#`, so an unparsed URL never keeps a token.
+/// any of those with a port. A URL runs from its scheme to the next
+/// whitespace, or to the quote that closes git's `'…'` field. A quote inside
+/// the query or fragment is not where the URL ends: git prints it raw, so
+/// stopping there would leave the rest of the URL (and its token) in the
+/// message.
 fn redact_url_credentials(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
@@ -892,46 +906,59 @@ fn redact_url_credentials(text: &str) -> String {
             .map_or(0, |start| start + 1);
         output.push_str(&rest[..scheme_start]);
         let after = &rest[scheme_start..];
-        let end = after.find(ends_url).unwrap_or(after.len());
-        let (candidate, trailing) = split_trailing_prose(&after[..end]);
+        // A quote directly before the scheme opens the field git prints; its
+        // matching close is the URL's end, not the first quote inside it.
+        let open_quote = rest[..scheme_start]
+            .chars()
+            .next_back()
+            .filter(|ch| matches!(ch, '\'' | '"'));
+        let (candidate, trailing) = split_url_field(after, open_quote);
         output.push_str(&redact_one_url(candidate));
-        rest = &after[end - trailing.len()..];
+        rest = trailing;
     }
     output.push_str(rest);
     output
 }
 
-/// Characters that always end a URL in a message, even inside one.
-fn ends_url(ch: char) -> bool {
-    ch.is_whitespace() || matches!(ch, '\'' | '"' | '<' | '>' | '`')
-}
-
-/// Splits sentence punctuation off the end of a URL.
+/// Splits one URL field off the start of `text`, returning it and the rest.
 ///
-/// A URL echoed in prose can be followed by `)`, `,` or a full stop. A closing
-/// `]` is kept when the URL opens an IPv6 literal with `[`, because it is part
-/// of the host there.
-fn split_trailing_prose(candidate: &str) -> (&str, &str) {
-    let mut end = candidate.len();
-    while let Some((index, ch)) = candidate[..end].char_indices().next_back() {
+/// The field ends at the first whitespace, or at the quote that opened it
+/// (the last such quote before that whitespace, which is the closing one even
+/// when the query or fragment itself contains quotes). Sentence punctuation
+/// after the URL is left in the trailing text.
+fn split_url_field(text: &str, open_quote: Option<char>) -> (&str, &str) {
+    let mut end = text.find(char::is_whitespace).unwrap_or(text.len());
+    if let Some(quote) = open_quote
+        && let Some(closing) = text[..end].rfind(quote)
+    {
+        end = closing;
+    }
+    // A URL echoed in prose can be followed by `)`, `,` or a full stop. A
+    // closing `]` is kept when the URL opens an IPv6 literal with `[`, because
+    // it is part of the host there.
+    let mut trimmed = end;
+    while let Some((index, ch)) = text[..trimmed].char_indices().next_back() {
         let prose = match ch {
             ')' | ',' | ';' | ':' | '.' | '}' | '!' | '?' => true,
-            ']' => !candidate[..end].contains('['),
+            ']' => !text[..trimmed].contains('['),
             _ => false,
         };
         if !prose {
             break;
         }
-        end = index;
+        trimmed = index;
     }
-    candidate.split_at(end)
+    (&text[..trimmed], &text[trimmed..])
 }
 
 /// One URL without its userinfo, query and fragment.
+///
+/// A URL the parser cannot read is replaced whole rather than trimmed by
+/// guesswork: guessing its end is exactly how a token used to survive.
 fn redact_one_url(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(parsed) => redact_parsed_url(&parsed),
-        Err(_) => redact_url_fallback(url),
+        Err(_) => "[redacted URL]".to_owned(),
     }
 }
 
@@ -966,26 +993,6 @@ fn redact_parsed_url(parsed: &url::Url) -> String {
         output.push_str("#[redacted]");
     }
     output
-}
-
-/// The most this can do without a parser: drop the userinfo and everything
-/// from the first `?` or `#`, which is where a query token lives.
-fn redact_url_fallback(url: &str) -> String {
-    let Some(scheme_end) = url.find("://").map(|index| index + 3) else {
-        return url.to_owned();
-    };
-    let (scheme, after) = url.split_at(scheme_end);
-    let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-    let (authority, rest) = after.split_at(authority_end);
-    let authority = match authority.rfind('@') {
-        Some(at) => format!("[redacted]@{}", &authority[at + 1..]),
-        None => authority.to_owned(),
-    };
-    let rest = match rest.find(['?', '#']) {
-        Some(marker) => format!("{}?[redacted]", &rest[..marker]),
-        None => rest.to_owned(),
-    };
-    format!("{scheme}{authority}{rest}")
 }
 
 /// Pushes a branch before a PR, blocking; returns whether it pushed.
@@ -1143,7 +1150,12 @@ fn validate_path(workspace: &Path, path: &str) -> Result<String, GitActionError>
 }
 
 /// The revision a working-tree diff starts from.
-fn diff_base(workspace: &Path) -> &'static str {
+///
+/// A repository with no commits has no `HEAD`; git diffs a first commit
+/// against the empty tree. Its object id depends on the repository's object
+/// format, so a SHA-256 repository gets its own empty tree rather than the
+/// SHA-1 one (which git there cannot resolve).
+fn diff_base(workspace: &Path) -> Result<String, GitActionError> {
     if git_opt(
         workspace,
         &["rev-parse", "--verify", "--quiet", "HEAD"],
@@ -1151,9 +1163,39 @@ fn diff_base(workspace: &Path) -> &'static str {
     )
     .is_some()
     {
-        "HEAD"
-    } else {
-        EMPTY_TREE
+        return Ok("HEAD".to_owned());
+    }
+    empty_tree(workspace)
+}
+
+/// The empty tree's object id for this repository's object format.
+///
+/// The documented formats have a known id; anything else (or a git too old to
+/// name the format) asks git for it instead of guessing.
+fn empty_tree(workspace: &Path) -> Result<String, GitActionError> {
+    let format = git_text(
+        workspace,
+        &["rev-parse", "--show-object-format"],
+        STATUS_TIMEOUT,
+    )
+    .unwrap_or_default();
+    match format.trim() {
+        "sha1" => Ok(SHA1_EMPTY_TREE.to_owned()),
+        "sha256" => Ok(SHA256_EMPTY_TREE.to_owned()),
+        _ => {
+            let id = git_text(
+                workspace,
+                &["hash-object", "-t", "tree", EMPTY_FILE],
+                STATUS_TIMEOUT,
+            )?;
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(GitActionError::Git(
+                    "git could not name the empty tree".into(),
+                ));
+            }
+            Ok(id.to_owned())
+        }
     }
 }
 
@@ -1171,8 +1213,10 @@ fn commit_input_blocking(
     // content whether or not it was staged. Describe that, not just the index.
     // A repository with no commits has no `HEAD` to compare with; the empty
     // tree is the same baseline git uses for a first commit.
+    let base;
     if include_unstaged || paths.is_some() {
-        args.push(diff_base(workspace));
+        base = diff_base(workspace)?;
+        args.push(&base);
     } else {
         args.push("--cached");
     }

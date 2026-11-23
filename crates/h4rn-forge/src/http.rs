@@ -129,6 +129,11 @@ impl ForgeHttp {
     }
 
     /// Performs a request, applying conditional GET and rate limiting.
+    ///
+    /// This is the path every ordinary call takes (a viewer, a repository
+    /// lookup, a list). A documented rate limit is waited out first, as it
+    /// always was: only the pull-request call has a shared deadline to keep
+    /// (see [`Self::request_within`]).
     pub async fn request(
         &self,
         method: Method,
@@ -136,8 +141,8 @@ impl ForgeHttp {
         body: Option<&Value>,
         conditional: bool,
     ) -> Result<HttpResponse> {
-        self.request_within(method, url, body, conditional, DEFAULT_REQUEST_TIMEOUT)
-            .await
+        self.limiter.acquire().await?;
+        self.send(method, url, body, conditional, None).await
     }
 
     /// Performs a request that must finish inside `budget`.
@@ -164,7 +169,19 @@ impl ForgeHttp {
             ));
         }
         let timeout = left.min(DEFAULT_REQUEST_TIMEOUT);
+        self.send(method, url, body, conditional, Some(timeout))
+            .await
+    }
 
+    /// Sends one prepared request, applying conditional GET and caching.
+    async fn send(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        conditional: bool,
+        timeout: Option<Duration>,
+    ) -> Result<HttpResponse> {
         let mut request = self.client.request(method.clone(), url).header(
             reqwest::header::ACCEPT,
             if self.accept.is_empty() {
@@ -188,11 +205,13 @@ impl ForgeHttp {
             request = request.json(body);
         }
 
-        let response = request
-            .timeout(timeout)
-            .send()
-            .await
-            .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
+        let response = match timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        }
+        .send()
+        .await
+        .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
 
         let status = response.status();
         let headers = response.headers().clone();
@@ -754,6 +773,16 @@ impl RateLimiter {
         }
     }
 
+    /// Takes one request's token, waiting out any documented rate limit first.
+    ///
+    /// The ordinary path: a reset up to a minute away is slept through, and a
+    /// further one is refused with [`ForgeError::RateLimited`]. The transfer's
+    /// own timeout starts once the wait is over, so a slow reset never eats
+    /// the time a request has to run.
+    async fn acquire(&self) -> Result<()> {
+        self.acquire_bounded(None).await
+    }
+
     /// Takes one request's token, waiting no longer than `budget` in total.
     ///
     /// A documented reset further away than the budget is not slept through:
@@ -761,9 +790,15 @@ impl RateLimiter {
     /// seconds until the reset, so the caller's deadline is kept and the person
     /// is told when to try again.
     async fn acquire_within(&self, budget: Duration) -> Result<()> {
+        self.acquire_bounded(Some(budget)).await
+    }
+
+    /// [`Self::acquire`] and [`Self::acquire_within`] in one loop; `None`
+    /// keeps the ordinary wait-then-send timing.
+    async fn acquire_bounded(&self, budget: Option<Duration>) -> Result<()> {
         let started = Instant::now();
         loop {
-            let left = budget.saturating_sub(started.elapsed());
+            let left = budget.map(|budget| budget.saturating_sub(started.elapsed()));
             let wait = {
                 let Ok(mut budget) = self.budget.lock() else {
                     return Err(ForgeError::Network("rate limiter poisoned".into()));
@@ -799,8 +834,8 @@ impl RateLimiter {
                 }
             };
 
-            match wait {
-                Some(wait) if wait >= left => {
+            match (wait, left) {
+                (Some(wait), Some(left)) if wait >= left => {
                     return Err(ForgeError::RateLimited {
                         forge: self.forge,
                         retry_after_secs: Some(wait.as_secs().max(1)),
@@ -808,7 +843,18 @@ impl RateLimiter {
                         message: "the request budget cannot cover the rate-limit wait".into(),
                     });
                 }
-                Some(wait) if !wait.is_zero() => tokio::time::sleep(wait).await,
+                // An ordinary request waits out a documented reset for up to a
+                // minute, then gives up with the seconds to retry, as it always
+                // did; a longer wait is a forge that is not coming back soon.
+                (Some(wait), None) if wait > Duration::from_secs(60) => {
+                    return Err(ForgeError::RateLimited {
+                        forge: self.forge,
+                        retry_after_secs: Some(wait.as_secs()),
+                        retry_at: None,
+                        message: "the request budget is exhausted".into(),
+                    });
+                }
+                (Some(wait), _) if !wait.is_zero() => tokio::time::sleep(wait).await,
                 _ => tokio::task::yield_now().await,
             }
         }
@@ -1281,5 +1327,88 @@ mod tests {
         );
         let requests = server.received_requests().await.expect("requests");
         assert_eq!(requests.len(), 1, "the second call never reached the forge");
+    }
+
+    /// Ordinary requests keep the old wait-then-send timing: a documented
+    /// reset is slept through even when it is longer than one transfer's
+    /// timeout. Only the pull-request call's shared budget refuses it.
+    #[tokio::test]
+    async fn an_ordinary_request_waits_out_a_rate_limit_beyond_its_timeout() {
+        let limiter = RateLimiter::new(ForgeKind::GitHub, 120);
+        {
+            let mut budget = limiter.budget.lock().expect("limiter");
+            budget.remaining = Some(0);
+            budget.reset_at = Some(Instant::now() + Duration::from_millis(250));
+        }
+        let error = limiter
+            .acquire_within(Duration::from_millis(50))
+            .await
+            .expect_err("the budget cannot cover the wait");
+        assert!(matches!(error, ForgeError::RateLimited { .. }), "{error:?}");
+
+        let started = Instant::now();
+        limiter
+            .acquire()
+            .await
+            .expect("an ordinary request waits instead of failing fast");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the ordinary path did not wait: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A viewer request that follows a `429` waits out `Retry-After` and then
+    /// succeeds, without the wait eating the transfer's own timeout.
+    #[tokio::test]
+    async fn a_viewer_request_after_a_rate_limit_waits_and_succeeds() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        #[derive(Clone)]
+        struct OnceRateLimited(Arc<AtomicBool>);
+
+        impl Respond for OnceRateLimited {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                if self.0.swap(true, Ordering::SeqCst) {
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"login": "octocat"}))
+                } else {
+                    ResponseTemplate::new(429).append_header("retry-after", "1")
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/user"))
+            .respond_with(OnceRateLimited(Arc::new(AtomicBool::new(false))))
+            .mount(&server)
+            .await;
+        let client = ForgeHttp::new(
+            ForgeKind::GitHub,
+            &server.uri(),
+            auth_header("authorization", "Bearer test-token-value"),
+            "application/json",
+            120,
+        )
+        .unwrap();
+
+        let url = format!("{}/user", server.uri());
+        let error = client.get_json(&url).await.expect_err("first 429");
+        assert!(matches!(error, ForgeError::RateLimited { .. }), "{error:?}");
+
+        let started = Instant::now();
+        let viewer = client
+            .get_json(&url)
+            .await
+            .expect("the viewer request waits and then succeeds");
+        assert_eq!(viewer["login"], "octocat");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "the request did not wait: {:?}",
+            started.elapsed()
+        );
     }
 }

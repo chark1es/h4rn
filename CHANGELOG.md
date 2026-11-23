@@ -33,7 +33,9 @@ All notable changes to h4rn are recorded here. The format follows
   `--no-verify`) and reports a hook's output. Push creates an upstream on `origin` when asked and
   is never forced: a non-fast-forward rejection or a bad credential is reported as exactly that.
   **Create pull request…** offers title, body, base branch (the default branch is preselected) and
-  a draft flag; the daemon pushes first when the branch needs it and then opens the request.
+  a draft flag; the daemon checks the remote without running any hook (or submodule recursion) and
+  then pushes first when the branch needs it and opens the request. When the real push does run,
+  its hooks run as usual and a hook failure stops the open, exactly as a push from the panel.
   **Generate** can fill the commit message or the pull request text from a model chosen under
   Settings → Source control (Off by default, coding agent, or text generator, plus custom
   instructions); it fills the field only and never commits, pushes or opens anything. Only the
