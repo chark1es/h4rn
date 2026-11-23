@@ -1401,23 +1401,6 @@ async fn supervised_token(daemon: &TestDaemon, client: &reqwest::Client) -> Stri
     .await
 }
 
-async fn wait_for_settings(
-    settings: &h4rn_harness::SessionSettings,
-    count: usize,
-) -> Vec<h4rn_harness::SettingChange> {
-    let started = Instant::now();
-    loop {
-        let changes = settings.get();
-        if changes.len() >= count {
-            return changes;
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            panic!("the fake harness never started a session: {changes:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
 #[tokio::test]
 async fn a_supervised_message_runs_at_approval_required_and_leaves_the_mode_alone() {
     let daemon = boot(None).await;
