@@ -448,6 +448,23 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A terminal's reply owner still answers after a resync.** With an old client attached, the first
+  viewer to answer owns every reply. But another client that held the query's bytes raw could make
+  the owner's snapshot-only claim give way, and the old client's copy was dropped too, so the shell
+  received no answer at all. A claim now gives way only to a viewer that could actually be written
+  under the ownership rule: any viewer when all of them name positions, otherwise only the owner.
+  A positioned viewer that the owner rule blocks can no longer swallow the answer either.
+- **Closing a terminal never signals a pid that another process may own, and still ends a shell that
+  ignores the hangup.** On Unix a pid is freed the moment the shell is reaped, so a close that ran
+  between the reap and the exit report could SIGHUP or SIGKILL whatever process reused it. The
+  reader thread now waits for the shell with `waitid(WNOWAIT)`, which reports the exit but leaves
+  the shell a zombie, and every real reap publishes the exit under a lock the close holds around
+  each pid-targeted signal: the opening hangup, the primary kill (a SIGHUP by pid on Unix) and the
+  pid fallback. While that lock shows no published exit, the pid is still this shell's live process
+  or its unreaped zombie, never a reused pid. A shell that survives the hangup and has no usable
+  process group is still ended, and the session's internal `alive` flag is never taken for a reap
+  confirmation. The group's TERM and KILL still go out on purpose, to end the shell's jobs, and
+  Windows keeps its handle kill, which holds a process handle rather than a bare pid.
 - **Thread settings always describe the session that will run the next turn.** The model list a
   Codex session reports survives the session ending, so an idle thread still offers the models its
   CLI really has (and a new Codex thread starts on the first of them, not on a static default the
