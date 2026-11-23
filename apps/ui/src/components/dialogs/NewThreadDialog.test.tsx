@@ -862,6 +862,47 @@ describe("NewThreadDialog drafts", () => {
     await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
   });
 
+  it("keeps a non-first harness and its typed model when the bound host is picked again", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["claude_code", "codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [
+      { harness: "claude_code", installed: "2.1.329" },
+      { harness: "codex", installed: "0.171.0" },
+    ];
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Codex/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Codex" })).toBeTruthy(),
+    );
+    fireEvent.change(modelField(), { target: { value: "gpt-6.2-astra" } });
+
+    // Picking the host that is already bound changes nothing, even though its
+    // first detected harness is Claude Code.
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: atlas" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /atlas/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Codex" })).toBeTruthy(),
+    );
+    expect(modelField().value).toBe("gpt-6.2-astra");
+  });
+
   it("adopts a live catalogue that arrives after the dialog opened", async () => {
     mock.state.hosts = {
       host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },

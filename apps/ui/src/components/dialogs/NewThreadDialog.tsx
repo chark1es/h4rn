@@ -448,15 +448,16 @@ export function NewThreadDialog() {
                 if (value === "") return;
                 const nextHost = hosts[value];
                 const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
-                // Reselecting the host that is already bound must not reset the
-                // field: ChipSelect fires on every pick, including the current
-                // one, and a value the person typed must survive it. A real
-                // host or harness change starts from what that host's live
-                // catalogue offers, never the static table.
+                // Reselecting the host that is already bound changes nothing:
+                // ChipSelect fires on every pick, including the current one, and
+                // the harness and model the person chose there (even one that
+                // is not the host's first harness) must survive it. A real host
+                // change starts from what that host's live catalogue offers,
+                // never the static table.
                 const hostChanged = value !== boundHost;
                 hostChosen.current = true;
                 showDraft(draftSession().selectHost(value));
-                if (nextHarness && harness !== "acp" && (hostChanged || nextHarness !== harness)) {
+                if (nextHarness && harness !== "acp" && hostChanged) {
                   setHarness(nextHarness);
                   setAgentId(null);
                   setModel(
