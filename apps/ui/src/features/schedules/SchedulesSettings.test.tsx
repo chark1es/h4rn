@@ -268,4 +268,33 @@ describe("scheduled tasks settings", () => {
     expect(requests).toContain("set_schedule_enabled");
     expect(await screen.findByText(/Paused/)).toBeTruthy();
   });
+
+  it("offers Resume for a task the daemon disarmed, not Pause", async () => {
+    setSchedulesRequesterForTests((request) =>
+      request.type === "list_schedules"
+        ? ok({
+            type: "schedules",
+            tasks: [
+              task({
+                enabled: false,
+                next_run_at: null,
+                last_run: run({
+                  thread_id: null,
+                  outcome: "failed",
+                  detail:
+                    "Its schedule has no next run: the task has an invalid time zone. Fix the schedule to run it again.",
+                }),
+              }),
+            ],
+          })
+        : ok({ type: "ack" }),
+    );
+    render(<SchedulesSettings />);
+
+    await screen.findByText("Nightly review");
+    expect(screen.getByRole("switch", { name: "Resume Nightly review" })).toBeTruthy();
+    expect(screen.queryByRole("switch", { name: "Pause Nightly review" })).toBeNull();
+    expect(screen.getByText(/Paused/)).toBeTruthy();
+    expect(screen.getByText(/Failed /)).toBeTruthy();
+  });
 });

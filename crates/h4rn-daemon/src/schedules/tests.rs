@@ -1425,6 +1425,176 @@ async fn a_bad_stored_zone_disarms_the_task_instead_of_starting_more_threads() {
 }
 
 #[tokio::test]
+async fn a_disarmed_task_is_paused_and_stops_keeping_its_thread() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::ContinueThread,
+        ))
+        .await
+        .expect("create");
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
+    let thread_id = runs[0].thread_id.clone().expect("thread");
+    assert!(
+        fixture.service.kept_threads().await.contains(&thread_id),
+        "an enabled task keeps its thread's checkout"
+    );
+
+    // Model a row written by an older or corrupted daemon: the schedule can no
+    // longer name a slot.
+    fixture
+        .service
+        .inner
+        .tasks
+        .lock()
+        .await
+        .get_mut(&task.task_id)
+        .expect("task")
+        .timezone = "Mars/Olympus_Mons".into();
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+
+    let disarmed = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        !disarmed.enabled,
+        "a task that will never run again is paused, so the toggle offers Resume"
+    );
+    assert!(disarmed.next_run_at.is_none());
+    assert_eq!(
+        disarmed.last_run.expect("the refusal is recorded").outcome,
+        ScheduleRunOutcome::Failed
+    );
+    assert!(
+        fixture.service.kept_threads().await.is_empty(),
+        "a disarmed task no longer protects its checkout"
+    );
+
+    // The pause is stored with the failure: a restart must not offer to pause a
+    // task that already runs nothing.
+    let restarted = ScheduleService::open(
+        Arc::clone(&fixture.journal),
+        Arc::clone(&fixture.manager),
+        HostId::new("host_schedule_test"),
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("restart");
+    let reopened = restarted.task(&task.task_id).await.expect("task");
+    assert!(!reopened.enabled, "the disarm is durable");
+    assert!(reopened.next_run_at.is_none());
+    fixture.clock.advance(chrono::Duration::days(1));
+    restarted.run_due().await;
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1,
+        "a disarmed task starts nothing after a restart"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_once_marker_is_migrated_and_keeps_the_slot_spent() {
+    for legacy_slot in [None, Some("2026-10-25T02:30".to_owned())] {
+        let clock = Arc::new(ManualClock::at(
+            "2026-10-24T12:00:00Z"
+                .parse::<DateTime<Utc>>()
+                .expect("clock"),
+        ));
+        let fixture = fixture(FakeHarness::new(), clock).await;
+        let task = fixture
+            .service
+            .create(draft(
+                &fixture.workspace_path,
+                ScheduleSpec::Once {
+                    date: "2026-10-25".into(),
+                    time: "02:30".into(),
+                },
+                ScheduleDestination::NewThread,
+            ))
+            .await
+            .expect("create");
+        let slot = task.next_run_at.expect("the once slot is armed");
+
+        // A row written before the zone joined the slot identity: it is spent,
+        // and its marker is either missing (only the old flag) or names just
+        // the local date and time. The armed slot is still stored.
+        let mut legacy = task.clone();
+        legacy.once_consumed = true;
+        legacy.once_consumed_slot = legacy_slot.clone();
+        legacy.next_run_at = Some(slot);
+        fixture
+            .journal
+            .upsert_schedule(&legacy)
+            .await
+            .expect("write the legacy row");
+
+        let reopened = ScheduleService::open(
+            Arc::clone(&fixture.journal),
+            Arc::clone(&fixture.manager),
+            HostId::new("host_schedule_test"),
+            fixture.clock.clone(),
+        )
+        .await
+        .expect("reopen");
+        let migrated = reopened.task(&task.task_id).await.expect("task");
+        assert_eq!(
+            migrated.once_consumed_slot.as_deref(),
+            Some("2026-10-25T02:30@Europe/Berlin"),
+            "the marker gains the zone that names its instant"
+        );
+        assert!(migrated.once_consumed);
+        assert!(
+            migrated.next_run_at.is_none(),
+            "a spent slot is not left armed"
+        );
+
+        // The slot never runs, even while the daemon keeps running.
+        fixture.clock.advance(chrono::Duration::minutes(15));
+        reopened.run_due().await;
+        assert_eq!(
+            reopened.runs(&task.task_id).await.expect("runs").len(),
+            0,
+            "a spent once slot starts no run"
+        );
+        assert_eq!(
+            fixture
+                .manager
+                .list_threads(&Default::default())
+                .await
+                .len(),
+            0
+        );
+
+        // Renaming the task names the same instant, so it stays spent.
+        let mut edit = migrated.draft();
+        edit.name = "Renamed once".into();
+        let renamed = reopened.update(&task.task_id, edit).await.expect("rename");
+        assert!(renamed.once_consumed);
+        assert!(renamed.next_run_at.is_none());
+        assert_eq!(
+            renamed.once_consumed_slot.as_deref(),
+            Some("2026-10-25T02:30@Europe/Berlin")
+        );
+        fixture.clock.advance(chrono::Duration::days(1));
+        reopened.run_due().await;
+        assert_eq!(
+            reopened.runs(&task.task_id).await.expect("runs").len(),
+            0,
+            "a renamed task keeps its spent slot spent"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_thread_pinned_to_working_but_idle_is_not_busy() {
     let clock = Arc::new(ManualClock::at(Utc::now()));
     let workspace = tempfile::tempdir().expect("workspace");
@@ -1959,10 +2129,9 @@ async fn a_once_slot_whose_marker_cannot_be_written_runs_only_after_it_is_durabl
         .clock
         .advance(chrono::Duration::minutes(12 * 60 + 31));
 
-    // The spent marker cannot be written, and a crash lands before the run's
-    // own commit could persist it either.
+    // The spent marker cannot be written, so the run is refused before a
+    // thread starts.
     fixture.service.fail_next_upsert();
-    fixture.service.fail_next_commit();
     fixture.service.run_due().await;
     assert_eq!(
         fixture
@@ -1994,7 +2163,9 @@ async fn a_once_slot_whose_marker_cannot_be_written_runs_only_after_it_is_durabl
     );
 
     // A restart forgets the refused admission; the slot is still unspent, so it
-    // runs once after the retry deadline and then never again.
+    // runs once after the retry deadline. When that run's own write fails, only
+    // the write is retried: the slot is already spent, so the retry cannot
+    // start a second thread.
     let restarted = ScheduleService::open(
         Arc::clone(&fixture.journal),
         Arc::clone(&fixture.manager),
@@ -2003,6 +2174,26 @@ async fn a_once_slot_whose_marker_cannot_be_written_runs_only_after_it_is_durabl
     )
     .await
     .expect("restart");
+    fixture.clock.advance(chrono::Duration::seconds(31));
+    restarted.fail_next_commit();
+    restarted.run_due().await;
+    assert!(
+        restarted
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .is_empty(),
+        "the run waits for its own retry"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .list_threads(&Default::default())
+            .await
+            .len(),
+        1,
+        "the started thread is the only one"
+    );
     fixture.clock.advance(chrono::Duration::seconds(31));
     restarted.run_due().await;
     let runs = wait_runs(&restarted, &task.task_id, 1).await;

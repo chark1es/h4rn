@@ -912,9 +912,10 @@ impl ScheduleService {
                 .await
                 .insert(task_id.clone(), task.clone());
             if let Err(error) = self.persist_task(&task).await {
-                // The spent marker is not durable, so the run must not start:
+                // The spent marker is not durable, so the run cannot start:
                 // a crash before the run's own write would arm the slot again.
-                // Keep the slot blocked in memory and retry on the backoff.
+                // Keep the slot blocked in memory and re-arm it only after
+                // this backoff; the run starts once the marker write succeeds.
                 let failures = {
                     let mut retries = lock(&self.inner.retries);
                     let failures = retries.entry(task_id.clone()).or_insert(0);
@@ -1134,12 +1135,15 @@ impl ScheduleService {
         task.thread_id.clone()
     }
 
-    /// Disarms a task whose schedule cannot name its next slot, and says why.
+    /// Disarms and pauses a task whose schedule cannot name its next slot, and
+    /// says why.
     ///
     /// The due run is not dispatched: its thread could never be recorded, and
-    /// each backoff of the unrecorded run would start another. The task keeps
-    /// its history and shows the failure until the schedule is fixed and the
-    /// task is resumed.
+    /// each backoff of the unrecorded run would start another. Pausing it too
+    /// keeps the list honest: a task that will never run again is not one the
+    /// toggle can offer to pause, and it stops holding its thread's checkout
+    /// against worktree cleanup. The task keeps its history and shows the
+    /// failure until the schedule is fixed and the task is resumed.
     async fn record_uncomputable(
         &self,
         task_id: &ScheduleTaskId,
@@ -1156,6 +1160,7 @@ impl ScheduleService {
                 return;
             }
             task.next_run_at = None;
+            task.enabled = false;
             task.updated_at = now;
             self.inner
                 .tasks
@@ -1175,9 +1180,9 @@ impl ScheduleService {
             };
             (task, run)
         };
-        // The task is already disarmed in memory, so `record` keeps it that way
-        // and commits the visible failure; a failed write is retried on its own
-        // backoff without admitting the slot again.
+        // The task is already disarmed and paused in memory, so `record` keeps
+        // it that way and commits the visible failure; a failed write is
+        // retried on its own backoff without admitting the slot again.
         if let Err(error) = self
             .record(task_id, &task, run, Trigger::Scheduled, now)
             .await
