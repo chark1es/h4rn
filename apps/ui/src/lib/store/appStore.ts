@@ -176,6 +176,11 @@ export type AppState = {
   /** Daemon host id of the machine this client is talking to. */
   localHostId: HostId | null;
   /**
+   * The daemon machine's IANA time zone, or `null` when an older daemon did
+   * not report one. Schedule editors default to it.
+   */
+  daemonTimezone: string | null;
+  /**
    * The connect machine the connected daemon owns, from its `hello`.
    *
    * A direct socket reaches exactly this daemon, so this is the machine the
@@ -222,6 +227,7 @@ function createInitialState(): AppState {
     lastSyncAt: null,
     serverVersion: null,
     localHostId: null,
+    daemonTimezone: null,
     daemonMachineId: null,
     pendingCreates: [],
     pendingActions: {},
@@ -816,6 +822,7 @@ export function startConnection(): void {
       hosts,
       serverVersion: info.serverVersion,
       localHostId: info.localHostId,
+      daemonTimezone: info.daemonTimezone || null,
       daemonMachineId: info.daemonMachineId,
       connection: { ...state.connection, error: null },
     });

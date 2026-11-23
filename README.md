@@ -35,7 +35,8 @@ pure views over a single Rust daemon and one typed WebSocket protocol.
 
 Architecture decisions live in [docs/decisions.md](docs/decisions.md); product intent is in
 [PRODUCT.md](PRODUCT.md) and the design system in [DESIGN.md](DESIGN.md). Diff review scopes and
-line comments are in [docs/diffs.md](docs/diffs.md); thread titles written by a model are described
+line comments are in [docs/diffs.md](docs/diffs.md); scheduled tasks and webhooks are described in
+[docs/scheduled-tasks.md](docs/scheduled-tasks.md); thread titles written by a model are described
 in [docs/text-generation.md](docs/text-generation.md). Packaging and the tag-driven release process
 are in [docs/release.md](docs/release.md); relay deployment is in
 [docs/self-hosting.md](docs/self-hosting.md).

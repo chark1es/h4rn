@@ -71,6 +71,14 @@ pub enum ServerFrame {
         /// One output line or the final result.
         event: crate::HarnessUpdateEvent,
     },
+    /// An ephemeral scheduled-task change, outside the durable thread log.
+    ///
+    /// A reconnecting client re-reads the list with
+    /// [`crate::ClientRequest::ListSchedules`].
+    ScheduleEvent {
+        /// The task that was created, changed or deleted.
+        event: crate::ScheduleEvent,
+    },
 }
 
 /// A device paired directly (LAN/tailnet) with this computer.
@@ -125,6 +133,14 @@ pub enum ResponseBody {
         local_host: HostId,
         /// Hosts this daemon can route to.
         hosts: Vec<HostSummary>,
+        /// The daemon machine's IANA time zone, such as `Europe/Berlin`.
+        ///
+        /// An editor that creates a schedule uses this as the default, so a
+        /// floating date and time mean the daemon's wall clock rather than a
+        /// phone in another zone. An older daemon omits it; the client falls
+        /// back to its own zone.
+        #[serde(default)]
+        daemon_timezone: String,
     },
     /// Host list.
     Hosts {
@@ -659,6 +675,28 @@ pub enum ResponseBody {
         /// Current settings.
         settings: crate::text_generation::TextGenerationSettings,
     },
+    /// Every scheduled task on this daemon, oldest first.
+    Schedules {
+        /// Stored tasks.
+        tasks: Vec<crate::ScheduleTask>,
+    },
+    /// One scheduled task after a create, edit, enable/disable, run or rotate.
+    ScheduleTask {
+        /// The task's current state.
+        task: crate::ScheduleTask,
+    },
+    /// One task's run history, newest first.
+    ScheduleRuns {
+        /// Recorded runs, at most the daemon's history bound.
+        runs: Vec<crate::ScheduleRun>,
+    },
+    /// A webhook task's secret URL path, revealed to an admin.
+    ScheduleWebhookUrl {
+        /// The task the path belongs to.
+        task_id: crate::ScheduleTaskId,
+        /// The path to post to, absent when the task has no webhook URL.
+        path: Option<String>,
+    },
     /// A thread row after the owner renamed it.
     ThreadRenamed {
         /// The thread with its new title.
@@ -1138,22 +1176,35 @@ mod tests {
             "daemon_machine_id": "m_atlas",
             "local_host": "host_atlas",
             "hosts": [],
+            "daemon_timezone": "Europe/Berlin",
         });
         match serde_json::from_value::<ResponseBody>(value.clone()).unwrap() {
             ResponseBody::Hello {
-                daemon_machine_id, ..
-            } => assert_eq!(daemon_machine_id.as_deref(), Some("m_atlas")),
+                daemon_machine_id,
+                daemon_timezone,
+                ..
+            } => {
+                assert_eq!(daemon_machine_id.as_deref(), Some("m_atlas"));
+                assert_eq!(daemon_timezone, "Europe/Berlin");
+            }
             other => panic!("unexpected body: {other:?}"),
         }
 
-        // A daemon older than this field answers without it. Its absence must
-        // not fail the handshake; the client falls back to the local host name.
+        // A daemon older than these fields answers without them. Their absence
+        // must not fail the handshake; the client falls back to the local host
+        // name and its own zone.
         let mut older = value;
         older.as_object_mut().unwrap().remove("daemon_machine_id");
+        older.as_object_mut().unwrap().remove("daemon_timezone");
         match serde_json::from_value::<ResponseBody>(older).unwrap() {
             ResponseBody::Hello {
-                daemon_machine_id, ..
-            } => assert_eq!(daemon_machine_id, None),
+                daemon_machine_id,
+                daemon_timezone,
+                ..
+            } => {
+                assert_eq!(daemon_machine_id, None);
+                assert_eq!(daemon_timezone, "");
+            }
             other => panic!("unexpected body: {other:?}"),
         }
     }

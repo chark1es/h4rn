@@ -14,12 +14,14 @@ use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
 use h4rn_daemon::network_access::NetworkAccess;
 use h4rn_daemon::remote::DeviceRegistry;
+use h4rn_daemon::schedules::ScheduleService;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, FsOmitted,
-    HarnessKind, PairScope, ProjectSource, ProtoError, ProtoErrorCode, ResponseBody, RuntimeMode,
-    ServerFrame, ThreadSummary, TransportPathKind,
+    HarnessKind, HostId, PairScope, ProjectSource, ProtoError, ProtoErrorCode, ResponseBody,
+    RuntimeMode, ScheduleDestination, ScheduleDraft, ScheduleSpec, ServerFrame, ThreadSummary,
+    TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -34,6 +36,10 @@ struct TestDaemon {
     addr: std::net::SocketAddr,
     service: Arc<SecureService>,
     devices: Arc<DeviceRegistry>,
+    /// The scheduled-task service and the values its drafts need.
+    schedules: Arc<ScheduleService>,
+    host: HostId,
+    workspace: std::path::PathBuf,
     /// The network listener, off unless a test turns it on.
     network: Arc<NetworkAccess>,
     dir: Option<tempfile::TempDir>,
@@ -75,6 +81,7 @@ async fn boot_at(
     devices: Arc<DeviceRegistry>,
     owned: Option<tempfile::TempDir>,
 ) -> TestDaemon {
+    let workspace = data_dir.clone();
     let config = Config {
         data_dir,
         bind: "127.0.0.1:0".parse().expect("bind"),
@@ -101,6 +108,8 @@ async fn boot_at(
         .build()
         .await
         .expect("build daemon");
+    let schedules = daemon.schedules();
+    let host = daemon.local_host();
     let bound = daemon.bind().await.expect("bind daemon");
     let addr = bound.local_addr();
     let network = bound.network();
@@ -116,6 +125,9 @@ async fn boot_at(
         addr,
         service,
         devices,
+        schedules,
+        host,
+        workspace,
         network,
         dir: owned,
         shutdown: Some(shutdown),
@@ -311,6 +323,51 @@ impl SecureClient {
     async fn request(&mut self, body: ClientRequest) -> Result<ResponseBody, ProtoError> {
         let id = self.send(body).await;
         self.response(id).await
+    }
+
+    /// Reads the next raw text frame, without parsing it.
+    async fn read_raw_text(&mut self) -> String {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), self.client.recv())
+                .await
+                .expect("timed out waiting for a raw secure frame");
+            match event {
+                Some(ClientEvent::Frame(frame)) => match frame.as_text() {
+                    Some(text) => return text.to_owned(),
+                    None => continue,
+                },
+                Some(ClientEvent::Closed { reason }) => {
+                    panic!("secure session closed while waiting: {reason}")
+                }
+                Some(ClientEvent::Error { message, .. }) => {
+                    panic!("secure transport error while waiting: {message}")
+                }
+                Some(ClientEvent::Status(_) | ClientEvent::Established(_)) => {}
+                None => panic!("secure client stopped while waiting"),
+            }
+        }
+    }
+
+    /// Sends one request and returns every raw text frame read until its
+    /// answer, so a test can inspect exactly what crossed the wire.
+    async fn request_frames(
+        &mut self,
+        body: ClientRequest,
+    ) -> (Vec<String>, Result<ResponseBody, ProtoError>) {
+        let id = self.send(body).await;
+        let mut seen = Vec::new();
+        loop {
+            let text = self.read_raw_text().await;
+            seen.push(text.clone());
+            if let Ok(ServerFrame::Response {
+                id: response_id,
+                result,
+            }) = serde_json::from_str::<ServerFrame>(&text)
+                && response_id == id
+            {
+                return (seen, result);
+            }
+        }
     }
 
     async fn hello(&mut self) -> ResponseBody {
@@ -2072,6 +2129,120 @@ async fn a_large_editor_read_is_omitted_on_a_secure_session() {
         }
         other => panic!("unexpected read response: {other:?}"),
     }
+
+    client.close().await;
+    daemon.stop().await;
+}
+
+fn webhook_task(daemon: &TestDaemon) -> ScheduleDraft {
+    ScheduleDraft {
+        name: "View-scope webhook".into(),
+        host: daemon.host.clone(),
+        workspace_path: daemon.workspace.display().to_string(),
+        harness: HarnessKind::ClaudeCode,
+        agent_id: None,
+        model: "fake-model".into(),
+        runtime_mode: RuntimeMode::ApprovalRequired,
+        prompt: "Review {{body.ref}}".into(),
+        schedule: ScheduleSpec::Webhook,
+        timezone: "UTC".into(),
+        destination: ScheduleDestination::NewThread,
+        enabled: true,
+    }
+}
+
+#[tokio::test]
+async fn a_view_only_device_never_sees_a_webhook_path() {
+    let client_identity = device_identity();
+    let key = client_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices
+        .insert_scoped("viewer", key, vec![PairScope::View])
+        .expect("persist");
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+
+    let first = daemon
+        .schedules
+        .create(webhook_task(&daemon))
+        .await
+        .expect("create a webhook task");
+    let first_secret = first
+        .webhook_path
+        .as_deref()
+        .expect("path")
+        .strip_prefix("/webhooks/")
+        .expect("prefix")
+        .to_owned();
+
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+
+    // A live change reaches the view client as a raw frame with no path in it.
+    let second = daemon
+        .schedules
+        .create(webhook_task(&daemon))
+        .await
+        .expect("create a second webhook task");
+    let second_secret = second
+        .webhook_path
+        .as_deref()
+        .expect("path")
+        .strip_prefix("/webhooks/")
+        .expect("prefix")
+        .to_owned();
+    let event_frame = loop {
+        let text = client.read_raw_text().await;
+        assert!(
+            !text.contains(&first_secret) && !text.contains(&second_secret),
+            "a raw event frame leaked a webhook path: {text}"
+        );
+        let frame: ServerFrame = serde_json::from_str(&text).expect("parse frame");
+        if matches!(frame, ServerFrame::ScheduleEvent { .. }) {
+            break text;
+        }
+    };
+    assert!(
+        event_frame.contains("schedule_event"),
+        "the view client should receive the change event: {event_frame}"
+    );
+    assert!(
+        event_frame.contains("\"webhook_path_set\":true"),
+        "the event still says a URL exists: {event_frame}"
+    );
+
+    // The raw list answer carries no path either.
+    let (frames, result) = client.request_frames(ClientRequest::ListSchedules).await;
+    assert!(
+        result.is_ok(),
+        "a view device may read the list: {result:?}"
+    );
+    assert!(!frames.is_empty());
+    for frame in &frames {
+        assert!(
+            !frame.contains(&first_secret) && !frame.contains(&second_secret),
+            "a raw list frame leaked a webhook path: {frame}"
+        );
+    }
+    match result.expect("list answer") {
+        ResponseBody::Schedules { tasks } => {
+            assert_eq!(tasks.len(), 2);
+            assert!(tasks.iter().all(|task| task.webhook_path_set));
+        }
+        other => panic!("unexpected list answer: {other:?}"),
+    }
+
+    // Revealing the secret is admin-only.
+    let denied = client
+        .request(ClientRequest::GetScheduleWebhookUrl {
+            task_id: first.task_id.clone(),
+        })
+        .await
+        .expect_err("a view-only device must not reveal the path");
+    assert_eq!(denied.code, ProtoErrorCode::Forbidden);
+    assert!(!denied.message.contains(&first_secret));
 
     client.close().await;
     daemon.stop().await;

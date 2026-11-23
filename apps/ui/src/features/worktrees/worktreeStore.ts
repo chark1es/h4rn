@@ -186,6 +186,7 @@ export const WORKTREE_SKIP_REASONS = {
     "the checkout was recreated during the clear",
     "not a registered worktree",
     "is a thread workspace",
+    "has an enabled scheduled task",
     "could not read every worktree registration",
   ],
   /** `branch <name> is a symbolic ref` — the ref is kept, target included. */

@@ -48,6 +48,7 @@ class FakeTransport implements Transport {
         daemon_machine_id: null,
         local_host: "host_test",
         hosts: [],
+        daemon_timezone: "Europe/Berlin",
       });
       return;
     }
@@ -204,6 +205,7 @@ describe("H4rnClient", () => {
       daemon_machine_id: daemonMachineId,
       local_host: "host_test",
       hosts: [],
+      daemon_timezone: "Europe/Berlin",
     });
     const readyWith = async (body: ResponseBody): Promise<ReadyInfo> => {
       const { client } = harness(
@@ -750,6 +752,7 @@ describe("H4rnClient", () => {
       daemon_machine_id: null,
       local_host: "host_test",
       hosts: [],
+      daemon_timezone: "Europe/Berlin",
     });
     await settle();
     const sent = transports[0]?.sent ?? [];

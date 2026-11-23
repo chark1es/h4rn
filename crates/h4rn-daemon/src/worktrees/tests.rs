@@ -6097,3 +6097,126 @@ fn a_staged_submodule_update_counts_even_when_the_submodule_is_ignored() {
         "the staged submodule update is staged work"
     );
 }
+
+/// A scheduled draft that runs in `path` and keeps one thread.
+fn scheduled_draft(path: &Path) -> h4rn_protocol::ScheduleDraft {
+    h4rn_protocol::ScheduleDraft {
+        name: "Keep this checkout".into(),
+        host: HostId::new("host_local"),
+        workspace_path: path.to_string_lossy().into_owned(),
+        harness: HarnessKind::ClaudeCode,
+        agent_id: None,
+        model: "default".into(),
+        runtime_mode: RuntimeMode::ApprovalRequired,
+        prompt: "Keep working here".into(),
+        schedule: h4rn_protocol::ScheduleSpec::Every {
+            count: 1,
+            unit: h4rn_protocol::IntervalUnit::Hours,
+        },
+        timezone: "UTC".into(),
+        destination: h4rn_protocol::ScheduleDestination::ContinueThread,
+        enabled: true,
+    }
+}
+
+/// Runs a scheduled task once and waits for its thread to settle.
+async fn run_scheduled(
+    schedules: &crate::schedules::ScheduleService,
+    threads: &ThreadManager,
+    task: &h4rn_protocol::ScheduleTaskId,
+) -> ThreadId {
+    let run = schedules.run_now(task).await.expect("run now");
+    let thread = run.thread_id.expect("thread");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while threads.thread_is_busy(&thread).await {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the scheduled run settles");
+    thread
+}
+
+#[tokio::test]
+async fn a_clear_keeps_a_thread_with_an_enabled_scheduled_task() {
+    let fixture = Fixture::new();
+    let first = fixture.add_worktree("wt-scheduled", "scheduled-branch");
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(FakeHarness::new())]).await;
+    let schedules = Arc::new(
+        crate::schedules::ScheduleService::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("schedule journal")),
+            Arc::clone(&threads),
+            HostId::new("host_local"),
+            Arc::new(crate::threads::SystemClock),
+        )
+        .await
+        .expect("schedule service"),
+    );
+    let task = schedules
+        .create(scheduled_draft(&first))
+        .await
+        .expect("create scheduled task");
+    run_scheduled(&schedules, &threads, &task.task_id).await;
+    tracker.set_schedule_service(Arc::clone(&schedules));
+
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == git::norm(&first))
+        .unwrap_or_else(|| panic!("the scheduled thread workspace is listed: {listed:?}"))
+        .clone();
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, "has an enabled scheduled task");
+    assert!(first.is_dir(), "the scheduled checkout is kept");
+
+    // Pausing the task releases its worktree, as the docs promise.
+    let paused = schedules
+        .set_enabled(&task.task_id, false)
+        .await
+        .expect("pause the task");
+    assert!(paused.next_run_at.is_none());
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert_eq!(outcome.removed, vec![entry.path.clone()], "{outcome:?}");
+    assert!(
+        !first.exists(),
+        "a paused task no longer keeps the checkout"
+    );
+
+    // Deleting the task releases its worktree too.
+    let second = fixture.add_worktree("wt-scheduled-deleted", "scheduled-deleted-branch");
+    let task = schedules
+        .create(scheduled_draft(&second))
+        .await
+        .expect("create a second scheduled task");
+    run_scheduled(&schedules, &threads, &task.task_id).await;
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == git::norm(&second))
+        .unwrap_or_else(|| panic!("the second workspace is listed: {listed:?}"))
+        .clone();
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, "has an enabled scheduled task");
+
+    schedules
+        .delete(&task.task_id)
+        .await
+        .expect("delete the task");
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert_eq!(outcome.removed, vec![entry.path.clone()], "{outcome:?}");
+    assert!(
+        !second.exists(),
+        "a deleted task no longer keeps the checkout"
+    );
+}
