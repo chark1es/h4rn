@@ -22,8 +22,9 @@ while it is off is expired when it comes back.
    and its files.
 
 Choose **Stop sharing** to end the link at once. Creating a new link, settling
-(archiving) the thread, or turning the Labs setting off also ends it. A link
-lasts 24 hours.
+(archiving) the thread, or the 24 hours passing also ends it. Turning the Labs
+setting off stops every link while it is off; unexpired links work again when it
+is back on, with their waiting files intact.
 
 The link works through your Connect relay address when the machine is linked to
 Connect. Without Connect it names the daemon's own network-listener address, so

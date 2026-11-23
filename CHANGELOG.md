@@ -16,9 +16,9 @@ All notable changes to h4rn are recorded here. The format follows
   model. Every message they write waits as a **Request** above your composer and
   in the sidebar; **Send** runs it as a normal turn with the thread's current
   permissions, **Dismiss** deletes it and its files. Settling the thread, Stop
-  sharing, a new link, or Settings → Labs → Guest links off ends the link and
-  deletes waiting files. The journal stores only hashes of the link token and
-  the browser cookie.
+  sharing, a new link, or the 24-hour expiry ends the link and deletes waiting
+  files; Settings → Labs → Guest links off stops every link while it is off.
+  The journal stores only hashes of the link token and the browser cookie.
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the
