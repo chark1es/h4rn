@@ -1970,6 +1970,95 @@ fieldset.q-seg-fs {
   flex-direction: column;
   gap: 10px;
 }
+/* Guest messages waiting for the owner (ADR-044). */
+.q-guest-reqs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.q-guest-req {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-raised);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.q-guest-req-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.q-guest-req-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-tx);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.q-guest-req-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 22px;
+}
+.q-guest-req-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.q-guest-req-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--fill);
+  color: var(--fg-2);
+  font-size: 11.5px;
+  max-width: 100%;
+}
+.q-guest-req-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 34ch;
+}
+.q-guest-req-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.q-guest-req-foot > .q-faint {
+  margin-right: auto;
+  min-width: 0;
+  flex: 1 1 180px;
+}
+.q-guest-off {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-sunk);
+  color: var(--fg-2);
+  font-size: 12.5px;
+}
+.q-guest-off svg {
+  flex: none;
+  margin-top: 2px;
+}
+
 .q-ask {
   border-radius: 12px;
   background: var(--bg-raised);

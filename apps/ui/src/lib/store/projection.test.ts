@@ -26,6 +26,32 @@ const TOOL: ToolCall = {
 };
 
 describe("foldEvent", () => {
+  it("keeps a guest message out of the transcript until the owner sends it", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "guest_requested",
+      thread_id: "t1",
+      request: {
+        request_id: "greq_1",
+        thread_id: "t1",
+        text: "look at this",
+        attachments: [{ name: "notes.txt", mime: "text/plain", size: 12 }],
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    expect(log.turns).toHaveLength(0);
+    expect(log.guestRequests).toHaveLength(1);
+    expect(log.guestRequests[0]?.attachments[0]?.name).toBe("notes.txt");
+
+    log = foldEvent(log, {
+      type: "guest_request_resolved",
+      thread_id: "t1",
+      request_id: "greq_1",
+      sent: true,
+    });
+    expect(log.guestRequests).toHaveLength(0);
+  });
+
   it("accumulates message deltas into a running turn", () => {
     let log = createThreadLog();
     log = foldEvent(log, {

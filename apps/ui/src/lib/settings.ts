@@ -1,6 +1,7 @@
 import {
   BellIcon,
   CommandIcon,
+  FlaskConicalIcon,
   GitBranchIcon,
   GitCommitHorizontalIcon,
   GitPullRequestIcon,
@@ -35,6 +36,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { key: "providers", label: "Providers", icon: LayersIcon, group: "Machines" },
   { key: "resume", label: "Auto-resume", icon: TimerIcon, group: "Machines" },
   { key: "forges", label: "Forges", icon: GitPullRequestIcon, group: "Machines" },
+  { key: "labs", label: "Labs", icon: FlaskConicalIcon, group: "Machines" },
   { key: "account", label: "Account & relay", icon: UserIcon, group: "Account" },
 ];
 

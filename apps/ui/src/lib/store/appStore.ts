@@ -1144,6 +1144,16 @@ export function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
     if (event.type === "turn_completed") {
       nextSummary.last_activity = new Date().toISOString();
     }
+    if (event.type === "guest_requested") {
+      nextSummary.pending_guest_requests = (nextSummary.pending_guest_requests ?? 0) + 1;
+      nextSummary.needs_attention = true;
+    }
+    if (event.type === "guest_request_resolved") {
+      nextSummary.pending_guest_requests = Math.max(
+        0,
+        (nextSummary.pending_guest_requests ?? 0) - 1,
+      );
+    }
   }
 
   return {
@@ -1552,6 +1562,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       tps: 0,
     },
     needs_attention: false,
+    pending_guest_requests: 0,
     unread: false,
     resume_at: null,
     limit: null,

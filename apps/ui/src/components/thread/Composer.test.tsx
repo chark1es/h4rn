@@ -136,6 +136,7 @@ const summary: ThreadSummary = {
   context_window: null,
   context_fill_percent: null,
   needs_attention: false,
+  pending_guest_requests: 0,
   unread: false,
   resume_at: null,
   limit: null,
@@ -161,7 +162,15 @@ function log(prompts: string[]): ThreadLog {
     usage: null,
     changes: null,
   }));
-  return { turns, nextSeq: 0, loaded: true, loading: false, approvals: {}, pending: [] };
+  return {
+    turns,
+    nextSeq: 0,
+    loaded: true,
+    loading: false,
+    approvals: {},
+    pending: [],
+    guestRequests: [],
+  };
 }
 
 let rafQueue: FrameRequestCallback[] = [];

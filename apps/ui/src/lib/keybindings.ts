@@ -44,6 +44,7 @@ export type CommandId =
   | "thread.snooze"
   | "thread.pin"
   | "thread.reopen"
+  | "guest.share"
   | "terminal.toggle"
   | "panel.changes"
   | "panel.subagents"
@@ -203,6 +204,13 @@ export const COMMANDS: readonly CommandSpec[] = [
     label: "Keep in Working",
     group: "Thread",
     binding: "mod+alt+p",
+    inInputs: true,
+  },
+  {
+    id: "guest.share",
+    label: "Share with guest",
+    group: "Thread",
+    binding: "mod+alt+g",
     inInputs: true,
   },
   {
