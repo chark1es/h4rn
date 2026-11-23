@@ -224,6 +224,41 @@ fn session_starts(workspace: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Waits, bounded, for the thread to show the schedule the limit armed.
+///
+/// The limit can land after the turn completion (the exit report races it), so
+/// reading the summary once would be a guess instead of an assertion.
+async fn wait_for_scheduled(
+    manager: &ThreadManager,
+    thread_id: &ThreadId,
+) -> h4rn_protocol::ThreadSummary {
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        loop {
+            let summary = manager
+                .thread_summary(thread_id)
+                .await
+                .expect("thread summary");
+            if summary.agent_state == AgentState::Scheduled {
+                return summary;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the limit turned into a scheduled resume")
+}
+
+/// Waits, bounded, for a fixture marker file to appear.
+async fn wait_for_path(path: &std::path::Path, what: &str) {
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting until {what}"));
+}
+
 /// A closed ACP transport is detached before the next turn is promoted, so the
 /// queued message starts a fresh agent instead of being written into a closed
 /// client.
@@ -536,11 +571,20 @@ async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
 }
 
 /// A limit that only the exit report carries after `end_turn` still pauses the
-/// thread: the completion arrives on a closed transport, so the pump waits for
-/// the report and arms the schedule before promoting the message queued behind
-/// the turn.
+/// thread when the reply is an ordinary newline-terminated frame, as a real
+/// peer writes it.
+///
+/// The peer answers and exits at once; its exit closes stdout, so the process
+/// can be reaped before the reader has drained the reply already in the pipe.
+/// The reply must still settle the turn as completed, and a message queued
+/// behind it must not be failed for a death it never touched: the promoted turn
+/// goes back to the pause instead of failing, and no fresh agent starts into
+/// the provider that refused it.
+///
+/// The prompt gate is closed until the follow-up has been queued, so the
+/// message really is queued behind the turn rather than opened as a new one.
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let Some(manager) = manager().await else {
@@ -571,48 +615,163 @@ async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
         .send_message(&thread_id, "queued".into(), Vec::new())
         .await
         .expect("queue");
-    let waiting = workspace
-        .path()
-        .join(".agy-fixture-limit-after-turn-waiting");
-    tokio::time::timeout(TURN_TIMEOUT, async {
-        while !waiting.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the fixture answered and closed stdout");
+    // Let the turn answer and exit at once. The prompt gate keeps the answer
+    // held until the follow-up was queued, so the promotion is guaranteed to
+    // happen while the reply and the death race; the exit then closes stdout
+    // the way a real peer's exit does.
     std::fs::write(
-        workspace.path().join(".agy-fixture-limit-after-turn-gate"),
+        workspace
+            .path()
+            .join(".agy-fixture-limit-after-turn-prompt-gate"),
         b"",
     )
-    .expect("release the fixture's exit gate");
+    .expect("let the fixture answer");
 
     let ended = next_turn(&mut events).await;
     assert_eq!(ended.status, TurnStatus::Completed, "{:?}", ended.errors);
     assert!(
-        ended.limits.iter().any(|(reset, auto)| *reset && *auto),
-        "the exit report's limit armed the resume: {:?}",
-        ended.limits
+        ended.text.contains("echo:"),
+        "the reply that was in the pipe before the exit is the turn's result: {:?}",
+        ended.text
     );
 
+    // Whatever order the completion and the report took, the thread ends
+    // scheduled on the exit report's limit.
+    let scheduled = wait_for_scheduled(&manager, &thread_id).await;
     let meter = manager.meter().expect("the test manager has a meter");
     let schedules = meter.schedules().await.expect("read schedules");
     assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
     assert_eq!(schedules[0].thread_id, thread_id);
+    assert_eq!(
+        scheduled.agent_state,
+        AgentState::Scheduled,
+        "the thread waits for the limit's reset"
+    );
 
-    // The limit arrived before the completion could promote the queue, so the
-    // queued turn did not start on a fresh agent.
+    // The queued turn was not failed for a death it never touched: it waits for
+    // the schedule and did not start a fresh agent into the paused provider.
     assert_eq!(
         session_starts(workspace.path()),
         1,
         "the queued turn did not start a new agent"
     );
+    // The pump gives a closed completion one bounded window for the exit
+    // report, so a failure would be published inside (500 ms) plus the
+    // projection's own step. Watch past it: a completion of the queued turn,
+    // or a thread that fell out of Scheduled, is exactly the bug.
     assert!(
-        tokio::time::timeout(Duration::from_millis(250), next_turn(&mut events))
+        tokio::time::timeout(Duration::from_millis(800), next_turn(&mut events))
             .await
             .is_err(),
-        "the queued turn ({}) started past a usage limit",
+        "the queued turn ({}) was failed or promoted past a usage limit",
         queued.turn_id
+    );
+    let summary = manager
+        .thread_summary(&thread_id)
+        .await
+        .expect("thread summary");
+    assert_eq!(
+        summary.agent_state,
+        AgentState::Scheduled,
+        "the queued turn is still the thread's parked work"
+    );
+
+    manager.shutdown().await;
+}
+
+/// The harder ordering, forced with a gate: the queued message is promoted and
+/// written while the transport is still healthy, and only then does the agent
+/// close stdout and exit with the limit on stderr.
+///
+/// The daemon must hand the promoted turn back to the pause, not fail it and
+/// not replay an agent start: it produced no output, so the resumed attempt is
+/// the same prompt.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_limit_after_a_promoted_turn_hands_it_back_to_the_queue() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let queued = manager
+        .send_message(&thread_id, "queued".into(), Vec::new())
+        .await
+        .expect("queue");
+    // The turn answers only now, so the follow-up above was queued behind it.
+    std::fs::write(
+        workspace
+            .path()
+            .join(".agy-fixture-limit-after-queue-prompt-gate"),
+        b"",
+    )
+    .expect("let the fixture answer");
+    // The fixture writes this marker once the promoted prompt reached it: the
+    // queue was promoted and written while the transport was still healthy.
+    wait_for_path(
+        &workspace
+            .path()
+            .join(".agy-fixture-limit-after-queue-second"),
+        "the promoted prompt reached the agent",
+    )
+    .await;
+    // Only now does the agent close stdout and exit with the reset.
+    std::fs::write(
+        workspace.path().join(".agy-fixture-limit-after-queue-gate"),
+        b"",
+    )
+    .expect("let the fixture exit");
+
+    let ended = next_turn(&mut events).await;
+    assert_eq!(ended.status, TurnStatus::Completed, "{:?}", ended.errors);
+
+    let scheduled = wait_for_scheduled(&manager, &thread_id).await;
+    let meter = manager.meter().expect("the test manager has a meter");
+    let schedules = meter.schedules().await.expect("read schedules");
+    assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
+    assert_eq!(schedules[0].thread_id, thread_id);
+    assert_eq!(scheduled.agent_state, AgentState::Scheduled);
+
+    assert_eq!(
+        session_starts(workspace.path()),
+        1,
+        "the promoted turn did not start a new agent"
+    );
+    // Watch past the pump's bounded window for a closed completion (500 ms): a
+    // failed or promoted turn would be published inside it.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(800), next_turn(&mut events))
+            .await
+            .is_err(),
+        "the promoted turn ({}) was failed past a usage limit",
+        queued.turn_id
+    );
+    let summary = manager
+        .thread_summary(&thread_id)
+        .await
+        .expect("thread summary");
+    assert_eq!(
+        summary.agent_state,
+        AgentState::Scheduled,
+        "the promoted turn is still the thread's parked work"
     );
 
     manager.shutdown().await;

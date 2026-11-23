@@ -105,7 +105,14 @@ session reports the model it actually restored, the thread keeps that model: the
 thread and the next session all name it, instead of the `default` alias or an id the agent is no
 longer running. Typing `default` afterwards returns the thread to the agent's own choice. A load also
 replays the old conversation as session updates; h4rn consumes that history before the new turn, so
-it is neither shown twice nor able to fill the event queue and stall a long conversation.
+it is neither shown twice nor able to fill the event queue and stall a long conversation. A slow
+consumer cannot grow the reader's memory either: the updates the reader holds for it are capped at
+four session queues, and beyond that the newest update is dropped and counted. A permission request,
+a transport close, stdout closing and the process exit report have a reserved path: once more than
+one session queue of updates is waiting, they get the next slot, so a flood of text never hides the
+event that decides what a request means or that the agent is gone. While the consumer keeps up the
+reader's order is kept, so a close never arrives before the words read ahead of it. A turn's
+settlement also keeps its place behind the updates already read.
 
 The new-thread and composer mode pickers only offer a choice h4rn can map onto an advertised mode id.
 The mapping is the daemon's: Approval required → `default`, `ask`, `manual` or `supervised`;
