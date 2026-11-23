@@ -779,6 +779,7 @@ export class MockFs {
             added: delta.added,
             removed: delta.removed,
             binary: BINARY.has(path),
+            counts_omitted: false,
           },
         ];
       });
@@ -805,6 +806,7 @@ export class MockFs {
         added: delta.added,
         removed: delta.removed,
         binary: BINARY.has(path),
+        counts_omitted: false,
       });
     }
     files.sort((left, right) => left.path.localeCompare(right.path));

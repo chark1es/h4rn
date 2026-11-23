@@ -3,6 +3,7 @@ import {
   FileTextIcon,
   Loader2Icon,
   MessageSquareIcon,
+  RefreshCwIcon,
   TriangleAlertIcon,
 } from "lucide-react";
 import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
@@ -58,6 +59,10 @@ type DiffViewProps = {
   onOpenFile: (path: string) => void;
   onRevert: (path: string, content: string) => void;
   onSendComments: (comments: ReviewComment[]) => void;
+  /** A branch review has no base; the fallback is the uncommitted source. */
+  onCompareHead: () => void;
+  /** Re-read the branch or commit lists. */
+  onRefresh: () => void;
 };
 
 const KEYWORDS = new Set([
@@ -156,7 +161,8 @@ function splitPath(path: string): { dir: string; name: string } {
 function fileTitle(file: FsDiffFile): string {
   const status = STATUS[file.status]?.label ?? file.status;
   const rename = file.old_path ? ` (was ${file.old_path})` : "";
-  return `${file.path} · ${status}${rename}`;
+  const counts = file.binary ? " · binary" : file.counts_omitted ? " · line counts not read" : "";
+  return `${file.path} · ${status}${rename}${counts}`;
 }
 
 type LineSelection = { anchor: number; focus: number };
@@ -341,6 +347,8 @@ export function DiffView({
   onOpenFile,
   onRevert,
   onSendComments,
+  onCompareHead,
+  onRefresh,
 }: DiffViewProps) {
   const isPhone = useIsPhone();
   const context = source === "agent" ? 10 : 3;
@@ -384,7 +392,14 @@ export function DiffView({
   const lineComments = useMemo(() => {
     const byLine = new Map<number, ReviewComment[]>();
     const hidden: ReviewComment[] = [];
+    const elsewhere: ReviewComment[] = [];
     for (const comment of commentsForPath) {
+      // A comment belongs to the source it was written in. Showing it under a
+      // line of another source would move the note to a place it never meant.
+      if (comment.source !== sourceLabel) {
+        elsewhere.push(comment);
+        continue;
+      }
       let anchor = -1;
       for (let index = 0; index < visible.length; index += 1) {
         const line = visible[index];
@@ -400,8 +415,8 @@ export function DiffView({
       }
       byLine.set(anchor, [...(byLine.get(anchor) ?? []), comment]);
     }
-    return { byLine, hidden };
-  }, [commentsForPath, visible]);
+    return { byLine, hidden, elsewhere };
+  }, [commentsForPath, sourceLabel, visible]);
 
   const addComment = (range: LineSelection, text: string) => {
     if (!threadId || !path) return;
@@ -471,6 +486,16 @@ export function DiffView({
           {error.hint ? (
             <p style={{ margin: "4px 0 0", color: "var(--fg-3)" }}>{error.hint}</p>
           ) : null}
+          {source === "branch" ? (
+            <button
+              type="button"
+              className="q-btn secondary"
+              style={{ marginTop: 12, height: 26 }}
+              onClick={onCompareHead}
+            >
+              Compare with HEAD
+            </button>
+          ) : null}
         </div>
       </div>
     );
@@ -503,6 +528,16 @@ export function DiffView({
             The file list did not load.
           </p>
           <p style={{ margin: "4px 0 0", color: "var(--fg-2)" }}>{filesError.message}</p>
+          {source === "branch" ? (
+            <button
+              type="button"
+              className="q-btn secondary"
+              style={{ marginTop: 12, height: 26 }}
+              onClick={onCompareHead}
+            >
+              Compare with HEAD
+            </button>
+          ) : null}
         </div>
       );
     }
@@ -523,24 +558,14 @@ export function DiffView({
       </div>
     );
   }
-  if (diff.too_large) {
-    return (
-      <div className="q-scroll" style={{ flex: 1, padding: 16 }}>
-        <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
-          This file is too large to diff. Open it in your editor or a terminal instead.
-        </p>
-      </div>
-    );
-  }
-  if (diff.binary) {
-    return (
-      <div className="q-scroll" style={{ flex: 1, padding: 16 }}>
-        <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
-          Both sides are binary, so there is no text diff to show.
-        </p>
-      </div>
-    );
-  }
+  // A binary or oversized file says so in the diff body. The file list, the
+  // source bar and the comment bar stay: another file or source is one click
+  // away, and comments already written for this file remain reachable.
+  const blocked = diff.too_large
+    ? "This file is too large to diff. Open it in your editor or a terminal instead."
+    : diff.binary
+      ? "Both sides are binary, so there is no text diff to show."
+      : null;
 
   const range = rangeLabel(visible, selection);
   const draftRange = rangeLabel(visible, draft);
@@ -574,8 +599,16 @@ export function DiffView({
               {file.old_path ? <span className="was"> ← {file.old_path}</span> : null}
             </span>
             <span className="counts">
-              <span className="q-add">+{file.added}</span>{" "}
-              <span className="q-del">−{file.removed}</span>
+              {file.binary ? (
+                <span className="q-faint">binary</span>
+              ) : file.counts_omitted ? (
+                <span className="q-faint">no counts</span>
+              ) : (
+                <>
+                  <span className="q-add">+{file.added}</span>{" "}
+                  <span className="q-del">−{file.removed}</span>
+                </>
+              )}
             </span>
           </button>
         );
@@ -612,7 +645,11 @@ export function DiffView({
             options={scopeRows.map((file) => ({
               value: file.path,
               label: file.path,
-              hint: `+${file.added} −${file.removed}`,
+              hint: file.binary
+                ? "binary"
+                : file.counts_omitted
+                  ? "no counts"
+                  : `+${file.added} −${file.removed}`,
             }))}
             onChange={onSelectFile}
           />
@@ -709,6 +746,19 @@ export function DiffView({
           <span className="q-add">+{added}</span> <span className="q-del">−{removed}</span>
         </span>
         <span className="grow" />
+        {source === "branch" || source === "commit" ? (
+          <button
+            type="button"
+            className="q-btn ghost"
+            style={{ height: 24 }}
+            title="Read the branch and commit lists again"
+            aria-label="Refresh the branch and commit lists"
+            onClick={onRefresh}
+          >
+            <RefreshCwIcon className="q-icon s12" aria-hidden />
+            {isPhone ? null : "Refresh"}
+          </button>
+        ) : null}
         {range ? (
           <button
             type="button"
@@ -739,127 +789,155 @@ export function DiffView({
       <div className="q-diff-body">
         {showFileList && !isPhone ? fileList : null}
         <div className="q-hunk q-diff-scroll">
-          <section className="q-diff-lines" aria-label="Diff lines">
-            {rows.map(({ key, row, visibleIndex }) => {
-              if (row.kind === "hunk") {
-                return (
-                  <div key={key} className="hh">
-                    @@ -{row.oldStart},{row.oldCount} +{row.newStart},{row.newCount} @@
-                    {row.context ? ` ${row.context}` : ""}
-                  </div>
-                );
-              }
-              const lineIndex = visibleIndex ?? 0;
-              const selected =
-                selection !== null &&
-                lineIndex >= Math.min(selection.anchor, selection.focus) &&
-                lineIndex <= Math.max(selection.anchor, selection.focus);
-              const number = row.newLine ?? row.oldLine ?? "";
-              return (
-                <Fragment key={key}>
-                  <button
-                    type="button"
-                    ref={(node) => {
-                      if (node) rowRefs.current.set(lineIndex, node);
-                      else rowRefs.current.delete(lineIndex);
-                    }}
-                    aria-pressed={selected}
-                    aria-label={`Line ${number}: ${row.text || "blank line"}`}
-                    tabIndex={
-                      selection
-                        ? selection.focus === lineIndex
-                          ? 0
-                          : -1
-                        : lineIndex === 0
-                          ? 0
-                          : -1
-                    }
-                    className={cn(
-                      "q-ln",
-                      row.kind === "added" && "a",
-                      row.kind === "removed" && "d",
-                      selected && "sel",
-                    )}
-                    onClick={(event) => {
-                      if (event.shiftKey && selection) {
-                        setSelection({ anchor: selection.anchor, focus: lineIndex });
-                      } else {
-                        setSelection({ anchor: lineIndex, focus: lineIndex });
-                      }
-                      rowRefs.current.get(lineIndex)?.focus();
-                    }}
-                    onFocus={() => {
-                      if (!selection) setSelection({ anchor: lineIndex, focus: lineIndex });
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                        event.preventDefault();
-                        moveSelection(
-                          lineIndex,
-                          event.key === "ArrowDown" ? 1 : -1,
-                          event.shiftKey,
-                        );
-                        return;
-                      }
-                      if (event.key === "Enter" || event.key === "c") {
-                        event.preventDefault();
-                        openDraft(lineIndex);
-                        return;
-                      }
-                      if (event.key === "Escape") {
-                        setDraft(null);
-                        setSelection(null);
-                      }
-                    }}
-                  >
-                    <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
-                    <span className="sg" aria-hidden>
-                      {row.kind === "added" ? "+" : row.kind === "removed" ? "−" : " "}
-                    </span>
-                    <span
-                      className="q-cx"
-                      style={
-                        isPhone
-                          ? { whiteSpace: "pre-wrap", wordBreak: "break-word", paddingRight: 16 }
-                          : undefined
-                      }
-                    >
-                      {row.text ? highlightCode(row.text) : " "}
-                    </span>
-                  </button>
-                  {(lineComments.byLine.get(lineIndex) ?? []).map((comment) => (
-                    <div key={comment.id} className="q-review-row">
-                      <CommentNote
-                        comment={comment}
-                        onUpdate={(text) => updateReviewComment(comment.id, text)}
-                        onDelete={() => deleteReviewComment(comment.id)}
-                      />
-                    </div>
-                  ))}
-                  {draft && draft.focus === lineIndex ? (
-                    <div className="q-review-row">
-                      <CommentEditor
-                        label={
-                          draftRange
-                            ? `${draftRange.side === "new" ? "New" : "Old"} lines ${draftRange.start}${draftRange.end === draftRange.start ? "" : `–${draftRange.end}`} · ${sourceLabel}`
-                            : sourceLabel
-                        }
-                        onSubmit={(text) => addComment(draft, text)}
-                        onCancel={() => setDraft(null)}
-                      />
-                    </div>
-                  ) : null}
-                </Fragment>
-              );
-            })}
-          </section>
-          {lineComments.hidden.length > 0 ? (
-            <div className="q-review-hidden">
-              <p className="q-review-meta">
-                {lineComments.hidden.length}{" "}
-                {lineComments.hidden.length === 1 ? "comment is" : "comments are"} on lines hidden
-                by collapsed context.
+          {blocked ? (
+            <div style={{ padding: 16 }}>
+              <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
+                {blocked}
               </p>
+            </div>
+          ) : (
+            <section className="q-diff-lines" aria-label="Diff lines">
+              {rows.map(({ key, row, visibleIndex }) => {
+                if (row.kind === "hunk") {
+                  return (
+                    <div key={key} className="hh">
+                      @@ -{row.oldStart},{row.oldCount} +{row.newStart},{row.newCount} @@
+                      {row.context ? ` ${row.context}` : ""}
+                    </div>
+                  );
+                }
+                const lineIndex = visibleIndex ?? 0;
+                const selected =
+                  selection !== null &&
+                  lineIndex >= Math.min(selection.anchor, selection.focus) &&
+                  lineIndex <= Math.max(selection.anchor, selection.focus);
+                const number = row.newLine ?? row.oldLine ?? "";
+                return (
+                  <Fragment key={key}>
+                    <button
+                      type="button"
+                      ref={(node) => {
+                        if (node) rowRefs.current.set(lineIndex, node);
+                        else rowRefs.current.delete(lineIndex);
+                      }}
+                      aria-pressed={selected}
+                      aria-label={`Line ${number}: ${row.text || "blank line"}`}
+                      tabIndex={
+                        selection
+                          ? selection.focus === lineIndex
+                            ? 0
+                            : -1
+                          : lineIndex === 0
+                            ? 0
+                            : -1
+                      }
+                      className={cn(
+                        "q-ln",
+                        row.kind === "added" && "a",
+                        row.kind === "removed" && "d",
+                        selected && "sel",
+                      )}
+                      onClick={(event) => {
+                        if (event.shiftKey && selection) {
+                          setSelection({ anchor: selection.anchor, focus: lineIndex });
+                        } else {
+                          setSelection({ anchor: lineIndex, focus: lineIndex });
+                        }
+                        rowRefs.current.get(lineIndex)?.focus();
+                      }}
+                      onFocus={() => {
+                        if (!selection) setSelection({ anchor: lineIndex, focus: lineIndex });
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                          event.preventDefault();
+                          moveSelection(
+                            lineIndex,
+                            event.key === "ArrowDown" ? 1 : -1,
+                            event.shiftKey,
+                          );
+                          return;
+                        }
+                        if (event.key === "Enter" || event.key === "c") {
+                          event.preventDefault();
+                          openDraft(lineIndex);
+                          return;
+                        }
+                        if (event.key === "Escape") {
+                          setDraft(null);
+                          setSelection(null);
+                        }
+                      }}
+                    >
+                      <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
+                      <span className="sg" aria-hidden>
+                        {row.kind === "added" ? "+" : row.kind === "removed" ? "−" : " "}
+                      </span>
+                      <span
+                        className="q-cx"
+                        style={
+                          isPhone
+                            ? { whiteSpace: "pre-wrap", wordBreak: "break-word", paddingRight: 16 }
+                            : undefined
+                        }
+                      >
+                        {row.text ? highlightCode(row.text) : " "}
+                      </span>
+                    </button>
+                    {(lineComments.byLine.get(lineIndex) ?? []).map((comment) => (
+                      <div key={comment.id} className="q-review-row">
+                        <CommentNote
+                          comment={comment}
+                          onUpdate={(text) => updateReviewComment(comment.id, text)}
+                          onDelete={() => deleteReviewComment(comment.id)}
+                        />
+                      </div>
+                    ))}
+                    {draft && draft.focus === lineIndex ? (
+                      <div className="q-review-row">
+                        <CommentEditor
+                          label={
+                            draftRange
+                              ? `${draftRange.side === "new" ? "New" : "Old"} lines ${draftRange.start}${draftRange.end === draftRange.start ? "" : `–${draftRange.end}`} · ${sourceLabel}`
+                              : sourceLabel
+                          }
+                          onSubmit={(text) => addComment(draft, text)}
+                          onCancel={() => setDraft(null)}
+                        />
+                      </div>
+                    ) : null}
+                  </Fragment>
+                );
+              })}
+            </section>
+          )}
+          {lineComments.hidden.length + lineComments.elsewhere.length > 0 ? (
+            <div className="q-review-hidden">
+              {lineComments.elsewhere.length > 0 ? (
+                <p className="q-review-meta">
+                  {lineComments.elsewhere.length}{" "}
+                  {lineComments.elsewhere.length === 1 ? "comment belongs" : "comments belong"} to
+                  another diff source, so{" "}
+                  {lineComments.elsewhere.length === 1 ? "it is" : "they are"} listed here with the
+                  source each was written in.
+                </p>
+              ) : null}
+              {lineComments.elsewhere.map((comment) => (
+                <div key={comment.id} className="q-review-row">
+                  <CommentNote
+                    comment={comment}
+                    onUpdate={(text) => updateReviewComment(comment.id, text)}
+                    onDelete={() => deleteReviewComment(comment.id)}
+                  />
+                </div>
+              ))}
+              {lineComments.hidden.length > 0 ? (
+                <p className="q-review-meta">
+                  {lineComments.hidden.length}{" "}
+                  {lineComments.hidden.length === 1 ? "comment is" : "comments are"} on lines hidden
+                  by collapsed context.
+                </p>
+              ) : null}
               {lineComments.hidden.map((comment) => (
                 <div key={comment.id} className="q-review-row">
                   <CommentNote

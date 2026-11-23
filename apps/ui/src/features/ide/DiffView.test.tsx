@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FsDiff, FsDiffFiles, ThreadId } from "@/gen";
@@ -36,6 +36,7 @@ const files: FsDiffFiles = {
       added: 1,
       removed: 1,
       binary: false,
+      counts_omitted: false,
     },
     {
       path: "b.txt",
@@ -44,6 +45,7 @@ const files: FsDiffFiles = {
       added: 2,
       removed: 0,
       binary: false,
+      counts_omitted: false,
     },
   ],
 };
@@ -70,6 +72,8 @@ function view(overrides: Partial<Parameters<typeof DiffView>[0]> = {}) {
       onOpenFile={() => undefined}
       onRevert={() => undefined}
       onSendComments={() => undefined}
+      onCompareHead={() => undefined}
+      onRefresh={() => undefined}
       {...overrides}
     />
   );
@@ -177,5 +181,120 @@ describe("diff review", () => {
     render(view({ diff: { ...diff, too_large: true } }));
     expect(screen.getByText(/too large to diff/)).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Diff lines" })).toBeNull();
+  });
+
+  it("keeps the branch file list and comment bar beside a too-large file", () => {
+    const onSelectFile = vi.fn();
+    render(
+      view({
+        source: "branch",
+        files,
+        sourceLabel: "branch vs main",
+        diff: {
+          ...diff,
+          against: { kind: "base", base: "main" },
+          label: "vs main",
+          too_large: true,
+        },
+        onSelectFile,
+      }),
+    );
+    expect(screen.getByRole("complementary", { name: "Changed files" })).toBeTruthy();
+    expect(screen.getByText(/too large to diff/)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Diff lines" })).toBeNull();
+    // The source bar, the count and the send action are still usable.
+    expect(screen.getByText("2 files")).toBeTruthy();
+    expect(screen.getByText("0 comments")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send to agent" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "b.txt · renamed (was old-b.txt)" }));
+    expect(onSelectFile).toHaveBeenCalledWith("b.txt");
+  });
+
+  it("keeps the branch file list when the chosen file is binary", () => {
+    render(
+      view({
+        source: "branch",
+        files,
+        sourceLabel: "branch vs main",
+        diff: { ...diff, against: { kind: "base", base: "main" }, label: "vs main", binary: true },
+      }),
+    );
+    expect(screen.getByRole("complementary", { name: "Changed files" })).toBeTruthy();
+    expect(screen.getByText(/Both sides are binary/)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Diff lines" })).toBeNull();
+  });
+
+  it("offers HEAD when a branch review has no base", () => {
+    const onCompareHead = vi.fn();
+    render(
+      view({
+        source: "branch",
+        sourceLabel: "branch vs base",
+        diff: null,
+        files: null,
+        filesError: {
+          code: "invalid_request",
+          message: "No base branch: this repository has no remote default branch.",
+          hint: null,
+        },
+        onCompareHead,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Compare with HEAD" }));
+    expect(onCompareHead).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a comment from another diff source out of the lines", () => {
+    addReviewComment({
+      threadId: thread,
+      path: "a.txt",
+      side: "new",
+      startLine: 2,
+      endLine: 2,
+      lines: [{ number: 2, sign: "+", text: "B" }],
+      text: "Written against the branch.",
+      source: "branch vs main",
+    });
+    render(view({ sourceLabel: "uncommitted (HEAD)" }));
+    const lines = screen.getByRole("region", { name: "Diff lines" });
+    expect(within(lines).queryByText("Written against the branch.")).toBeNull();
+    expect(screen.getByText("Written against the branch.")).toBeTruthy();
+    expect(screen.getByText(/another diff source/)).toBeTruthy();
+    expect(screen.getByText(/branch vs main/)).toBeTruthy();
+  });
+
+  it("marks a binary or unread file in the list instead of fake counts", () => {
+    render(
+      view({
+        source: "branch",
+        files: {
+          ...files,
+          files: [
+            {
+              path: "a.txt",
+              old_path: null,
+              status: "modified",
+              added: 1,
+              removed: 1,
+              binary: true,
+              counts_omitted: false,
+            },
+            {
+              path: "b.txt",
+              old_path: "old-b.txt",
+              status: "renamed",
+              added: 0,
+              removed: 0,
+              binary: false,
+              counts_omitted: true,
+            },
+          ],
+        },
+        sourceLabel: "branch vs main",
+        diff: { ...diff, against: { kind: "base", base: "main" }, label: "vs main" },
+      }),
+    );
+    expect(screen.getByText("binary")).toBeTruthy();
+    expect(screen.getByText("no counts")).toBeTruthy();
   });
 });

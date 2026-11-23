@@ -1,4 +1,4 @@
-//! Git status and `HEAD` content via the `git` executable.
+//! Git status via the `git` executable.
 //!
 //! Why shell out to `git` rather than link `git2`:
 //!
@@ -11,15 +11,13 @@
 //! - it keeps the daemon binary small and avoids a second TLS/SSH stack.
 //!
 //! Failure is always soft: a missing repository, a detached `HEAD` or a bare
-//! checkout yields "no HEAD version" rather than breaking the editor.
+//! checkout yields no git status rather than breaking the editor.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use h4rn_protocol::GitFileStatus;
-
-use super::paths::FsError;
 
 /// Git statuses keyed by workspace-relative path.
 #[derive(Clone, Debug, Default)]
@@ -176,27 +174,6 @@ pub fn branch(workspace: &Path) -> Option<String> {
 ///
 /// `None` means the file is new, untracked, or the workspace is not a git
 /// repository; the caller turns that into a human note.
-pub fn head_blob(workspace: &Path, rel: &str) -> Result<Option<Vec<u8>>, FsError> {
-    if repository_root(workspace).is_none() {
-        return Ok(None);
-    }
-    // `HEAD:./path` is interpreted relative to the command's working directory,
-    // which is the workspace (possibly a subdirectory of the repository).
-    let spec = format!("HEAD:./{rel}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .arg("show")
-        .arg(&spec)
-        .output()
-        .map_err(|error| FsError::Io(format!("run git: {error}")))?;
-    if output.status.success() {
-        Ok(Some(output.stdout))
-    } else {
-        Ok(None)
-    }
-}
-
 fn run_git(workspace: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")

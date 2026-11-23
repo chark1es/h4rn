@@ -136,8 +136,9 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
   remembered in `localStorage`. It never holds a second thread, app navigation, or the terminal.
 - **Terminal** stays a bottom drawer under the composer (`T`), not a panel tab.
 - **IDE.** ⌘E switches the main area to the IDE for the selected thread's project: tabs, the
-  `Edit | vs HEAD | vs agent` strip, the "Changes by <agent> in <thread> since …" scope strip,
-  the editor/diff and the status bar. Selecting a thread in another project switches the
+  `Edit | Diff` segment with one source picker (Uncommitted, Turn, Branch, Commits), the base or
+  commit picker while a wider source is open, the "Changes by <agent> in <thread> since …" scope
+  strip, the editor/diff and the status bar. Selecting a thread in another project switches the
   workspace and restores that project's tabs ("Restored N tabs" appears quietly at the end of
   the tab strip). The file tree lives in the right panel's Files tab. The header names the
   workspace (monogram, host, path) and carries a thread chip; clicking it, or ⌘E, returns to
@@ -518,8 +519,8 @@ The palette is grouped, fuzzy, and context-aware: commands that apply to the foc
 | Usage | Set CLIProxyAPI override for… | — | Per harness |
 | IDE | Open IDE | `G` `E` | Last file |
 | IDE | Open file… | `⌘P` | Host + path |
-| IDE | Diff vs HEAD | `⌥D` | Current file |
-| IDE | Diff vs agent changes | `⌥A` | Current file |
+| IDE | Diff: Uncommitted | `⌥D` | Current file |
+| IDE | Diff: Turn | `⌥A` | Current file |
 | Pull requests | Open PR… | `G` `P` | Search across repos |
 | Pull requests | Hand comment to agent | `H` | Comment focused |
 | View | Toggle context panel | — | Diff/files/terminal |
@@ -1436,7 +1437,7 @@ Covered structurally in flow (d). Additional rules:
 
 - **Layout:** file tree 240 px, editor flexible, diff/search as a right-side panel (360 px) or a full-width mode; the context panel is not reused here.
 - **Tabs** show a dirty dot; closing a dirty tab asks once (“Save, discard, cancel”), and `Esc` cancels the close.
-- **Diff vs HEAD** is the repo state; **Diff vs agent changes** is scoped to the current thread’s checkpoints. Both are labeled with their scope and time; neither pretends to be the other.
+- **Uncommitted** compares one file with HEAD; **Turn** is scoped to the current thread's turn checkpoint; **Branch** compares the working tree with the merge base of a chosen base branch; and **Commits** shows one commit against its first parent. Every source is named in the pane, a Branch review with no base offers **Compare with HEAD**, and a binary or oversized file keeps the file list and comment actions usable.
 - **Agent changes** are listed as files with `+18 −4`, a `Review` action, and per-file `Open` / `Hand to agent` (with the file path pre-filled in the composer). Accepting/reverting is per file, with a confirmation that names the thread.
 - **Search** is a panel with file/regex toggles and grouped results; `⌘⇧F`. Clicking a result opens the file at the line.
 - **CodeMirror 6** carries the theme tokens: paper ground, ink text, cue cursor, cue-tint selection, standby/strike for diff gutters. No minimap, no breadcrumbs beyond the path bar, no activity bar.

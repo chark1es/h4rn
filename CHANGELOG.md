@@ -65,19 +65,26 @@ All notable changes to h4rn are recorded here. The format follows
   source picker now offers Uncommitted (HEAD), the turn, Branch and Commits. Branch review compares
   the working tree with the merge base of a base branch, so commits made on the base after the fork
   stay out of the review; the base is the upstream's default branch, then `main`, then `master`,
-  and can be changed from the repository's branches. The file list carries git status, added and
-  removed line counts, renames and untracked files, and stops at 2,000 entries with a visible
-  truncation note. Commits lists the newest 100 commits in the branch range and shows one commit's
-  files against its first parent (a root commit against the empty tree); commit ids are validated
-  before git sees them. With no base, the pane says why and HEAD is one click away. Every file
-  still shows the existing binary and too-large states.
+  and can be changed from the repository's branches. A remote `HEAD` that no longer resolves is
+  skipped rather than becoming a dead base. The file list carries git status, added and removed
+  line counts, renames and untracked files, and stops at 2,000 entries with a visible truncation
+  note; untracked line counts stop at a byte budget and say `no counts`, and an unreadable or
+  binary new file is marked instead of reading as an empty addition. Commits lists the newest 100
+  commits in the branch range and shows one commit's files against its first parent (a root commit
+  against the empty tree), following a rename to the parent's old path and reading only the
+  committed blobs, so a large working copy does not hide a small commit. A shallow clone's boundary
+  commit says its parent is missing instead of pretending every file was added. Commit ids are
+  validated before git sees them. Both wider lists re-read when entered and on Refresh. With no
+  base, the pane says why and **Compare with HEAD** switches to Uncommitted. Every file still shows
+  the existing binary and too-large states, with the file list and comment actions left usable.
 - **Line review comments go to the thread's composer as plain context.** Select a line or range in
   any diff mode (click, Shift-click, or the keyboard) and write a comment. Pending comments sit
-  under their lines, survive switching files and modes for the thread, and can be edited or
-  deleted. **Send to agent** appends one quoted block per comment (path, side, line range, the
-  quoted lines, the comment and the diff source) to the composer draft; nothing is sent until the
-  person presses Send. There is no mock data behind any of it: every list and diff comes from git
-  in the thread's workspace.
+  under their lines while their diff source is open and are listed with their source when it is
+  not, survive switching files and modes for the thread (in page memory; a reload clears them), and
+  can be edited or deleted. **Send to agent** appends one quoted block per comment (path, side,
+  line range, the quoted lines, the comment and the diff source) to the composer draft; nothing is
+  sent until the person presses Send. There is no mock data behind any of it: every list and diff
+  comes from git in the thread's workspace.
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and

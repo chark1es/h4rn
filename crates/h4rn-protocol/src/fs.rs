@@ -268,6 +268,13 @@ pub struct FsDiffFile {
     pub removed: u32,
     /// True when git or the daemon found either side is not text.
     pub binary: bool,
+    /// True when the daemon listed the file but did not read it to count lines.
+    ///
+    /// An untracked file has no git numstat to ask; the daemon reads it, within
+    /// a total byte budget. A file past that budget is still listed, but its
+    /// `added`/`removed` counts are not known. An older daemon omits the field.
+    #[serde(default)]
+    pub counts_omitted: bool,
 }
 
 /// The files a branch or commit range changed.

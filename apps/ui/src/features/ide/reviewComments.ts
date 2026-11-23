@@ -4,10 +4,10 @@ import type { ThreadId } from "@/gen";
 
 /**
  * Review comments live with a thread, not with the file or scope that was open
- * when they were written. They stay in memory for the daemon session so moving
- * between files, commits and diff modes never loses one. Sending only appends
- * text to the thread's composer draft; nothing leaves the client until the
- * person presses Send.
+ * when they were written. They stay in page memory for the thread, so moving
+ * between files, commits and diff modes never loses one; a reload clears them.
+ * Sending only appends text to the thread's composer draft; nothing leaves the
+ * client until the person presses Send.
  */
 export type ReviewSide = "old" | "new";
 

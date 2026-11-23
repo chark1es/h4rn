@@ -691,30 +691,33 @@ impl FsService {
         let relative = normalize_relative(rel)?;
         let rel_path = relative_of(&root, &root.join(&relative));
         let path = resolve_for_diff(&root, rel)?;
-        // The working-tree side is bounded exactly like an editor read: an
-        // oversized file is reported as too large instead of being loaded.
-        let current_too_large = path
-            .as_ref()
-            .and_then(|path| fs::metadata(path).ok())
-            .map(|meta| meta.len() > MAX_READ_BYTES)
-            .unwrap_or(false);
-        let current = if current_too_large {
-            None
-        } else {
-            path.and_then(|path| fs::read(path).ok())
-        };
-        let after = current.as_deref().and_then(text::decode);
-        let after_text = after.as_ref().map(|decoded| decoded.text.clone());
-        let current_binary = current
-            .as_deref()
-            .map(|bytes| text::decode(bytes).is_none())
-            .unwrap_or(false);
 
         match against {
             DiffAgainst::Head => {
-                let before = git::head_blob(&root, &rel_path)?;
+                // The working-tree side is bounded exactly like an editor read:
+                // an oversized file is reported as too large instead of being
+                // loaded.
+                let working = working_side(path.as_deref());
+                let mut too_large = working.too_large;
+                // `HEAD:./path` is relative to the workspace, which can be a
+                // subdirectory of the repository; go through the repository
+                // path so the blob is size-checked before it is read.
+                let before = match git::repository_root(&root) {
+                    Some(repo) => {
+                        let repo_rel = git_diff::repo_path(&root, &repo, &rel_path);
+                        match git_diff::blob_at(&repo, "HEAD", &repo_rel)? {
+                            git_diff::Blob::Bytes(bytes) => Some(bytes),
+                            git_diff::Blob::TooLarge => {
+                                too_large = true;
+                                None
+                            }
+                            git_diff::Blob::Missing => None,
+                        }
+                    }
+                    None => None,
+                };
                 let before_text = before.as_deref().and_then(text::decode);
-                let binary = current_binary
+                let binary = working.binary
                     || before
                         .as_deref()
                         .map(|bytes| text::decode(bytes).is_none())
@@ -724,10 +727,10 @@ impl FsService {
                     against: against.clone(),
                     label: "HEAD".into(),
                     before: before_text.map(|decoded| decoded.text),
-                    after: after_text,
+                    after: working.after,
                     binary,
-                    too_large: current_too_large,
-                    note: if current_too_large {
+                    too_large,
+                    note: if too_large {
                         Some("This file is too large to diff.".into())
                     } else if before.is_none() {
                         Some("No HEAD version: the file is new or not tracked by git.".into())
@@ -737,6 +740,7 @@ impl FsService {
                 })
             }
             DiffAgainst::AgentTurn { thread_id, turn_id } => {
+                let working = working_side(path.as_deref());
                 let entry = self.snapshots.entry(thread_id, turn_id, &rel_path);
                 let (before, note) = match entry {
                     Some(entry) if entry.existed => {
@@ -759,7 +763,7 @@ impl FsService {
                     ),
                 };
                 let before_text = before.as_deref().and_then(text::decode);
-                let binary = current_binary
+                let binary = working.binary
                     || before
                         .as_deref()
                         .map(|bytes| text::decode(bytes).is_none())
@@ -769,10 +773,10 @@ impl FsService {
                     against: against.clone(),
                     label: format!("Turn {}", short_turn(turn_id.as_str())),
                     before: before_text.map(|decoded| decoded.text),
-                    after: after_text,
+                    after: working.after,
                     binary,
-                    too_large: current_too_large,
-                    note: if current_too_large {
+                    too_large: working.too_large,
+                    note: if working.too_large {
                         Some("This file is too large to diff.".into())
                     } else {
                         note
@@ -780,15 +784,23 @@ impl FsService {
                 })
             }
             DiffAgainst::Base { base } => {
+                let working = working_side(path.as_deref());
                 let repo = git::repository_root(&root).ok_or_else(|| {
                     FsError::NotFound("This workspace is not a git repository.".into())
                 })?;
                 let info = git_diff::resolve_base(&root, base.as_deref())?;
                 let repo_rel = git_diff::repo_path(&root, &repo, &rel_path);
-                let mut too_large = current_too_large;
-                let before = merge_base_blob(&repo, &info.merge_base, &repo_rel, &mut too_large)?;
+                let mut too_large = working.too_large;
+                let range = [&info.merge_base[..]];
+                let before = blob_following_rename(
+                    &repo,
+                    &info.merge_base,
+                    &range,
+                    &repo_rel,
+                    &mut too_large,
+                )?;
                 let before_text = before.as_deref().and_then(text::decode);
-                let binary = current_binary
+                let binary = working.binary
                     || before
                         .as_deref()
                         .map(|bytes| text::decode(bytes).is_none())
@@ -797,7 +809,7 @@ impl FsService {
                     Some("This file is too large to diff.".into())
                 } else if before.is_none() {
                     Some("No base version: the file is new since the merge base.".into())
-                } else if current.is_none() {
+                } else if !working.present {
                     Some("This file was deleted since the merge base.".into())
                 } else {
                     None
@@ -807,7 +819,7 @@ impl FsService {
                     against: against.clone(),
                     label: format!("vs {}", info.name),
                     before: before_text.map(|decoded| decoded.text),
-                    after: after_text,
+                    after: working.after,
                     binary,
                     too_large,
                     note,
@@ -820,16 +832,13 @@ impl FsService {
                 let full = git_diff::resolve_commit(&repo, sha)?;
                 let short = git_diff::short_sha(&repo, &full);
                 let repo_rel = git_diff::repo_path(&root, &repo, &rel_path);
-                let parent = git_diff::first_parent(&repo, &full);
-                let mut too_large = current_too_large;
-                let before = match git_diff::blob_at(&repo, &parent, &repo_rel)? {
-                    git_diff::Blob::Bytes(bytes) => Some(bytes),
-                    git_diff::Blob::TooLarge => {
-                        too_large = true;
-                        None
-                    }
-                    git_diff::Blob::Missing => None,
-                };
+                let parent = git_diff::first_parent(&repo, &full)?;
+                // A commit review shows the commit's own blobs. The working
+                // tree may be any size; it is not part of this answer.
+                let mut too_large = false;
+                let range = [&parent[..], &full[..]];
+                let before =
+                    blob_following_rename(&repo, &parent, &range, &repo_rel, &mut too_large)?;
                 let committed = match git_diff::blob_at(&repo, &full, &repo_rel)? {
                     git_diff::Blob::Bytes(bytes) => Some(bytes),
                     git_diff::Blob::TooLarge => {
@@ -1215,30 +1224,72 @@ fn short_turn(value: &str) -> String {
         .collect()
 }
 
-/// Counts added/removed lines between two texts.
+/// The working-tree side of a diff, read within the same bound as an editor.
+struct WorkingSide {
+    /// The file is over the read cap and was not loaded.
+    too_large: bool,
+    /// A readable file exists at the path.
+    present: bool,
+    /// Decoded text, or `None` when the file is missing, oversized or binary.
+    after: Option<String>,
+    /// The bytes are not text.
+    binary: bool,
+}
+
+fn working_side(path: Option<&Path>) -> WorkingSide {
+    let too_large = path
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|meta| meta.len() > MAX_READ_BYTES)
+        .unwrap_or(false);
+    if too_large {
+        return WorkingSide {
+            too_large,
+            present: true,
+            after: None,
+            binary: false,
+        };
+    }
+    let bytes = path.and_then(|path| fs::read(path).ok());
+    let present = bytes.is_some();
+    let binary = bytes
+        .as_deref()
+        .map(|bytes| text::decode(bytes).is_none())
+        .unwrap_or(false);
+    let after = bytes
+        .as_deref()
+        .and_then(text::decode)
+        .map(|found| found.text);
+    WorkingSide {
+        too_large: false,
+        present,
+        after,
+        binary,
+    }
+}
+
+/// Reads a path from a tree, following a detected rename.
 ///
-/// Reads a path from the merge-base tree, following a detected rename.
-///
-/// A renamed file has no blob under its new name at the merge base, so the
-/// review would otherwise look like the file was newly added. When git reports
-/// the rename, the old path supplies the real base content.
-fn merge_base_blob(
+/// A renamed file has no blob under its new name at the base, so the review
+/// would otherwise look like the file was newly added. When git reports the
+/// rename in `range`, the old path supplies the real base content.
+fn blob_following_rename(
     repo: &Path,
-    merge_base: &str,
+    rev: &str,
+    range: &[&str],
     repo_rel: &str,
     too_large: &mut bool,
 ) -> Result<Option<Vec<u8>>, FsError> {
-    match git_diff::blob_at(repo, merge_base, repo_rel)? {
+    match git_diff::blob_at(repo, rev, repo_rel)? {
         git_diff::Blob::Bytes(bytes) => Ok(Some(bytes)),
         git_diff::Blob::TooLarge => {
             *too_large = true;
             Ok(None)
         }
         git_diff::Blob::Missing => {
-            let Some(old) = git_diff::renamed_from(repo, merge_base, repo_rel) else {
+            let Some(old) = git_diff::renamed_from_range(repo, range, repo_rel) else {
                 return Ok(None);
             };
-            match git_diff::blob_at(repo, merge_base, &old)? {
+            match git_diff::blob_at(repo, rev, &old)? {
                 git_diff::Blob::Bytes(bytes) => Ok(Some(bytes)),
                 git_diff::Blob::TooLarge => {
                     *too_large = true;

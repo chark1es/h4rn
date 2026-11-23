@@ -28,4 +28,12 @@ removed: number,
 /**
  * True when git or the daemon found either side is not text.
  */
-binary: boolean, };
+binary: boolean, 
+/**
+ * True when the daemon listed the file but did not read it to count lines.
+ *
+ * An untracked file has no git numstat to ask; the daemon reads it, within
+ * a total byte budget. A file past that budget is still listed, but its
+ * `added`/`removed` counts are not known. An older daemon omits the field.
+ */
+counts_omitted: boolean, };

@@ -725,11 +725,52 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     [openDiff, setState],
   );
 
+  /** Loads the branch review: the branch list for its picker, then the files. */
+  const loadBranch = useCallback(
+    async (preferred: string | null) => {
+      const base = stateRef.current.diffBase;
+      // Always refetch: the agent may have fetched, committed or renamed a
+      // branch since this pane last read the list.
+      void fetchBranches();
+      const files = await fetchDiffFiles({ kind: "base", base });
+      await showDiffForFiles(files, "branch", preferred, { base });
+    },
+    [fetchBranches, fetchDiffFiles, showDiffForFiles],
+  );
+
+  /** Loads the commits review: a fresh commit list, then one commit's files. */
+  const loadCommit = useCallback(
+    async (preferred: string | null) => {
+      const current = stateRef.current;
+      const list = await fetchDiffCommits(current.diffBase);
+      const sha = chooseCommit(list, current.diffCommit);
+      if (!sha) {
+        setState((state) => ({
+          ...state,
+          diffSource: "commit",
+          diffCommit: null,
+          diffPath: null,
+          diff: null,
+          diffLoading: false,
+          diffError: state.commitsError,
+        }));
+        return;
+      }
+      setState((state) => ({ ...state, diffSource: "commit", diffCommit: sha }));
+      const files = await fetchDiffFiles({ kind: "commit", sha });
+      await showDiffForFiles(files, "commit", preferred, { commit: sha });
+    },
+    [fetchDiffCommits, fetchDiffFiles, showDiffForFiles, setState],
+  );
+
   /** Switches the pane's scope and loads whatever that scope needs. */
   const selectDiffSource = useCallback(
     async (source: DiffSource) => {
       const current = stateRef.current;
-      const preferred = current.diffPath ?? activeTab(current.tabs)?.path ?? null;
+      // Entering the pane shows the file the person is on. The remembered
+      // `diffPath` belongs to the Branch/Commits file list, and a stale one
+      // must never answer for another tab.
+      const preferred = activeTab(current.tabs)?.path ?? current.diffPath;
       if (source === "head" || source === "agent") {
         if (preferred) {
           await openDiff(preferred, source);
@@ -746,37 +787,12 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         return;
       }
       if (source === "branch") {
-        if (!current.diffBranches && !current.branchesLoading) void fetchBranches();
-        const files = await fetchDiffFiles({ kind: "base", base: current.diffBase });
-        await showDiffForFiles(files, "branch", preferred, { base: current.diffBase });
+        await loadBranch(preferred);
         return;
       }
-      const list = current.diffCommits ?? (await fetchDiffCommits(current.diffBase));
-      const sha = chooseCommit(list, current.diffCommit);
-      if (!sha) {
-        setState((state) => ({
-          ...state,
-          diffSource: "commit",
-          diffCommit: null,
-          diffPath: null,
-          diff: null,
-          diffLoading: false,
-          diffError: state.commitsError,
-        }));
-        return;
-      }
-      setState((state) => ({ ...state, diffSource: "commit", diffCommit: sha }));
-      const against: DiffAgainst = { kind: "commit", sha };
-      const files = await fetchDiffFiles(against);
-      if (!files) return;
-      const path = firstDiffPath(files, preferred);
-      if (!path) {
-        await showDiffForFiles(files, "commit", preferred);
-        return;
-      }
-      await openDiff(path, "commit", { commit: sha });
+      await loadCommit(preferred);
     },
-    [fetchBranches, fetchDiffCommits, fetchDiffFiles, openDiff, showDiffForFiles, setState],
+    [loadBranch, loadCommit, openDiff, setState],
   );
 
   /** Changes the branch the review compares against. */
@@ -805,6 +821,16 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     },
     [fetchDiffFiles, showDiffForFiles, setState],
   );
+
+  /** Re-reads the branch or commit lists on an explicit refresh. */
+  const refreshDiffLists = useCallback(async () => {
+    const current = stateRef.current;
+    if (current.diffSource === "branch") {
+      await loadBranch(current.diffPath);
+    } else if (current.diffSource === "commit") {
+      await loadCommit(current.diffPath);
+    }
+  }, [loadBranch, loadCommit]);
 
   // -------------------------------------------------------------------
   // Search
@@ -1072,6 +1098,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     selectDiffSource,
     setDiffBase,
     setDiffCommit,
+    refreshDiffLists,
     fetchBranches,
     runSearch,
     setSearchQuery,

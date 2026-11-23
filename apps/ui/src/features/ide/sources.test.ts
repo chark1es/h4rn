@@ -77,6 +77,7 @@ describe("diff sources", () => {
           added: 1,
           removed: 0,
           binary: false,
+          counts_omitted: false,
         },
         {
           path: "b.ts",
@@ -85,6 +86,7 @@ describe("diff sources", () => {
           added: 2,
           removed: 0,
           binary: false,
+          counts_omitted: false,
         },
       ],
     };

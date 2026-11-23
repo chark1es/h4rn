@@ -30,6 +30,12 @@ use super::text;
 pub const MAX_DIFF_FILES: usize = 2_000;
 /// The most commits the commit list returns.
 pub const MAX_DIFF_COMMITS: usize = 100;
+/// The most bytes the untracked-file pass reads to count lines.
+///
+/// Untracked files have no `git diff` numstat to ask, so the daemon reads them.
+/// One person's build output can be many gigabytes; past this budget files are
+/// still listed, just without line counts.
+pub const MAX_UNTRACKED_BYTES: u64 = 2 * 1024 * 1024;
 /// Git's well-known empty tree, used as the base of a root commit.
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -209,7 +215,10 @@ pub fn default_base_name(workspace: &Path) -> Option<String> {
             &["symbolic-ref", "--quiet", "--short", &head_ref],
         ) {
             let name = text_of(&out);
-            if !name.is_empty() && name != "HEAD" {
+            // A symbolic ref outlives the branch it points at. A `HEAD` left
+            // dangling by a deleted or never-fetched branch is not a base; fall
+            // through to the remote's main or master instead of failing later.
+            if !name.is_empty() && name != "HEAD" && resolves_commit(workspace, &name).is_some() {
                 return Some(name);
             }
         }
@@ -323,6 +332,7 @@ struct RawChange {
     added: u32,
     removed: u32,
     binary: bool,
+    counts_omitted: bool,
 }
 
 fn name_status(
@@ -419,14 +429,17 @@ fn tracked_changes(repo: &Path, range: &[&str], prefix: &str) -> Result<Vec<RawC
             added,
             removed,
             binary,
+            counts_omitted: false,
         });
     }
     Ok(changes)
 }
 
-fn untracked_changes(repo: &Path, prefix: &str) -> Result<Vec<RawChange>, FsError> {
+fn untracked_changes(repo: &Path, prefix: &str) -> Result<(Vec<RawChange>, bool), FsError> {
     let out = run_git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     let mut changes = Vec::new();
+    let mut truncated = false;
+    let mut budget = MAX_UNTRACKED_BYTES;
     for raw in out.split(|byte| *byte == 0) {
         if raw.is_empty() {
             continue;
@@ -434,6 +447,12 @@ fn untracked_changes(repo: &Path, prefix: &str) -> Result<Vec<RawChange>, FsErro
         let path = String::from_utf8_lossy(raw).into_owned();
         if !in_scope(&path, prefix) {
             continue;
+        }
+        if changes.len() == MAX_DIFF_FILES {
+            // The list is a review aid, not an inventory. Stop reading here and
+            // say so, rather than walking a tree that may hold a million files.
+            truncated = true;
+            break;
         }
         let absolute = repo.join(&path);
         // Never follow a symlink here: an untracked link can point outside the
@@ -444,21 +463,33 @@ fn untracked_changes(repo: &Path, prefix: &str) -> Result<Vec<RawChange>, FsErro
             .as_ref()
             .map(|meta| meta.is_file())
             .unwrap_or(false);
+        let size = metadata.as_ref().map(|meta| meta.len()).unwrap_or(0);
         let oversized = metadata
             .as_ref()
             .map(|meta| meta.len() > MAX_READ_BYTES)
             .unwrap_or(false);
-        let (added, binary) = if !regular || oversized {
-            (0, true)
+        let mut binary = false;
+        let mut counts_omitted = false;
+        let mut added = 0;
+        if !regular {
+            binary = true;
+        } else if oversized || size > budget {
+            // Do not read a file the line count does not need, and do not spend
+            // the whole pass on one large new file. The list says the count was
+            // not read instead of pretending the file is empty.
+            counts_omitted = true;
         } else {
             match std::fs::read(&absolute) {
-                Ok(bytes) => match text::decode(&bytes) {
-                    Some(decoded) => (decoded.text.lines().count() as u32, false),
-                    None => (0, true),
-                },
-                Err(_) => (0, false),
+                Ok(bytes) => {
+                    budget = budget.saturating_sub(bytes.len() as u64);
+                    match text::decode(&bytes) {
+                        Some(decoded) => added = decoded.text.lines().count() as u32,
+                        None => binary = true,
+                    }
+                }
+                Err(_) => binary = true,
             }
-        };
+        }
         changes.push(RawChange {
             path: workspace_relative(&path, prefix),
             old_path: None,
@@ -466,9 +497,10 @@ fn untracked_changes(repo: &Path, prefix: &str) -> Result<Vec<RawChange>, FsErro
             added,
             removed: 0,
             binary,
+            counts_omitted,
         });
     }
-    Ok(changes)
+    Ok((changes, truncated))
 }
 
 fn finish(mut changes: Vec<RawChange>, truncated_by_cap: bool) -> RangeFiles {
@@ -485,6 +517,7 @@ fn finish(mut changes: Vec<RawChange>, truncated_by_cap: bool) -> RangeFiles {
                 added: change.added,
                 removed: change.removed,
                 binary: change.binary,
+                counts_omitted: change.counts_omitted,
             })
             .collect(),
         truncated,
@@ -504,8 +537,8 @@ pub fn branch_files(
     let mut changes = tracked_changes(&repo, &range, &prefix)?;
     let capped;
     if changes.len() < MAX_DIFF_FILES {
-        let untracked = untracked_changes(&repo, &prefix)?;
-        capped = changes.len() + untracked.len() > MAX_DIFF_FILES;
+        let (untracked, untracked_truncated) = untracked_changes(&repo, &prefix)?;
+        capped = untracked_truncated || changes.len() + untracked.len() > MAX_DIFF_FILES;
         changes.extend(untracked);
     } else {
         capped = true;
@@ -521,13 +554,7 @@ pub fn commit_files(workspace: &Path, sha: &str) -> Result<(String, RangeFiles),
     let short = run_git_ok(&repo, &["rev-parse", "--short", &full])
         .map(|out| text_of(&out))
         .unwrap_or_else(|| full[..7.min(full.len())].to_owned());
-    let parent = run_git_ok(
-        &repo,
-        &["rev-parse", "--verify", "--quiet", &format!("{full}^")],
-    )
-    .map(|out| text_of(&out))
-    .filter(|parent| !parent.is_empty())
-    .unwrap_or_else(|| EMPTY_TREE.to_owned());
+    let parent = first_parent(&repo, &full)?;
     let prefix = workspace_prefix(&repo, workspace);
     let range = [&parent[..], &full[..]];
     let changes = tracked_changes(&repo, &range, &prefix)?;
@@ -641,19 +668,15 @@ pub fn repo_path(workspace: &Path, repo: &Path, rel: &str) -> String {
     }
 }
 
-/// The old path of a rename whose new path is `new_path`, if git detects one.
-pub fn renamed_from(repo: &Path, merge_base: &str, new_path: &str) -> Option<String> {
-    let out = run_git_ok(
-        repo,
-        &[
-            "diff",
-            "--name-status",
-            "-z",
-            "--find-renames",
-            merge_base,
-            "--",
-        ],
-    )?;
+/// The old path of a rename in `range`, as `git diff --name-status` sees it.
+///
+/// The branch review passes one revision (working tree against the merge base);
+/// a commit review passes parent and commit.
+pub fn renamed_from_range(repo: &Path, range: &[&str], new_path: &str) -> Option<String> {
+    let mut args = vec!["diff", "--name-status", "-z", "--find-renames"];
+    args.extend_from_slice(range);
+    args.push("--");
+    let out = run_git_ok(repo, &args)?;
     let parts: Vec<&[u8]> = out.split(|byte| *byte == 0).collect();
     let mut index = 0;
     while index + 2 < parts.len() {
@@ -673,15 +696,44 @@ pub fn renamed_from(repo: &Path, merge_base: &str, new_path: &str) -> Option<Str
     None
 }
 
+/// True when the stored commit object names a parent.
+///
+/// `git rev-parse <sha>^` respects shallow grafts and finds no parent for a
+/// shallow boundary, so the raw object is the only way to tell a boundary
+/// commit from a root commit.
+fn stored_parent_count(repo: &Path, sha: &str) -> Option<usize> {
+    let spec = format!("{sha}^{{commit}}");
+    let out = run_git_ok(repo, &["cat-file", "-p", &spec])?;
+    Some(
+        text_of(&out)
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .filter(|line| line.starts_with("parent "))
+            .count(),
+    )
+}
+
 /// The first parent of a commit, or the empty tree for a root commit.
-pub fn first_parent(repo: &Path, sha: &str) -> String {
-    run_git_ok(
+///
+/// A shallow clone carries a boundary commit whose parent object is absent. Its
+/// stored object still names the parent, so reporting it as a root commit would
+/// invent an "everything was added" review. Say what is missing instead.
+pub fn first_parent(repo: &Path, sha: &str) -> Result<String, FsError> {
+    if let Some(parent) = run_git_ok(
         repo,
         &["rev-parse", "--verify", "--quiet", &format!("{sha}^")],
     )
     .map(|out| text_of(&out))
     .filter(|parent| !parent.is_empty())
-    .unwrap_or_else(|| EMPTY_TREE.to_owned())
+    {
+        return Ok(parent);
+    }
+    match stored_parent_count(repo, sha) {
+        Some(count) if count > 0 => Err(FsError::Invalid(format!(
+            "This commit's parent isn't in this shallow clone, so there is nothing to compare `{sha}` with. Fetch more history and try again."
+        ))),
+        _ => Ok(EMPTY_TREE.to_owned()),
+    }
 }
 
 /// Git's abbreviated form of a full commit id.

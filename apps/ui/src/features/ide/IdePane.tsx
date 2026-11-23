@@ -126,6 +126,20 @@ export function IdePane() {
   const [closing, setClosing] = useState(false);
   const [resolving, setResolving] = useState(false);
 
+  // The diff pane belongs to the file the person is on. Clicking another tab
+  // while it is open follows that tab instead of leaving the previous file's
+  // diff under the new path.
+  const diffTabPath = active?.path ?? null;
+  const diffSource = state.diffSource;
+  const diffPath = state.diffPath;
+  const openDiffSession = session.openDiff;
+  useEffect(() => {
+    if (panel !== "diff" || !diffTabPath) return;
+    if (diffSource !== "head" && diffSource !== "agent") return;
+    if (diffPath === diffTabPath) return;
+    void openDiffSession(diffTabPath, diffSource);
+  }, [panel, diffTabPath, diffSource, diffPath, openDiffSession]);
+
   useEffect(() => {
     setCursor({ line: 1, column: 1 });
   }, []);
@@ -626,6 +640,8 @@ export function IdePane() {
                 }}
                 onRevert={(path, content) => void session.revertTo(path, content)}
                 onSendComments={sendReviewComments}
+                onCompareHead={() => void session.selectDiffSource("head")}
+                onRefresh={() => void session.refreshDiffLists()}
               />
             ) : (
               <div

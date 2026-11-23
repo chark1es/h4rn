@@ -8,8 +8,24 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use h4rn_daemon::fs::{FsError, FsService};
+use h4rn_daemon::fs::{FsError, FsService, MAX_READ_BYTES};
 use h4rn_protocol::{DiffAgainst, GitFileStatus};
+
+fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
 
 struct Repo {
     dir: tempfile::TempDir,
@@ -42,19 +58,7 @@ impl Repo {
     }
 
     fn git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.workspace)
-            .args(args)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        run_git(&self.workspace, args)
     }
 
     fn write(&self, rel: &str, content: &str) {
@@ -233,6 +237,58 @@ fn commit_diff_reads_the_root_commit_and_the_first_parent() {
         .service
         .diff(repo.workspace(), "a.txt", &commit_against(&second))
         .expect("second diff");
+    assert_eq!(diff.before.as_deref(), Some("one\n"));
+    assert_eq!(diff.after.as_deref(), Some("one\ntwo\n"));
+}
+
+#[test]
+fn commit_diff_follows_a_rename_to_the_parents_old_path() {
+    let repo = Repo::new("main");
+    repo.write("old.txt", "one\ntwo\n");
+    repo.commit("initial");
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.write("new.txt", "one\ntwo\nthree\n");
+    let renamed = repo.commit("rename and add a line");
+
+    let diff = repo
+        .service
+        .diff(repo.workspace(), "new.txt", &commit_against(&renamed))
+        .expect("rename diff");
+    assert_eq!(diff.before.as_deref(), Some("one\ntwo\n"));
+    assert_eq!(diff.after.as_deref(), Some("one\ntwo\nthree\n"));
+
+    let files = repo
+        .service
+        .diff_files(repo.workspace(), &commit_against(&renamed))
+        .expect("commit files");
+    let file = files
+        .files
+        .iter()
+        .find(|file| file.path == "new.txt")
+        .expect("rename appears");
+    assert_eq!(file.status, GitFileStatus::Renamed);
+    assert_eq!(file.old_path.as_deref(), Some("old.txt"));
+    assert_eq!(file.added, 1);
+    assert_eq!(file.removed, 0);
+}
+
+#[test]
+fn commit_mode_reads_the_committed_blobs_not_a_large_working_copy() {
+    let repo = Repo::new("main");
+    repo.write("a.txt", "one\n");
+    repo.commit("initial");
+    repo.write("a.txt", "one\ntwo\n");
+    let second = repo.commit("second");
+
+    // The working copy is far past the read cap. A commit review answers from
+    // the commit's own blobs, so it must not be dragged down by that.
+    repo.write("a.txt", &"x".repeat(MAX_READ_BYTES as usize + 10));
+
+    let diff = repo
+        .service
+        .diff(repo.workspace(), "a.txt", &commit_against(&second))
+        .expect("commit diff");
+    assert!(!diff.too_large);
     assert_eq!(diff.before.as_deref(), Some("one\n"));
     assert_eq!(diff.after.as_deref(), Some("one\ntwo\n"));
 }
@@ -421,6 +477,29 @@ fn an_oversized_side_is_reported_instead_of_loaded() {
     );
 }
 
+#[test]
+fn an_oversized_head_side_is_capped_before_it_is_read() {
+    let repo = Repo::new("main");
+    repo.write("big.txt", &"a".repeat(MAX_READ_BYTES as usize + 1));
+    repo.commit("initial");
+    // The working copy is small; only the HEAD blob is oversized.
+    repo.write("big.txt", "small now\n");
+
+    let diff = repo
+        .service
+        .diff(repo.workspace(), "big.txt", &DiffAgainst::Head)
+        .expect("head diff");
+    assert!(diff.too_large);
+    assert_eq!(diff.before, None);
+    assert_eq!(diff.after.as_deref(), Some("small now\n"));
+    assert!(
+        diff.note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("too large")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn an_untracked_symlink_is_listed_without_reading_its_target() {
@@ -443,4 +522,155 @@ fn an_untracked_symlink_is_listed_without_reading_its_target() {
     assert_eq!(link.status, GitFileStatus::Untracked);
     assert!(link.binary, "a link's target is never read as text");
     assert_eq!(link.added, 0);
+}
+
+#[test]
+fn untracked_files_stop_at_the_file_cap_and_say_so() {
+    let repo = Repo::new("main");
+    repo.write("a.txt", "one\n");
+    repo.commit("initial");
+    for index in 0..2_005 {
+        repo.write(&format!("loose/file-{index:04}.txt"), "");
+    }
+
+    let files = repo
+        .service
+        .diff_files(repo.workspace(), &base(Some("main")))
+        .expect("branch comparison");
+    assert_eq!(files.files.len(), 2_000);
+    assert!(files.truncated);
+}
+
+#[test]
+fn untracked_line_counts_stop_at_the_read_budget() {
+    let repo = Repo::new("main");
+    repo.write("a.txt", "one\n");
+    repo.commit("initial");
+    // Each file is under the per-file cap but the two together exceed the
+    // untracked read budget.
+    repo.write("budget-a.txt", &"a\n".repeat(700_000));
+    repo.write("budget-b.txt", &"b\n".repeat(700_000));
+
+    let files = repo
+        .service
+        .diff_files(repo.workspace(), &base(Some("main")))
+        .expect("branch comparison");
+    let first = files
+        .files
+        .iter()
+        .find(|file| file.path == "budget-a.txt")
+        .expect("first file");
+    let second = files
+        .files
+        .iter()
+        .find(|file| file.path == "budget-b.txt")
+        .expect("second file");
+    assert!(!first.counts_omitted);
+    assert_eq!(first.added, 700_000);
+    assert!(second.counts_omitted);
+    assert_eq!(second.added, 0);
+    assert!(!second.binary, "a text file past the budget is not binary");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_untracked_file_is_marked_not_listed_as_empty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new("main");
+    repo.write("a.txt", "one\n");
+    repo.commit("initial");
+    let path = repo.workspace.join("secret.txt");
+    fs::write(&path, "hidden\n").expect("write");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let files = repo
+        .service
+        .diff_files(repo.workspace(), &base(Some("main")))
+        .expect("branch comparison");
+    let secret = files
+        .files
+        .iter()
+        .find(|file| file.path == "secret.txt")
+        .expect("the unreadable file is listed");
+    assert!(secret.binary);
+    assert_eq!(secret.added, 0);
+
+    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+}
+
+#[test]
+fn a_stale_remote_head_falls_through_to_the_remotes_main() {
+    let repo = Repo::new("main");
+    repo.write("a.txt", "one\n");
+    let head = repo.commit("initial");
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        repo.dir.path().join("remote.git").to_str().unwrap(),
+    ]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", &head]);
+    // The default-branch symref outlives a branch that was deleted or never
+    // fetched. It must not become the base the review tries to use.
+    repo.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/gone",
+    ]);
+
+    let files = repo
+        .service
+        .diff_files(repo.workspace(), &base(None))
+        .expect("the remote's main resolves");
+    assert_eq!(files.base.as_deref(), Some("origin/main"));
+}
+
+#[test]
+fn a_shallow_boundary_commit_says_its_parent_is_missing() {
+    let repo = Repo::new("main");
+    repo.write("a.txt", "one\n");
+    repo.commit("first");
+    repo.write("a.txt", "one\ntwo\n");
+    repo.commit("second");
+
+    let shallow = repo.dir.path().join("shallow");
+    let url = format!("file://{}", repo.workspace.display());
+    let output = Command::new("git")
+        .args([
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &url,
+            shallow.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run git clone");
+    assert!(
+        output.status.success(),
+        "clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let service = FsService::new(repo.dir.path().join("shallow-data")).expect("service");
+    service.allow_root(&shallow).expect("allow root");
+    let boundary = run_git(&shallow, &["rev-parse", "HEAD"]);
+
+    let error = service
+        .diff(
+            shallow.to_str().unwrap(),
+            "a.txt",
+            &commit_against(&boundary),
+        )
+        .expect_err("the boundary commit has no parent here");
+    assert!(matches!(error, FsError::Invalid(_)), "got {error:?}");
+    assert!(
+        error.to_string().contains("shallow clone"),
+        "unexpected message: {error}"
+    );
+
+    let error = service
+        .diff_files(shallow.to_str().unwrap(), &commit_against(&boundary))
+        .expect_err("the file list cannot diff a missing parent");
+    assert!(error.to_string().contains("shallow clone"), "{error}");
 }
