@@ -3388,6 +3388,56 @@ mod tests {
         assert_eq!(sink.wakes().len(), 1);
     }
 
+    #[tokio::test]
+    async fn a_failed_wake_a_rewatch_overtook_does_not_restore_the_old_baseline() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_failed_wake_rewatch");
+        watched(&service, &sink, &thread_id).await;
+
+        // A check fails. The poll reports it, but its wake is held inside
+        // delivery and is going to fail.
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Failure,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        let (started, release) = sink.gate_next_wake();
+        sink.fail_next_wakes(1);
+        let service_for_poll = Arc::clone(&service);
+        let poll = tokio::spawn(async move { service_for_poll.poll_once().await });
+        started.await.expect("the failure wake is waiting");
+
+        // The thread unwatches and watches again while that wake is in
+        // flight. The re-watch reads a body that already contains the
+        // failure, so the failure is not news for the replacement.
+        service.unwatch(&thread_id, &repo(), 7);
+        service
+            .watch(&thread_id, &repo(), 7)
+            .await
+            .expect("re-watch");
+
+        // Releasing the failed wake must not put the pre-failure snapshot
+        // back on the replacement: that would make the next poll report the
+        // same failure for a watcher that already has it.
+        release.send(()).expect("release the failure wake");
+        poll.await.expect("poll finished");
+        assert!(sink.wakes().is_empty(), "{:?}", sink.wakes());
+
+        service.poll_once().await;
+        assert!(
+            sink.wakes().is_empty(),
+            "a failed wake a re-watch overtook must not re-report its change: {:?}",
+            sink.wakes()
+        );
+        assert_eq!(service.watching_threads(&repo(), 7).len(), 1);
+    }
+
     fn wiremock_repo(server: &wiremock::MockServer) -> ForgeRepoRef {
         ForgeRepoRef {
             forge: h4rn_protocol::ForgeKind::GitHub,
