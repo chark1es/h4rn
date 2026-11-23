@@ -56,9 +56,9 @@ const HARNESS_MODES: Record<HarnessKind, RuntimeMode[]> = {
   codex: ["approval_required", "auto_accept_edits", "full_access"],
   opencode: ["approval_required", "auto_accept_edits", "full_access"],
   antigravity: ["approval_required", "auto_accept_edits", "plan", "full_access"],
-  // A configured agent names its own modes. When its catalogue is known, only
-  // the modes it advertised are offered; without one, plan stays available
-  // because the agent may offer it and the daemon refuses a mode it does not.
+  // A configured agent names its own modes. Until it does, no mode is offered:
+  // the dialog and the composer say the agent manages its own mode rather than
+  // guessing, because the daemon refuses a mode the agent never advertised.
   acp: ["approval_required", "auto_accept_edits", "plan", "full_access"],
 };
 
@@ -72,12 +72,15 @@ export function threadModeChoices(
   advertisedAgentModes?: readonly string[],
 ): ModeChoice[] {
   const offered = HARNESS_MODES[harness];
-  if (harness !== "acp" || !advertisedAgentModes || advertisedAgentModes.length === 0) {
+  if (harness !== "acp") {
     return MODE_CHOICES.filter((choice) => offered.includes(choice.value));
   }
-  // The cached agent catalogue is authoritative when it is known: never offer
-  // a label the agent did not name, and use the daemon's id mapping so an
-  // agent's `acceptEdits`/`bypassPermissions` counts as the mode it names.
+  // A configured agent's catalogue is authoritative, and an empty or unknown
+  // one is not a licence to offer everything: h4rn cannot map a mode it was not
+  // told about, so there is no choice to show until the agent names its modes.
+  if (!advertisedAgentModes || advertisedAgentModes.length === 0) return [];
+  // Never offer a label the agent did not name, and use the daemon's id mapping
+  // so an agent's `acceptEdits`/`bypassPermissions` counts as the mode it names.
   const mapped = new Set(
     advertisedAgentModes
       .map(runtimeModeForModeId)
@@ -144,14 +147,26 @@ export function nonDefaultSettings(summary: ThreadSummary, defaultMode: RuntimeM
   return parts;
 }
 
-/** The choices the model picker offers: the harness's list plus proxy models. */
+/**
+ * The choices the model picker offers: the live session's catalogue, the
+ * harness's static list before the first session, and proxy models.
+ *
+ * A live session is the truth: Codex publishes `model/list` at session start
+ * and a configured ACP agent names its own models. Only when no session has
+ * reported a catalogue yet does the static list stand in.
+ */
 export function threadModelChoices(
   harness: HarnessKind,
   current: string,
   agentModels: readonly string[],
   proxyModels: readonly string[],
+  sessionModels: readonly string[] = [],
 ): string[] {
   const known =
-    harness === "acp" ? agentModels : [...(HARNESS_MODELS[harness]?.models ?? []), ...proxyModels];
+    sessionModels.length > 0
+      ? [...sessionModels, ...proxyModels]
+      : harness === "acp"
+        ? agentModels
+        : [...(HARNESS_MODELS[harness]?.models ?? []), ...proxyModels];
   return [...new Set([current, ...known])].filter((model) => model.length > 0);
 }

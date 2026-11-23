@@ -23,6 +23,7 @@ function summary(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     model: "claude-sonnet-5-5",
     runtime_mode: "approval_required",
     reasoning_efforts: [],
+    models: [],
     fast: false,
     tab: "working",
     placed_by_user: false,
@@ -63,6 +64,16 @@ describe("thread controls", () => {
   it("offers an ACP agent only the modes it advertised", () => {
     const offered = threadModeChoices("acp", ["default", "auto"]).map((choice) => choice.value);
     expect(offered).toEqual(["approval_required", "full_access"]);
+  });
+
+  it("offers no ACP mode until the agent names its catalogue", () => {
+    // An unknown catalogue is not a licence to offer every mode: the daemon
+    // cannot map one it was not told about, so the picker stays closed and the
+    // thread says the agent manages its own mode.
+    expect(threadModeChoices("acp")).toEqual([]);
+    expect(threadModeChoices("acp", [])).toEqual([]);
+    // A catalogue whose ids h4rn maps none of is just as unknown.
+    expect(threadModeChoices("acp", ["code", "architect"])).toEqual([]);
   });
 
   it("accepts the agent's own spellings of the modes the daemon maps", () => {
@@ -117,5 +128,19 @@ describe("thread controls", () => {
     const models = threadModelChoices("claude_code", "custom-model", [], ["proxy/model"]);
     expect(models[0]).toBe("custom-model");
     expect(models).toContain("proxy/model");
+  });
+
+  it("offers the live session's model catalogue before the static list", () => {
+    // Codex publishes `model/list` at session start; the picker must offer
+    // those ids, not the adapter's static table.
+    const models = threadModelChoices("codex", "gpt-a", [], [], ["gpt-a", "gpt-b", "gpt-c"]);
+    expect(models).toEqual(["gpt-a", "gpt-b", "gpt-c"]);
+    expect(models).not.toContain("gpt-5.1-codex");
+
+    // Before the first session there is no catalogue, so the static list (and
+    // a configured proxy's models) still fills the picker.
+    const fallback = threadModelChoices("codex", "gpt-5.1-codex", [], ["proxy/model"]);
+    expect(fallback).toContain("gpt-5.1-codex-mini");
+    expect(fallback).toContain("proxy/model");
   });
 });

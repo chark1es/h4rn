@@ -40,6 +40,7 @@ function threadSummary(input: { threadId: string; host: string }): ThreadSummary
     model: "claude-sonnet-4-5",
     runtime_mode: "approval_required",
     reasoning_efforts: [],
+    models: [],
     fast: false,
     tab: "working",
     placed_by_user: false,

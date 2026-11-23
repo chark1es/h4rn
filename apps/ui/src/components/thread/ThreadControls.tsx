@@ -90,6 +90,7 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
     summary.model,
     agent?.models.map((model) => model.id) ?? [],
     proxyModelsFor(summary.harness).map((model) => model.id),
+    summary.models ?? [],
   );
   const changed = nonDefaultSettings(summary, threadSettings.defaultPermissionMode);
   const mode = summary.runtime_mode ?? "approval_required";
@@ -120,7 +121,7 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
             <span className="q-tctrl-quiet truncate">{changed.join(" · ")}</span>
           ) : null}
           <ChevronDownIcon
-            className={cn("q-icon s12", expanded && "q-rot90")}
+            className={cn("q-icon s12", expanded && "q-rot180")}
             strokeWidth={1.5}
             aria-hidden
           />
@@ -163,21 +164,30 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
             </button>
           </form>
 
-          <div className="q-tctrl-head">Permissions</div>
-          <div role="menu" aria-label="Permission mode" className="q-tctrl-list">
-            {modes.map((choice) => (
-              <Choice
-                key={choice.value}
-                checked={choice.value === mode}
-                label={choice.label}
-                onSelect={() => {
-                  void setThreadRuntimeMode(summary.thread_id, choice.value).then((ok) => {
-                    if (ok) setOpen(false);
-                  });
-                }}
-              />
-            ))}
-          </div>
+          {modes.length > 0 ? (
+            <>
+              <div className="q-tctrl-head">Permissions</div>
+              <div role="menu" aria-label="Permission mode" className="q-tctrl-list">
+                {modes.map((choice) => (
+                  <Choice
+                    key={choice.value}
+                    checked={choice.value === mode}
+                    label={choice.label}
+                    onSelect={() => {
+                      void setThreadRuntimeMode(summary.thread_id, choice.value).then((ok) => {
+                        if (ok) setOpen(false);
+                      });
+                    }}
+                  />
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="q-tctrl-head">Permissions</div>
+              <p className="q-tctrl-note">{modeLabel(mode)} · the agent manages its own mode.</p>
+            </>
+          )}
 
           {efforts.length > 0 ? (
             <>
@@ -230,12 +240,6 @@ export function ThreadControls({ summary }: { summary: ThreadSummary }) {
                 }}
               />
             </>
-          ) : null}
-
-          {modes.length === 0 && efforts.length === 0 && !fast ? (
-            <div className="q-tctrl-note q-tctrl-foot">
-              {modeLabel(mode)} · the agent manages its own mode.
-            </div>
           ) : null}
         </div>
       )}

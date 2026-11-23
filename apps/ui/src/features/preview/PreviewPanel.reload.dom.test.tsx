@@ -84,6 +84,7 @@ const thread: ThreadSummary = {
   model: "claude-sonnet",
   runtime_mode: "approval_required",
   reasoning_efforts: [],
+  models: [],
   fast: false,
   tab: "working",
   placed_by_user: false,

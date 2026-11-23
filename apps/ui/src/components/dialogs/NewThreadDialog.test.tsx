@@ -472,6 +472,58 @@ describe("NewThreadDialog drafts", () => {
     expect(screen.queryByText("Can be changed later from the composer.")).toBeNull();
   });
 
+  it("shows no mode picker until the agent names any mode", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.harness.agents = [
+      {
+        id: "demo",
+        name: "Demo agent",
+        command: "demo-agent",
+        env: {},
+        working_dir: { kind: "thread_workspace" },
+        installed: true,
+        models: [],
+        modes: [],
+        version: null,
+        path: "/usr/bin/demo-agent",
+      },
+    ];
+    // The agent advertises no mode catalogue at all. h4rn cannot map a mode it
+    // was never told about, so all four h4rn modes must not be offered.
+    mock.harness.probes = {
+      demo: {
+        id: "demo",
+        installed: true,
+        version: null,
+        models: [{ id: "demo-model", name: "Demo" }],
+        modes: [],
+        error: null,
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+
+    await waitFor(() => expect(screen.getByText("Mode is managed by the agent.")).toBeTruthy());
+    for (const label of [
+      "Mode: Approval required",
+      "Mode: Auto-accept edits",
+      "Mode: Plan",
+      "Mode: Full access",
+    ]) {
+      expect(screen.queryByRole("button", { name: label })).toBeNull();
+    }
+  });
+
   it("offers Plan at creation and keeps a Plan default", async () => {
     mock.state.hosts = { host_a: host("host_a", "atlas") };
     mock.state.localHostId = "host_a";

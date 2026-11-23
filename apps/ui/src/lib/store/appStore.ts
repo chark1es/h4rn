@@ -1533,6 +1533,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     model: input.model,
     runtime_mode: input.runtimeMode ?? "approval_required",
     reasoning_efforts: [],
+    models: [],
     ...(input.reasoningEffort ? { reasoning_effort: input.reasoningEffort } : {}),
     fast: input.fast ?? false,
     tab: "working",

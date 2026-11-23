@@ -28,7 +28,7 @@ export const HARNESS_MODELS: Record<HarnessKind, HarnessModelInfo> = {
     models: ["gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1"],
     thinking: {
       kind: "Reasoning effort",
-      levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      levels: ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     },
   },
   opencode: {

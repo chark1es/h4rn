@@ -1,5 +1,4 @@
-import type { AcpAgentSpec, AcpWorkingDir, RuntimeMode } from "@/gen";
-import { MODE_CHOICES, runtimeModeForModeId } from "@/lib/threadControls";
+import type { AcpAgentSpec, AcpWorkingDir } from "@/gen";
 
 /** The editable shape of the "Add / edit ACP agent" form. */
 export type AcpAgentForm = {
@@ -165,31 +164,6 @@ export function acpPickerOptions(
       label: agent.installed ? agent.name : `${agent.name} · not installed`,
     })),
   ];
-}
-
-/**
- * The thread modes h4rn maps onto ACP mode ids.
- *
- * A generic agent names its own modes; h4rn only changes the mode when the
- * agent advertised an id the daemon maps to it. The labels and the mappable
- * modes come from the same table the composer uses, so the dialog and the
- * thread picker cannot disagree.
- */
-export const THREAD_RUNTIME_MODES: { value: RuntimeMode; label: string }[] = MODE_CHOICES.map(
-  ({ value, label }) => ({ value, label }),
-);
-
-/** The mode choices the new-thread picker offers for an ACP agent. */
-export function acpRuntimeModeChoices(
-  advertised: string[],
-): { value: RuntimeMode; label: string }[] {
-  const mapped = new Set(
-    advertised.map(runtimeModeForModeId).filter((mode): mode is RuntimeMode => mode !== undefined),
-  );
-  return MODE_CHOICES.filter((choice) => mapped.has(choice.value)).map(({ value, label }) => ({
-    value,
-    label,
-  }));
 }
 
 /**
