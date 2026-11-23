@@ -79,9 +79,17 @@ enum SendFailure {
 /// the session, so the stream does not end when the agent dies. A test that
 /// needs to report a death the way the adapter does (the generic stdout close,
 /// then the exit status with the stderr it drained) pushes it through this
-/// handle instead of ending the stream.
+/// handle instead of ending the stream. It also carries the session's transport
+/// health, so a test can model an agent that exited while its stream stays
+/// open.
 #[derive(Clone, Debug, Default)]
-pub struct EventInjector(Arc<Mutex<Vec<EventSink>>>);
+pub struct EventInjector(Arc<Mutex<Vec<InjectedSession>>>);
+
+#[derive(Clone, Debug)]
+struct InjectedSession {
+    sink: EventSink,
+    health: crate::TransportHealth,
+}
 
 impl EventInjector {
     /// Queues one event on the most recently started session's stream.
@@ -91,7 +99,7 @@ impl EventInjector {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .last()
-            .cloned();
+            .map(|session| session.sink.clone());
         if let Some(sender) = sender {
             sender.try_send(event);
         }
@@ -108,9 +116,26 @@ impl EventInjector {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(session)
-            .cloned();
+            .map(|session| session.sink.clone());
         if let Some(sender) = sender {
             sender.try_send(event);
+        }
+    }
+
+    /// Marks the most recently started session's transport closed, the way an
+    /// agent that exited does, without ending its event stream.
+    ///
+    /// A test uses this so the daemon classifies the next completion as one on
+    /// a closed transport, exactly as a real peer's exit does.
+    pub fn close_transport(&self) {
+        let health = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last()
+            .map(|session| session.health.clone());
+        if let Some(health) = health {
+            health.close_with(crate::TransportCloseKind::Exit);
         }
     }
 }
@@ -1030,12 +1055,16 @@ impl Harness for FakeHarness {
         sender
             .send(HarnessEvent::SessionStarted { session_id })
             .await;
+        let health = TransportHealth::new();
         if let Some(injector) = &self.event_injector {
             injector
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(sender.clone());
+                .push(InjectedSession {
+                    sink: sender.clone(),
+                    health: health.clone(),
+                });
         }
 
         let session_scripts = self.session_scripts.clone();
@@ -1094,7 +1123,7 @@ impl Harness for FakeHarness {
             trailing_completion_gate: self.trailing_completion_gate.clone(),
             stderr: self.stderr.clone().unwrap_or_default(),
             closed: false,
-            health: TransportHealth::new(),
+            health,
             streaming_send: self.streaming_send.clone(),
             diagnostic_before_death: self.diagnostic_before_death.clone(),
             immediate_stream_end: self.immediate_stream_end,

@@ -469,14 +469,7 @@ mod tests {
     fn an_absolute_executable_resolves() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("agent");
-        std::fs::write(&path, "#!/bin/sh\n").expect("write");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions).expect("chmod");
-        }
+        executable_file(&path);
         assert_eq!(resolve_acp_command(&path.display().to_string()), Some(path));
     }
 
@@ -488,11 +481,7 @@ mod tests {
 
     #[cfg(unix)]
     fn executable_file(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, "#!/bin/sh\n").expect("write");
-        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("chmod");
+        crate::test_scripts::write_script(path, "#!/bin/sh\n");
     }
 
     #[cfg(unix)]
@@ -588,18 +577,14 @@ mod tests {
         let new_marker = new.path().join("new-ran");
         let old_script = old.path().join("agent");
         let new_script = new.path().join("agent");
-        executable_file(&old_script);
-        std::fs::write(
+        crate::test_scripts::write_script(
             &old_script,
-            format!("#!/bin/sh\n: > '{}'\nexit 1\n", old_marker.display()),
-        )
-        .expect("write old script");
-        executable_file(&new_script);
-        std::fs::write(
+            &format!("#!/bin/sh\n: > '{}'\nexit 1\n", old_marker.display()),
+        );
+        crate::test_scripts::write_script(
             &new_script,
-            format!("#!/bin/sh\n: > '{}'\nexit 1\n", new_marker.display()),
-        )
-        .expect("write new script");
+            &format!("#!/bin/sh\n: > '{}'\nexit 1\n", new_marker.display()),
+        );
 
         let source = Arc::new(EditableAgents::default());
         source.set(spec("demo", &old_script.display().to_string()));

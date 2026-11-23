@@ -903,6 +903,27 @@ peer writes them): `H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers and exits at onc
 stderr, and `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the promoted
 prompt reaches it, so the promotion-before-the-limit order is fixed by the test, not by the machine.
 
+**Addendum: work already done is never replayed, and a pause always owns its prompt.** Three rules
+refine the requeue. First, "produced nothing" is read from a turn-long marker, not from the running
+tool map: a *completed* tool call leaves that map empty, and it is the strongest proof the prompt
+reached the provider's work, so such a turn settles as limited with its tool card and output and is
+never written again. Second, ownership of a stream is established before a delta is published. The
+ACP adapter tags every `session/update` with the prompt generation it follows and the bridge only
+applies updates for the running generation; the daemon additionally drops updates until the prompt
+has been handed to the harness (`on_the_wire`), so a finished turn's late text is neither journaled
+under the promoted turn nor able to block its requeue. ACP carries no turn id, so an update a peer
+writes after it has read the new prompt is indistinguishable from the new turn's own output; the
+drop covers everything the daemon can attribute. Third, a pause and its prompt are one record. The
+schedule binds to a turn only through `parked_turn_to_keep`, and whenever it does, the prompt is
+saved on the thread row in the same step, so a limit landing between promotion and claim survives a
+restart. A claim re-checks pause ownership under the record lock and refuses to write a prompt the
+pause now owns. A requeue keeps the dead session's exit status and stderr row instead of clearing
+it, and the published `auto_resume` flag is derived from the schedule that was actually armed: a
+limit that no meter or ledger could schedule reads as rate-limited, never as `Scheduled`. Reply
+resolution is independent of event delivery for the same "never lose the person's answer" reason:
+the reader publishes into an unbounded queue drained by one forwarder, so a full session queue can
+no longer park it before the reply behind those updates.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

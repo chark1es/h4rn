@@ -199,6 +199,12 @@ pub enum AcpError {
 pub enum AcpEvent {
     /// A `session/update` notification.
     SessionUpdate {
+        /// The prompt generation the update follows.
+        ///
+        /// `0` means it arrived while no prompt was running. The bridge drops
+        /// an update whose generation is not the running turn's, so a finished
+        /// turn's late output never lands on the turn that follows it.
+        generation: u64,
         /// Session the update belongs to.
         session_id: String,
         /// Parsed update.
@@ -262,8 +268,13 @@ pub enum AcpEvent {
     ///
     /// Queued through the reader's own event queue before the prompt frame is
     /// written, so the bridge knows that updates arriving from here on belong
-    /// to a running turn (see [`Self::Settled`]).
-    PromptStarted,
+    /// to a running turn (see [`Self::Settled`]). `generation` tags the turn:
+    /// every update the reader publishes while it is the current generation
+    /// belongs to it, and a settlement only closes the generation it names.
+    PromptStarted {
+        /// The prompt generation this turn is.
+        generation: u64,
+    },
     /// The events a prompt task produced for the turn it just finished.
     ///
     /// Queued through the reader's own event queue, so they are published
@@ -274,6 +285,8 @@ pub enum AcpEvent {
     /// after this until the next [`Self::PromptStarted`]: no turn is running
     /// then, so an update cannot belong to one.
     Settled {
+        /// The prompt generation that settled.
+        generation: u64,
         /// The turn's final events, in the order they must be applied.
         events: Vec<crate::HarnessEvent>,
     },
@@ -336,8 +349,29 @@ struct Shared {
     next_id: AtomicU64,
     pending: PendingMap,
     stdin_tx: Mutex<Option<mpsc::Sender<OutgoingFrame>>>,
-    events_tx: mpsc::Sender<AcpEvent>,
+    /// What the reader published, in the order it read it.
+    ///
+    /// Unbounded on purpose: request resolution must never wait for the event
+    /// consumer. With only the bounded channel, a slow consumer could fill it,
+    /// park the reader inside a `session/update` send, and the supervisor's
+    /// bounded exit wait would then abort a reader that had not yet read the
+    /// reply sitting behind those updates. A forwarder task moves these into
+    /// the session's bounded channel in the same order, so delivery can lag
+    /// without ever blocking a reply.
+    reader_events: mpsc::UnboundedSender<AcpEvent>,
+    /// How many events the reader has published, in order.
+    ///
+    /// The load path uses it to know when the forwarder has moved everything
+    /// the replay produced into the bounded channel it drains, so none of the
+    /// history is left behind to look like live output.
+    reader_published: AtomicU64,
+    /// How many published events the forwarder has moved on.
+    forwarded: Arc<AtomicU64>,
     events_rx: Mutex<Option<mpsc::Receiver<AcpEvent>>>,
+    /// The prompt generation the reader tags updates with.
+    ///
+    /// Advanced before a prompt frame is written; `0` while no prompt runs.
+    prompt_generation: AtomicU64,
     server: Mutex<Option<AcpServerInfo>>,
     stderr: StderrRing,
     pid: Option<u32>,
@@ -485,14 +519,14 @@ impl AcpClient {
                     stderr: stderr_tail.clone(),
                 });
                 shared.exit_notify.notify_waiters();
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::Exited {
+                publish(
+                    &shared,
+                    AcpEvent::Exited {
                         status: status_text,
                         stderr: stderr_tail,
                         deliberate,
-                    })
-                    .await;
+                    },
+                );
             });
             *lock(&client.shared.supervisor) = Some(supervisor);
         }
@@ -516,6 +550,21 @@ impl AcpClient {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (events_tx, events_rx) = mpsc::channel(config.event_capacity.max(16));
+        let (reader_events, mut reader_events_rx) = mpsc::unbounded_channel();
+        // One task owns the bounded channel: the reader only queues here, so a
+        // slow consumer can never stop it from reading (and resolving) the
+        // agent's replies.
+        let relay = events_tx.clone();
+        let forwarded = Arc::new(AtomicU64::new(0));
+        let forwarded_count = Arc::clone(&forwarded);
+        tokio::spawn(async move {
+            while let Some(event) = reader_events_rx.recv().await {
+                if relay.send(event).await.is_err() {
+                    break;
+                }
+                forwarded_count.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let (stdin_tx, stdin_rx) = mpsc::channel(FRAME_CHANNEL_CAPACITY);
         let shared = Arc::new(Shared {
             config,
@@ -523,8 +572,11 @@ impl AcpClient {
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             stdin_tx: Mutex::new(Some(stdin_tx)),
-            events_tx,
+            reader_events,
+            reader_published: AtomicU64::new(0),
+            forwarded,
             events_rx: Mutex::new(Some(events_rx)),
+            prompt_generation: AtomicU64::new(0),
             server: Mutex::new(None),
             stderr,
             pid,
@@ -625,8 +677,17 @@ impl AcpClient {
     /// every update the turn produced before it. The prompt task uses this to
     /// publish its turn's settlement without overtaking the turn's own
     /// updates.
-    pub(crate) async fn queue_behind_reader(&self, event: AcpEvent) -> bool {
-        self.shared.events_tx.send(event).await.is_ok()
+    pub(crate) fn queue_behind_reader(&self, event: AcpEvent) -> bool {
+        publish(&self.shared, event)
+    }
+
+    /// Starts a new prompt generation and returns it.
+    ///
+    /// Called before the prompt frame is written: every `session/update` the
+    /// reader publishes from then on is tagged with this generation, and the
+    /// bridge only applies the updates that belong to the running prompt.
+    pub(crate) fn begin_prompt(&self) -> u64 {
+        self.shared.prompt_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Opens a new session and returns its models, modes and id.
@@ -708,16 +769,34 @@ impl AcpClient {
             // The reader queues the last replayed frames before it resolves
             // the reply, so some history can still sit in the channel once the
             // call settles. Drain it now, or it would surface as output of the
-            // next turn.
-            while let Ok(event) = receiver.try_recv() {
-                if !matches!(event, AcpEvent::SessionUpdate { .. }) {
-                    kept.push(event);
+            // next turn. The forwarder may not have moved the tail in yet, so
+            // wait, bounded, until everything the reader had published by the
+            // reply has arrived here, draining as it does.
+            let target = self.shared.reader_published.load(Ordering::SeqCst);
+            let deadline = tokio::time::Instant::now() + STDERR_DRAIN_GRACE;
+            loop {
+                loop {
+                    match receiver.try_recv() {
+                        Ok(event) => {
+                            if !matches!(event, AcpEvent::SessionUpdate { .. }) {
+                                kept.push(event);
+                            }
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    }
                 }
+                if self.shared.forwarded.load(Ordering::SeqCst) >= target
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
             // Hand back what arrived during the load before anything newer can
             // be read, so a permission request or an error keeps its order.
             for event in kept {
-                let _ = self.shared.events_tx.send(event).await;
+                publish(&self.shared, event);
             }
             *lock(&self.shared.events_rx) = Some(receiver);
         }
@@ -1240,6 +1319,19 @@ impl Drop for AcpClient {
     }
 }
 
+/// Publishes `event` in the order the reader read it.
+///
+/// Never blocks on the consumer: the bounded channel is fed by one forwarder
+/// task, so a slow bridge can delay delivery but never stop the reader from
+/// reading (and resolving) the agent's replies.
+fn publish(shared: &Arc<Shared>, event: AcpEvent) -> bool {
+    let published = shared.reader_events.send(event).is_ok();
+    if published {
+        shared.reader_published.fetch_add(1, Ordering::SeqCst);
+    }
+    published
+}
+
 fn spawn_writer<W>(
     mut stdin: W,
     mut frames: mpsc::Receiver<OutgoingFrame>,
@@ -1254,13 +1346,13 @@ where
             let mut bytes = match serde_json::to_vec(&frame) {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    let _ = shared
-                        .events_tx
-                        .send(AcpEvent::Error {
+                    publish(
+                        &shared,
+                        AcpEvent::Error {
                             message: format!("failed to encode an ACP frame: {error}"),
                             retryable: false,
-                        })
-                        .await;
+                        },
+                    );
                     continue;
                 }
             };
@@ -1287,14 +1379,14 @@ where
                         kind: TransportCloseKind::Write,
                     },
                 );
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::TransportClosed {
+                publish(
+                    &shared,
+                    AcpEvent::TransportClosed {
                         message: format!("failed to write to the ACP agent: {detail}"),
                         retryable: false,
                         kind: TransportCloseKind::Write,
-                    })
-                    .await;
+                    },
+                );
                 // The caller's one failure row is built from this: name the
                 // writer's own I/O error, not just that the writer left.
                 if let Some(written) = written {
@@ -1317,14 +1409,14 @@ where
                         kind: TransportCloseKind::Write,
                     },
                 );
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::TransportClosed {
+                publish(
+                    &shared,
+                    AcpEvent::TransportClosed {
                         message: format!("failed to flush the ACP agent stdin: {detail}"),
                         retryable: false,
                         kind: TransportCloseKind::Write,
-                    })
-                    .await;
+                    },
+                );
                 if let Some(written) = written {
                     let _ = written.send(Err(detail));
                 }
@@ -1353,14 +1445,14 @@ where
                 Ok(None) => break,
                 Err(error) => {
                     close_kind = TransportCloseKind::Read;
-                    let _ = shared
-                        .events_tx
-                        .send(AcpEvent::TransportClosed {
+                    publish(
+                        &shared,
+                        AcpEvent::TransportClosed {
                             message: format!("failed to read the ACP agent stdout: {error}"),
                             retryable: false,
                             kind: TransportCloseKind::Read,
-                        })
-                        .await;
+                        },
+                    );
                     break;
                 }
             };
@@ -1371,16 +1463,16 @@ where
             let frame: Value = match serde_json::from_str(line) {
                 Ok(frame) => frame,
                 Err(error) => {
-                    let _ = shared
-                        .events_tx
-                        .send(AcpEvent::Error {
+                    publish(
+                        &shared,
+                        AcpEvent::Error {
                             message: format!(
                                 "unparseable ACP frame ({error}): {}",
                                 truncate(line, 320)
                             ),
                             retryable: false,
-                        })
-                        .await;
+                        },
+                    );
                     continue;
                 }
             };
@@ -1395,13 +1487,13 @@ where
             } else if let Some(id) = frame.get("id") {
                 resolve_response(&shared, id.clone(), &frame);
             } else {
-                let _ = shared
-                    .events_tx
-                    .send(AcpEvent::Error {
+                publish(
+                    &shared,
+                    AcpEvent::Error {
                         message: "ACP frame had neither method nor id".into(),
                         retryable: false,
-                    })
-                    .await;
+                    },
+                );
             }
         }
 
@@ -1420,13 +1512,13 @@ where
             },
         );
         if !shared.shutting_down.load(Ordering::SeqCst) {
-            let _ = shared
-                .events_tx
-                .send(AcpEvent::Closed {
+            publish(
+                &shared,
+                AcpEvent::Closed {
                     message: "the ACP agent stdout closed".into(),
                     kind: close_kind,
-                })
-                .await;
+                },
+            );
         }
     })
 }
@@ -1434,20 +1526,28 @@ where
 async fn handle_notification(shared: &Arc<Shared>, method: &str, params: Value) {
     if method == "session/update" {
         if let Some((session_id, update)) = parse_session_update(&params) {
-            let _ = shared
-                .events_tx
-                .send(AcpEvent::SessionUpdate { session_id, update })
-                .await;
+            // Tag the update with the prompt it follows. The reader reads the
+            // generation when it reads the frame, so an update read while no
+            // prompt runs is tagged 0 and dropped by the bridge.
+            let generation = shared.prompt_generation.load(Ordering::SeqCst);
+            publish(
+                shared,
+                AcpEvent::SessionUpdate {
+                    generation,
+                    session_id,
+                    update,
+                },
+            );
             return;
         }
     }
-    let _ = shared
-        .events_tx
-        .send(AcpEvent::Notification {
+    publish(
+        shared,
+        AcpEvent::Notification {
             method: method.to_string(),
             params,
-        })
-        .await;
+        },
+    );
 }
 
 async fn handle_inbound(shared: &Arc<Shared>, id: Value, method: &str, params: Value) {
@@ -1474,13 +1574,13 @@ async fn handle_inbound(shared: &Arc<Shared>, id: Value, method: &str, params: V
         }
         "session/request_permission" => {
             let request = AcpPermissionRequest::from_value(&params);
-            let _ = shared
-                .events_tx
-                .send(AcpEvent::PermissionRequest {
+            publish(
+                shared,
+                AcpEvent::PermissionRequest {
                     request_id: id,
                     request,
-                })
-                .await;
+                },
+            );
         }
         "terminal/create"
         | "terminal/output"
@@ -1590,13 +1690,14 @@ fn teardown_transport(shared: &Arc<Shared>, message: String) {
             kind: TransportCloseKind::Write,
         },
     );
-    if let Err(error) = shared.events_tx.try_send(AcpEvent::TransportClosed {
+    if let Err(error) = shared.reader_events.send(AcpEvent::TransportClosed {
         message,
         retryable: false,
         kind: TransportCloseKind::Write,
     }) {
-        // A full event queue already has plenty for the daemon to act on; the
-        // closed transport is visible through `is_closed` either way.
+        // The unbounded queue only fails once its forwarder and receiver are
+        // gone, which is a client nobody is reading any more; the closed
+        // transport is visible through `is_closed` either way.
         tracing::debug!(
             target: "h4rn_harness::acp",
             %error,
@@ -2046,7 +2147,9 @@ mod tests {
         let mut events = events;
         let first = events.recv().await.expect("event");
         match first {
-            AcpEvent::SessionUpdate { session_id, update } => {
+            AcpEvent::SessionUpdate {
+                session_id, update, ..
+            } => {
                 assert_eq!(session_id, "s-1");
                 assert_eq!(update.text().as_deref(), Some("pong"));
             }
@@ -2916,6 +3019,47 @@ mod tests {
                 .await
                 .unwrap_or_else(|error| panic!("run {run}: the reply was lost: {error:?}"));
             assert_eq!(info.agent_name, "Exit Peer", "run {run}");
+            client.shutdown().await.expect("shutdown");
+        }
+    }
+
+    /// A reply behind a full event queue still resolves.
+    ///
+    /// A real agent can stream more updates than the consumer has read when its
+    /// reply lands. The reader used to block on the 17th update of a 16-slot
+    /// queue, so the supervisor's bounded exit wait aborted it before it read
+    /// the reply already in the pipe: an answered request failed with
+    /// `Closed { kind: Exit }`. Delivery may lag; it may never decide whether a
+    /// request was answered.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_behind_a_full_event_queue_still_resolves() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut frames = String::new();
+        for index in 0..40 {
+            frames.push_str(&format!(
+                "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"s-1\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"update {index}\"}}}}}}}}\n"
+            ));
+        }
+        frames.push_str(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"Busy Peer\"}}}\n",
+        );
+        // The peer answers the first frame it reads with 40 updates and then
+        // its reply, and exits without waiting for anything else.
+        let script = format!("read -r line; printf '%s' '{frames}'; exit 0");
+        let mut config =
+            AcpClientConfig::new("/bin/sh", workspace.path()).args(["-c", script.as_str()]);
+        // The review's shape: 17 updates must not stall a 16-slot queue.
+        config.event_capacity = 16;
+        for run in 0..20 {
+            let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+            // The test never reads these: the queue fills and stays full.
+            let _events = client.take_events().expect("events");
+            let info = client
+                .initialize()
+                .await
+                .unwrap_or_else(|error| panic!("run {run}: the reply was lost: {error:?}"));
+            assert_eq!(info.agent_name, "Busy Peer", "run {run}");
             client.shutdown().await.expect("shutdown");
         }
     }

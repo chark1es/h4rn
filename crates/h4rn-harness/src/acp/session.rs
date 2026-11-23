@@ -751,7 +751,10 @@ impl HarnessSession for AcpSession {
         // Tell the bridge a turn is starting before the frame can be read: a
         // `session/update` that follows is this turn's, while one that follows
         // the settlement of the previous turn is not (and is dropped there).
-        let _ = client.queue_behind_reader(AcpEvent::PromptStarted).await;
+        // The generation tags this turn so a settlement only closes its own
+        // prompt's span.
+        let generation = client.begin_prompt();
+        let _ = client.queue_behind_reader(AcpEvent::PromptStarted { generation });
         let pending = match client.start_prompt(&session_id, &content).await {
             Ok(pending) => pending,
             Err(error) => {
@@ -759,9 +762,10 @@ impl HarnessSession for AcpSession {
                 // No turn is running after this failed write: close the span
                 // the `PromptStarted` marker opened, so a late update from the
                 // previous turn is dropped instead of reaching this one.
-                let _ = client
-                    .queue_behind_reader(AcpEvent::Settled { events: Vec::new() })
-                    .await;
+                let _ = client.queue_behind_reader(AcpEvent::Settled {
+                    generation,
+                    events: Vec::new(),
+                });
                 // A prompt that failed before its frame reached the agent is
                 // the same death the prompt task would report: name the I/O
                 // error, the agent's stderr and its exit, so the daemon's one
@@ -884,9 +888,10 @@ impl HarnessSession for AcpSession {
                     // Queued behind the frames the reader has already read, so
                     // the turn's last update can never arrive after its
                     // completion (see `AcpEvent::Settled`).
-                    let _ = client
-                        .queue_behind_reader(AcpEvent::Settled { events: settled })
-                        .await;
+                    let _ = client.queue_behind_reader(AcpEvent::Settled {
+                        generation,
+                        events: settled,
+                    });
                 }
                 Err(error) => {
                     // A transport death reaches this task and the bridge
@@ -999,9 +1004,10 @@ impl HarnessSession for AcpSession {
                     // Queued behind the frames the reader has already read, so
                     // the failure row and completion land after every update
                     // this turn produced (see `AcpEvent::Settled`).
-                    let _ = client
-                        .queue_behind_reader(AcpEvent::Settled { events: settled })
-                        .await;
+                    let _ = client.queue_behind_reader(AcpEvent::Settled {
+                        generation,
+                        events: settled,
+                    });
                 }
             }
         }));
@@ -1257,20 +1263,23 @@ fn spawn_event_bridge(
     policy: AcpSessionPolicy,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Whether a prompt is running: updates can only belong to a turn
-        // between its `PromptStarted` and its settlement. An update outside
-        // that span arrived after its turn ended and has no turn to land on.
-        let mut running = true;
+        // The prompt the bridge is following, if any. Updates can only belong
+        // to a turn between its `PromptStarted` and its settlement, and only
+        // when their generation is that prompt's: an update outside that span
+        // (or a finished turn's late one) has no turn to land on.
+        let mut running: Option<u64> = Some(0);
         while let Some(event) = events.recv().await {
             let mapped: Vec<HarnessEvent> = match event {
-                AcpEvent::PromptStarted => {
-                    running = true;
+                AcpEvent::PromptStarted { generation } => {
+                    running = Some(generation);
                     Vec::new()
                 }
-                AcpEvent::SessionUpdate { .. } if !running => {
+                AcpEvent::SessionUpdate { generation, .. } if running != Some(generation) => {
                     tracing::debug!(
                         target: "h4rn_harness::acp",
-                        "dropped a session update that arrived after its turn settled"
+                        generation,
+                        running = ?running,
+                        "dropped a session update that belongs to no running turn"
                     );
                     Vec::new()
                 }
@@ -1361,9 +1370,14 @@ fn spawn_event_bridge(
                 }
                 // The prompt task queued these behind the frames it had
                 // already seen, so they arrive after the turn's own updates
-                // and before anything the reader reads next.
-                AcpEvent::Settled { events } => {
-                    running = false;
+                // and before anything the reader reads next. Only the prompt
+                // they name may close the running span: a settlement that
+                // arrives after a newer prompt started belongs to the turn
+                // before it and leaves that turn alone.
+                AcpEvent::Settled { generation, events } => {
+                    if running == Some(generation) {
+                        running = None;
+                    }
                     events
                 }
             };
@@ -1845,6 +1859,7 @@ mod tests {
 
     use super::*;
     use crate::acp::AcpClientConfig;
+    use crate::acp::parse_session_update;
     use serde_json::json;
 
     pub(crate) fn policy() -> AcpSessionPolicy {
@@ -3294,6 +3309,92 @@ mod tests {
 
         agent.await.expect("agent");
         session.shutdown().await.expect("shutdown");
+    }
+
+    /// An update tagged with a settled prompt never reaches the turn that
+    /// replaced it, even when it is read after the next prompt started.
+    ///
+    /// ACP carries no turn id on `session/update`, so the bridge tags every
+    /// update with the prompt generation the reader saw when it read the frame.
+    /// An update whose tag is not the running prompt's belongs to the turn that
+    /// already ended: applying it would put the finished turn's words on the new
+    /// prompt (and keep a promoted turn from going back to the queue).
+    #[tokio::test]
+    async fn an_update_from_a_settled_prompt_is_dropped_after_the_next_prompt_starts() {
+        let (tx, rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let bridge = spawn_event_bridge(
+            rx,
+            out_tx,
+            Arc::new(Mutex::new(AcpShared::new())),
+            Arc::new(AtomicBool::new(false)),
+            policy(),
+        );
+        let update = |text: &str, generation: u64| AcpEvent::SessionUpdate {
+            generation,
+            session_id: "s-1".into(),
+            update: parse_session_update(&json!({
+                "sessionId": "s-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text}
+                }
+            }))
+            .expect("update")
+            .1,
+        };
+
+        // Turn 1's update and settlement, then turn 2 starts.
+        tx.send(AcpEvent::PromptStarted { generation: 1 })
+            .await
+            .expect("send");
+        tx.send(update("first turn", 1)).await.expect("send");
+        tx.send(AcpEvent::Settled {
+            generation: 1,
+            events: vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }],
+        })
+        .await
+        .expect("send");
+        tx.send(AcpEvent::PromptStarted { generation: 2 })
+            .await
+            .expect("send");
+        // A stale frame read after turn 2 started still carries turn 1's tag.
+        tx.send(update("late words", 1)).await.expect("send");
+        tx.send(update("second turn", 2)).await.expect("send");
+        tx.send(AcpEvent::Settled {
+            generation: 2,
+            events: vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }],
+        })
+        .await
+        .expect("send");
+
+        let mut text = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = out_rx.recv().await {
+                match event {
+                    HarnessEvent::TextDelta { text: delta } => text.push(delta),
+                    HarnessEvent::TurnCompleted { .. } => {}
+                    other => panic!("unexpected event {other:?}"),
+                }
+                if text.len() == 2 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the bridge published both turns");
+        assert_eq!(
+            text,
+            vec!["first turn".to_string(), "second turn".to_string()],
+            "the settled prompt's late update was applied to the next turn"
+        );
+        bridge.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]

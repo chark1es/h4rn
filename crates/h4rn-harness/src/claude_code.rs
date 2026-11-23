@@ -1195,12 +1195,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probes_an_executable_and_reads_its_version() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("claude");
-        std::fs::write(&path, "#!/bin/sh\necho '2.1.323 (Claude Code)'\n").expect("write");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::test_scripts::write_script(&path, "#!/bin/sh\necho '2.1.323 (Claude Code)'\n");
         assert_eq!(probe_version(&path).as_deref(), Some("2.1.323"));
     }
 
@@ -1333,8 +1330,6 @@ mod tests {
     /// request with `reply`.
     #[cfg(unix)]
     fn fake_cli(directory: &Path, reply: &str) -> (HarnessInstall, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-
         let log = directory.join("control.log");
         let path = directory.join("claude");
         let script = format!(
@@ -1351,8 +1346,7 @@ done
 "#,
             r = reply
         );
-        std::fs::write(&path, script).expect("write the fake cli");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::test_scripts::write_script(&path, &script);
         (
             HarnessInstall {
                 path,

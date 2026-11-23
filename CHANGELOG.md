@@ -470,23 +470,37 @@ All notable changes to h4rn are recorded here. The format follows
   that write handle was open, the child inherited it and the spawn failed with `Text file busy`
   (os error 26), which `run_until` reports as "off" - the exact CI failure. The tests now run
   `/bin/sh`, which is never freshly written, and each test that expects "off" first proves the shell
-  really runs, so a spawn failure cannot pass for the command's result. The hung-CLI test keeps a
-  short budget and still covers the deadline.
+  really runs, so a spawn failure cannot pass for the command's result. The shell preflight has its
+  own budget, measured separately from the command under test, and the hung-CLI test writes a marker
+  as its first act and asserts it: a spent deadline that never started the hung command now fails
+  instead of passing for a timeout nobody exercised. The sibling harness fixtures share one helper
+  that installs a fake CLI by rename and retries the spawn while the path is `Text file busy`.
 - **A reply that reached the pipe before the agent exited is kept, and a queued message survives a
   usage limit even when the queue was already promoted.** A real ACP peer ends its turn with an
   ordinary newline-terminated frame and can exit at once, so the process may be reaped before the
   stdout reader has drained the reply already in the pipe. The supervisor now waits, bounded, for
   the reader to reach EOF before it fails anything still pending, so an answered turn settles
-  Completed instead of Failed with the exit report. The adapter also publishes a turn's settlement
-  behind the updates the reader had already taken, and drops a session update that arrives after
-  the settlement until the next prompt starts: a finished turn's last text stays with that turn and
-  is never applied to the turn that follows it. When the queued message was already promoted onto a
+  Completed instead of Failed with the exit report. Reply resolution no longer depends on the event
+  consumer keeping up either: the reader publishes into its own unbounded queue that one forwarder
+  hands to the session in order, so a full 16-slot queue can no longer park the reader before it
+  reads the reply behind it (a long `session/load` replay still drains its own history before the
+  next turn). The adapter also tags every update with the prompt generation it follows and publishes
+  a turn's settlement behind the updates the reader had already taken. The daemon drops an update
+  until the prompt has been handed to the harness, so a finished turn's late text is never
+  journaled under a turn that never ran. When the queued message was already promoted onto a
   transport that then closed, it is handed back to the exit report's pause instead of being failed:
   its write failed, so nothing it collected can be its own, and the parked prompt is delivered after
-  the reset. A death observed before the promotion is still held back by a bounded wait for the exit
-  report; in the ordering where the completion is published first, the requeue is what guarantees
-  the outcome. If no schedule can be armed (no usage meter, or a ledger that refuses it), the
-  requeued turn now fails honestly instead of staying pending with no delivery owner.
+  the reset. A turn that already did work is never run a second time: a completed tool call (which
+  leaves the running-tool map empty) counts as proof the prompt reached the provider, so that turn
+  settles as limited with its own tool card and output instead of being replayed. A death observed
+  before the promotion is still held back by a bounded wait for the exit report; in the ordering
+  where the completion is published first, the requeue is what guarantees the outcome. A pause that
+  binds to a promoted turn saves that prompt on the thread row, and a claim that finds the turn
+  parked refuses to write it, so a limit landing between promotion and claim survives a restart and
+  is delivered once after the reset. If no schedule can be armed (no usage meter, or a ledger that
+  refuses it), the requeued turn fails honestly instead of staying pending with no delivery owner,
+  and the thread reads as rate-limited, never as `Scheduled` with nothing to fire. A requeue also
+  keeps the dead session's exit status and stderr row instead of clearing it.
 - **A re-watched PR and a reconnected badge keep their promises.** Every watcher
   generation now comes from one service-wide counter that never reuses a value,
   so a poll that started before an unwatch and re-watch cannot hand its older

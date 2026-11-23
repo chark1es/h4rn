@@ -1573,12 +1573,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn probes_an_executable_and_reads_its_version() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("codex");
-        std::fs::write(&path, "#!/bin/sh\necho 'codex-cli 0.168.0'\n").expect("write");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::test_scripts::write_script(&path, "#!/bin/sh\necho 'codex-cli 0.168.0'\n");
         assert_eq!(probe_version(&path).as_deref(), Some("0.168.0"));
     }
 

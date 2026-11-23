@@ -221,7 +221,8 @@ mod tests {
     #[cfg(unix)]
     const ANSWER_BUDGET: Duration = Duration::from_secs(60);
 
-    /// Runs `/bin/sh -c <command>` through [`run_until`].
+    /// Runs `/bin/sh -c <command>` through [`run_until`], with the budget
+    /// starting after the preflight.
     ///
     /// The tests used to write a fresh executable script and spawn it at once.
     /// When another test thread forks while that write handle is still open,
@@ -231,11 +232,16 @@ mod tests {
     /// never freshly written, so these tests exercise detection, not the
     /// filesystem.
     ///
+    /// The preflight has its own budget so it can never spend the command's:
+    /// the hung test's short deadline must be measured from the moment its own
+    /// command is spawned, or a slow preflight would make `run_until` return
+    /// `None` before starting it and the test would pass without a hung child.
+    ///
     /// The positive control keeps a spawn failure from passing for a command's
     /// outcome in the tests that expect `None`: the shell really runs here, so
     /// a `None` from the command below is the command's own result.
     #[cfg(unix)]
-    fn run_shell(args: &[&str], deadline: Instant) -> Option<String> {
+    fn run_shell(args: &[&str], budget: Duration) -> Option<String> {
         let shell = Path::new("/bin/sh");
         assert!(
             shell.is_file(),
@@ -245,7 +251,7 @@ mod tests {
             run_until(shell, &["-c", "true"], Instant::now() + ANSWER_BUDGET).is_some(),
             "the test process could not run /bin/sh, so `None` below would be a spawn failure"
         );
-        run_until(shell, args, deadline)
+        run_until(shell, args, Instant::now() + budget)
     }
 
     #[test]
@@ -277,12 +283,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_hung_cli_is_killed_at_the_deadline() {
+        let workspace = tempfile::tempdir().unwrap();
+        let marker = workspace.path().join("started");
+        // The marker proves the command under test really ran: without it, a
+        // `None` from `run_until` could be the already-expired deadline, a
+        // spawn failure or a preflight that ate the budget.
+        let command = format!(": > '{}'; exec sleep 30", marker.display());
         let started = Instant::now();
-        let output = run_shell(
-            &["-c", "exec sleep 30"],
-            started + Duration::from_millis(300),
-        );
+        let output = run_shell(&["-c", &command], Duration::from_millis(300));
         assert_eq!(output, None);
+        assert!(
+            marker.exists(),
+            "the hung command never started, so this proves nothing about the deadline"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "the hung command was not given its deadline: {:?}",
+            started.elapsed()
+        );
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "a hung tailscale CLI must not stall detection: {:?}",
@@ -293,17 +311,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_prompt_cli_still_answers() {
-        let output = run_shell(&["-c", "echo 100.64.1.5"], Instant::now() + ANSWER_BUDGET);
+        let output = run_shell(&["-c", "echo 100.64.1.5"], ANSWER_BUDGET);
         assert_eq!(output.as_deref().map(str::trim), Some("100.64.1.5"));
     }
 
     #[cfg(unix)]
     #[test]
     fn a_failing_cli_reads_as_off() {
-        assert_eq!(
-            run_shell(&["-c", "exit 1"], Instant::now() + ANSWER_BUDGET),
-            None
-        );
+        assert_eq!(run_shell(&["-c", "exit 1"], ANSWER_BUDGET), None);
     }
 
     #[test]
