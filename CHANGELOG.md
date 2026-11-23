@@ -848,10 +848,10 @@ All notable changes to h4rn are recorded here. The format follows
   pid that may already belong to another process. The Windows handle kill still runs, because it
   owns a duplicated process handle rather than a bare pid. The Windows close test now also waits for
   the exit report, so a leaked blocked reader fails it instead of passing on the child handle alone.
-  The close path also drops the PTY
-  master: a killed Windows ConPTY client leaves the pseudoconsole open, which would keep the
-  reader thread blocked and the session alive, so closing the master ends the console, releases
-  the reader, and lets the exit report run.
+  The close path drops both PTY ends: a killed Windows ConPTY client leaves the pseudoconsole open,
+  which would keep the reader thread blocked and the session alive, so closing the master ends the
+  console, closing the writer releases its input pipe, and together they release the reader and let
+  the exit report run.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries with the output chunk that

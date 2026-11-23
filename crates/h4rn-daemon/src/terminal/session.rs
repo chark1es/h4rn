@@ -349,7 +349,8 @@ pub struct Session {
     /// On Windows a killed ConPTY client does not close the pseudoconsole: the
     /// master keeps it open and the reader thread (which holds the session
     /// alive) would block in `read` forever. Dropping the master closes the
-    /// console and releases the reader so `finish` can report the exit.
+    /// console, and the close path drops the writer with it, which releases
+    /// the reader so `finish` can report the exit.
     pty: Mutex<Option<Box<dyn MasterPty + Send>>>,
     /// The spawned shell's own pid, for the initial hangup.
     ///
@@ -862,9 +863,18 @@ impl Session {
         }
     }
 
-    /// Drops the PTY master, which closes the console/pipes it owns.
+    /// Drops the PTY master and writer, which close the pipes they own.
+    ///
+    /// On Windows a killed ConPTY client does not close the pseudoconsole by
+    /// itself: the master keeps it open and the reader thread, which holds the
+    /// session alive, would block in `read` forever. Dropping the master closes
+    /// the console, and dropping the writer closes the input pipe the close path
+    /// no longer needs; both ends must go for the console host to finish and the
+    /// blocked read to return, so `finish` can report the exit. On Unix the drop
+    /// releases a blocked master read after the kill.
     fn close_pty(&self) {
         drop(lock(&self.pty).take());
+        drop(lock(&self.writer).take());
     }
 
     /// Waits until the shell exits, or `limit` passes.
@@ -2006,7 +2016,10 @@ mod tests {
         while session.info().exit.is_none() {
             assert!(
                 Instant::now() < deadline,
-                "dropping the master must release the reader so it reports the exit"
+                "closing both PTY ends must release the reader so it reports the exit \
+                 (alive={}, child lock free={})",
+                session.is_alive(),
+                session.child.try_lock().is_ok(),
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

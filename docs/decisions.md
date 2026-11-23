@@ -158,12 +158,17 @@ the shell's pid as well as its group. The session also keeps a cloned child kill
 duplicated process handle — so the close path can end the shell through that handle even while the
 reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
 the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
-falls back to the same cloned killer, so the shell still ends without the child lock. The killer is
-a separate mutex, so a busy reader thread cannot delay it. After the signals the close path also
-drops the PTY master: on Windows a killed ConPTY client does not close the pseudoconsole itself, so
-the master would keep the reader thread blocked in `read` and the session alive; dropping it closes
-the console, releases the reader, and lets the exit report run. On Unix it releases a master read
-that outlived the killed group.
+falls back to the same cloned killer, so the shell still ends without the child lock. Once the close
+wait has reaped the shell, the pid fallbacks are skipped: SIGHUP and SIGKILL by pid could reach a
+process that reused it, while the Windows handle kill still runs because it holds a process handle.
+The killer is
+a separate mutex, so a busy reader thread cannot delay it. After the signals the close path drops
+both PTY ends: on Windows a killed ConPTY client does not close the pseudoconsole itself, so the
+master would keep the reader thread blocked in `read` and the session alive; dropping the master
+closes the console and dropping the writer closes its input pipe, and together they release the
+reader so the exit report runs. On Unix the drop releases a master read that outlived the killed
+group. The Windows close test waits for that exit report, so a blocked reader leaks into a failure
+rather than hiding behind the child handle.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's
