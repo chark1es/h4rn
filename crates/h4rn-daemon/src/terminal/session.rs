@@ -343,10 +343,11 @@ pub struct Session {
     child: Mutex<Box<dyn Child + Send + Sync>>,
     /// An independent killer for the shell.
     ///
-    /// `finish` can hold the child lock inside `wait()` until the shell
-    /// exits; the close path must still end the shell. The cloned killer owns
-    /// its own process handle (on Windows) or pid, so it works while that lock
-    /// is busy.
+    /// On Windows `finish` can hold the child lock inside `wait()` until the
+    /// shell exits, and the close path must still end the shell. The cloned
+    /// killer owns its own process handle (on Windows) or pid, so it works
+    /// while that lock is busy. On Unix it is the fallback for a pid signal
+    /// taken under the reap lock.
     killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
     /// The PTY master, dropped by the close path.
     ///
@@ -364,12 +365,41 @@ pub struct Session {
     shell_pid: Option<i32>,
     process_group: Option<i32>,
     exit: Mutex<Option<TerminalExit>>,
-    /// Status captured when `wait_for_shell_exit` reaped the child.
+    /// Whether the exit notice was already sent to the viewers.
     ///
-    /// `finish` runs on the reader thread and may reach `wait` after that, so
-    /// the captured status is reused instead of reporting the failed second
-    /// wait as `-1`.
+    /// The close path may reap and publish the shell before the reader thread
+    /// reaches its own reap, so both paths can find an exit to report; this
+    /// keeps the notice to exactly one.
+    exit_notified: AtomicBool,
+    /// Status captured when the shell was reaped.
+    ///
+    /// `finish` runs on the reader thread and may reach `wait` after another
+    /// path already reaped the child, so the captured status is reused instead
+    /// of reporting the failed second wait as `-1`.
     reaped_status: Mutex<Option<portable_pty::ExitStatus>>,
+    /// Serializes the real reap and every pid-targeted close signal.
+    ///
+    /// **Lock order: `reap` -> `child` -> `reaped_status` -> `exit`.** A
+    /// blocking `waitid` never runs under this lock; only the reap and the
+    /// exit publication do, and each pid-targeted signal does too.
+    ///
+    /// The shell's pid is only freed by a real reap (`wait`/`waitpid`). Every
+    /// reap the session performs itself holds this lock and publishes the exit
+    /// before releasing it, so a close that holds the lock and sees no
+    /// published exit knows the pid is still this session's live process or
+    /// its unreaped zombie, never a pid another process reused. (portable-pty's
+    /// `child.kill()` polls `try_wait` internally; that call is itself part of
+    /// the locked pid step, and no pid signal follows it.) The reader thread
+    /// first waits for the shell **without reaping** it (`waitid` with
+    /// `WNOWAIT`), so a close that signals during that wait reaches the
+    /// zombie, not a freed pid.
+    reap: Mutex<()>,
+    /// Set while the reader thread waits for the shell without reaping it.
+    ///
+    /// A test hook: the close test must wait for that pause, which no longer
+    /// holds the child lock.
+    #[cfg(all(test, unix))]
+    awaiting_shell_exit: AtomicBool,
     /// Where the close path sends its signals.
     ///
     /// Production uses [`SystemSignals`]; unit tests substitute a recorder so
@@ -431,7 +461,11 @@ impl Session {
             shell_pid,
             process_group,
             exit: Mutex::new(None),
+            exit_notified: AtomicBool::new(false),
             reaped_status: Mutex::new(None),
+            reap: Mutex::new(()),
+            #[cfg(all(test, unix))]
+            awaiting_shell_exit: AtomicBool::new(false),
             signals: Arc::new(SystemSignals),
             alive: AtomicBool::new(true),
         }
@@ -525,13 +559,82 @@ impl Session {
         if !self.alive.swap(false, Ordering::SeqCst) {
             return;
         }
+        // Wait for the shell to exit **without reaping it**. The zombie keeps
+        // its pid, so a close that runs between this wait and the reap below
+        // may signal that pid and only ever reaches this session's own
+        // process. `wait` frees the pid the moment it returns, which is why
+        // the reap itself must be under the lock the close shares.
+        #[cfg(unix)]
+        self.await_shell_exit_without_reaping();
+        // The reap and the exit publication are one step under the reap lock,
+        // so no close can observe a freed pid as unpublished.
+        match self.reap_and_publish() {
+            Some(exit) => self.notify_exit_once(exit),
+            None => {
+                // A close reaped and published the shell first. It sends the
+                // notice; this only covers the window where it has not yet.
+                if let Some(exit) = lock(&self.exit).clone() {
+                    self.notify_exit_once(exit);
+                }
+            }
+        }
+    }
+
+    /// Waits until the shell exits while leaving it reapable (Unix).
+    ///
+    /// `waitid` with `WNOWAIT` is POSIX and exists on every Unix target h4rn
+    /// builds (Linux and macOS), so no `pidfd` fallback is needed: it reports
+    /// the exit and keeps the child a zombie until [`Session::reap_and_publish`]
+    /// reaps it. `EINTR` is retried; `ECHILD` means nothing of ours is left to
+    /// wait for (another path already reaped it, or the pid is not our child),
+    /// so the reap step below sorts out the status.
+    #[cfg(unix)]
+    fn await_shell_exit_without_reaping(&self) {
+        let Some(pid) = self
+            .shell_pid
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        else {
+            // A spawned Unix child always reports its pid; only test doubles
+            // and the no-pid fallback reach the reap without this wait.
+            return;
+        };
+        #[cfg(all(test, unix))]
+        self.awaiting_shell_exit.store(true, Ordering::SeqCst);
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        loop {
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+        #[cfg(all(test, unix))]
+        self.awaiting_shell_exit.store(false, Ordering::SeqCst);
+    }
+
+    /// Reaps the shell and publishes its exit under the reap lock.
+    ///
+    /// Returns the exit it published, or `None` when another path published
+    /// one first. Lock order: `reap` -> `child` -> `reaped_status` -> `exit`.
+    fn reap_and_publish(&self) -> Option<TerminalExit> {
+        let _reap = lock(&self.reap);
+        if lock(&self.exit).is_some() {
+            return None;
+        }
         let status = {
-            // `wait_for_shell_exit` may already have reaped the child while
-            // closing the terminal; a second `wait` would then fail and lose
-            // the real status. It stores that status while still holding the
-            // child lock, so taking both locks in the same order (child, then
-            // captured status) makes the captured status visible here and
-            // closes the race where the child is reaped between the two steps.
+            // A status captured by an earlier reap (the close path on Windows,
+            // or a child that refuses a second `wait`) is reused, so the exit
+            // report is not lost to a failed wait.
             let mut child = lock(&self.child);
             let captured = lock(&self.reaped_status).take();
             match captured {
@@ -539,26 +642,38 @@ impl Session {
                 None => child.wait().ok(),
             }
         };
-        let exit = match status {
-            Some(status) => {
-                let signal = status.signal().map(str::to_owned);
-                TerminalExit {
-                    status: if signal.is_some() {
-                        -1
-                    } else {
-                        status.exit_code() as i32
-                    },
-                    signal,
-                    at: Utc::now(),
-                }
-            }
-            None => TerminalExit {
-                status: -1,
-                signal: None,
-                at: Utc::now(),
-            },
-        };
+        let exit = terminal_exit(status);
         *lock(&self.exit) = Some(exit.clone());
+        Some(exit)
+    }
+
+    /// Reaps the shell if it has already exited, without blocking.
+    ///
+    /// The caller holds the reap lock and the child lock; the exit is
+    /// published before the lock is released, so a later pid-targeted signal
+    /// sees the confirmation and skips. Returns the published exit.
+    #[cfg(unix)]
+    fn reap_exited(&self, child: &mut Box<dyn Child + Send + Sync>) -> Option<TerminalExit> {
+        if lock(&self.exit).is_some() {
+            return None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                *lock(&self.reaped_status) = Some(status.clone());
+                let exit = terminal_exit(Some(status));
+                *lock(&self.exit) = Some(exit.clone());
+                Some(exit)
+            }
+            // Still running, or a wait that could not answer.
+            Ok(None) | Err(_) => None,
+        }
+    }
+
+    /// Sends the exit notice to attached viewers exactly once.
+    fn notify_exit_once(&self, exit: TerminalExit) {
+        if self.exit_notified.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let notice = TerminalExitNotice {
             terminal_id: self.id.clone(),
             thread_id: self.thread_id.clone(),
@@ -783,14 +898,22 @@ impl Session {
     /// The order is: SIGHUP to the shell's own pid, wait until the shell exits
     /// (bounded, so a shell that ignores the hangup cannot delay shutdown
     /// forever), SIGTERM to the shell's process group, a grace period for TERM
-    /// handlers to clean up, then `child.kill()` and SIGKILL for the group. The
-    /// hangup targets the spawned child rather than the cached foreground
+    /// handlers to clean up, then the handle kill and SIGKILL for the group.
+    /// The hangup targets the spawned child rather than the cached foreground
     /// group: a shell that starts a job while it boots puts that job in the
     /// foreground, and the job would receive the hangup instead of the shell.
-    /// On Unix `child.kill()` is a SIGHUP to that same pid, so it is skipped
-    /// once the shell is confirmed reaped; Windows keeps its handle kill. The
-    /// group TERM and KILL still go out on purpose after a reap: they end the
-    /// shell's jobs, which can outlive it.
+    ///
+    /// Every pid-targeted signal — the opening hangup, the primary
+    /// `child.kill()` (a SIGHUP by pid on Unix) and the pid fallbacks — runs
+    /// under the [`Session::reap`] lock, after checking that the exit is not
+    /// published. The shell's pid is only freed by a reap, and every reap
+    /// publishes the exit under that same lock, so while a signal is sent the
+    /// pid is still this session's live process or its unreaped zombie. The
+    /// reader thread waits for the shell with `waitid(WNOWAIT)` before it
+    /// reaps, so the pid cannot be reused while the close might signal it.
+    /// The group TERM and KILL still go out on purpose after a reap: they end
+    /// the shell's jobs, which can outlive it, and accept the small reuse risk
+    /// of the group id (often the shell's own pid) for that.
     ///
     /// Waiting for the shell rather than a fixed delay is what makes the
     /// hangup reliable under load: an interactive shell forwards SIGHUP to its
@@ -799,17 +922,15 @@ impl Session {
     /// hangup, so closing a terminal on Windows still takes no two seconds.
     /// Windows has no POSIX sessions or signals: the ConPTY closes when the PTY
     /// is dropped, which ends the console processes attached to it, and the
-    /// SIGHUP/SIGTERM steps are no-ops there.
+    /// SIGHUP/SIGTERM steps are no-ops there. Its handle kill owns a process
+    /// handle rather than a bare pid, so it is untouched by this rule.
     pub async fn kill_with_grace(&self) {
         // Hang up first and wait, so the shell can run its hangup path and
         // its jobs hear SIGHUP; only then fall back to TERM and KILL for the
         // shell's group.
-        //
-        // A shell the reader thread has already reaped gets no SIGHUP by pid:
-        // that pid may belong to another process by now.
-        let hung_up = !self.shell_confirmed_reaped()
-            && hangup_pid(self.shell_pid, self.process_group)
-                .is_some_and(|pid| self.signals.hangup(pid));
+        let hung_up = hangup_pid(self.shell_pid, self.process_group)
+            .and_then(|pid| self.signal_shell_pid(|| self.signals.hangup(pid)))
+            .unwrap_or(false);
         if hung_up {
             self.wait_for_shell_exit(HANGUP_GRACE).await;
         }
@@ -819,38 +940,10 @@ impl Session {
         // Keep the grace period after TERM so a job's cleanup handler can run
         // before the group is killed.
         tokio::time::sleep(TERM_GRACE).await;
-        // The reader thread may be holding the child in `wait()` after a PTY
-        // EOF; waiting for that lock here would outlast the close deadline.
-        // The cloned killer owns its own process handle, so it still ends the
-        // shell (the only way on Windows), and the pid signals below need no
-        // handle at all.
-        match try_lock(&self.child) {
-            // A handle kill that fails (the child was already reaped, or
-            // Windows refused it) gets the same fallback as a busy lock. The
-            // child lock is held while the reaped status is read, in the same
-            // order as `finish`.
-            //
-            // On Unix `child.kill()` is a SIGHUP to the child's pid, not a
-            // handle operation, so it is skipped only when the shell is
-            // confirmed reaped: that pid may already belong to another
-            // process. `alive == false` is not confirmation — `finish` clears
-            // it before it takes the child lock, so a shell that survived the
-            // hangup can look reaped while it is still running. Windows keeps
-            // the handle kill, which owns a process handle.
-            Some(mut child) => {
-                #[cfg(windows)]
-                let kill_failed = child.kill().is_err();
-                #[cfg(not(windows))]
-                let kill_failed = {
-                    let reaped = self.confirm_reap(&mut child);
-                    !reaped && child.kill().is_err()
-                };
-                if kill_failed {
-                    self.kill_after_busy_handle();
-                }
-            }
-            None => self.kill_after_busy_handle(),
-        }
+        // The cloned killer holds its own process handle on Windows and its
+        // own pid on Unix, so the close never waits for the child lock the
+        // reader thread may take inside `finish`'s reap.
+        self.end_shell();
         if let Some(pgid) = self.process_group {
             self.signals.group(pgid, Signal::Kill);
         }
@@ -862,72 +955,102 @@ impl Session {
         self.close_pty();
     }
 
-    /// Whether the shell is already known to have exited, before the close
-    /// sends anything to its pid.
+    /// Sends one pid-targeted signal while holding the reap lock.
     ///
-    /// `finish` publishing the exit after the reader thread reaped the shell,
-    /// or a status captured by an earlier wait, is proof. Nothing else is: the
-    /// child is not polled here, because a live shell must still get the
-    /// hangup. Each lock is taken on its own.
-    fn shell_confirmed_reaped(&self) -> bool {
-        if lock(&self.exit).is_some() {
-            return true;
-        }
-        lock(&self.reaped_status).is_some()
-    }
-
-    /// Whether the shell is confirmed reaped, reaping it now if it has exited.
+    /// Returns `None` when the exit is already published: the pid may belong
+    /// to another process now, so nothing may be sent to it. Otherwise the
+    /// lock is held across the signal, and no reap can free the pid until the
+    /// signal has gone out.
     ///
-    /// The caller holds the child lock. A status captured by the hangup wait is
-    /// proof. Otherwise `try_wait` is the only check that can still tell a
-    /// running shell from an exited one: the session's `alive` flag cannot,
-    /// because `finish` clears it before it takes this lock. A status found
-    /// here is captured for `finish`, the same way `wait_for_shell_exit` stores
-    /// the status it reaps.
-    #[cfg(not(windows))]
-    fn confirm_reap(&self, child: &mut Box<dyn Child + Send + Sync>) -> bool {
-        if lock(&self.reaped_status).is_some() {
-            return true;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                *lock(&self.reaped_status) = Some(status);
-                true
+    /// Lock order: `reap` -> `exit`. The caller must not hold the child lock.
+    fn signal_shell_pid(&self, signal: impl FnOnce() -> bool) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            let _reap = lock(&self.reap);
+            if lock(&self.exit).is_some() {
+                return None;
             }
-            // Still running, or a wait that could not answer. Only a reap
-            // suppresses the pid signal.
-            Ok(None) | Err(_) => false,
+            Some(signal())
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows: the handle kill owns a process handle, and the pid
+            // signals are no-ops, so there is no pid reuse to guard against.
+            Some(signal())
         }
     }
 
-    /// Ends the shell when the child handle is busy or refused the kill.
+    /// Ends the shell after the grace period.
     ///
-    /// The pid-based fallbacks are unsafe once the shell is known to have
-    /// exited: the close wait can reap it during the hangup grace, and its pid
-    /// may already belong to another process, so SIGHUP and SIGKILL would hit
-    /// the wrong one. A status captured under the child lock skips both. A busy
-    /// lock cannot inspect the child at all; `finish` clears `alive` before it
-    /// takes that lock, so a session that is no longer alive skips them too.
-    /// The primary kill does not use that rule: it reads the child under the
-    /// lock, so a live shell that survived the hangup is still ended. The
-    /// Windows handle kill is kept: it owns a duplicated process handle rather
-    /// than a bare pid and cannot signal an unrelated process.
-    fn kill_after_busy_handle(&self) {
-        // Child lock (held by the caller or the reader thread) then the
-        // captured status, the same order `finish` takes them in.
-        let reaped = lock(&self.reaped_status).is_some() || !self.is_alive();
+    /// On Unix the primary kill and its pid fallback are one critical section
+    /// against the reap: no reap can run between them, and a shell that already
+    /// exited is reaped and published here instead of signalled.
+    fn end_shell(&self) {
         #[cfg(windows)]
         {
-            kill_through_handle(&self.killer);
-        }
-        #[cfg(not(windows))]
-        {
-            if !reaped {
-                // On Unix the handle kill is SIGHUP, which a shell may catch
-                // and ignore; the SIGKILL by pid below is the hard stop there.
-                kill_through_handle(&self.killer);
+            // A handle kill that fails (the child was already reaped, or
+            // Windows refused it) gets the same fallback as a busy lock.
+            match try_lock(&self.child) {
+                Some(mut child) => {
+                    if child.kill().is_err() {
+                        self.kill_after_busy_handle();
+                    }
+                }
+                None => self.kill_after_busy_handle(),
             }
         }
+        #[cfg(unix)]
+        {
+            let published = {
+                let _reap = lock(&self.reap);
+                if lock(&self.exit).is_some() {
+                    None
+                } else {
+                    // Reap a shell that has already exited so its pid is not
+                    // signalled and its status is kept for the exit report.
+                    let mut child = try_lock(&self.child);
+                    let reaped = child.as_mut().and_then(|child| self.reap_exited(child));
+                    if reaped.is_none() {
+                        // Still running (or the lock is busy): the pid is safe
+                        // to signal because no reap can run without this lock.
+                        //
+                        // portable-pty's `child.kill()` is a SIGHUP by pid on
+                        // Unix and polls `try_wait` for a moment inside the
+                        // call; that poll also runs under this lock, so even a
+                        // shell it reaps there cannot be signalled by a later
+                        // pid-targeted step. The fallback stays in the same
+                        // critical section.
+                        let kill_failed = match child.as_mut() {
+                            Some(child) => child.kill().is_err(),
+                            None => true,
+                        };
+                        if kill_failed {
+                            // On Unix the handle kill is SIGHUP, which a shell
+                            // may catch and ignore; the SIGKILL by pid below is
+                            // the hard stop there.
+                            kill_through_handle(&self.killer);
+                            self.signals.pid(self.shell_pid, Signal::Kill);
+                        }
+                    }
+                    reaped
+                }
+            };
+            if let Some(exit) = published {
+                self.notify_exit_once(exit);
+            }
+        }
+    }
+
+    /// Ends the shell on Windows when the child handle is busy or refused the
+    /// kill.
+    ///
+    /// The handle kill owns a duplicated process handle and cannot signal an
+    /// unrelated process, so it is kept even after a reap. Only Windows uses
+    /// this; on Unix the pid-targeted path is guarded by the reap lock.
+    #[cfg(windows)]
+    fn kill_after_busy_handle(&self) {
+        let reaped = lock(&self.reaped_status).is_some() || !self.is_alive();
+        kill_through_handle(&self.killer);
         if !reaped {
             self.signals.pid(self.shell_pid, Signal::Kill);
         }
@@ -949,27 +1072,43 @@ impl Session {
 
     /// Waits until the shell exits, or `limit` passes.
     ///
-    /// `try_wait` reaps the shell when it has exited; the status is stored
-    /// while the child lock is still held so `finish` can never see the child
-    /// as reaped without also seeing its status. Both take the child lock
-    /// before the captured-status lock.
-    ///
-    /// The child lock is only ever tried, never waited for: after a PTY EOF
-    /// the reader thread holds it in `wait()` until the shell exits, and a
-    /// blocking lock here would let that shell hold up the whole close. A
-    /// shell that is busy being reaped is simply still running as far as the
-    /// deadline is concerned, so the caller moves on to TERM and KILL.
+    /// On Unix a shell that already exited is reaped and published under the
+    /// reap lock; a running one is only checked with `try_wait`, so the pid is
+    /// never freed without the exit becoming visible in the same critical
+    /// section. The child lock is only ever tried, never waited for, so a
+    /// shell that is busy being reaped is still running as far as the deadline
+    /// is concerned and the caller moves on to TERM and KILL.
     async fn wait_for_shell_exit(&self, limit: Duration) {
         let deadline = Instant::now() + limit;
         loop {
-            if let Some(mut child) = try_lock(&self.child) {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        *lock(&self.reaped_status) = Some(status);
+            #[cfg(windows)]
+            {
+                if let Some(mut child) = try_lock(&self.child) {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            *lock(&self.reaped_status) = Some(status);
+                            return;
+                        }
+                        Err(_) => return,
+                        Ok(None) => {}
+                    }
+                }
+            }
+            #[cfg(unix)]
+            {
+                let published = {
+                    let _reap = lock(&self.reap);
+                    if lock(&self.exit).is_some() {
                         return;
                     }
-                    Err(_) => return,
-                    Ok(None) => {}
+                    match try_lock(&self.child) {
+                        Some(mut child) => self.reap_exited(&mut child),
+                        None => None,
+                    }
+                };
+                if let Some(exit) = published {
+                    self.notify_exit_once(exit);
+                    return;
                 }
             }
             if Instant::now() >= deadline {
@@ -977,6 +1116,29 @@ impl Session {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+}
+
+/// Builds the published exit record from a reaped status.
+fn terminal_exit(status: Option<portable_pty::ExitStatus>) -> TerminalExit {
+    match status {
+        Some(status) => {
+            let signal = status.signal().map(str::to_owned);
+            TerminalExit {
+                status: if signal.is_some() {
+                    -1
+                } else {
+                    status.exit_code() as i32
+                },
+                signal,
+                at: Utc::now(),
+            }
+        }
+        None => TerminalExit {
+            status: -1,
+            signal: None,
+            at: Utc::now(),
+        },
     }
 }
 
@@ -1408,8 +1570,9 @@ fn signal_group(pgid: i32, signal: Signal) {
 
 /// Signals one process directly, without the child handle.
 ///
-/// The close path uses this when the reader thread holds the child lock: the
-/// signal must go out on schedule, not after the shell decides to exit.
+/// The Unix close path uses this for its pid fallback while it holds the reap
+/// lock, so the signal goes out on schedule and cannot race a reap; the child
+/// handle is not needed for it. Windows ignores it.
 fn signal_pid(pid: Option<i32>, signal: Signal) {
     #[cfg(unix)]
     {
@@ -1921,13 +2084,12 @@ mod tests {
     /// A child that closes its stdio (so the master sees EOF) and then keeps
     /// running while ignoring SIGHUP and SIGTERM.
     ///
-    /// The EOF makes the reader thread call `finish`, which holds the child
-    /// lock inside `wait()` until the process ends. Closing the terminal must
-    /// still send TERM and then KILL on schedule instead of waiting for a lock
-    /// that the ignored hangup can never release.
+    /// The EOF makes the reader thread call `finish`, which waits for the
+    /// process to exit without reaping it. Closing the terminal must still
+    /// send TERM and then KILL on schedule instead of waiting for that wait.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_does_not_wait_for_a_shell_that_holds_the_child_lock() {
+    async fn close_does_not_wait_for_a_shell_that_outlives_the_reader_eof() {
         use std::time::Instant;
 
         let pty = portable_pty::native_pty_system()
@@ -1961,27 +2123,28 @@ mod tests {
         ));
         session.start_reader(reader);
 
-        // Wait until the reader thread's `finish` holds the child in `wait`
-        // and can no longer release it before the close path runs.
+        // Wait until the reader thread's `finish` is waiting for the shell
+        // without reaping it. That wait must not hold the child lock or the
+        // reap lock: otherwise the close could not signal at all.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while session.child.try_lock().is_ok() {
+        while !session.awaiting_shell_exit.load(Ordering::SeqCst) {
             assert!(
                 Instant::now() < deadline,
-                "the PTY EOF must let the reader thread reach the child wait"
+                "the PTY EOF must let the reader thread reach the shell wait"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         // The hangup is ignored, so the wait lasts its whole bound; the TERM
-        // grace follows. The child lock must add nothing on top. A blocking
+        // grace follows. The reap lock must add nothing on top. A blocking
         // lock would never be released here, because only this path kills the
         // shell, so a watchdog ends it shortly after the deadline and the
         // wall-clock assertion below fails instead of hanging the test.
         //
         // The watchdog waits on a completion signal rather than sleeping a
-        // fixed time, and it only signals a pid while the session still says
-        // the shell is alive: once the close reaps the child, its pid may be
-        // reused, and killing it then would hit an unrelated process.
+        // fixed time, and it only signals a pid under the reap lock while the
+        // exit is unpublished: once the shell is reaped its pid may be reused,
+        // and killing it then would hit an unrelated process.
         let bound = HANGUP_GRACE + TERM_GRACE + Duration::from_millis(500);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let watchdog = {
@@ -1993,13 +2156,15 @@ mod tests {
                 {
                     return false;
                 }
-                if !session.is_alive() {
+                let _reap = lock(&session.reap);
+                if lock(&session.exit).is_some() {
                     return false;
                 }
                 if let Some(pid) = session.shell_pid {
-                    // SAFETY: the session still reports the shell as alive, so
-                    // the pid cannot have been reaped and reused; ESRCH after
-                    // an exit that races this check is ignored.
+                    // SAFETY: the reap lock is held and the exit is
+                    // unpublished, so the pid is the live shell or its
+                    // unreaped zombie; ESRCH after an exit that races this
+                    // check is ignored.
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
                 true
@@ -2014,7 +2179,7 @@ mod tests {
         assert!(!fired, "the close path must finish without the watchdog");
         assert!(
             elapsed < bound,
-            "close must not wait for the child lock the reader thread holds (took {elapsed:?})"
+            "close must not wait for the shell the reader thread is waiting on (took {elapsed:?})"
         );
 
         // The pid/group signals reached the shell, so the reader thread's
@@ -3106,11 +3271,10 @@ mod tests {
         );
     }
 
-    /// The busy-lock fallback never signals the pid of a shell whose reader
-    /// thread has started `finish`. That path cannot inspect the child at all,
-    /// so an inactive session is taken for a reaped one. This covers the
-    /// fallback only: the primary kill reads the child under the lock, and the
-    /// tests around this one cover it.
+    /// A close never signals the pid of a shell whose exit is published, even
+    /// while the child lock is busy. The published exit is the confirmation:
+    /// `alive == false` alone is not, because `finish` clears it before the
+    /// shell has exited.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_reaped_shell_with_a_busy_child_lock_is_not_signalled_by_pid() {
@@ -3143,9 +3307,14 @@ mod tests {
         );
         let signals = Arc::new(RecordedSignals::default());
         session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
-        // `finish` clears the flag before it takes the child lock, so a close
-        // that lands in that window sees a busy handle for an exited shell.
+        // The exit is published, so the shell was reaped; a pid signal now
+        // could reach a process that reused it.
         session.alive.store(false, Ordering::SeqCst);
+        *lock(&session.exit) = Some(TerminalExit {
+            status: 0,
+            signal: None,
+            at: Utc::now(),
+        });
         let session = Arc::new(session);
 
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -3242,10 +3411,10 @@ mod tests {
     }
 
     /// A shell that ignores the hangup is still ended when the session only
-    /// *looks* reaped. `finish` clears `alive` before it takes the child lock,
-    /// so a close that lands in that window sees an inactive session for a
-    /// shell that is still running; with no usable process group, nothing else
-    /// could reach it.
+    /// *looks* reaped. `finish` clears `alive` before it waits for the shell
+    /// without reaping it, so a close that lands in that window sees an
+    /// inactive session for a shell that is still running; with no usable
+    /// process group, nothing else could reach it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_shell_that_survives_the_hangup_is_still_killed() {
@@ -3279,7 +3448,8 @@ mod tests {
         session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
         // The cached foreground group is missing, so only the handle kill and
         // the pid fallback can end this shell. The reader thread's `finish` has
-        // cleared `alive` but has not reached the child lock yet.
+        // cleared `alive` and is waiting for the shell, with its exit
+        // unpublished.
         session.process_group = None;
         session.alive.store(false, Ordering::SeqCst);
         let session = Arc::new(session);
@@ -3302,13 +3472,12 @@ mod tests {
         );
     }
 
-    /// The reader thread's exit report reaps the shell and consumes the status
-    /// the close wait captured. That reap is still a confirmed reap, so the
-    /// close must not signal the pid; the status it finds is kept for the exit
-    /// report.
+    /// A shell that has already exited when the close's terminate step runs is
+    /// reaped and its exit published inside the reap critical section, never
+    /// signalled by pid. The status is kept for the exit report.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_shell_reaped_by_the_reader_thread_is_not_signalled_by_pid() {
+    async fn a_shell_that_exited_before_the_close_is_reaped_not_signalled() {
         let pty = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -3337,8 +3506,8 @@ mod tests {
         );
         let signals = Arc::new(RecordedSignals::default());
         session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
-        // No hangup wait (no shell pid), and `finish` has already reaped the
-        // shell without the close wait capturing its status.
+        // No hangup wait (no shell pid), and the shell has exited while the
+        // reader thread has not published its exit yet.
         session.shell_pid = None;
         session.process_group = None;
         session.alive.store(false, Ordering::SeqCst);
@@ -3413,6 +3582,182 @@ mod tests {
         );
         assert_eq!(kills.load(Ordering::SeqCst), 0);
         assert!(lock(&signals.pids).is_empty());
+    }
+
+    /// Records every pid-targeted signal and checks the invariant at the
+    /// moment it is sent: the reap lock is held and the exit is unpublished.
+    #[derive(Default)]
+    struct GuardedSignals {
+        /// Set once the session exists (the recorder is built first so the
+        /// session can own it).
+        session: Mutex<Option<std::sync::Weak<Session>>>,
+        hangups: Mutex<Vec<i32>>,
+        pids: Mutex<Vec<(Option<i32>, Signal)>>,
+        violations: Mutex<Vec<String>>,
+    }
+
+    impl GuardedSignals {
+        fn record_pid_target(&self, what: &str) {
+            let Some(session) = lock(&self.session).as_ref().and_then(|weak| weak.upgrade()) else {
+                return;
+            };
+            // The signal path holds the reap lock across this call, so a free
+            // lock here means the pid was signalled outside its protection.
+            if session.reap.try_lock().is_ok() {
+                lock(&self.violations).push(format!("{what} was sent without the reap lock"));
+            }
+            if lock(&session.exit).is_some() {
+                lock(&self.violations)
+                    .push(format!("{what} was sent after the exit was published"));
+            }
+        }
+    }
+
+    impl CloseSignals for GuardedSignals {
+        fn hangup(&self, pid: i32) -> bool {
+            self.record_pid_target("the opening hangup");
+            lock(&self.hangups).push(pid);
+            true
+        }
+
+        fn group(&self, _pgid: i32, _signal: Signal) {
+            // Group signals are the documented exception: they end the
+            // shell's jobs and are allowed after a reap.
+        }
+
+        fn pid(&self, pid: Option<i32>, signal: Signal) {
+            self.record_pid_target("a pid fallback");
+            lock(&self.pids).push((pid, signal));
+        }
+    }
+
+    /// The exact race GPT reported: the reader thread has waited for the shell
+    /// to exit but has not reaped it yet, and a close runs in that pause.
+    ///
+    /// The shell is still a zombie, so a pid-targeted signal may only go out
+    /// while the reap lock shows the exit unpublished. The close then reaps it
+    /// and publishes the real status, proving the pid had not been freed when
+    /// the signal was sent.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_during_the_reader_exit_wait_only_signals_the_unreaped_zombie() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.args(["-c", "exit 7"]);
+        let child = pty.slave.spawn_command(command).expect("spawn child");
+        drop(pty.slave);
+        let writer = pty.master.take_writer().expect("pty writer");
+        let signals = Arc::new(GuardedSignals::default());
+        let mut session = Session::new(
+            TerminalId::new("term_exit_pause"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            child,
+            writer,
+        );
+        session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
+        let session = Arc::new(session);
+        *lock(&signals.session) = Some(Arc::downgrade(&session));
+        let pid = session.shell_pid.expect("spawned shell pid");
+
+        // This is the pause `finish` has before it reaps: the shell is a
+        // zombie and its pid is still ours.
+        session.await_shell_exit_without_reaping();
+        #[cfg(target_os = "linux")]
+        {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .expect("the exited shell is still a zombie");
+            let state = stat
+                .rsplit(')')
+                .next()
+                .and_then(|rest| rest.split_whitespace().next());
+            assert_eq!(
+                state,
+                Some("Z"),
+                "the reader waited for the shell without reaping it"
+            );
+        }
+
+        session.kill_with_grace().await;
+
+        assert_eq!(
+            *lock(&signals.hangups),
+            vec![pid],
+            "the opening hangup targets the shell's own pid"
+        );
+        assert!(
+            lock(&signals.pids).is_empty(),
+            "the close reaped the shell during the grace, so no pid fallback ran"
+        );
+        assert!(
+            lock(&signals.violations).is_empty(),
+            "a pid-targeted signal skipped the reap lock or followed a published exit: {:?}",
+            lock(&signals.violations)
+        );
+        let exit = session.info().exit.expect("the close reports the exit");
+        assert_eq!(
+            exit.status, 7,
+            "the close reaped the same unreaped zombie the hangup reached"
+        );
+    }
+
+    /// A live shell still gets the opening SIGHUP. A pid is only skipped once
+    /// its exit is published, so the closing hangup cannot be lost.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_shell_gets_the_opening_hangup() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
+        let mut session = Session::new(
+            TerminalId::new("term_live_hangup"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(StubbornChild {
+                pid: 4_000_005,
+                kills: Arc::clone(&kills),
+            }),
+            writer,
+        );
+        let signals = Arc::new(RecordedSignals::default());
+        session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
+        // No process group, and the child never reports an exit on its own.
+        session.process_group = None;
+        let session = Arc::new(session);
+
+        session.kill_with_grace().await;
+
+        assert_eq!(
+            *lock(&signals.hangups),
+            vec![4_000_005],
+            "a live shell's pid gets the opening SIGHUP"
+        );
     }
 
     #[tokio::test]

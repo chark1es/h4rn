@@ -140,44 +140,53 @@ fallback, keep divergence bounded to one reconnect.
 
 Closing a terminal sends SIGHUP to the shell's own process id, waits for the shell to exit so it
 has forwarded the hangup to its jobs (bounded at two seconds for a shell that ignores it), then does
-what it always did: SIGTERM to the shell's process group, a grace period for TERM handlers, then
-SIGKILL after `child.kill()`. The hangup uses the spawned child's pid rather than the
-foreground process group from `tcgetpgrp`, because a shell that starts a job while it boots puts that
-job in the foreground and it would receive the hangup instead. An interactive shell forwards SIGHUP
-to its jobs and skips `nohup`'d and `disown`'d ones, so background jobs end without special-casing
-`nohup`, and a job that called `setsid` has left the session and survives. Walking `ps` for session
-members is deliberately not done: `sess` is not portable and signalling every member reaches jobs the
+what it always did: SIGTERM to the shell's process group, a grace period for TERM handlers, then the
+handle kill (a SIGHUP by pid on Unix) and SIGKILL for the group. The hangup uses the spawned
+child's pid rather than the foreground process group from `tcgetpgrp`, because a shell that starts a
+job while it boots puts that job in the foreground and it would receive the hangup instead. An
+interactive shell forwards SIGHUP to its jobs and skips `nohup`'d and `disown`'d ones, so background
+jobs end without special-casing `nohup`, and a job that called `setsid` has left the session and
+survives. Walking `ps` for session members is deliberately not done: `sess` is not portable and
+signalling every member reaches jobs the
 user detached. The two-second wait runs only when a hangup was actually delivered; Windows has no
-POSIX signals, so closing a terminal there does not pause. When the close wait reaps the shell, it
-stores the status while still holding the child lock, and the reader thread's exit report takes the
-same locks in the same order, so it reuses that status rather than reporting `-1` from a second
-failed wait; the reap and the captured status can no longer be observed apart. The close path never
-waits for the child handle: the hangup wait only tries its lock, and when the reader thread already
-holds it in `wait()` after a PTY EOF, TERM and KILL still go out on schedule, with KILL addressed to
-the shell's pid as well as its group. The session also keeps a cloned child killer — on Windows a
-duplicated process handle — so the close path can end the shell through that handle even while the
-reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
-the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
-falls back to the same cloned killer, so the shell still ends without the child lock. Once the
-shell is confirmed reaped, no pid-targeted signal is sent: the opening hangup, `child.kill()`
-(which sends SIGHUP to the child's pid on Unix) and the pid fallbacks are all skipped, because
-SIGHUP and SIGKILL by pid could reach a process that reused it. The process-group TERM and KILL
-still go out on purpose to end the shell's jobs; the group id is often the shell's own pid, so
-they carry the same small reuse risk, accepted because jobs can outlive the shell. Confirmed means either the close wait stored the exit
-status, or the child handle reports the exit while the close path holds the child lock; the
-session's `alive` flag is not enough, because the reader thread clears it before it takes that lock,
-and a shell that ignored the hangup would otherwise be mistaken for a reaped one and left running. A
-busy child lock cannot inspect the child at all, so that fallback takes an inactive session for a
-reaped one and sends no pid signal either. The process-group TERM and KILL still run on purpose after
-a reap: they end the shell's jobs, which can outlive it. The Windows handle kill also still runs,
-because it holds a process handle rather than a bare pid. The killer is a separate mutex, so a busy
-reader thread cannot delay it. After the signals the close path drops both PTY ends: on Windows a
-killed ConPTY client does not close the pseudoconsole itself, so the master would keep the reader
-thread blocked in `read` and the session alive; dropping the master closes the console and dropping
-the writer closes its input pipe, and together they release the reader so the exit report runs. On
-Unix the drop releases a master read that outlived the killed group. The Windows close test waits
-for that exit report, so a blocked reader leaks into a failure rather than hiding behind the child
-handle.
+POSIX signals, so closing a terminal there does not pause.
+
+A pid belongs to the shell only until the shell is reaped, and `wait` frees it for reuse the moment
+it returns. A close that signalled the pid after that could reach an unrelated process, and no
+check-then-signal can close the window because the check and the signal are two steps. So the pid is
+kept alive for as long as a close might signal it: the reader thread's exit path first waits for the
+shell **without reaping it**, `waitid(P_PID, pid, …, WEXITED | WNOWAIT)` retried on `EINTR`, which
+reports the exit and leaves the child a zombie. (`WNOWAIT` is POSIX and available on every Unix
+target h4rn builds, so no `pidfd_send_signal` fallback is needed; the waitid call is documented at
+the call site.) Then it takes a dedicated `reap` mutex, reaps with `child.wait()`, publishes the
+exit, and releases it. The blocking `waitid` never runs under that mutex, so the close can always
+take it; only the reap-and-publish and each pid-targeted signal do.
+Every pid-targeted signal — the opening hangup, the primary `child.kill()`, and the pid fallbacks —
+takes the same `reap` mutex, checks whether the exit is already published, and signals only while
+it is not, still holding the lock. While the lock is held and the exit is unpublished the pid is
+this session's live process or its unreaped zombie, never a pid another process reused. A shell that
+already exited when a close runs is reaped and its exit published inside that critical section, so
+its pid is not signalled at all and its status is not lost. The lock order is `reap`, then `child`,
+then the stored status, then the exit.
+
+A **confirmed reap** is therefore any of: the exit published after a reap (by the reader thread, or
+by a close that reaped first), a stored exit status, or the `reap` lock being held with the exit
+already published. The session's `alive` flag is not confirmation — `finish` clears it before it
+waits for the shell — and a shell that ignored the hangup would otherwise be mistaken for a reaped
+one and left running. The close path never waits for the child handle: the hangup wait only tries its
+lock, and a busy handle falls back to the cloned
+child killer, which holds its own process handle on Windows and its own pid on Unix. The session
+also keeps that cloned killer so the close can end the shell through it while the reader thread is
+busy. On Windows that handle kill is the only termination path the console has, and it is unchanged:
+a process handle cannot be confused with a reused pid. The process-group TERM and KILL still go out
+on purpose to end the shell's jobs, which can outlive it; the group id is often the shell's own pid,
+so they carry the same small reuse risk, accepted for that reason. After the signals the close path
+drops both PTY ends: on Windows a killed ConPTY client does not close the pseudoconsole itself, so
+the master would keep the reader thread blocked in `read` and the session alive; dropping the master
+closes the console and dropping the writer closes its input pipe, and together they release the
+reader so the exit report runs. On Unix the drop releases a master read that outlived the killed
+group. The Windows close test waits for that exit report, so a blocked reader leaks into a failure
+rather than hiding behind the child handle.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's

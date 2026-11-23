@@ -428,15 +428,17 @@ All notable changes to h4rn are recorded here. The format follows
   received no answer at all. A claim now gives way only to a viewer that could actually be written
   under the ownership rule: any viewer when all of them name positions, otherwise only the owner.
   A positioned viewer that the owner rule blocks can no longer swallow the answer either.
-- **Closing a terminal ends the shell even when it ignores the hangup, and never signals a reaped
-  pid.** On Unix `child.kill()` is a SIGHUP to the shell's pid, and once the close had reaped the
-  shell that pid could already belong to another process. The close now skips that signal only when
-  the shell is confirmed reaped — the hangup wait stored its exit status, or the child handle reports
-  it while the close holds the child lock — so a shell that survives the hangup and has no usable
-  process group is still ended. The session's internal `alive` flag is not a reap confirmation: the
-  reader thread clears it just before it takes the exit status. The group's TERM and KILL still go
-  out on purpose, to end the shell's jobs, and Windows keeps its handle kill, which holds a process
-  handle rather than a bare pid.
+- **Closing a terminal never signals a pid that another process may own, and still ends a shell that
+  ignores the hangup.** On Unix a pid is freed the moment the shell is reaped, so a close that ran
+  between the reap and the exit report could SIGHUP or SIGKILL whatever process reused it. The
+  reader thread now waits for the shell with `waitid(WNOWAIT)`, which reports the exit but leaves
+  the shell a zombie, and every real reap publishes the exit under a lock the close holds around
+  each pid-targeted signal: the opening hangup, the primary kill (a SIGHUP by pid on Unix) and the
+  pid fallback. While that lock shows no published exit, the pid is still this shell's live process
+  or its unreaped zombie, never a reused pid. A shell that survives the hangup and has no usable
+  process group is still ended, and the session's internal `alive` flag is never taken for a reap
+  confirmation. The group's TERM and KILL still go out on purpose, to end the shell's jobs, and
+  Windows keeps its handle kill, which holds a process handle rather than a bare pid.
 - **Thread settings always describe the session that will run the next turn.** The model list a
   Codex session reports survives the session ending, so an idle thread still offers the models its
   CLI really has (and a new Codex thread starts on the first of them, not on a static default the
