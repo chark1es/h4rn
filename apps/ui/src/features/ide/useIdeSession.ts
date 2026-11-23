@@ -664,7 +664,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           filesLoading: false,
           filesError: null,
           // One comparison has one name. The daemon resolves the default base
-          // (and every abbreviation) to this branch; the pane remembers the
+          // (and the default base) to this branch; the pane remembers the
           // resolved name so the picker, the next requests and the comment key
           // all name the same comparison however the base was chosen.
           ...(against.kind === "base" && files.base ? { diffBase: files.base } : {}),
@@ -849,6 +849,11 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       setState,
     ],
   );
+
+  // The workspace effect re-runs an interrupted diff load through these
+  // without taking them as dependencies (that would re-run the whole restore).
+  const resumeDiffRef = useRef({ openDiff, loadBranch, loadCommit });
+  resumeDiffRef.current = { openDiff, loadBranch, loadCommit };
 
   /** Switches the pane's scope and loads whatever that scope needs. */
   const selectDiffSource = useCallback(
@@ -1041,17 +1046,37 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     };
     const cached = IDE_CACHE.get(workspaceKey);
     if (cached) {
+      // A diff, file list or commit list that was still loading when the
+      // workspace changed was dropped above. What the cache holds for it
+      // belongs to the previous request (`openDiff` keeps the last body until
+      // its reply lands), so never show it under the newer choice: clear it and
+      // ask again for exactly what was being loaded.
+      const interrupted = cached.diffLoading || cached.filesLoading || cached.commitsLoading;
+      const stale: Partial<IdeState> = interrupted
+        ? {
+            diff: null,
+            ...(cached.filesLoading ? { diffFiles: null } : {}),
+            ...(cached.commitsLoading ? { diffCommits: null } : {}),
+          }
+        : {};
       // A project keeps its tabs. Do not auto-open over them; just refresh the
       // root listing so new or deleted files still show up.
       applyState({
         ...cached,
         ...idle,
+        ...stale,
         workspaceKey,
         restoredTabs: cached.tabs.tabs.length,
         treeLoading: cached.listings[""] === undefined,
         treeError: null,
       });
       if (cached.listings[""] === undefined) void loadListing("");
+      if (interrupted) {
+        const resume = resumeDiffRef.current;
+        if (cached.diffSource === "branch") void resume.loadBranch(cached.diffPath);
+        else if (cached.diffSource === "commit") void resume.loadCommit(cached.diffPath);
+        else if (cached.diffPath) void resume.openDiff(cached.diffPath, cached.diffSource);
+      }
     } else {
       applyState({ ...initialState(), ...idle, workspaceKey });
       void loadListing("");

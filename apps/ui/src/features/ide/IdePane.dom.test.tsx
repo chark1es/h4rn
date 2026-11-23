@@ -769,4 +769,49 @@ describe("one comparison has one branch list and one comment key", () => {
     expect(screen.queryByRole("region", { name: "Diff lines" })).toBeNull();
     expect(pathBar().textContent).toBe(`${workspacePath}-empty`);
   });
+
+  it("re-reads a diff that was still loading when the person left and came back", async () => {
+    await mount();
+    await openDiff();
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew head/ })).toBeTruthy(),
+    );
+
+    // The editor opens b.ts and its diff reply is held back.
+    const release = holdNext("fs_diff");
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() => expect(diffRequests().at(-1)?.path).toBe("b.ts"));
+    const before = diffRequests().length;
+
+    // The person moves to a thread in another workspace and the held reply is
+    // dropped there.
+    const other = "th_2" as ThreadId;
+    mock.state.threads = {
+      ...mock.state.threads,
+      [other]: threadRow(other, `${workspacePath}-empty`, "Another task"),
+    };
+    act(() => {
+      mock.state.ui.selectedThreadId = other;
+      mock.notify();
+    });
+    await waitFor(() => expect(screen.getByText("Open a file to compare it.")).toBeTruthy());
+    await releaseHold(release);
+
+    // Coming back must not show a.ts's lines under b.ts: the interrupted read
+    // is asked again and b.ts's own diff is shown.
+    act(() => {
+      mock.state.ui.selectedThreadId = thread;
+      mock.notify();
+    });
+    await waitFor(() => expect(diffRequests().length).toBeGreaterThan(before));
+    expect(diffRequests().at(-1)?.path).toBe("b.ts");
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew head/ })).toBeTruthy(),
+    );
+    expect(within(diffLines()).queryByRole("button", { name: /Line 1: anew head/ })).toBeNull();
+    expect(pathBar().textContent).toBe("b.ts");
+  });
 });
