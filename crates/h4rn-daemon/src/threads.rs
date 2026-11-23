@@ -1158,6 +1158,7 @@ struct SummarySignature {
     tab: ThreadTab,
     pinned: bool,
     needs_attention: bool,
+    pending_guest_requests: u32,
     unread: bool,
     agent_state: AgentState,
     snoozed_until: Option<DateTime<Utc>>,
@@ -1171,6 +1172,7 @@ impl SummarySignature {
             tab: summary.tab,
             pinned: summary.pinned,
             needs_attention: summary.needs_attention,
+            pending_guest_requests: summary.pending_guest_requests,
             unread: summary.unread,
             agent_state: summary.agent_state,
             snoozed_until: summary.snoozed_until,
@@ -1218,6 +1220,7 @@ impl ThreadRecord {
             context_window: self.context_window,
             context_fill_percent: self.meta.usage.context_fill_percent(self.context_window),
             needs_attention: needs_attention(&self.state, now, settings),
+            pending_guest_requests: self.state.pending_guest_requests,
             unread: tab == ThreadTab::Done && !self.state.acknowledged,
             resume_at: self.resume_at,
             limit: self.limit.clone(),
@@ -1880,6 +1883,57 @@ impl ThreadManager {
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
         self.inner.broadcast(&record.meta.thread_id, &wire, &seqs);
         Ok(seqs.last().copied().unwrap_or(0))
+    }
+
+    /// Records a guest message waiting for the owner (ADR-044).
+    ///
+    /// The lifecycle raises a hand and wakes a snoozed thread, and the wire
+    /// carries the request itself so every client can render the card.
+    pub async fn emit_guest_request(
+        &self,
+        thread_id: &ThreadId,
+        request: h4rn_protocol::GuestRequest,
+    ) -> Result<u64, ManagerError> {
+        let handle = self.inner.handle(thread_id).await?;
+        let mut record = handle.lock().await;
+        let now = self.now();
+        let domain = vec![
+            ThreadEvent::MessageReceived {
+                source: h4rn_core::MessageSource::Guest,
+                at: now,
+            },
+            ThreadEvent::GuestRequestAdded { at: now },
+        ];
+        let wire = vec![Event::GuestRequested {
+            thread_id: thread_id.clone(),
+            request,
+        }];
+        self.inner
+            .emit(&mut record, domain, wire)
+            .await
+            .map(|(_, seq)| seq)
+    }
+
+    /// Records that a guest request was sent or dismissed.
+    pub async fn emit_guest_request_resolved(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+        sent: bool,
+    ) -> Result<u64, ManagerError> {
+        let handle = self.inner.handle(thread_id).await?;
+        let mut record = handle.lock().await;
+        let now = self.now();
+        let domain = vec![ThreadEvent::GuestRequestRemoved { at: now }];
+        let wire = vec![Event::GuestRequestResolved {
+            thread_id: thread_id.clone(),
+            request_id: request_id.to_owned(),
+            sent,
+        }];
+        self.inner
+            .emit(&mut record, domain, wire)
+            .await
+            .map(|(_, seq)| seq)
     }
 
     /// Drops approvals that a finished child leaves behind.

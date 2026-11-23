@@ -439,6 +439,9 @@ pub struct ThreadSummary {
     pub context_fill_percent: Option<u8>,
     /// Whether the thread is raising a hand.
     pub needs_attention: bool,
+    /// Guest messages waiting for the owner to send or dismiss (ADR-044).
+    #[serde(default)]
+    pub pending_guest_requests: u32,
     /// Whether a finished turn has not been acknowledged.
     pub unread: bool,
     /// When auto-resume will try this thread again, when scheduled (ADR-024).
@@ -731,6 +734,7 @@ mod tests {
             context_window: None,
             context_fill_percent: None,
             needs_attention: false,
+            pending_guest_requests: 0,
             unread: false,
             resume_at,
             limit,

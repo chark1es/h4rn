@@ -7,4 +7,4 @@
  * device-machine link, signs them into the device's access token, and relays
  * them to the daemon, which enforces them per request. `view` is always held.
  */
-export type PairScope = "view" | "approve" | "terminal" | "files" | "admin";
+export type PairScope = "view" | "approve" | "terminal" | "files" | "guest" | "admin";

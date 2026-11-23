@@ -37,6 +37,7 @@ pub mod connect;
 pub mod forge;
 mod fs;
 mod git_actions;
+mod guest;
 mod harness;
 mod ids;
 pub mod mcp;
@@ -77,6 +78,11 @@ pub use fs::{
 };
 pub use git_actions::{
     GitChangeSet, GitCommitResult, GitOperation, GitPushResult, GitThreadStatus, MAX_GIT_PATHS,
+};
+pub use guest::{
+    GUEST_COOKIE, GUEST_LINK_TTL_HOURS, GUEST_MAX_FILES, GUEST_MAX_MESSAGE_BYTES,
+    GUEST_MAX_PENDING_BYTES, GuestAttachment, GuestAttachmentInput, GuestLink, GuestLinkState,
+    GuestMessageInput, GuestRequest, GuestSettings, GuestSharing, GuestSnapshot, GuestThreadView,
 };
 pub use harness::{
     HarnessOutputStream, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo,

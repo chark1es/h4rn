@@ -135,6 +135,8 @@ pub struct ThreadState {
     pub pending_question: bool,
     /// A failure is waiting to be acknowledged.
     pub pending_failure: bool,
+    /// Guest messages waiting for the owner to send or dismiss (ADR-044).
+    pub pending_guest_requests: u32,
     /// The host disappeared while work was active.
     pub host_unreachable: bool,
     /// Usage-limit state.
@@ -165,6 +167,7 @@ impl ThreadState {
             pending_approval: false,
             pending_question: false,
             pending_failure: false,
+            pending_guest_requests: 0,
             host_unreachable: false,
             usage_limit: None,
             link_closed: false,
@@ -350,6 +353,15 @@ impl ThreadState {
                 }
                 if *source == MessageSource::Guest {}
             }
+            ThreadEvent::GuestRequestAdded { at } => {
+                self.pending_guest_requests = self.pending_guest_requests.saturating_add(1);
+                self.acknowledged = false;
+                self.last_activity = *at;
+            }
+            ThreadEvent::GuestRequestRemoved { at } => {
+                self.pending_guest_requests = self.pending_guest_requests.saturating_sub(1);
+                self.last_activity = *at;
+            }
             ThreadEvent::ManualMove { tab, pinned, at } => {
                 self.manual = Some(ManualOverride {
                     tab: *tab,
@@ -489,6 +501,9 @@ pub fn needs_attention(
     if state.pending_approval || state.pending_question || state.pending_failure {
         return true;
     }
+    if state.pending_guest_requests > 0 {
+        return true;
+    }
     if state.host_unreachable {
         return true;
     }
@@ -576,6 +591,7 @@ fn holds_settlement(state: &ThreadState, now: DateTime<Utc>) -> bool {
         || state.pending_approval
         || state.pending_question
         || state.pending_failure
+        || state.pending_guest_requests > 0
         || state.host_unreachable
         || state.pr_watch
         || is_snoozed(state, now)
@@ -694,6 +710,16 @@ pub enum ThreadEvent {
         /// Event time.
         at: DateTime<Utc>,
     },
+    /// A guest submitted a message that waits for the owner (ADR-044).
+    GuestRequestAdded {
+        /// Event time.
+        at: DateTime<Utc>,
+    },
+    /// A waiting guest message was sent or dismissed.
+    GuestRequestRemoved {
+        /// Event time.
+        at: DateTime<Utc>,
+    },
     /// The user moved the thread by hand.
     ManualMove {
         /// Destination tab.
@@ -766,6 +792,8 @@ impl ThreadEvent {
             | Self::HostRestored { at }
             | Self::FailureRaised { at }
             | Self::MessageReceived { at, .. }
+            | Self::GuestRequestAdded { at }
+            | Self::GuestRequestRemoved { at }
             | Self::ManualMove { at, .. }
             | Self::Acknowledge { at }
             | Self::Reopen { at }
@@ -790,6 +818,7 @@ impl ThreadEvent {
                     source: MessageSource::Guest | MessageSource::Subagent,
                     ..
                 }
+                | Self::GuestRequestAdded { .. }
         )
     }
 }
@@ -1065,6 +1094,40 @@ mod tests {
             let woken = snoozed.apply(&event);
             assert!(!is_snoozed(&woken, at(10)), "{event:?} should wake snooze");
         }
+    }
+
+    #[test]
+    fn a_guest_request_raises_a_hand_until_it_is_answered() {
+        let waiting = ThreadState::new(at(0)).apply(&ThreadEvent::GuestRequestAdded { at: at(1) });
+        assert_eq!(waiting.pending_guest_requests, 1);
+        assert!(needs_attention(&waiting, at(2), &settings()));
+        assert!(holds_settlement(&waiting, at(2)));
+
+        let snoozed = waiting.clone().apply(&ThreadEvent::Snooze {
+            until: Some(at(100)),
+            at: at(3),
+        });
+        let sent = snoozed
+            .clone()
+            .apply(&ThreadEvent::GuestRequestRemoved { at: at(4) });
+        assert_eq!(sent.pending_guest_requests, 0);
+        assert!(!needs_attention(&sent, at(5), &settings()));
+        assert!(is_snoozed(&sent, at(5)));
+
+        let two = waiting.apply(&ThreadEvent::GuestRequestAdded { at: at(3) });
+        assert_eq!(two.pending_guest_requests, 2);
+        let one = two.apply(&ThreadEvent::GuestRequestRemoved { at: at(4) });
+        assert_eq!(one.pending_guest_requests, 1);
+    }
+
+    #[test]
+    fn a_guest_request_wakes_a_snoozed_thread() {
+        let snoozed = ThreadState::new(at(0)).apply(&ThreadEvent::Snooze {
+            until: Some(at(100)),
+            at: at(1),
+        });
+        let woken = snoozed.apply(&ThreadEvent::GuestRequestAdded { at: at(2) });
+        assert!(!is_snoozed(&woken, at(2)));
     }
 
     #[test]

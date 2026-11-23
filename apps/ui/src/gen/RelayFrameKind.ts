@@ -3,4 +3,4 @@
 /**
  * Which relay frame this is.
  */
-export type RelayFrameKind = "open" | "data" | "close" | "ping";
+export type RelayFrameKind = "open" | "data" | "guest_http" | "close" | "ping";
