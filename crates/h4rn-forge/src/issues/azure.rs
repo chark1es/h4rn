@@ -178,6 +178,25 @@ async fn state_categories_for(
     }
 }
 
+/// True when a work-item type's reference name is one Azure gives an `Issue`
+/// or `Bug`: the system `Microsoft.VSTS.WorkItemTypes.<type>` form, or the
+/// inherited-process `<Process>.<type>` form. `Microsoft.<type>` is not one of
+/// Azure's names.
+fn is_issue_reference(reference: &str) -> bool {
+    const SYSTEM: &str = "Microsoft.VSTS.WorkItemTypes.";
+    if let Some(kind) = reference.strip_prefix(SYSTEM) {
+        return ISSUE_TYPES.contains(&kind);
+    }
+    match reference.rsplit_once('.') {
+        Some((process, kind)) => {
+            !process.is_empty()
+                && !process.eq_ignore_ascii_case("Microsoft")
+                && ISSUE_TYPES.contains(&kind)
+        }
+        None => false,
+    }
+}
+
 /// Discovers the project's issue work-item types and reads each one's states.
 ///
 /// A type whose states endpoint 404s is not defined by this process and is
@@ -193,8 +212,8 @@ async fn type_states(http: &ForgeHttp, api: &str, repo: &ForgeRepoRef) -> Result
     for kind in available["value"].as_array().into_iter().flatten() {
         let name = text(kind, "name");
         let reference = text(kind, "referenceName");
-        let documented = ISSUE_TYPES.iter().any(|known| *known == name)
-            || matches!(reference.as_str(), "Microsoft.Issue" | "Microsoft.Bug");
+        let documented =
+            ISSUE_TYPES.iter().any(|known| *known == name) || is_issue_reference(&reference);
         if name.is_empty() || !documented || order.contains(&name) {
             continue;
         }

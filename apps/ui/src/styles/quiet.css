@@ -6257,8 +6257,7 @@ fieldset.q-seg-fs {
   background: var(--bg-sunk);
 }
 .q-issue-row[aria-current="true"] {
-  border-left-color: var(--accent);
-  background: var(--bg-sunk);
+  background: var(--sel);
 }
 .q-issue-num {
   color: var(--fg-3);

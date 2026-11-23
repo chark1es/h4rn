@@ -396,15 +396,10 @@ export function issueCapabilitiesFor(
   entries: ForgeCapabilityEntry[],
 ): ForgeIssueCapabilities {
   if (kind === "linear") {
-    return {
-      ...NO_ISSUE_CAPABILITIES,
-      read: true,
-      comments: true,
-      search: true,
-      assigned_filter: true,
-      created_filter: true,
-      linked_pull_requests: true,
-    };
+    return (
+      entries.find((entry) => entry.forge === "linear")?.capabilities.issues ??
+      NO_ISSUE_CAPABILITIES
+    );
   }
   if (!account) return NO_ISSUE_CAPABILITIES;
   const forge = (account as ForgeAccount).forge;

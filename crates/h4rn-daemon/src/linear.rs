@@ -11,10 +11,44 @@ use std::sync::{Arc, RwLock};
 use chrono::Utc;
 use h4rn_forge::ForgeError;
 use h4rn_forge::issues::{LINEAR_ENDPOINT, LinearClient};
+use h4rn_protocol::ForgeCapabilities;
 use h4rn_protocol::issues::{
-    ForgeIssueFilter, LinearAccount, LinearIssue, LinearIssueComment, LinearIssuePage,
-    LinearProjectTeam, LinearTeam,
+    ForgeIssueCapabilities, ForgeIssueFilter, LinearAccount, LinearIssue, LinearIssueComment,
+    LinearIssuePage, LinearProjectTeam, LinearTeam,
 };
+
+/// What Linear's issue tracker can do, reported as one capability row so the
+/// Issues page hides what Linear would refuse.
+pub fn capabilities() -> ForgeCapabilities {
+    ForgeCapabilities {
+        device_flow: false,
+        review_threads: false,
+        resolve_threads: false,
+        nested_replies: false,
+        inline_review_comments: false,
+        checks: false,
+        pipelines: false,
+        diff_pagination: false,
+        graphql: true,
+        rerun_checks: false,
+        conditional_poll: false,
+        issues: ForgeIssueCapabilities {
+            read: true,
+            // Linear comments are writable here; titles, bodies, labels,
+            // assignees and state changes are not.
+            write: false,
+            comments: true,
+            labels: false,
+            assignees: false,
+            close_reason: false,
+            search: true,
+            assigned_filter: true,
+            created_filter: true,
+            mentioning_filter: false,
+            linked_pull_requests: true,
+        },
+    }
+}
 
 use crate::config::create_private_dir;
 use crate::forge::{ForgeServiceError, SecretStore};
@@ -216,6 +250,16 @@ impl LinearService {
     ) -> Result<LinearIssue, ForgeServiceError> {
         let client = self.client(account_id)?;
         Ok(client.get_issue(issue_id, comments_after).await?)
+    }
+
+    /// Reads one issue's team id, for an ownership check.
+    pub async fn team_id(
+        &self,
+        account_id: &str,
+        issue_id: &str,
+    ) -> Result<String, ForgeServiceError> {
+        let client = self.client(account_id)?;
+        Ok(client.team_id(issue_id).await?)
     }
 
     /// Reads one issue for a linked thread, resolving the account itself.

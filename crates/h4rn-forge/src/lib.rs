@@ -428,7 +428,7 @@ pub fn capability_entries() -> Vec<h4rn_protocol::ForgeCapabilityEntry> {
     ]
     .into_iter()
     .map(|forge| h4rn_protocol::ForgeCapabilityEntry {
-        forge,
+        forge: forge.into(),
         capabilities: capabilities(forge),
     })
     .collect()

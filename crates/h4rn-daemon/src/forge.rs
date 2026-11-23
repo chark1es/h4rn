@@ -27,6 +27,7 @@ use h4rn_protocol::{
     ForgeCommentPage, ForgeCredentialSource, ForgeDeviceFlow, ForgeDeviceFlowStatus, ForgeDiffPage,
     ForgeHandoff, ForgeKind, ForgeNewPr, ForgePrFilter, ForgePullRequest, ForgeRemote,
     ForgeRepoRef, ForgeReviewComment, ProtoError, ProtoErrorCode, RuntimeMode, ThreadId,
+    TrackerKind,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -346,14 +347,19 @@ impl ForgeService {
         }
     }
 
-    /// Configured accounts plus one capability row per forge.
+    /// Configured accounts plus one capability row per tracker.
     pub fn list_accounts(&self) -> (Vec<ForgeAccount>, Vec<ForgeCapabilityEntry>) {
         let accounts = self
             .accounts
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        (accounts, h4rn_forge::capability_entries())
+        let mut entries = h4rn_forge::capability_entries();
+        entries.push(ForgeCapabilityEntry {
+            forge: TrackerKind::Linear,
+            capabilities: crate::linear::capabilities(),
+        });
+        (accounts, entries)
     }
 
     /// Validates a token with the forge, then stores the account.
@@ -1522,6 +1528,22 @@ mod tests {
         };
         save_accounts(&path, std::slice::from_ref(&account)).unwrap();
         assert_eq!(load_accounts(&path).unwrap(), vec![account]);
+    }
+
+    #[tokio::test]
+    async fn the_capability_list_carries_a_linear_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = ForgeService::open(dir.path()).unwrap();
+        let (_, entries) = service.list_accounts();
+        let linear = entries
+            .iter()
+            .find(|entry| entry.forge == TrackerKind::Linear)
+            .expect("Linear has its own row");
+        assert!(linear.capabilities.issues.read);
+        assert!(linear.capabilities.issues.comments);
+        assert!(linear.capabilities.issues.search);
+        assert!(!linear.capabilities.issues.write);
+        service.shutdown();
     }
 
     #[test]

@@ -54,7 +54,7 @@ function account(overrides: Partial<ForgeAccount> = {}): ForgeAccount {
 }
 
 function capabilityEntry(
-  forge: ForgeAccount["forge"],
+  forge: ForgeCapabilityEntry["forge"],
   issues: ForgeIssueCapabilities,
 ): ForgeCapabilityEntry {
   return {
@@ -109,6 +109,8 @@ const mock = vi.hoisted(() => {
     hideRow: false,
     /** The tracker's state after the last update. */
     closed: false,
+    /** Whether the read reported a repository no project owns. */
+    readOnly: false,
   };
   const issue = (target: ForgeRepoRef, title = "Dark mode flickers"): ForgeIssue => ({
     summary: {
@@ -210,7 +212,7 @@ const mock = vi.hoisted(() => {
                 ],
           page: request.page,
           has_more: request.page === 1 ? (state.hasMore[request.repo.repo] ?? false) : false,
-          read_only: false,
+          read_only: state.readOnly,
         };
       }
       case "forge_get_issue": {
@@ -218,7 +220,7 @@ const mock = vi.hoisted(() => {
         detail.summary.state = state.closed ? "closed" : "open";
         if (state.detailLabels) detail.summary.labels = state.detailLabels;
         if (state.detailAssignees) detail.summary.assignees = state.detailAssignees;
-        return { type: "forge_issue", issue: detail, read_only: false };
+        return { type: "forge_issue", issue: detail, read_only: state.readOnly };
       }
       case "linear_get_issue": {
         const after = request.comments_after;
@@ -368,7 +370,7 @@ vi.mock("@/features/projects/store", () => ({
 }));
 
 import { IssuesPage } from "./IssuesPage";
-import { linearIssueRow } from "./store";
+import { issueCapabilitiesFor, linearIssueRow } from "./store";
 
 function resetTracker(
   options: {
@@ -382,6 +384,7 @@ function resetTracker(
     hasMore?: Record<string, boolean>;
     detailLabels?: { name: string; color: string | null }[];
     detailAssignees?: { login: string; name: string | null }[];
+    readOnly?: boolean;
   } = {},
 ) {
   mock.state.projects = options.projects ?? [
@@ -397,6 +400,16 @@ function resetTracker(
   mock.state.accounts = options.accounts ?? [account()];
   mock.state.capabilities = options.capabilities ?? [
     capabilityEntry("github", issueCapabilities()),
+    capabilityEntry(
+      "linear",
+      issueCapabilities({
+        write: false,
+        labels: false,
+        assignees: false,
+        close_reason: false,
+        mentioning_filter: false,
+      }),
+    ),
   ];
   mock.state.repos = options.repos ?? { "/work/widget": repo };
   mock.state.commentsCursor = options.commentsCursor ?? null;
@@ -409,6 +422,7 @@ function resetTracker(
   mock.state.detailAssignees = options.detailAssignees ?? null;
   mock.state.hideRow = false;
   mock.state.closed = false;
+  mock.state.readOnly = options.readOnly ?? false;
 }
 
 beforeEach(() => {
@@ -458,6 +472,19 @@ describe("the Issues page", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it("marks an issue read-only when no project owns the repository", async () => {
+    resetTracker({ readOnly: true });
+    render(<IssuesPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /Dark mode flickers/ }));
+    expect(
+      await screen.findByText(
+        "This project does not own the repository, so the issue is read-only.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Issue title")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Comment" })).toBeNull();
   });
 
   it("opens the issue beside the list and saves an edited title", async () => {
@@ -895,6 +922,30 @@ describe("issue paging", () => {
         (value) => value.type === "linear_get_issue" && value.comments_after === "lc_2",
       ),
     ).toBe(true);
+  });
+});
+
+describe("Linear capabilities", () => {
+  it("comes from the daemon's linear row, not the UI's own defaults", () => {
+    const row = capabilityEntry(
+      "linear",
+      issueCapabilities({
+        write: false,
+        labels: false,
+        assignees: false,
+        close_reason: false,
+        mentioning_filter: false,
+        linked_pull_requests: false,
+      }),
+    );
+    const caps = issueCapabilitiesFor("linear", undefined, [row]);
+    expect(caps.read).toBe(true);
+    expect(caps.comments).toBe(true);
+    expect(caps.linked_pull_requests).toBe(false);
+  });
+
+  it("offers nothing for Linear when the daemon has no linear row", () => {
+    expect(issueCapabilitiesFor("linear", undefined, []).read).toBe(false);
   });
 });
 

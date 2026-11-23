@@ -586,13 +586,15 @@ async fn gitea_lists_reads_and_writes_issues() {
 }
 
 #[tokio::test]
-async fn gitea_comments_page_at_the_server_page_limit() {
+async fn gitea_comments_are_one_complete_page() {
     let server = MockServer::start().await;
     let base = server.uri();
 
-    // Gitea's default page size is 50; a discussion with 51 comments must
-    // offer the next page even though the client would like 100 at once.
-    let comments: Vec<Value> = (1..=50)
+    // Gitea's `GET /issues/{index}/comments` is not paged: its swagger lists
+    // only owner, repo, index, since and before, and the server ignores
+    // `limit`/`page`. A 51-comment discussion must arrive in one response,
+    // with no follow-up request.
+    let comments: Vec<Value> = (1..=51)
         .map(|id| {
             json!({
                 "id": id,
@@ -604,18 +606,32 @@ async fn gitea_comments_page_at_the_server_page_limit() {
         .collect();
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/acme/widget/issues/4/comments"))
-        .and(query_param("limit", "50"))
-        .and(query_param("page", "1"))
+        .and(query_param_is_missing("limit"))
+        .and(query_param_is_missing("page"))
         .respond_with(ok(Value::Array(comments)))
+        .expect(2)
         .mount(&server)
         .await;
 
     let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
     let repo = repo(ForgeKind::Gitea, &base);
     let page = client.list_issue_comments(&repo, 4, None).await.unwrap();
-    assert_eq!(page.comments.len(), 50);
-    assert!(page.has_more);
-    assert_eq!(page.next_cursor.as_deref(), Some("2"));
+    assert_eq!(page.comments.len(), 51);
+    assert!(!page.has_more);
+    assert_eq!(page.next_cursor, None);
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "one complete page needs exactly one request"
+    );
+    // Even a cursor handed back cannot produce another page.
+    let again = client
+        .list_issue_comments(&repo, 4, Some("2"))
+        .await
+        .unwrap();
+    assert_eq!(again.comments.len(), 51);
+    assert!(!again.has_more);
+    assert_eq!(again.next_cursor, None);
 }
 
 #[tokio::test]
@@ -727,8 +743,8 @@ async fn azure_states_mocks(server: &MockServer) {
         .respond_with(ok(json!({
             "count": 2,
             "value": [
-                {"name": "Issue", "referenceName": "Microsoft.Issue"},
-                {"name": "Bug", "referenceName": "Microsoft.Bug"}
+                {"name": "Issue", "referenceName": "Microsoft.VSTS.WorkItemTypes.Issue"},
+                {"name": "Bug", "referenceName": "Microsoft.VSTS.WorkItemTypes.Bug"}
             ]
         })))
         .mount(server)
@@ -980,8 +996,8 @@ async fn azure_skips_a_type_this_process_does_not_define() {
         .respond_with(ok(json!({
             "count": 2,
             "value": [
-                {"name": "Issue", "referenceName": "Microsoft.Issue"},
-                {"name": "Bug", "referenceName": "Microsoft.Bug"}
+                {"name": "Issue", "referenceName": "Microsoft.VSTS.WorkItemTypes.Issue"},
+                {"name": "Bug", "referenceName": "Microsoft.VSTS.WorkItemTypes.Bug"}
             ]
         })))
         .mount(&server)
@@ -1048,6 +1064,90 @@ async fn azure_skips_a_type_this_process_does_not_define() {
 }
 
 #[tokio::test]
+async fn azure_recognises_an_inherited_type_by_its_real_reference_name() {
+    let server = MockServer::start().await;
+    let base = format!("{}/acme", server.uri());
+
+    // An inherited process keeps the system reference names, and a renamed
+    // copy keeps the `<Process>.<type>` one. `Microsoft.Issue` and
+    // `Microsoft.Bug` are not names Azure ever returns.
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes"))
+        .respond_with(ok(json!({
+            "count": 3,
+            "value": [
+                {"name": "Defect", "referenceName": "Acme.Bug"},
+                {"name": "Story", "referenceName": "Microsoft.VSTS.WorkItemTypes.UserStory"},
+                {"name": "Ghost", "referenceName": "Microsoft.Issue"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes/Defect/states"))
+        .respond_with(ok(azure_states()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/acme/platform/_apis/wit/wiql"))
+        .and(body_string_contains("[System.WorkItemType] = 'Defect'"))
+        .respond_with(ok(json!({"workItems": [{"id": 51}]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitems"))
+        .respond_with(ok(json!({
+            "count": 1,
+            "value": [{
+                "id": 51,
+                "fields": {
+                    "System.Title": "A renamed bug",
+                    "System.State": "Active",
+                    "System.WorkItemType": "Defect",
+                    "System.ChangedDate": "2026-05-02T00:00:00Z"
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AzureDevOpsClient::new(&base, &token(), 600).unwrap();
+    let repo = ForgeRepoRef {
+        forge: ForgeKind::AzureDevOps,
+        base_url: base.clone(),
+        owner: "platform".into(),
+        repo: "widget".into(),
+    };
+    let page = client
+        .list_issues(&repo, ForgeIssueFilter::Open, 1, None)
+        .await
+        .expect("the inherited Bug copy lists");
+    assert_eq!(page.issues.len(), 1);
+    assert_eq!(page.issues[0].number, 51);
+
+    let requests = server.received_requests().await.unwrap();
+    let wiql = requests
+        .iter()
+        .find(|request| request.url.path() == "/acme/platform/_apis/wit/wiql")
+        .expect("the WIQL request");
+    let body = String::from_utf8_lossy(&wiql.body);
+    assert!(!body.contains("'Story'"), "{body}");
+    assert!(!body.contains("'Ghost'"), "{body}");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.path().contains("/Story/")),
+        "a non-issue type must not be read"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.path().contains("/Ghost/")),
+        "the fake Microsoft.Issue name must not be read"
+    );
+}
+
+#[tokio::test]
 async fn azure_closes_each_type_with_its_own_finished_state() {
     let server = MockServer::start().await;
     let base = format!("{}/acme", server.uri());
@@ -1057,8 +1157,8 @@ async fn azure_closes_each_type_with_its_own_finished_state() {
         .respond_with(ok(json!({
             "count": 2,
             "value": [
-                {"name": "Issue", "referenceName": "Microsoft.Issue"},
-                {"name": "Bug", "referenceName": "Microsoft.Bug"}
+                {"name": "Issue", "referenceName": "Microsoft.VSTS.WorkItemTypes.Issue"},
+                {"name": "Bug", "referenceName": "Microsoft.VSTS.WorkItemTypes.Bug"}
             ]
         })))
         .mount(&server)
@@ -1799,6 +1899,7 @@ fn every_linear_document_matches_the_published_schema() {
         h4rn_forge::issues::LINEAR_LIST_QUERY,
         h4rn_forge::issues::LINEAR_SEARCH_QUERY,
         h4rn_forge::issues::LINEAR_DETAIL_QUERY,
+        h4rn_forge::issues::LINEAR_ISSUE_TEAM_QUERY,
         h4rn_forge::issues::LINEAR_COMMENT_MUTATION,
     ];
     for document in documents {

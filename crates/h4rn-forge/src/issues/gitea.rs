@@ -135,37 +135,31 @@ pub(crate) async fn get(
     })
 }
 
-/// Reads one issue's comments. The protocol cursor is the next page number.
+/// Reads one issue's comments.
+///
+/// Gitea's issue-comment endpoint is not paged: its swagger lists only
+/// `owner`, `repo`, `index`, `since` and `before`, and the server ignores
+/// `limit`/`page`. Every call returns the whole discussion, so this is a
+/// single complete page and the caller never asks for another.
 pub(crate) async fn comments(
     http: &ForgeHttp,
     api: &str,
     repo: &ForgeRepoRef,
     number: u32,
-    cursor: Option<&str>,
+    _cursor: Option<&str>,
 ) -> Result<ForgeIssueCommentPage> {
     validate_repo(repo)?;
-    let page = cursor
-        .and_then(|cursor| cursor.parse::<u32>().ok())
-        .unwrap_or(1)
-        .max(1);
-    // Gitea clamps `limit` to its configured page size (50 by default), so
-    // asking for 100 silently returns 50 and never looks like another page.
-    // Page at the documented default and let a full page mean "more".
-    let url = format!(
-        "{}/issues/{number}/comments?limit={PAGE_LIMIT}&page={page}",
-        repo_url(api, repo)
-    );
+    let url = format!("{}/issues/{number}/comments", repo_url(api, repo));
     let value = http.get_json(&url).await?;
     let items = value
         .as_array()
         .ok_or_else(|| ForgeError::Parse("Gitea returned no issue comments".into()))?;
-    let has_more = items.len() >= PAGE_LIMIT;
     Ok(ForgeIssueCommentPage {
         repo: repo.clone(),
         number,
         comments: items.iter().filter_map(map_comment).collect(),
-        has_more,
-        next_cursor: has_more.then(|| (page + 1).to_string()),
+        has_more: false,
+        next_cursor: None,
     })
 }
 

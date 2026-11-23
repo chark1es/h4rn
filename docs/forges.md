@@ -414,11 +414,13 @@ project and repository ids, which are resolved to that repository's web URL,
 so a pull request in another repository links there rather than to the
 checked-out one. Comment paging carries the provider's continuation through
 `ForgeListIssueComments.cursor` and `ForgeIssueCommentPage.next_cursor`
-(GitHub's page number, GitLab/Gitea page numbers, Azure's
+(GitHub's page number, GitLab page numbers, Azure's
 `continuationToken`); the discussion offers **Load more comments** until the
-tracker stops returning one. Gitea/Forgejo clamp a page to their configured
-size (50 by default), so the daemon pages at that size and treats a full page
-as another page.
+tracker stops returning one. Gitea/Forgejo's issue-comment endpoint does not
+page: its swagger lists only `owner`, `repo`, `index`, `since` and `before`,
+and it ignores `limit`/`page`, so every read returns the whole discussion as
+one complete page with no continuation. Gitea/Forgejo labels do page, so the
+label catalogue is still read page by page.
 
 Writes are `ForgeCommentIssue` and `ForgeUpdateIssue`: comment, title, body,
 labels, assignees, and close/reopen. Gitea/Forgejo replace labels through
@@ -452,7 +454,12 @@ state families), shows their comments and lets you comment
 `searchIssues`'s own `teamId` argument (typed `String`), while the list keeps
 it in the team filter (typed `ID`). Linear's `duplicate` workflow state is a
 closed family, like completed and canceled. Linear issues can be linked to
-threads like forge issues.
+threads like forge issues. Opening an issue makes one detail read; that read
+already carries its team, so the ownership check needs no second request, and
+a comment checks ownership with a one-field `issue { team { id } }` query.
+What Linear can do comes from the daemon's capability row whose `forge` key is
+`linear`, so the page reads it exactly like the forge rows instead of assuming
+a fixed set of actions.
 
 ### Thread links
 

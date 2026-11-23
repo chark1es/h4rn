@@ -280,6 +280,7 @@ export type * from "./ToolCallStatus";
 export type * from "./ToolStats";
 export type * from "./Topic";
 export type * from "./TrackedWorktree";
+export type * from "./TrackerKind";
 export type * from "./TransportPathKind";
 export type * from "./TransportPathState";
 export type * from "./TransportPathStatus";

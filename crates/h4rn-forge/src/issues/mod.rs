@@ -366,6 +366,18 @@ impl LinearClient {
         })
     }
 
+    /// Reads only the issue's team id.
+    ///
+    /// The ownership check needs nothing else, so it asks Linear for one
+    /// field instead of the whole discussion.
+    pub async fn team_id(&self, issue_id: &str) -> Result<String> {
+        let data = self
+            .query(LINEAR_ISSUE_TEAM_QUERY, json!({ "id": issue_id }))
+            .await?;
+        optional_text(&data["issue"]["team"], "id")
+            .ok_or_else(|| ForgeError::NotFound(format!("Linear issue {issue_id} was not found")))
+    }
+
     /// Posts a comment and returns what Linear stored.
     pub async fn create_comment(&self, issue_id: &str, body: &str) -> Result<LinearIssueComment> {
         let data = self
@@ -454,6 +466,14 @@ query($id: String!, $after: String) {
       pageInfo { hasNextPage endCursor }
     }
     attachments(first: 100) { nodes { title url metadata } }
+  }
+}"#;
+
+/// GraphQL document that reads only an issue's team id.
+pub const LINEAR_ISSUE_TEAM_QUERY: &str = r#"
+query($id: String!) {
+  issue(id: $id) {
+    team { id }
   }
 }"#;
 

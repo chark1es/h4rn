@@ -533,13 +533,16 @@ pub(super) async fn handle(
             issue_id,
             comments_after,
         } => {
-            let read_only = !linear_issue_owned(conn, &account_id, &issue_id).await?;
-            conn.state
+            // One read serves both the detail and the ownership check: the
+            // issue already carries its team id.
+            let issue = conn
+                .state
                 .linear
                 .get_issue(&account_id, &issue_id, comments_after.as_deref())
                 .await
-                .map(|issue| ResponseBody::LinearIssue { issue, read_only })
-                .map_err(ForgeServiceError::into_proto)
+                .map_err(ForgeServiceError::into_proto)?;
+            let read_only = !linear_team_owned(conn, &account_id, &issue.summary.team_id).await;
+            Ok(ResponseBody::LinearIssue { issue, read_only })
         }
         ClientRequest::LinearCommentIssue {
             account_id,
@@ -672,21 +675,26 @@ async fn linear_issue_owned(
     account_id: &str,
     issue_id: &str,
 ) -> Result<bool, ProtoError> {
-    let issue = conn
+    let team_id = conn
         .state
         .linear
-        .get_issue(account_id, issue_id, None)
+        .team_id(account_id, issue_id)
         .await
         .map_err(ForgeServiceError::into_proto)?;
+    Ok(linear_team_owned(conn, account_id, &team_id).await)
+}
+
+/// Whether a Linear team is attached to a project that still exists.
+async fn linear_team_owned(conn: &Connection, account_id: &str, team_id: &str) -> bool {
     let mapping = conn
         .state
         .linear
         .project_teams()
         .into_iter()
-        .find(|team| team.account_id == account_id && team.team_id == issue.summary.team_id);
+        .find(|team| team.account_id == account_id && team.team_id == team_id);
     match mapping {
-        Some(team) => Ok(project_is_known(conn, &team.project_id).await),
-        None => Ok(false),
+        Some(team) => project_is_known(conn, &team.project_id).await,
+        None => false,
     }
 }
 

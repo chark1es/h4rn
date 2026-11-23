@@ -3278,6 +3278,32 @@ async fn an_issue_write_checks_ownership_against_the_checkouts_not_a_cache() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
         .mount(&server)
         .await;
+    // The fork's parent reads fine but no checkout owns it, so it is
+    // read-only.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/parent/widget/issues"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/parent/widget/issues/4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "number": 4,
+            "title": "Upstream report",
+            "state": "open",
+            "user": {"login": "carol"},
+            "comments": 0,
+            "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-01T00:00:00Z",
+            "html_url": "https://example.test/parent/widget/issues/4"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/parent/widget/issues/4/timeline"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
 
     let repo_dir = tempfile::tempdir().expect("repo");
     git_in(repo_dir.path(), &["init", "-b", "main"]);
@@ -3374,6 +3400,39 @@ async fn an_issue_write_checks_ownership_against_the_checkouts_not_a_cache() {
         .await
         .expect("the designated repository lists");
 
+    // A repository no project checks out still reads, and says it is
+    // read-only so the page can refuse writes before the request.
+    let unowned_page = client
+        .request(ClientRequest::ForgeListIssues {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            filter: ForgeIssueFilter::Open,
+            page: 1,
+            query: None,
+        })
+        .await
+        .expect("an unowned repository still reads");
+    match unowned_page {
+        ResponseBody::ForgeIssues { read_only, .. } => {
+            assert!(read_only, "the parent repository is not ours to write");
+        }
+        other => panic!("unexpected list response: {other:?}"),
+    }
+    let unowned_issue = client
+        .request(ClientRequest::ForgeGetIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            number: 4,
+        })
+        .await
+        .expect("an unowned issue still reads");
+    match unowned_issue {
+        ResponseBody::ForgeIssue { read_only, .. } => {
+            assert!(read_only, "the parent repository is not ours to write");
+        }
+        other => panic!("unexpected issue response: {other:?}"),
+    }
+
     // A fork checkout designates its `origin`, never its `upstream`.
     let comment = client
         .request(ClientRequest::ForgeCommentIssue {
@@ -3451,6 +3510,109 @@ async fn an_issue_write_checks_ownership_against_the_checkouts_not_a_cache() {
         .filter(|request| request.method.as_str() != "GET")
         .collect::<Vec<_>>();
     assert!(writes.is_empty(), "no tracker write was sent: {writes:?}");
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn opening_a_linear_issue_reads_it_once() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Restores the Linear endpoint environment when the test ends.
+    struct EndpointGuard(Option<std::ffi::OsString>);
+
+    impl Drop for EndpointGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => unsafe { std::env::set_var("H4RN_LINEAR_ENDPOINT", value) },
+                None => unsafe { std::env::remove_var("H4RN_LINEAR_ENDPOINT") },
+            }
+        }
+    }
+
+    let server = MockServer::start().await;
+    // One document serves the viewer connect and the issue detail alike;
+    // GraphQL clients read only the keys they asked for.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "viewer": {
+                    "name": "Acme",
+                    "email": "alice@example.test",
+                    "organization": {"name": "Acme"}
+                },
+                "issue": {
+                    "id": "iss_1",
+                    "identifier": "ENG-1",
+                    "title": "Rate limit the import",
+                    "description": "Imports hammer the API.",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-02T00:00:00Z",
+                    "url": "https://linear.app/acme/issue/ENG-1",
+                    "state": {"name": "In Progress", "type": "started"},
+                    "team": {"id": "team_1", "key": "ENG"},
+                    "assignee": null,
+                    "labels": {"nodes": []},
+                    "comments": {
+                        "nodes": [],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    },
+                    "attachments": {"nodes": []}
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let _guard = EndpointGuard(std::env::var_os("H4RN_LINEAR_ENDPOINT"));
+    unsafe { std::env::set_var("H4RN_LINEAR_ENDPOINT", format!("{}/graphql", server.uri())) };
+
+    let daemon = boot_inner(ThreadManagerOptions::default(), FakeHarness::new(), true).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let account = match client
+        .request(ClientRequest::LinearConnect {
+            api_key: "fixture-linear-key".into(),
+        })
+        .await
+        .expect("connect Linear")
+    {
+        ResponseBody::LinearAccounts { accounts } => {
+            accounts.into_iter().next().expect("one connected account")
+        }
+        other => panic!("unexpected connect response: {other:?}"),
+    };
+
+    let before = server.received_requests().await.expect("recorded").len();
+    let opened = client
+        .request(ClientRequest::LinearGetIssue {
+            account_id: account.account_id.clone(),
+            issue_id: "iss_1".into(),
+            comments_after: None,
+        })
+        .await
+        .expect("open the issue");
+    match opened {
+        ResponseBody::LinearIssue { issue, read_only } => {
+            assert_eq!(issue.summary.identifier, "ENG-1");
+            // No project owns this team, so the page says read-only.
+            assert!(read_only);
+        }
+        other => panic!("unexpected issue response: {other:?}"),
+    }
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(
+        requests.len() - before,
+        1,
+        "opening an issue must read the tracker once: {:?}",
+        requests
+            .iter()
+            .map(|request| request.url.as_str())
+            .collect::<Vec<_>>()
+    );
 
     daemon.stop().await;
 }

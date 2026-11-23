@@ -798,11 +798,55 @@ pub struct PrLinkedThread {
     pub watching: bool,
 }
 
-/// A capabilities row for one forge kind.
+/// The tracker a capabilities row describes.
+///
+/// Forges use the same names as [`ForgeKind`]. Linear is a separate tracker
+/// with its own API, so it gets its own row rather than being folded into a
+/// forge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+pub enum TrackerKind {
+    /// github.com or a GitHub Enterprise Server (GHES) instance.
+    #[serde(rename = "github")]
+    GitHub,
+    /// gitlab.com or a self-hosted GitLab instance.
+    #[serde(rename = "gitlab")]
+    GitLab,
+    /// gitea.com or a self-hosted Gitea instance.
+    #[serde(rename = "gitea")]
+    Gitea,
+    /// codeberg.org or a self-hosted Forgejo instance.
+    #[serde(rename = "forgejo")]
+    Forgejo,
+    /// bitbucket.org (Bitbucket Cloud).
+    #[serde(rename = "bitbucket")]
+    Bitbucket,
+    /// dev.azure.com or a legacy `*.visualstudio.com` organization.
+    #[serde(rename = "azure_devops")]
+    AzureDevOps,
+    /// Linear.
+    #[serde(rename = "linear")]
+    Linear,
+}
+
+impl From<ForgeKind> for TrackerKind {
+    fn from(forge: ForgeKind) -> Self {
+        match forge {
+            ForgeKind::GitHub => Self::GitHub,
+            ForgeKind::GitLab => Self::GitLab,
+            ForgeKind::Gitea => Self::Gitea,
+            ForgeKind::Forgejo => Self::Forgejo,
+            ForgeKind::Bitbucket => Self::Bitbucket,
+            ForgeKind::AzureDevOps => Self::AzureDevOps,
+        }
+    }
+}
+
+/// A capabilities row for one tracker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ForgeCapabilityEntry {
-    /// Forge kind.
-    pub forge: ForgeKind,
+    /// Tracker the row describes: a forge kind, or `linear`. Linear has its
+    /// own row rather than being folded into a forge.
+    pub forge: TrackerKind,
     /// What it supports.
     pub capabilities: ForgeCapabilities,
 }
