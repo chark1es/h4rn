@@ -7,6 +7,24 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Threads can change permission mode, model and reasoning effort mid-thread.**
+  The model chip in the composer now opens a thread-controls panel: permission
+  mode, model, reasoning effort and (on Codex) fast mode. A change applies to the
+  next turn — in place where the harness can switch (Claude Code's `set_model`
+  and `set_permission_mode`, Codex's per-turn model, effort and sandbox, ACP
+  `session/set_model`/`session/set_mode`/`set_config_option`, OpenCode's session
+  model and permissions), otherwise by closing an idle session so the next turn
+  resumes the conversation on the new settings. The thread summary reports the
+  live values and a thread that differs from this device's defaults shows them
+  quietly beside its model. Plan mode is offered for Claude Code and for ACP
+  agents that advertise it; reasoning effort for Claude Code and Codex; fast mode
+  for Codex. A value the harness cannot honour is refused with a clear reason.
+  New requests: `SetThreadRuntimeMode`, `SetThreadModel`,
+  `SetThreadReasoningEffort` and `SetThreadFast`; `CreateThread` accepts
+  `reasoning_effort` and `fast`, and older daemons/threads without the new fields
+  still deserialize. `⌘⇧A`/`Ctrl+Shift+A` opens the permission picker
+  (Acknowledge moves to `⌘⌥A`/`Ctrl+Alt+A`), and Settings → Threads → New
+  threads sets the default permission mode on this device.
 - **Threads can commit, push and open a pull request.** The thread menu's **Commit, push and
   PR…** panel shows the workspace's real branch, upstream, ahead/behind counts and its staged,
   unstaged and untracked paths, and whether a rebase, merge or cherry-pick is in progress. Commit
@@ -396,8 +414,43 @@ All notable changes to h4rn are recorded here. The format follows
   is shown only when the agent reports one during `initialize`; h4rn does not install or update it.
   See [docs/acp.md](docs/acp.md).
 
+### Changed
+
+- **The `thread.acknowledge` shortcut moved off `Mod+Shift+A`.** It is now
+  `Mod+Alt+A` (`⌘⌥A` / `Ctrl+Alt+A`); `Mod+Shift+A` opens the new permission
+  picker. Shortcuts help and the command palette show the new binding.
+
 ### Fixed
 
+- **Thread settings always describe the session that will run the next turn.** The model list a
+  Codex session reports survives the session ending, so an idle thread still offers the models its
+  CLI really has (and a new Codex thread starts on the first of them, not on a static default the
+  installed CLI may have dropped). A thread created on a model the CLI no longer lists keeps the
+  live list, and a switch is still checked against it. Two changes to the same setting are
+  serialised, so the summary, the journal and the session record always name the value the session
+  ended on. A prompt claimed just as its session died is handed back and delivered on a fresh
+  session instead of being written into a dead one. A resumed ACP session now reports the model its
+  agent restored, and the summary shows that model instead of the `default` alias. The ACP start
+  records the model it selects in place, so the thread controls never name the model the session
+  left. A model chosen while a session is still starting is not reconciled away by that session's
+  older snapshot, and the New thread dialog adopts the host's live model list whenever it arrives —
+  reselecting the same host, or a catalogue that arrives after the dialog opened, never falls back
+  to a static model the installed CLI may have dropped, and a model typed by hand is never
+  overwritten.
+- **Thread settings apply to the turn they promise, and never to one already running.** A
+  settings change that lands while a session is still starting no longer detaches the session that
+  startup is about to write the turn to (which left the thread Working forever), and only a turn
+  whose prompt has not reached the harness yet may be moved onto a fresh session; a change made
+  during a running turn applies from the turn after it. Two settings changed at the same time each
+  keep their own field instead of one request writing back the whole snapshot it read before the
+  other landed. Choosing an ACP agent's `default` model on a live session is deferred to the next
+  session instead of being refused. A Claude Code process that exits while a control request is
+  outstanding now fails that request at once instead of after a 10-second timeout. The composer's
+  model list uses the session's own catalogue (Codex's `model/list`, a configured agent's advertised
+  models) once a session has run, falling back to the static list only before the first session, and
+  Codex offers `minimal` reasoning effort. An ACP agent that advertises no mode catalogue shows
+  "Mode is managed by the agent" instead of all four permission modes, and a start refuses a
+  non-default mode it cannot map.
 - **The PR watch keeps its promises under races and failures.** A re-watch read
   that a poll overtakes is discarded instead of moving the baseline backwards,
   and a poll read that a re-watch overtakes is discarded the same way, so the

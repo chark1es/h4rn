@@ -15,6 +15,10 @@ export function Popover({
   children,
   align = "start",
   width = 320,
+  placement = "below",
+  open: controlledOpen,
+  onOpenChange,
+  triggerClassName = "q-btn secondary",
 }: {
   /** Accessible name of the panel. */
   label: string;
@@ -24,16 +28,33 @@ export function Popover({
   children: (api: { close: () => void }) => ReactNode;
   align?: "start" | "end";
   width?: number;
+  /** Open below the trigger (default) or above it. */
+  placement?: "below" | "above";
+  /** Controlled open state; omit to let the popover own it. */
+  open?: boolean;
+  /** Called when the popover asks to open or close. */
+  onOpenChange?: (open: boolean) => void;
+  /** Classes for the trigger button; defaults to the secondary button. */
+  triggerClassName?: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
   const root = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
 
+  const setOpen = useCallback(
+    (next: boolean) => {
+      if (onOpenChange) onOpenChange(next);
+      else setUncontrolledOpen(next);
+    },
+    [onOpenChange],
+  );
+
   const close = useCallback(() => {
     setOpen(false);
     triggerRef.current?.focus();
-  }, []);
+  }, [setOpen]);
 
   useEffect(() => {
     if (!open) return;
@@ -52,7 +73,7 @@ export function Popover({
       document.removeEventListener("pointerdown", onPointer);
       document.removeEventListener("keydown", onKey, true);
     };
-  }, [open, close]);
+  }, [open, close, setOpen]);
 
   // Focus the first control when the panel opens.
   useEffect(() => {
@@ -70,11 +91,11 @@ export function Popover({
       <button
         ref={triggerRef}
         type="button"
-        className="q-btn secondary"
+        className={triggerClassName}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen(!open)}
       >
         {trigger({ open })}
       </button>
@@ -84,7 +105,11 @@ export function Popover({
           role="dialog"
           aria-label={label}
           className="q-pop"
-          style={{ top: "calc(100% + 6px)", [align === "end" ? "right" : "left"]: 0, width }}
+          style={{
+            [placement === "above" ? "bottom" : "top"]: "calc(100% + 6px)",
+            [align === "end" ? "right" : "left"]: 0,
+            width,
+          }}
         >
           {children({ close })}
         </div>

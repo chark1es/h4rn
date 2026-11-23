@@ -4,6 +4,7 @@
  * How much autonomy a harness session is granted (ADR-005).
  *
  * The daemon maps this to the harness's own permission switch; the Claude Code
- * adapter uses `--permission-mode`. It is fixed for the life of a thread.
+ * adapter uses `--permission-mode`. A change applies to the live session where
+ * the harness can switch in place, or at the next session start.
  */
-export type RuntimeMode = "approval_required" | "auto_accept_edits" | "full_access";
+export type RuntimeMode = "approval_required" | "auto_accept_edits" | "plan" | "full_access";

@@ -24,6 +24,7 @@ import {
   TextGeneratorsSettings,
   ThreadSettings,
 } from "@/features/text-generation/TextGenerationSettings";
+import { NewThreadDefaults } from "@/features/threads/ThreadSettings";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 import { WorktreeSettings } from "@/features/worktrees/WorktreeSettings";
@@ -617,7 +618,11 @@ function ShortcutsForm() {
 const FORMS: Record<string, () => React.ReactNode> = {
   hosts: () => <LiveHostsForm />,
   devices: () => <LiveHostsForm pairing />,
-  threads: ThreadSettings,
+  threads: () => (
+    <ThreadSettings>
+      <NewThreadDefaults />
+    </ThreadSettings>
+  ),
   // One page title (the proxy form owns it) and one column: text generators
   // render as a group under the same page padding.
   providers: () => (

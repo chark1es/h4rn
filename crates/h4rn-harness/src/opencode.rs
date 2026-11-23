@@ -373,6 +373,64 @@ impl OpenCodeSession {
 
 #[async_trait]
 impl HarnessSession for OpenCodeSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    async fn set_runtime_mode(&mut self, mode: RuntimeMode) -> Result<(), HarnessError> {
+        self.ensure_open()?;
+        let session_id = self
+            .current_session_id()
+            .ok_or_else(|| HarnessError::Transport {
+                harness: self.kind,
+                message: "opencode session has no server session id".into(),
+            })?;
+        let response = self
+            .http
+            .patch(format!("{}/api/session/{session_id}", self.base_url))
+            .basic_auth("opencode", Some(self.password.as_str()))
+            .timeout(REQUEST_TIMEOUT)
+            .json(&json!({ "permissions": permissions_for(mode) }))
+            .send()
+            .await
+            .map_err(|error| HarnessError::Transport {
+                harness: self.kind,
+                message: format!("opencode permission switch failed: {error}"),
+            })?;
+        ensure_success(response, "permission switch", self.kind).await?;
+        Ok(())
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
+        self.ensure_open()?;
+        let Some((provider, model)) = parse_model(model) else {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: unsupported_model(model),
+            });
+        };
+        let session_id = self
+            .current_session_id()
+            .ok_or_else(|| HarnessError::Transport {
+                harness: self.kind,
+                message: "opencode session has no server session id".into(),
+            })?;
+        let response = self
+            .http
+            .post(format!("{}/api/session/{session_id}/model", self.base_url))
+            .basic_auth("opencode", Some(self.password.as_str()))
+            .timeout(REQUEST_TIMEOUT)
+            .json(&json!({ "model": { "id": model, "providerID": provider } }))
+            .send()
+            .await
+            .map_err(|error| HarnessError::Transport {
+                harness: self.kind,
+                message: format!("opencode model switch failed: {error}"),
+            })?;
+        ensure_success(response, "model switch", self.kind).await?;
+        Ok(())
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         self.ensure_open()?;
         let session_id = self
@@ -549,7 +607,10 @@ impl Drop for OpenCodeSession {
 
 /// Parses a `provider/model` selection.
 ///
-/// Empty values and the sentinels `default`/`auto` mean "let the server pick".
+/// Empty values and the sentinels `default`/`auto` mean "no explicit
+/// selection": a session start lets the server pick, which is why they are not
+/// a `(provider, model)` pair. A live session cannot switch back to that choice
+/// (`[`unsupported_model`]` says so), only to a named model.
 pub fn parse_model(model: &str) -> Option<(String, String)> {
     let model = model.trim();
     if model.is_empty()
@@ -563,6 +624,19 @@ pub fn parse_model(model: &str) -> Option<(String, String)> {
         return None;
     }
     Some((provider.to_string(), id.to_string()))
+}
+
+/// Why [`parse_model`] returned nothing, in the person's terms.
+fn unsupported_model(model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty()
+        || model.eq_ignore_ascii_case("default")
+        || model.eq_ignore_ascii_case("auto")
+    {
+        "the server's default model; a session start lets OpenCode pick it, while a live session can only switch to a `provider/model`".to_string()
+    } else {
+        format!("model `{model}`; OpenCode models are `provider/model`")
+    }
 }
 
 /// Builds the generated `OPENCODE_CONFIG_CONTENT` document for a session.
@@ -671,7 +745,7 @@ pub fn build_prompt(text: &str, attachments: &[AttachmentRef]) -> (String, Vec<V
 /// The permission rules OpenCode should apply to a session.
 pub fn permissions_for(mode: RuntimeMode) -> Value {
     let (shell, edit) = match mode {
-        RuntimeMode::ApprovalRequired => ("ask", "ask"),
+        RuntimeMode::ApprovalRequired | RuntimeMode::Plan => ("ask", "ask"),
         RuntimeMode::AutoAcceptEdits => ("ask", "allow"),
         RuntimeMode::FullAccess => ("allow", "allow"),
     };
@@ -1381,6 +1455,20 @@ mod tests {
     }
 
     #[test]
+    fn a_default_model_is_refused_in_words_that_match_the_parser() {
+        let message = unsupported_model("default");
+        assert!(
+            message.contains("server's default") && message.contains("session start"),
+            "the reason explains what the sentinel means: {message}"
+        );
+        assert!(
+            !message.contains("OpenCode models are"),
+            "the sentinel is not a malformed provider/model: {message}"
+        );
+        assert!(unsupported_model("no-slash").contains("provider/model"));
+    }
+
+    #[test]
     fn generated_config_declares_the_custom_provider() {
         let mut spec = spec();
         spec.model = "cpa/gpt-5.1".into();
@@ -1429,6 +1517,12 @@ mod tests {
         let full = permissions_for(RuntimeMode::FullAccess);
         assert_eq!(full[0]["effect"], "allow");
         assert_eq!(full[1]["effect"], "allow");
+
+        // OpenCode has no plan mode; the daemon refuses it for this harness, so
+        // the mapping only needs to stay on the safe side.
+        let plan = permissions_for(RuntimeMode::Plan);
+        assert_eq!(plan[0]["effect"], "ask");
+        assert_eq!(plan[1]["effect"], "ask");
     }
 
     #[test]

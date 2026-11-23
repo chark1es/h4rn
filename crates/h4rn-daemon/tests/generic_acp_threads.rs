@@ -168,6 +168,8 @@ async fn create_with_model(
             prompt: "hello".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -795,6 +797,8 @@ async fn a_fixed_working_directory_is_the_threads_workspace() {
             prompt: "hello".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

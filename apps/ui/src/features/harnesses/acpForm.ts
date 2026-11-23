@@ -1,4 +1,4 @@
-import type { AcpAgentSpec, AcpWorkingDir, RuntimeMode } from "@/gen";
+import type { AcpAgentSpec, AcpWorkingDir } from "@/gen";
 
 /** The editable shape of the "Add / edit ACP agent" form. */
 export type AcpAgentForm = {
@@ -164,35 +164,6 @@ export function acpPickerOptions(
       label: agent.installed ? agent.name : `${agent.name} · not installed`,
     })),
   ];
-}
-
-/**
- * The thread modes h4rn maps onto ACP mode ids.
- *
- * A generic agent names its own modes; h4rn only changes the mode when the
- * agent advertised the id this row selects with. The label is a promise, so a
- * mode the agent does not offer is never shown.
- */
-const RUNTIME_MODE_ROWS: { value: RuntimeMode; label: string; modeId: string }[] = [
-  { value: "approval_required", label: "Approval required", modeId: "default" },
-  { value: "auto_accept_edits", label: "Auto-accept edits", modeId: "accept-edits" },
-  { value: "full_access", label: "Full access", modeId: "auto" },
-];
-
-/** Every thread mode, for harnesses that map them the way they always have. */
-export const THREAD_RUNTIME_MODES: { value: RuntimeMode; label: string }[] = RUNTIME_MODE_ROWS.map(
-  ({ value, label }) => ({ value, label }),
-);
-
-/** The mode choices the new-thread picker offers for an ACP agent. */
-export function acpRuntimeModeChoices(
-  advertised: string[],
-): { value: RuntimeMode; label: string }[] {
-  const ids = new Set(advertised);
-  return RUNTIME_MODE_ROWS.filter((row) => ids.has(row.modeId)).map(({ value, label }) => ({
-    value,
-    label,
-  }));
 }
 
 /**
