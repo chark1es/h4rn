@@ -1457,9 +1457,11 @@ A guest message is not a turn. It is a row in the journal and an event,
 `GuestRequested`, which raises a hand in the lifecycle and renders as a Request
 at the end of the thread; `SendGuestRequest` uploads its files, calls the normal
 `SendMessage` path with the thread's current permission mode, and
-`DismissGuestRequest` deletes the files. Settling a thread, stopping sharing,
-creating a new link, turning the Labs setting off, or the 24-hour expiry ends
-the link; every end path deletes waiting files.
+`DismissGuestRequest` deletes the files. Settling a thread, stopping sharing or
+creating a new link ends the link and deletes its waiting files; the 24-hour
+expiry does the same on the first request after the deadline. The Labs switch
+disables every link without deleting it, and turning it back on revives the
+ones that have not expired.
 
 The guest scope (`PairScope::Guest`) exists as the narrow server-side statement
 of what the surface may do: one thread's events and a waiting message. A device

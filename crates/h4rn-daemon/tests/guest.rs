@@ -570,6 +570,31 @@ async fn an_expired_link_stops_and_a_revoked_link_deletes_pending_files() {
     // A fresh link, then the 24 hours pass in the journal.
     let second = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
     let second_token = second.rsplit('/').next().unwrap().to_owned();
+    let expired = Browser::new(format!("{base}/guest/{second_token}"));
+    let (_, cookie, _) = expired.get("").await;
+    let expired = Browser {
+        client: expired.client,
+        base: expired.base,
+        cookie,
+    };
+    let (status, _) = expired
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "this should not survive expiry".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "expired.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"expired"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202);
+    let expired_request = request_id_from_snapshot(&expired).await;
+    let expired_dir = daemon.dir.path().join("guest").join(&expired_request);
+    assert!(expired_dir.is_dir());
+
     let pool = sqlx::SqlitePool::connect(&format!(
         "sqlite:{}",
         daemon.dir.path().join("events.db").display()
@@ -584,7 +609,6 @@ async fn an_expired_link_stops_and_a_revoked_link_deletes_pending_files() {
         .expect("expire link");
     pool.close().await;
 
-    let expired = Browser::new(format!("{base}/guest/{second_token}"));
     let (status, _, _) = expired.get("").await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let state = expired.state(0).await;
@@ -596,6 +620,7 @@ async fn an_expired_link_stops_and_a_revoked_link_deletes_pending_files() {
             .to_lowercase()
             .contains("expired")
     );
+    assert!(!expired_dir.exists(), "expiry deletes waiting files");
 
     // The guest page itself says the same thing for the expired link.
     let (_, _, body) = expired.get("").await;

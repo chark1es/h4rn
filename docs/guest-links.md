@@ -70,8 +70,10 @@ be PNG, JPEG, GIF or WebP. While messages wait for you, their files can total
 
 A waiting message's files live in the daemon's data directory under
 `guest/<request-id>/`. Dismissing the message, ending the link, creating a new
-link, settling the thread or turning the feature off deletes them. A message you
-send keeps its files like any other message in the thread.
+link, settling the thread, or the 24-hour expiry deletes them. Turning the Labs
+setting off only disables the link, so its waiting files stay until the link is
+used again or ended. A message you send keeps its files like any other message
+in the thread.
 
 The guest's text and files run with the thread's current permission mode once
 you send them. Check them first, as you would anything pasted from a chat.

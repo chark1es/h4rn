@@ -436,6 +436,22 @@ impl GuestService {
     }
 
     async fn end_link(&self, link: &LinkRow) -> Result<(), GuestError> {
+        self.discard_pending(link).await?;
+        sqlx::query("DELETE FROM guest_links WHERE link_id = ?")
+            .bind(&link.link_id)
+            .execute(&self.pool)
+            .await?;
+        self.tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&link.link_id);
+        Ok(())
+    }
+
+    /// Deletes every waiting message and file for a link, leaving the link
+    /// row itself in place. Used by Stop sharing, a new link, settling and the
+    /// first request after the 24 hours pass.
+    async fn discard_pending(&self, link: &LinkRow) -> Result<(), GuestError> {
         let pending = self.pending_requests(&link.link_id).await?;
         for request in &pending {
             self.delete_request_files(request)?;
@@ -448,14 +464,6 @@ impl GuestService {
                 .emit_guest_request_resolved(&link.thread_id, &request.request_id, false)
                 .await;
         }
-        sqlx::query("DELETE FROM guest_links WHERE link_id = ?")
-            .bind(&link.link_id)
-            .execute(&self.pool)
-            .await?;
-        self.tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&link.link_id);
         Ok(())
     }
 
@@ -530,6 +538,10 @@ impl GuestService {
             ));
         };
         if link.expires_at <= Utc::now() {
+            // The link is over: its waiting files must not outlive it. The
+            // row stays so the page can still say "expired" instead of
+            // "revoked".
+            let _ = self.discard_pending(&link).await;
             return Ok(Resolved {
                 link,
                 state: GuestLinkState::Expired,
