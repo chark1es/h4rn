@@ -1346,7 +1346,7 @@ async fn a_wrong_webhook_path_is_refused_before_the_body_is_read() {
         .body(body(Arc::clone(&reads)))
         .expect("request");
     let response = crate::server::serve_webhook_request(&fixture.service, secret, request).await;
-    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
