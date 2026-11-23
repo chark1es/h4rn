@@ -158,19 +158,24 @@ the shell's pid as well as its group. The session also keeps a cloned child kill
 duplicated process handle — so the close path can end the shell through that handle even while the
 reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
 the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
-falls back to the same cloned killer, so the shell still ends without the child lock. Once the close
-wait has reaped the shell, no pid signal is sent: `child.kill()`, which sends SIGHUP to the child's
-pid on Unix, is skipped before the fallbacks, and the pid fallbacks themselves are skipped too
-because SIGHUP and SIGKILL by pid could reach a process that reused it; the Windows handle kill
-still runs because it holds a process handle rather than a bare pid.
-The killer is
-a separate mutex, so a busy reader thread cannot delay it. After the signals the close path drops
-both PTY ends: on Windows a killed ConPTY client does not close the pseudoconsole itself, so the
-master would keep the reader thread blocked in `read` and the session alive; dropping the master
-closes the console and dropping the writer closes its input pipe, and together they release the
-reader so the exit report runs. On Unix the drop releases a master read that outlived the killed
-group. The Windows close test waits for that exit report, so a blocked reader leaks into a failure
-rather than hiding behind the child handle.
+falls back to the same cloned killer, so the shell still ends without the child lock. Once the
+shell is confirmed reaped, no signal is sent to the shell's own pid: `child.kill()`, which sends
+SIGHUP to the child's pid on Unix, and the pid fallbacks are skipped, because SIGHUP and SIGKILL by
+pid could reach a process that reused it. Confirmed means either the close wait stored the exit
+status, or the child handle reports the exit while the close path holds the child lock; the
+session's `alive` flag is not enough, because the reader thread clears it before it takes that lock,
+and a shell that ignored the hangup would otherwise be mistaken for a reaped one and left running. A
+busy child lock cannot inspect the child at all, so that fallback takes an inactive session for a
+reaped one and sends no pid signal either. The process-group TERM and KILL still run on purpose after
+a reap: they end the shell's jobs, which can outlive it. The Windows handle kill also still runs,
+because it holds a process handle rather than a bare pid. The killer is a separate mutex, so a busy
+reader thread cannot delay it. After the signals the close path drops both PTY ends: on Windows a
+killed ConPTY client does not close the pseudoconsole itself, so the master would keep the reader
+thread blocked in `read` and the session alive; dropping the master closes the console and dropping
+the writer closes its input pipe, and together they release the reader so the exit report runs. On
+Unix the drop releases a master read that outlived the killed group. The Windows close test waits
+for that exit report, so a blocked reader leaks into a failure rather than hiding behind the child
+handle.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's

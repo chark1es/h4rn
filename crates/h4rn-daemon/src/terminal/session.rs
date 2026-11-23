@@ -788,7 +788,9 @@ impl Session {
     /// group: a shell that starts a job while it boots puts that job in the
     /// foreground, and the job would receive the hangup instead of the shell.
     /// On Unix `child.kill()` is a SIGHUP to that same pid, so it is skipped
-    /// once the wait reaped the shell; Windows keeps its handle kill.
+    /// once the shell is confirmed reaped; Windows keeps its handle kill. The
+    /// group TERM and KILL still go out on purpose after a reap: they end the
+    /// shell's jobs, which can outlive it.
     ///
     /// Waiting for the shell rather than a fixed delay is what makes the
     /// hangup reliable under load: an interactive shell forwards SIGHUP to its
@@ -825,16 +827,18 @@ impl Session {
             // order as `finish`.
             //
             // On Unix `child.kill()` is a SIGHUP to the child's pid, not a
-            // handle operation, so it is skipped once the close wait has
-            // reaped the shell: that pid may already belong to another
-            // process. Windows keeps it, because there it holds a process
-            // handle.
+            // handle operation, so it is skipped only when the shell is
+            // confirmed reaped: that pid may already belong to another
+            // process. `alive == false` is not confirmation — `finish` clears
+            // it before it takes the child lock, so a shell that survived the
+            // hangup can look reaped while it is still running. Windows keeps
+            // the handle kill, which owns a process handle.
             Some(mut child) => {
                 #[cfg(windows)]
                 let kill_failed = child.kill().is_err();
                 #[cfg(not(windows))]
                 let kill_failed = {
-                    let reaped = lock(&self.reaped_status).is_some() || !self.is_alive();
+                    let reaped = self.confirm_reap(&mut child);
                     !reaped && child.kill().is_err()
                 };
                 if kill_failed {
@@ -854,15 +858,42 @@ impl Session {
         self.close_pty();
     }
 
+    /// Whether the shell is confirmed reaped, reaping it now if it has exited.
+    ///
+    /// The caller holds the child lock. A status captured by the hangup wait is
+    /// proof. Otherwise `try_wait` is the only check that can still tell a
+    /// running shell from an exited one: the session's `alive` flag cannot,
+    /// because `finish` clears it before it takes this lock. A status found
+    /// here is captured for `finish`, the same way `wait_for_shell_exit` stores
+    /// the status it reaps.
+    #[cfg(not(windows))]
+    fn confirm_reap(&self, child: &mut Box<dyn Child + Send + Sync>) -> bool {
+        if lock(&self.reaped_status).is_some() {
+            return true;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                *lock(&self.reaped_status) = Some(status);
+                true
+            }
+            // Still running, or a wait that could not answer. Only a reap
+            // suppresses the pid signal.
+            Ok(None) | Err(_) => false,
+        }
+    }
+
     /// Ends the shell when the child handle is busy or refused the kill.
     ///
     /// The pid-based fallbacks are unsafe once the shell is known to have
     /// exited: the close wait can reap it during the hangup grace, and its pid
     /// may already belong to another process, so SIGHUP and SIGKILL would hit
-    /// the wrong one. A reaped status captured under the child lock, or a
-    /// session that is no longer alive, skips both. The Windows handle kill is
-    /// kept: it owns a duplicated process handle rather than a bare pid and
-    /// cannot signal an unrelated process.
+    /// the wrong one. A status captured under the child lock skips both. A busy
+    /// lock cannot inspect the child at all; `finish` clears `alive` before it
+    /// takes that lock, so a session that is no longer alive skips them too.
+    /// The primary kill does not use that rule: it reads the child under the
+    /// lock, so a live shell that survived the hangup is still ended. The
+    /// Windows handle kill is kept: it owns a duplicated process handle rather
+    /// than a bare pid and cannot signal an unrelated process.
     fn kill_after_busy_handle(&self) {
         // Child lock (held by the caller or the reader thread) then the
         // captured status, the same order `finish` takes them in.
@@ -2712,6 +2743,70 @@ mod tests {
         assert!(lock(&answers).is_answered(6, 0));
     }
 
+    #[test]
+    fn a_first_reply_from_a_snapshot_only_claimant_gives_way_only_to_a_positioned_viewer() {
+        // Before any owner is set, an unpositioned reply names no position: its
+        // bytes may answer a different query than the one the claim names, and
+        // the claimed query could be left without an answer. So it must not
+        // displace a snapshot-only claim. A viewer that names positions and has
+        // the chunk raw can answer the claimed query, so the claim does give
+        // way to it. Exactly one write happens in either layout.
+        for positioned_raw_viewer in [false, true] {
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let writer = recording_writer(&written);
+            // The claimant parsed 1..=3 raw and was resynced at 8, so chunk 6
+            // reached it only inside the snapshot.
+            let (claimant, _claimant_rx) = viewer_sent_then_resynced(3, 8);
+            // The legacy viewer has 1..=8 raw but names no position.
+            let (legacy, _legacy_rx) = viewer_since_snapshot(0, 8);
+            // The positioned viewer has 6..=8 raw and can name the answer.
+            let (positioned, _positioned_rx) = viewer_since_snapshot(5, 8);
+            let attached = if positioned_raw_viewer {
+                vec![(1, claimant), (2, legacy), (3, positioned)]
+            } else {
+                vec![(1, claimant), (2, legacy)]
+            };
+            let (viewers, answers) = input_state(&attached);
+            lock(&viewers)
+                .get_mut(&2)
+                .expect("the legacy viewer")
+                .reply_positions = false;
+
+            write_input_locked(&writer, &viewers, &answers, 1, b"iCLAIM", at(6, 0))
+                .expect("a claim is dropped or written without failing the connection");
+            if positioned_raw_viewer {
+                write_input_locked(&writer, &viewers, &answers, 3, b"iRAW", at(6, 0))
+                    .expect("the positioned viewer answers the chunk it parsed raw");
+            } else {
+                write_input_locked(
+                    &writer,
+                    &viewers,
+                    &answers,
+                    2,
+                    b"iLEGACY",
+                    QueryReply::Unpositioned,
+                )
+                .expect("the unpositioned reply is dropped without failing the connection");
+            }
+
+            let written = lock(&written);
+            assert_eq!(
+                &**written,
+                if positioned_raw_viewer {
+                    b"iRAW".as_slice()
+                } else {
+                    b"iCLAIM".as_slice()
+                },
+                "one write either way: the claim survives an unpositioned viewer and \
+                 gives way to a positioned one (positioned={positioned_raw_viewer})"
+            );
+            assert!(
+                lock(&answers).is_answered(6, 0),
+                "the answer is recorded once"
+            );
+        }
+    }
+
     /// A killer that counts how often it was asked to end the shell.
     #[derive(Debug)]
     struct CountingKiller {
@@ -2760,6 +2855,51 @@ mod tests {
 
         fn process_id(&self) -> Option<u32> {
             None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    /// A shell that ignores the hangup: `kill` is delivered, the child records
+    /// it and keeps running, and no process group is known.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct StubbornChild {
+        pid: u32,
+        kills: Arc<AtomicU64>,
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::ChildKiller for StubbornChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            // The SIGHUP that portable-pty sends on Unix is ignored by this
+            // shell, so the process is still running after the call returns.
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(CountingKiller {
+                kills: Arc::clone(&self.kills),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::Child for StubbornChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::other("the test child never exits"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(self.pid)
         }
 
         #[cfg(windows)]
@@ -2948,8 +3088,11 @@ mod tests {
         );
     }
 
-    /// A busy child lock with an already-reaped shell must not fall back to the
-    /// pid signals: on Unix they are the same pid the primary kill would use.
+    /// The busy-lock fallback never signals the pid of a shell whose reader
+    /// thread has started `finish`. That path cannot inspect the child at all,
+    /// so an inactive session is taken for a reaped one. This covers the
+    /// fallback only: the primary kill reads the child under the lock, and the
+    /// tests around this one cover it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_reaped_shell_with_a_busy_child_lock_is_not_signalled_by_pid() {
@@ -3077,6 +3220,126 @@ mod tests {
             kills.load(Ordering::SeqCst),
             1,
             "the Windows handle kill still runs after a reap"
+        );
+    }
+
+    /// A shell that ignores the hangup is still ended when the session only
+    /// *looks* reaped. `finish` clears `alive` before it takes the child lock,
+    /// so a close that lands in that window sees an inactive session for a
+    /// shell that is still running; with no usable process group, nothing else
+    /// could reach it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_that_survives_the_hangup_is_still_killed() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
+        let mut session = Session::new(
+            TerminalId::new("term_hangup_survived"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(StubbornChild {
+                pid: 4_000_002,
+                kills: Arc::clone(&kills),
+            }),
+            writer,
+        );
+        let signals = Arc::new(RecordedSignals::default());
+        session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
+        // The cached foreground group is missing, so only the handle kill and
+        // the pid fallback can end this shell. The reader thread's `finish` has
+        // cleared `alive` but has not reached the child lock yet.
+        session.process_group = None;
+        session.alive.store(false, Ordering::SeqCst);
+        let session = Arc::new(session);
+
+        session.kill_with_grace().await;
+
+        assert_eq!(
+            lock(&signals.hangups).len(),
+            1,
+            "the close still hangs up the shell first"
+        );
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            1,
+            "a shell that ignored the hangup is ended through its handle, not taken for reaped"
+        );
+        assert!(
+            lock(&signals.pids).is_empty(),
+            "the handle kill worked, so the pid fallback must not run"
+        );
+    }
+
+    /// The reader thread's exit report reaps the shell and consumes the status
+    /// the close wait captured. That reap is still a confirmed reap, so the
+    /// close must not signal the pid; the status it finds is kept for the exit
+    /// report.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_reaped_by_the_reader_thread_is_not_signalled_by_pid() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
+        let mut session = Session::new(
+            TerminalId::new("term_reader_reaped"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(ReapThenRecordKillChild {
+                pid: 4_000_003,
+                kills: Arc::clone(&kills),
+            }),
+            writer,
+        );
+        let signals = Arc::new(RecordedSignals::default());
+        session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
+        // No hangup wait (no shell pid), and `finish` has already reaped the
+        // shell without the close wait capturing its status.
+        session.shell_pid = None;
+        session.process_group = None;
+        session.alive.store(false, Ordering::SeqCst);
+        let session = Arc::new(session);
+
+        session.kill_with_grace().await;
+
+        assert!(
+            lock(&session.reaped_status).is_some(),
+            "the reap the handle found is kept for the exit report"
+        );
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            0,
+            "a reaped shell must not get the handle kill's SIGHUP"
+        );
+        assert!(
+            lock(&signals.pids).is_empty(),
+            "a reaped shell must not get a pid SIGKILL"
         );
     }
 

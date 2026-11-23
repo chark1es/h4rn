@@ -428,10 +428,14 @@ All notable changes to h4rn are recorded here. The format follows
   received no answer at all. A claim now gives way only to a viewer that could actually be written
   under the ownership rule: any viewer when all of them name positions, otherwise only the owner.
   A positioned viewer that the owner rule blocks can no longer swallow the answer either.
-- **Closing a terminal never signals a pid that was already reaped.** On Unix `child.kill()` is a
-  SIGHUP to the shell's pid. When the close wait had reaped the shell during the hangup grace, that
-  signal could reach a process the system had since given the same pid. The handle kill now takes
-  the same reaped check as the pid fallbacks; Windows keeps its handle kill, which holds a process
+- **Closing a terminal ends the shell even when it ignores the hangup, and never signals a reaped
+  pid.** On Unix `child.kill()` is a SIGHUP to the shell's pid, and once the close had reaped the
+  shell that pid could already belong to another process. The close now skips that signal only when
+  the shell is confirmed reaped — the hangup wait stored its exit status, or the child handle reports
+  it while the close holds the child lock — so a shell that survives the hangup and has no usable
+  process group is still ended. The session's internal `alive` flag is not a reap confirmation: the
+  reader thread clears it just before it takes the exit status. The group's TERM and KILL still go
+  out on purpose, to end the shell's jobs, and Windows keeps its handle kill, which holds a process
   handle rather than a bare pid.
 - **Thread settings always describe the session that will run the next turn.** The model list a
   Codex session reports survives the session ending, so an idle thread still offers the models its
