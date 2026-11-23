@@ -876,27 +876,32 @@ the restoration releases the turn instead of leaving it pending. The tests that 
 the fake harness's session/send notifications, a start gate and a held clock, and the storage-failure
 and restart paths run on a journal and ledger that are deliberately broken or reopened.
 
-**Addendum: a promoted turn waits for the exit report, and a death hands it back to the pause.** A
-message queued behind a turn is the daemon's own next step, not the person's Send, so it is marked
-as promoted when the settlement moves it out of the queue. A real ACP peer answers `end_turn` with
-an ordinary newline-terminated frame and only then exits; on a multi-threaded runtime the completion
-can be published before the reader observes the end of stdout, so the promotion can land on a
-transport the exit report is about to declare rate limited. Two rules keep the pause authoritative.
-While a dead session's report is pending (the bounded window every idle death gets), the queue's
-promotion waits: it does not start an agent, and the publish path advances the queue once the
-verdict is in, so the promoted turn either runs on a fresh agent or is parked by the reset. If the
-promotion did reach the dead transport first, the turn is handed back to the queue instead of being
-failed: its prompt never reached the provider, so the armed schedule names it and delivers it after
-the reset. Only a promoted turn that produced nothing is requeued; a prompt the person sent into a
-dying session stays their failure to see, and a promoted turn that streamed output keeps its own
-failure rather than replaying work. This also needed one attribution fix: the adapter publishes a
-turn's reply itself while the bridge forwards that turn's updates on the same channel, and the two
-producers race, so an update that arrives for a turn whose prompt is not on the wire yet is dropped
-instead of being applied to the turn that follows it. The `agy-fixture` peer keeps its replies
-ordinary (a newline terminator, as a real peer writes them) and holds the two orderings with gates:
-`H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers, closes stdout and exits with the reset on stderr, and
-`H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the promoted prompt reaches
-it, so the promotion-before-the-limit order is fixed by the test, not by the machine.
+**Addendum: a reply in the pipe survives the exit, and a promoted turn waits for the exit report or
+is handed back to its pause.** A message queued behind a turn is the daemon's own next step, not the
+person's Send, so it is marked as promoted when the settlement moves it out of the queue. A real ACP
+peer answers `end_turn` with an ordinary newline-terminated frame and then exits at once, so the
+process can be reaped while the reply is still in the pipe. The supervisor therefore waits, bounded,
+for the stdout reader to reach EOF before it fails anything still pending: the reader resolves every
+reply the agent wrote, and only requests with no answer are failed with the exit report. The adapter
+also publishes a turn's settlement through the reader's own event queue, so it lands behind every
+update the reader had already taken, and the bridge drops a `session/update` that arrives after a
+settlement until the next prompt starts: a finished turn's text can no longer be applied to the turn
+that follows it, and it can no longer make a turn that never ran look as if it produced output. Two
+rules keep the pause authoritative. A death observed between turns (the close arrives while no turn
+is active) opens the bounded exit-report window, and the queue's promotion waits for it: it does not
+start an agent, and the publish path advances the queue once the verdict is in. In the ordering the
+fixture forces, the completion is published while the transport is still open, so that wait does not
+apply; the promoted write fails on the dead pipe instead, and the turn is handed back to the queue
+rather than failed. Its prompt never reached the provider, so nothing it collected can be its own,
+and the armed schedule names it and delivers it after the reset. Only the write-failure path may
+requeue without the quiet check for that reason; a promoted turn whose own completion failed on a
+closed transport must still have produced nothing to go back, and a prompt the person sent into a
+dying session stays their failure to see. A paused prompt with no schedule that can be armed (no
+usage meter, or a ledger that refuses it) is failed honestly instead of being parked with no
+delivery owner. The `agy-fixture` peer keeps its replies ordinary (a newline terminator, as a real
+peer writes them): `H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers and exits at once with the reset on
+stderr, and `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the promoted
+prompt reaches it, so the promotion-before-the-limit order is fixed by the test, not by the machine.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

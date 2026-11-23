@@ -574,14 +574,15 @@ async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
 /// thread when the reply is an ordinary newline-terminated frame, as a real
 /// peer writes it.
 ///
-/// The completion can be classified before the reader observes the end of
-/// stdout; a message queued behind the turn is then promoted onto a transport
-/// that is already gone. The limit the exit report carries must still be the
-/// thread's answer: the promoted turn goes back to the pause instead of
-/// failing, and no fresh agent starts into the provider that refused it.
+/// The peer answers and exits at once; its exit closes stdout, so the process
+/// can be reaped before the reader has drained the reply already in the pipe.
+/// The reply must still settle the turn as completed, and a message queued
+/// behind it must not be failed for a death it never touched: the promoted turn
+/// goes back to the pause instead of failing, and no fresh agent starts into
+/// the provider that refused it.
 ///
-/// Both gates are closed until the follow-up has been queued, so the message
-/// really is queued behind the turn rather than opened as a new one.
+/// The prompt gate is closed until the follow-up has been queued, so the
+/// message really is queued behind the turn rather than opened as a new one.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
@@ -614,9 +615,10 @@ async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
         .send_message(&thread_id, "queued".into(), Vec::new())
         .await
         .expect("queue");
-    // Let the turn answer and die. Both gates open at once, right after the
-    // follow-up was queued: the exit report races the completion, which is the
-    // ordering this test exists to survive.
+    // Let the turn answer and exit at once. The prompt gate keeps the answer
+    // held until the follow-up was queued, so the promotion is guaranteed to
+    // happen while the reply and the death race; the exit then closes stdout
+    // the way a real peer's exit does.
     std::fs::write(
         workspace
             .path()
@@ -624,14 +626,14 @@ async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
         b"",
     )
     .expect("let the fixture answer");
-    std::fs::write(
-        workspace.path().join(".agy-fixture-limit-after-turn-gate"),
-        b"",
-    )
-    .expect("let the fixture exit");
 
     let ended = next_turn(&mut events).await;
     assert_eq!(ended.status, TurnStatus::Completed, "{:?}", ended.errors);
+    assert!(
+        ended.text.contains("echo:"),
+        "the reply that was in the pipe before the exit is the turn's result: {:?}",
+        ended.text
+    );
 
     // Whatever order the completion and the report took, the thread ends
     // scheduled on the exit report's limit.

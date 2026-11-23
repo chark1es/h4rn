@@ -482,17 +482,13 @@ fn main() {
                 }
                 if text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN") {
                     // Answer this turn with an ordinary newline-terminated
-                    // frame, then close stdout and exit with the reset on
-                    // stderr. A real peer writes its last reply this way, so the
-                    // daemon can read the reply and publish the turn's
-                    // completion before it observes the end of stdout; the
-                    // requeue of any message the completion promoted is what
-                    // keeps the pause authoritative.
-                    close_stdout();
-                    wait_for_gate(
-                        ".agy-fixture-limit-after-turn-waiting",
-                        ".agy-fixture-limit-after-turn-gate",
-                    );
+                    // frame and then exit at once with the reset on stderr. A
+                    // real peer does not close stdout first and wait: its exit
+                    // closes the pipe, so the process can be reaped before the
+                    // reader has drained the reply that is already in it. The
+                    // reply must still be the turn's result, and the requeue of
+                    // anything the completion promoted is what keeps the pause
+                    // authoritative.
                     eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }

@@ -749,6 +749,19 @@ enum DispatchState {
     Settled,
 }
 
+/// Why a promoted turn is being handed back to the queue.
+///
+/// The two paths know different things about whether the turn could have run:
+/// a failed write proves the prompt never reached the provider, while a failed
+/// completion on a closed transport only says its transport died.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequeueReason {
+    /// Its prompt write failed: it never reached the provider.
+    WriteFailed,
+    /// Its own completion reported failure on a closed transport.
+    CompletionFailed,
+}
+
 /// What a Stop did to a turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StopOutcome {
@@ -1673,8 +1686,8 @@ impl ThreadRecord {
         })
     }
 
-    /// Hands a promoted turn whose transport died before it ran back to the
-    /// pause that holds it.
+    /// Hands a promoted turn whose prompt never ran back to the pause that
+    /// holds it.
     ///
     /// A message promoted from the queue behind a turn is the daemon's own
     /// next step. When its prompt never reaches the provider because the
@@ -1684,11 +1697,36 @@ impl ThreadRecord {
     /// turn stays active and pending, the armed schedule names it, and its own
     /// reset delivers it.
     ///
-    /// `false` when the turn is not that promoted, quiet turn any more (a Stop
-    /// won, or it produced output): the caller then settles it as usual.
-    async fn requeue_promoted_turn(&mut self, turn_id: &TurnId) -> bool {
-        if !self.promoted_turn_is(turn_id) || !self.active_turn_is_quiet() {
+    /// `why` decides what may have to be true before it goes back. A failed
+    /// write proves the prompt never reached the provider, so nothing the
+    /// turn accumulated can be its own; a failed completion does not, so only
+    /// a turn that produced nothing goes back.
+    ///
+    /// `false` when the turn is not that promoted turn any more (a Stop won),
+    /// or when its completion failed after it produced output: the caller then
+    /// settles it as usual.
+    async fn requeue_promoted_turn(&mut self, turn_id: &TurnId, why: RequeueReason) -> bool {
+        if !self.promoted_turn_is(turn_id) {
             return false;
+        }
+        match why {
+            // The prompt never reached the provider. Text, tools or usage
+            // recorded under this turn arrived before its prompt was on the
+            // wire, which means they are a finished turn's late updates that
+            // leaked through, not this turn's work. Clearing them keeps the
+            // resumed attempt honest and cannot lose anything the person saw:
+            // the finished turn's own text was published when it settled.
+            RequeueReason::WriteFailed => {
+                if let Some(active) = self.active.as_mut() {
+                    active.text.clear();
+                    active.tools.clear();
+                    active.usage = Usage::default();
+                }
+            }
+            RequeueReason::CompletionFailed if !self.active_turn_is_quiet() => {
+                return false;
+            }
+            RequeueReason::CompletionFailed => {}
         }
         let Some(dispatch) = self
             .active
@@ -1728,6 +1766,16 @@ impl ThreadRecord {
     /// could run that work into the very limit the report is about to arm. A
     /// person's Send is never held back this way; only the queue's own
     /// promotion is.
+    ///
+    /// This only covers the death that was observed *before* the promotion:
+    /// `dying_sessions` is filled when a close arrives between turns, and the
+    /// promoted turn then exists with an empty queue behind it. When the
+    /// completion is published first (a real peer answers `end_turn` and exits
+    /// at once), the transport is still open at the settlement, so this guard
+    /// does not apply; the write fails instead and
+    /// [`Self::requeue_promoted_turn`] hands the turn to the exit report's
+    /// pause. That requeue, not this wait, is what guarantees the outcome in
+    /// the ordering the fixture forces.
     fn promotion_waits_for_death(&self) -> bool {
         !self.dying_sessions.is_empty()
             && self.active.as_ref().is_some_and(|active| {
@@ -4973,7 +5021,9 @@ impl Inner {
                         .as_ref()
                         .is_some_and(|signal| signal.reset_at.is_some())
                     && record.promoted_turn_is(turn_id)
-                    && record.requeue_promoted_turn(turn_id).await
+                    && record
+                        .requeue_promoted_turn(turn_id, RequeueReason::WriteFailed)
+                        .await
                 {
                     let now = self.now();
                     let mut domain = Vec::new();
@@ -4991,6 +5041,33 @@ impl Inner {
                             &mut wire,
                         )
                         .await;
+                    }
+                    // Only a pause that names this prompt will deliver it. A
+                    // daemon without a meter (or a ledger that refuses the
+                    // schedule) arms none, and returning here would park the
+                    // turn with no delivery owner: it would stay pending
+                    // forever instead of showing its failure. Settle it
+                    // honestly and let the queue move on.
+                    if !record.pause_parks_turn(turn_id) {
+                        let detached = record.detach_session(claimed_generation);
+                        let mut end = TurnEnd::transport_failed(
+                            message,
+                            Some("Inspect the thread and retry when ready".into()),
+                            false,
+                        );
+                        end.wire = wire;
+                        end.domain = domain;
+                        let settled = self.settle_turn_locked(&mut record, turn_id, end).await;
+                        drop(record);
+                        if let Some(detached) = detached {
+                            let _ = detached.lock().await.shutdown().await;
+                        }
+                        if settled {
+                            // The settlement may have promoted the next queued
+                            // message under the same lock.
+                            self.spawn_advance(handle);
+                        }
+                        return;
                     }
                     wire.push(Event::Error {
                         thread_id: Some(record.meta.thread_id.clone()),
@@ -5562,13 +5639,16 @@ impl Inner {
                 break;
             }
             // A turn whose prompt is not on the wire yet cannot own this
-            // output. The adapter publishes a turn's reply itself, while the
-            // bridge forwards that turn's updates on this same channel: the two
-            // producers race, so a delta (or a tool update, a plan, a usage
-            // report) from the turn that just ended can arrive after its
-            // settlement and before the promoted turn is written. Applying it
-            // here would put the previous turn's work on the new one, and make
-            // a turn that never ran look like it produced output.
+            // output. The ACP bridge publishes a turn's settlement behind the
+            // updates the reader had already taken, so a delta from that turn
+            // can no longer arrive after its completion; this is the daemon's
+            // own backstop for any other producer that violates it. A delta (or
+            // a tool update, a plan, a usage report) that arrives here while the
+            // active prompt is still unclaimed cannot be the active turn's, and
+            // applying it would put the finished turn's work on the new one.
+            // A turn whose prompt was claimed but not written is handled where
+            // its write fails: nothing it collected can be its own then
+            // (`RequeueReason::WriteFailed`).
             if record.pending_turn()
                 && matches!(
                     &event,
@@ -5833,7 +5913,9 @@ impl Inner {
                                 .as_ref()
                                 .is_some_and(|scheduled| scheduled.auto_resume)
                             && let Some(turn_id) = turn_id
-                            && record.requeue_promoted_turn(&turn_id).await
+                            && record
+                                .requeue_promoted_turn(&turn_id, RequeueReason::CompletionFailed)
+                                .await
                         {
                             tracing::info!(
                                 thread_id = %thread_id,
@@ -6790,10 +6872,14 @@ impl Inner {
                 return;
             }
             if record.promotion_waits_for_death() {
-                // The queue's own promotion waits one bounded window for the
-                // dead session's exit report: starting an agent now could run
-                // it into the limit the report is about to arm. The publish
-                // path advances the queue when the report's verdict is in.
+                // A death observed between turns is still waiting for its exit
+                // report: starting an agent now could run this promoted turn
+                // into the limit the report is about to arm. The publish path
+                // advances the queue when the report's verdict is in. The other
+                // ordering (the completion is published while the transport is
+                // still open, then the write fails on the dead pipe) is not
+                // held here; `requeue_promoted_turn` hands that turn back to
+                // the pause instead.
                 return;
             }
             // A live session started with settings the thread no longer has
@@ -17539,6 +17625,237 @@ mod tests {
             2,
             "the prompt was delivered on a fresh session"
         );
+    }
+
+    /// A late update from the finished turn never costs a promoted turn its
+    /// requeue, and it is never kept as the promoted turn's own output.
+    ///
+    /// The adapter publishes a turn's updates and its completion on one channel
+    /// and the ACP bridge now orders them before the completion, but the daemon
+    /// must stay honest if one leaks in after the settlement anyway: the
+    /// promoted prompt's write fails on the dead transport, so nothing the turn
+    /// collected could be its own. The turn goes back to the pause that names
+    /// it instead of failing, and the late text is not kept.
+    #[tokio::test]
+    async fn a_late_update_from_a_finished_turn_never_denies_a_promoted_turns_requeue() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let (harness, injector) = FakeHarness::new().with_event_injector();
+        let (harness, completion) = harness.with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let harness = harness.with_closed_limit_after(
+            2,
+            "provider usage limit reached, resets at 2099-12-01T00:00:00Z",
+            Some(reset_at),
+        );
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // Turn 2 streams its echo and then holds its completion. The message
+        // queued behind it is what that completion promotes.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+
+        // Hold the promoted turn's delivery between its claim and its write, so
+        // the late update arrives while the prompt is claimed but not written.
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        completion.release();
+        // Turn 2's completion settles it and starts the promoted turn; this is
+        // the first `TurnStarted` after that completion.
+        let (finished, status) = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnCompleted {
+                turn_id, status, ..
+            } = wire.event
+            {
+                break (turn_id, status);
+            }
+        };
+        assert_eq!(status, TurnStatus::Completed);
+        let promoted = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnStarted { turn_id, .. } = wire.event {
+                break turn_id;
+            }
+        };
+        assert_ne!(finished, promoted, "the promotion starts a new turn");
+        tokio::time::timeout(Duration::from_secs(5), pause.checked.notified())
+            .await
+            .expect("the promoted delivery reached its claim");
+        pause.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), pause.claimed.notified())
+            .await
+            .expect("the promoted delivery claimed the turn");
+
+        // The finished turn's last update leaks through after the settlement.
+        injector.emit(HarnessEvent::TextDelta {
+            text: "late words".into(),
+        });
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        assert!(
+            wait_until(|| {
+                handle.try_lock().is_ok_and(|record| {
+                    record
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.text == "late words")
+                })
+            })
+            .await,
+            "the late update reached the claimed turn, which is the race this guards"
+        );
+
+        // The promoted write now fails on the dead transport with the exit
+        // report's limit. Nothing reached the provider, so the turn must go
+        // back to the pause even though the late text is on it.
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        pause.write.notify_one();
+        loop {
+            let wire = next_event(&mut events).await;
+            if matches!(wire.event, Event::UsageLimitHit { .. }) {
+                break;
+            }
+        }
+
+        let record = handle.lock().await;
+        assert_eq!(
+            record
+                .scheduled_limit
+                .as_ref()
+                .and_then(|limit| limit.parked_turn.clone()),
+            Some(promoted.clone()),
+            "the pause names the promoted turn"
+        );
+        assert_eq!(
+            record
+                .meta
+                .parked
+                .as_ref()
+                .map(|parked| parked.turn_id.clone()),
+            Some(promoted.clone()),
+            "the prompt is on the row for a restart to restore"
+        );
+        let active = record
+            .active
+            .as_ref()
+            .expect("the promoted turn is parked, not failed");
+        assert_eq!(active.turn_id, promoted);
+        assert!(
+            record.pending_turn(),
+            "the failed write put the prompt back"
+        );
+        assert!(
+            active.text.is_empty(),
+            "the finished turn's late update is not the promoted turn's own text"
+        );
+        drop(record);
+
+        manager.shutdown().await;
+    }
+
+    /// A requeued turn with no schedule to deliver it fails instead of hanging.
+    ///
+    /// The promoted prompt's write dies on the exit report's limit, but a
+    /// daemon without a meter can arm no resume. Parking the prompt for a
+    /// schedule that will never exist would leave the thread Working forever,
+    /// so the turn settles honestly and the queue moves on.
+    #[tokio::test]
+    async fn a_requeued_turn_with_no_schedule_to_deliver_it_fails_instead_of_hanging() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let (harness, completion) = FakeHarness::new().with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let harness = harness.with_closed_limit_after(
+            2,
+            "provider usage limit reached, resets at 2099-12-01T00:00:00Z",
+            Some(reset_at),
+        );
+        let host = HostId::new("host_test");
+        // No meter: the limit is recorded but no resume can be armed.
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+        completion.release();
+
+        // The finished turn settles, the queued one is promoted, and its write
+        // fails with a limit that cannot become a schedule.
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted { status, .. } = wire.event
+                    && status != TurnStatus::Completed
+                {
+                    return status;
+                }
+            }
+        })
+        .await
+        .expect("the promoted turn was settled instead of parked forever");
+        assert_eq!(status, TurnStatus::Failed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        let record = handle.lock().await;
+        assert!(
+            record.active.is_none(),
+            "the turn is not left pending with nobody to deliver it"
+        );
+        assert!(record.scheduled_limit.is_none(), "no schedule was armed");
+        assert!(record.meta.parked.is_none(), "no prompt is left parked");
+        drop(record);
+
+        manager.shutdown().await;
     }
 
     /// An ACP live session cannot go back to the agent's default alias in

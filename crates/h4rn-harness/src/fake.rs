@@ -178,6 +178,9 @@ pub struct FakeHarness {
     shutdown_count: Option<ShutdownCount>,
     /// A test-only switch: prompts after the first `n` fail as a dead transport.
     dead_sends_after: Option<usize>,
+    /// Whether a typed limit failure also reports a closed transport, the way
+    /// a write into a session whose agent just exited does.
+    close_on_limit_failure: bool,
     /// A test-only switch: prompts after the first `n` fail with this
     /// (possibly untyped) error instead of being answered.
     send_failure_after: Option<(usize, SendFailure)>,
@@ -516,6 +519,7 @@ impl Default for FakeHarness {
             session_count: None,
             shutdown_count: None,
             dead_sends_after: None,
+            close_on_limit_failure: false,
             send_failure_after: None,
             stream_end_gate: None,
             trailing_completion_gate: None,
@@ -827,6 +831,30 @@ impl FakeHarness {
         self
     }
 
+    /// Lets the first `ok_sends` prompts succeed, then fails later sends with
+    /// the typed limit *and* a transport that reports itself closed.
+    ///
+    /// A test uses this for a promoted prompt written into a session whose
+    /// agent already exited with the reset on stderr: the prompt never reaches
+    /// the provider, the write fails on the dead transport, and the limit on
+    /// the failure is what must hold the queued turn.
+    pub fn with_closed_limit_after(
+        mut self,
+        ok_sends: usize,
+        message: impl Into<String>,
+        reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        self.close_on_limit_failure = true;
+        self.send_failure_after = Some((
+            ok_sends,
+            SendFailure::RateLimited(LimitSignal {
+                message: message.into(),
+                reset_at,
+            }),
+        ));
+        self
+    }
+
     /// Lets the first `ok_sends` prompts succeed, then fails every later send
     /// with an ordinary transport error whose text is `message`.
     ///
@@ -1053,6 +1081,7 @@ impl Harness for FakeHarness {
             interrupt_count: self.interrupt_count.clone(),
             interrupt_failures: self.interrupt_failures.clone(),
             dead_sends_after: self.dead_sends_after,
+            close_on_limit_failure: self.close_on_limit_failure,
             send_failure_after: self.send_failure_after.clone(),
             sends: 0,
             has_answered: false,
@@ -1112,6 +1141,8 @@ pub struct FakeSession {
     interrupt_failures: Option<Arc<AtomicUsize>>,
     /// Sends after this many fail as a dead transport and close the session.
     dead_sends_after: Option<usize>,
+    /// Whether a typed limit failure also reports a closed transport.
+    close_on_limit_failure: bool,
     /// Sends after this many fail with this test-only failure.
     send_failure_after: Option<(usize, SendFailure)>,
     /// Prompts this session has been asked to write.
@@ -1240,6 +1271,10 @@ impl HarnessSession for FakeSession {
         if let Some((after, failure)) = self.send_failure_after.clone()
             && self.sends > after
         {
+            if self.close_on_limit_failure && matches!(failure, SendFailure::RateLimited(_)) {
+                self.closed = true;
+                self.health.close();
+            }
             return Err(match failure {
                 SendFailure::Transport(message) => HarnessError::Transport {
                     harness: self.kind,

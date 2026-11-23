@@ -472,18 +472,21 @@ All notable changes to h4rn are recorded here. The format follows
   `/bin/sh`, which is never freshly written, and each test that expects "off" first proves the shell
   really runs, so a spawn failure cannot pass for the command's result. The hung-CLI test keeps a
   short budget and still covers the deadline.
-- **A rate limit that only an agent's exit report carries still pauses the thread when the queue was
-  already promoted.** A real ACP peer answers `end_turn` with an ordinary newline-terminated frame
-  and only then exits, and on a multi-threaded runtime the turn's completion can be published before
-  the reader sees the end of stdout. The daemon now holds a queue promotion while a dead session's
-  exit report is pending, and a message that was promoted onto the dead transport is handed back to
-  the exit report's pause instead of being failed: its prompt never reached the provider, so the
-  armed schedule delivers it after the reset, and no fresh agent starts into the limited provider.
-  Only a promoted turn that produced nothing goes back; a message the person sent into a dying
-  session keeps its own failure. An adapter update that arrives for a turn whose prompt is not on the
-  wire yet is dropped instead of being applied to the promoted turn, which used to make a turn that
-  never ran look like it produced output. The fixture no longer pauses between closing stdout and
-  exiting in any of its exit branches, and its tests force both orderings with gates.
+- **A reply that reached the pipe before the agent exited is kept, and a queued message survives a
+  usage limit even when the queue was already promoted.** A real ACP peer ends its turn with an
+  ordinary newline-terminated frame and can exit at once, so the process may be reaped before the
+  stdout reader has drained the reply already in the pipe. The supervisor now waits, bounded, for
+  the reader to reach EOF before it fails anything still pending, so an answered turn settles
+  Completed instead of Failed with the exit report. The adapter also publishes a turn's settlement
+  behind the updates the reader had already taken, and drops a session update that arrives after
+  the settlement until the next prompt starts: a finished turn's last text stays with that turn and
+  is never applied to the turn that follows it. When the queued message was already promoted onto a
+  transport that then closed, it is handed back to the exit report's pause instead of being failed:
+  its write failed, so nothing it collected can be its own, and the parked prompt is delivered after
+  the reset. A death observed before the promotion is still held back by a bounded wait for the exit
+  report; in the ordering where the completion is published first, the requeue is what guarantees
+  the outcome. If no schedule can be armed (no usage meter, or a ledger that refuses it), the
+  requeued turn now fails honestly instead of staying pending with no delivery owner.
 - **A re-watched PR and a reconnected badge keep their promises.** Every watcher
   generation now comes from one service-wide counter that never reuses a value,
   so a poll that started before an unwatch and re-watch cannot hand its older
