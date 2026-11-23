@@ -932,20 +932,30 @@ tool map: a *completed* tool call leaves that map empty, and it is the strongest
 reached the provider's work, so such a turn settles as limited with its tool card and output and is
 never written again. Second, ownership of a stream is established before a delta is published. The
 ACP adapter tags every `session/update` with the prompt generation it follows and the bridge only
-applies updates for the running generation; the daemon additionally drops updates until the prompt
-has been handed to the harness (`on_the_wire`), so a finished turn's late text is neither journaled
-under the promoted turn nor able to block its requeue. ACP carries no turn id, so an update a peer
-writes after it has read the new prompt is indistinguishable from the new turn's own output; the
-drop covers everything the daemon can attribute. Third, a pause and its prompt are one record. The
-schedule binds to a turn only through `parked_turn_to_keep`, and whenever it does, the prompt is
-saved on the thread row in the same step, so a limit landing between promotion and claim survives a
-restart. A claim re-checks pause ownership under the record lock and refuses to write a prompt the
-pause now owns. A requeue keeps the dead session's exit status and stderr row instead of clearing
-it, and the published `auto_resume` flag is derived from the schedule that was actually armed: a
-limit that no meter or ledger could schedule reads as rate-limited, never as `Scheduled`. Reply
-resolution is independent of event delivery for the same "never lose the person's answer" reason:
-the reader publishes into an unbounded queue drained by one forwarder, so a full session queue can
-no longer park it before the reply behind those updates.
+applies updates for the running generation. The daemon also holds a promoted turn's text, tools,
+plan and usage from the moment its prompt goes on the wire (`on_the_wire`) until that write returns
+`Ok`, and drops them when it fails: an adapter that has not accepted the prompt yet can still be
+draining the finished turn's output, so those events are neither published nor journaled under a
+turn whose write can fail and send the prompt back to the queue. Releasing in the adapter's order on
+success keeps the turn's own first words. ACP carries no turn id, so text a peer writes after it has
+read the new prompt is still indistinguishable from the new turn's own output; the hold covers
+exactly everything up to the acceptance. Third, a pause and its prompt are one record. The schedule
+binds to a turn only through `parked_turn_to_keep`, and the prompt is saved on the thread row only
+when the ledger really armed the schedule, in the same step, so a limit landing between promotion
+and claim survives a restart. A ledger that refuses the schedule leaves no prompt on the row for a
+restart to deliver again. A claim re-checks pause ownership under the record lock and refuses to
+write a prompt the pause now owns. A requeue keeps the dead session's exit status and stderr row
+instead of clearing it, and the published `auto_resume` flag is derived from the schedule that was
+actually armed: a limit that no meter or ledger could schedule reads as rate-limited, never as
+`Scheduled`. Reply resolution is independent of event delivery for the same "never lose the
+person's answer" reason: the reader publishes into its own queue drained by one forwarder, so a full
+session queue can no longer park it before the reply behind those updates. That queue is bounded at
+four session queues; when it overflows the newest ordinary update is dropped and counted. A
+permission request, a transport close, stdout's close and the exit report take a reserved queue:
+once more than one session queue of updates is waiting they get the next slot, so a flood cannot
+delay the event that decides what a request means or that the agent is gone. While the consumer
+keeps up the reader's order is kept, so a close never overtakes the words read before it. A
+settlement stays in the ordinary order, behind the updates the reader had already taken.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 
