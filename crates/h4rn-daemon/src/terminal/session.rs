@@ -170,10 +170,11 @@ impl Viewer {
 
     /// Whether this viewer was sent `seq` as that chunk's raw bytes.
     ///
-    /// A chunk folded into a snapshot is never raw, even when the same
-    /// position was also sent: the snapshot replaced its bytes for this
-    /// parser. Positions above the last snapshot bound are raw by definition,
-    /// because the only way to receive them is as output.
+    /// A chunk that reached this viewer only inside a snapshot is not raw. A
+    /// chunk it parsed raw before a later snapshot stays raw: its parser saw
+    /// those bytes, so it can still answer a query that started there.
+    /// Positions above the last snapshot bound are raw by definition, because
+    /// the only way to receive them is as output.
     pub fn raw_contains(&self, seq: u64) -> bool {
         lock(&self.credit).raw_contains(seq)
     }
@@ -257,8 +258,11 @@ pub struct Credit {
 ///
 /// A stream that keeps up needs one range; each snapshot that skips output
 /// starts another. The cap only matters for a viewer that resyncs hundreds of
-/// times, and forgetting the oldest range can only make a very old position
-/// unanswerable, which the answered-query window has already done.
+/// times. Forgetting the oldest range makes those old raw positions look
+/// snapshot-only for this viewer: its claim there is given up to another
+/// viewer that has the position raw, or accepted when none does. Either way
+/// the shared `(position, ordinal)` record still allows one write, so the
+/// bound never causes a second answer.
 const RAW_RANGES_MAX: usize = 32;
 
 impl Credit {

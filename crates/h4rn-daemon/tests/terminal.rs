@@ -1337,6 +1337,49 @@ async fn a_sole_viewer_answers_a_query_the_snapshot_completed() {
     drop(cwd);
 }
 
+/// When every attached viewer saw a query's chunk only inside its snapshot,
+/// no viewer has it raw, so neither claim is dropped: the shared identity
+/// writes exactly one answer and the shell is never left without one.
+#[tokio::test]
+async fn two_viewers_that_saw_a_query_only_in_snapshots_answer_it_once() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, mut rx, first) = attach_viewer(&manager, &terminal, true);
+    let (second_id, _second_rx, second) = attach_viewer(&manager, &terminal, true);
+    for attached in [&first, &second] {
+        attached.viewer.reset_credit(5);
+        mark_sent(attached, 5);
+    }
+
+    manager
+        .input_by_stream(terminal.stream_id, first_id, b"iFIRST5", at(5, 0))
+        .expect("the first snapshot viewer answers");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iSECOND5", at(5, 0))
+        .expect("the second snapshot viewer's duplicate is accepted and deduped");
+    manager
+        .input_by_stream(terminal.stream_id, first_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut rx,
+        &manager,
+        &terminal.terminal_id,
+        first_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iFIRST5").count() + output.matches("iSECOND5").count(),
+        1,
+        "two snapshot-only viewers give the shell exactly one answer: {output:?}"
+    );
+
+    drop((first, second));
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
 /// A viewer that is registered but has not been handed its attach snapshot
 /// yet has received nothing, so it cannot answer and must not hold back the
 /// viewer that can.

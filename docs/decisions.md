@@ -226,7 +226,11 @@ for that viewer, and another attached viewer received **that position** raw. Tha
 the bytes and answers the query, and its answer must be the one written. Everything else is
 accepted: a chunk the viewer parsed raw, a position no other viewer parsed raw, and the case where
 every viewer saw the query only through a snapshot, where the shared `(position, ordinal)` record
-still reduces the replies to one write. A viewer still taking its attach snapshot has received
+still reduces the replies to one write. A viewer remembers at most 32 raw ranges (one per resync
+that skipped output); forgetting the oldest makes those old positions look snapshot-only for it, so
+its claim there gives way to a viewer that has them raw, or is accepted when none does. Either way
+the answer record still allows one write, so the cap can never cause a second answer. A viewer
+still taking its attach snapshot has received
 nothing, so it never makes another viewer's claim give way. A viewer that stalled before a chunk and
 catches up later therefore names the answers exactly as a viewer that kept up does: the query it
 missed stays unseen, and the queries it saw are written once between them, in arrival order. The one
