@@ -221,6 +221,33 @@ mod tests {
     #[cfg(unix)]
     const ANSWER_BUDGET: Duration = Duration::from_secs(60);
 
+    /// Runs `/bin/sh -c <command>` through [`run_until`].
+    ///
+    /// The tests used to write a fresh executable script and spawn it at once.
+    /// When another test thread forks while that write handle is still open,
+    /// the child inherits it and the spawn fails with `Text file busy` (os
+    /// error 26) - and `run_until` reports every spawn failure as `None`, which
+    /// is exactly the answer the hung and failing tests expect. `/bin/sh` is
+    /// never freshly written, so these tests exercise detection, not the
+    /// filesystem.
+    ///
+    /// The positive control keeps a spawn failure from passing for a command's
+    /// outcome in the tests that expect `None`: the shell really runs here, so
+    /// a `None` from the command below is the command's own result.
+    #[cfg(unix)]
+    fn run_shell(args: &[&str], deadline: Instant) -> Option<String> {
+        let shell = Path::new("/bin/sh");
+        assert!(
+            shell.is_file(),
+            "these tests need /bin/sh to stand in for the tailscale CLI"
+        );
+        assert!(
+            run_until(shell, &["-c", "true"], Instant::now() + ANSWER_BUDGET).is_some(),
+            "the test process could not run /bin/sh, so `None` below would be a spawn failure"
+        );
+        run_until(shell, args, deadline)
+    }
+
     #[test]
     fn modes_parse_strictly() {
         assert_eq!(TailscaleMode::parse("AUTO"), Some(TailscaleMode::Auto));
@@ -248,23 +275,11 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn script(dir: &Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("tailscale");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-
-    #[cfg(unix)]
     #[test]
     fn a_hung_cli_is_killed_at_the_deadline() {
-        let dir = tempfile::tempdir().unwrap();
-        let binary = script(dir.path(), "exec sleep 30");
         let started = Instant::now();
-        let output = run_until(
-            &binary,
-            &["status", "--json"],
+        let output = run_shell(
+            &["-c", "exec sleep 30"],
             started + Duration::from_millis(300),
         );
         assert_eq!(output, None);
@@ -278,19 +293,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_prompt_cli_still_answers() {
-        let dir = tempfile::tempdir().unwrap();
-        let binary = script(dir.path(), "echo 100.64.1.5");
-        let output = run_until(&binary, &["ip", "-4"], Instant::now() + ANSWER_BUDGET);
+        let output = run_shell(&["-c", "echo 100.64.1.5"], Instant::now() + ANSWER_BUDGET);
         assert_eq!(output.as_deref().map(str::trim), Some("100.64.1.5"));
     }
 
     #[cfg(unix)]
     #[test]
     fn a_failing_cli_reads_as_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let binary = script(dir.path(), "exit 1");
         assert_eq!(
-            run_until(&binary, &["ip", "-4"], Instant::now() + ANSWER_BUDGET),
+            run_shell(&["-c", "exit 1"], Instant::now() + ANSWER_BUDGET),
             None
         );
     }
