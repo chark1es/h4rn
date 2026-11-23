@@ -41,9 +41,9 @@ assignees: Array<ForgeIssuePerson>,
  */
 comment_count: number, 
 /**
- * Last update on the tracker.
+ * Last update on the tracker, when it reports one.
  */
-updated_at: string, 
+updated_at: string | null, 
 /**
  * Browser URL.
  */

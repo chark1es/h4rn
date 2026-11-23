@@ -1,0 +1,175 @@
+# The Linear schema surface the daemon's documents use, copied from
+# https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql
+# (trimmed to the fields under test). The test parses this and checks every
+# field our queries and mutations name, so a typo or a stale field fails there
+# instead of at runtime.
+
+type Query {
+  viewer: User!
+  teams(first: Int): TeamConnection!
+  issues(first: Int, after: String, filter: IssueFilter, orderBy: PaginationOrderBy): IssueConnection!
+  issue(id: String!): Issue!
+  searchIssues(
+    term: String!
+    teamId: String
+    first: Int
+    after: String
+    filter: IssueFilter
+  ): IssueSearchPayload!
+}
+
+type Mutation {
+  commentCreate(input: CommentCreateInput!): CommentPayload!
+}
+
+type User {
+  name: String!
+  displayName: String!
+  email: String
+  organization: Organization
+}
+
+type Organization {
+  name: String!
+}
+
+type Team {
+  id: ID!
+  key: String!
+  name: String!
+}
+
+type TeamConnection {
+  nodes: [Team!]!
+}
+
+type Issue {
+  id: ID!
+  identifier: String!
+  title: String!
+  description: String
+  createdAt: DateTime
+  updatedAt: DateTime
+  url: String!
+  state: WorkflowState!
+  team: Team!
+  assignee: User
+  labels(first: Int): IssueLabelConnection!
+  comments(first: Int): CommentConnection!
+  attachments(first: Int): AttachmentConnection!
+}
+
+type IssueSearchResult {
+  id: ID!
+  identifier: String!
+  title: String!
+  updatedAt: DateTime
+  url: String!
+  state: WorkflowState!
+  team: Team!
+  assignee: User
+  labels(first: Int): IssueLabelConnection!
+}
+
+type IssueConnection {
+  nodes: [Issue!]!
+  pageInfo: PageInfo!
+}
+
+type IssueSearchPayload {
+  nodes: [IssueSearchResult!]!
+  pageInfo: PageInfo!
+}
+
+type WorkflowState {
+  name: String!
+  type: String!
+}
+
+type IssueLabelConnection {
+  nodes: [IssueLabel!]!
+}
+
+type IssueLabel {
+  name: String!
+}
+
+type CommentConnection {
+  nodes: [Comment!]!
+  pageInfo: PageInfo!
+}
+
+type Comment {
+  id: ID!
+  body: String!
+  createdAt: DateTime!
+  updatedAt: DateTime
+  user: User
+}
+
+type AttachmentConnection {
+  nodes: [Attachment!]!
+}
+
+type Attachment {
+  title: String!
+  url: String!
+  metadata: JSONObject
+}
+
+type CommentPayload {
+  success: Boolean!
+  comment: Comment
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+
+input IssueFilter {
+  and: [IssueFilter!]
+  team: TeamFilter
+  state: WorkflowStateFilter
+  assignee: NullableUserFilter
+  creator: NullableUserFilter
+}
+
+input TeamFilter {
+  id: IDComparator
+}
+
+input IDComparator {
+  eq: ID
+  in: [ID!]
+}
+
+input WorkflowStateFilter {
+  type: StringComparator
+}
+
+input StringComparator {
+  eq: String
+  in: [String!]
+}
+
+input NullableUserFilter {
+  isMe: BooleanComparator
+}
+
+input BooleanComparator {
+  eq: Boolean
+}
+
+input CommentCreateInput {
+  issueId: String!
+  body: String!
+}
+
+enum PaginationOrderBy {
+  createdAt
+  updatedAt
+}
+
+scalar DateTime
+scalar JSONObject

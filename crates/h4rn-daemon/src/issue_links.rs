@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_forge::ForgeError;
 use h4rn_protocol::issues::{IssueScope, LinearIssueSummary, LinkedIssueState, ThreadIssue};
-use h4rn_protocol::{
-    ForgeIssueSummary, ForgeRepoRef, ProtoError, ProtoErrorCode, ThreadId, ThreadTab,
-};
+use h4rn_protocol::{ForgeIssueSummary, ForgeRepoRef, ProtoError, ProtoErrorCode, ThreadId};
 use serde::{Deserialize, Serialize};
 
 use crate::forge::ForgeServiceError;
@@ -347,17 +345,9 @@ impl IssueSource for TrackerIssueSource {
         _team_id: &str,
         issue_id: &str,
     ) -> Result<LinearIssueSummary, IssueLinkError> {
-        let issue = self.linear.get_issue(account_id, issue_id).await?;
+        let issue = self.linear.get_issue(account_id, issue_id, None).await?;
         Ok(issue.summary)
     }
-}
-
-/// Whether a thread can still accept a link (present and not archived).
-pub async fn thread_is_active(manager: &ThreadManager, thread_id: &ThreadId) -> bool {
-    manager
-        .thread_summary(thread_id)
-        .await
-        .is_some_and(|summary| summary.tab != ThreadTab::Settled)
 }
 
 #[cfg(test)]
@@ -419,7 +409,7 @@ mod tests {
                 labels: Vec::new(),
                 assignees: Vec::new(),
                 comment_count: 1,
-                updated_at: Utc::now(),
+                updated_at: Some(Utc::now()),
                 web_url: "https://github.com/acme/widget/issues/12".into(),
             })
         }
@@ -444,7 +434,7 @@ mod tests {
                 team_key: "ENG".into(),
                 assignees: Vec::new(),
                 labels: Vec::new(),
-                updated_at: Utc::now(),
+                updated_at: Some(Utc::now()),
                 url: "https://linear.app/acme/issue/ENG-1".into(),
             })
         }

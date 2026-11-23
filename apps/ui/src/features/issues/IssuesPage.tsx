@@ -7,7 +7,7 @@ import {
   SearchIcon,
   UnlinkIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { Markdown } from "@/components/thread/Markdown";
@@ -19,18 +19,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { forgeLabel } from "@/features/forge/store";
 import { useProjects } from "@/features/projects/store";
 import type {
   ForgeAccount,
+  ForgeCapabilityEntry,
   ForgeIssue,
+  ForgeIssueCapabilities,
   ForgeIssueComment,
   ForgeIssueFilter,
   ForgeIssueState,
-  ForgeIssueSummary,
   ForgeIssueUpdate,
   ForgeRepoRef,
-  IssueScope,
   LinearAccount,
   LinearIssue,
   LinearProjectTeam,
@@ -44,6 +43,7 @@ import {
   ISSUE_FILTERS,
   IssueApi,
   type IssueRow,
+  issueCapabilitiesFor,
   issueError,
   issueKey,
   issueStateLabel,
@@ -77,14 +77,24 @@ function writeHidden(hidden: Set<string>): void {
 }
 
 type Source =
-  | { kind: "forge"; accountId: string; repo: ForgeRepoRef; page: number }
-  | { kind: "linear"; accountId: string; projectId: string; cursor: string | null };
+  | {
+      kind: "forge";
+      accountId: string;
+      repo: ForgeRepoRef;
+      page: number;
+      hasMore: boolean;
+    }
+  | {
+      kind: "linear";
+      accountId: string;
+      projectId: string;
+      cursor: string | null;
+      hasMore: boolean;
+    };
 
-type Group = TrackerGroup & { sources: Source[] };
-
-type Selection = {
-  row: IssueRow;
-  readOnly: boolean;
+type Group = TrackerGroup & {
+  sources: Source[];
+  capabilities: ForgeIssueCapabilities;
 };
 
 function sortRows(rows: IssueRow[]): IssueRow[] {
@@ -98,11 +108,31 @@ function mergeRows(existing: IssueRow[], incoming: IssueRow[]): IssueRow[] {
   return sortRows([...existing, ...incoming.filter((row) => !seen.has(row.key))]);
 }
 
+/** Whether a filter means the same thing to every tracker currently shown. */
+function filterSupported(groups: Group[], filter: ForgeIssueFilter): boolean {
+  if (filter === "open" || filter === "closed" || filter === "all") return true;
+  if (groups.length === 0) return true;
+  return groups.every((group) => {
+    switch (filter) {
+      case "assigned":
+        return group.capabilities.assigned_filter;
+      case "created":
+        return group.capabilities.created_filter;
+      case "mentioning":
+        return group.capabilities.mentioning_filter;
+      default:
+        return true;
+    }
+  });
+}
+
 /**
  * Issues from every project's tracker, grouped by account.
  *
  * Every row comes from the daemon's tracker read. A failed read is shown in
- * its group and never replaced by remembered rows.
+ * its group and never replaced by remembered rows. A tracker the daemon says
+ * it cannot read is not queried, and filters or actions it cannot honour are
+ * not offered.
  */
 export function IssuesPage() {
   const projects = useProjects((state) => state.projects);
@@ -110,6 +140,7 @@ export function IssuesPage() {
   const connection = useApp((state) => state.connection.status);
 
   const [accounts, setAccounts] = useState<ForgeAccount[]>([]);
+  const [forgeCapabilities, setForgeCapabilities] = useState<ForgeCapabilityEntry[]>([]);
   const [linearAccounts, setLinearAccounts] = useState<LinearAccount[]>([]);
   const [mappings, setMappings] = useState<LinearProjectTeam[]>([]);
   const [repos, setRepos] = useState<Record<string, ForgeRepoRef>>({});
@@ -120,18 +151,33 @@ export function IssuesPage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Selection | null>(null);
+  const [selected, setSelected] = useState<IssueRow | null>(null);
   const [linked, setLinked] = useState<Set<string>>(new Set());
   const [refresh, setRefresh] = useState(0);
+  // Bumped whenever the query changes, so a page that arrives late for a
+  // superseded search or filter is discarded instead of spliced in.
+  const queryToken = useRef(0);
+
+  const changeFilter = (next: ForgeIssueFilter) => {
+    queryToken.current += 1;
+    setGroups([]);
+    setFilter(next);
+  };
+  const runSearch = (term: string) => {
+    queryToken.current += 1;
+    setGroups([]);
+    setSearch(term);
+  };
 
   // A cold deep link mounts before the socket handshake finishes.
   useEffect(() => {
     if (connection === "connecting") return;
     let cancelled = false;
     Promise.all([api().forgeAccounts(), api().linearAccounts(), api().projectTeams()])
-      .then(([forgeAccounts, linear, teams]) => {
+      .then(([forge, linear, teams]) => {
         if (cancelled) return;
-        setAccounts(forgeAccounts);
+        setAccounts(forge.accounts);
+        setForgeCapabilities(forge.capabilities);
         setLinearAccounts(linear);
         setMappings(teams);
       })
@@ -191,6 +237,7 @@ export function IssuesPage() {
   useEffect(() => {
     void refresh;
     if (connection === "connecting") return;
+    const token = queryToken.current;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -204,9 +251,16 @@ export function IssuesPage() {
           candidate.forge === repo.forge &&
           candidate.base_url.replace(/\/$/, "") === repo.base_url.replace(/\/$/, ""),
       );
-      if (account) {
-        forgeSources.push({ kind: "forge", accountId: account.account_id, repo, page: 1 });
-      }
+      if (!account) continue;
+      const capabilities = issueCapabilitiesFor("forge", account, forgeCapabilities);
+      if (!capabilities.read) continue;
+      forgeSources.push({
+        kind: "forge",
+        accountId: account.account_id,
+        repo,
+        page: 1,
+        hasMore: false,
+      });
     }
     const linearSources: Source[] = [];
     for (const project of visible) {
@@ -217,6 +271,7 @@ export function IssuesPage() {
           accountId: mapping.account_id,
           projectId: project.id,
           cursor: null,
+          hasMore: false,
         });
       }
     }
@@ -230,11 +285,16 @@ export function IssuesPage() {
       sources.map(async (source) => {
         try {
           if (source.kind === "forge") {
-            const result = await api().listForgeIssues(source.repo, filter, 1, search || null);
+            const result = await api().listForgeIssues(
+              source.accountId,
+              source.repo,
+              filter,
+              1,
+              search || null,
+            );
             return {
-              source,
+              source: { ...source, hasMore: result.hasMore },
               rows: result.issues.map((issue) => forgeIssueRow(source.accountId, issue)),
-              hasMore: result.hasMore,
               readOnly: result.readOnly,
               error: null as string | null,
             };
@@ -246,9 +306,12 @@ export function IssuesPage() {
             search || null,
           );
           return {
-            source,
+            source: {
+              ...source,
+              cursor: result.nextCursor,
+              hasMore: result.nextCursor !== null,
+            },
             rows: result.issues.map((issue) => linearIssueRow(source.accountId, issue)),
-            hasMore: result.nextCursor !== null,
             readOnly: result.readOnly,
             error: null as string | null,
           };
@@ -256,14 +319,13 @@ export function IssuesPage() {
           return {
             source,
             rows: [] as IssueRow[],
-            hasMore: false,
             readOnly: true,
             error: issueError(cause),
           };
         }
       }),
     ).then((results) => {
-      if (cancelled) return;
+      if (cancelled || token !== queryToken.current) return;
       const byAccount = new Map<string, Group>();
       for (const result of results) {
         const kind = result.source.kind;
@@ -285,9 +347,10 @@ export function IssuesPage() {
             loading: false,
             error: null,
             sources: [],
+            capabilities: issueCapabilitiesFor(kind, account, forgeCapabilities),
           } satisfies Group);
         group.rows = mergeRows(group.rows, result.rows);
-        group.hasMore = group.hasMore || result.hasMore;
+        group.hasMore = group.hasMore || result.source.hasMore;
         group.error = group.error ?? result.error;
         group.sources.push(result.source);
         byAccount.set(key, group);
@@ -300,6 +363,7 @@ export function IssuesPage() {
     };
   }, [
     accounts,
+    forgeCapabilities,
     linearAccounts,
     mappings,
     projects,
@@ -311,21 +375,46 @@ export function IssuesPage() {
     connection,
   ]);
 
+  // A filter one of the shown trackers cannot honour is not offered; if it
+  // was selected before the tracker changed, fall back to open.
+  const canMention = filterSupported(groups, "mentioning");
+  const canAssign = filterSupported(groups, "assigned");
+  const canCreate = filterSupported(groups, "created");
+  useEffect(() => {
+    if (
+      (filter === "mentioning" && !canMention) ||
+      (filter === "assigned" && !canAssign) ||
+      (filter === "created" && !canCreate)
+    ) {
+      queryToken.current += 1;
+      setGroups([]);
+      setFilter("open");
+    }
+  }, [filter, canMention, canAssign, canCreate]);
+
   const loadMore = useCallback(
     async (group: Group) => {
+      const token = queryToken.current;
+      const active = group.sources.filter((source) => source.hasMore);
+      if (active.length === 0) return;
       setGroups((current) =>
         current.map((item) => (item.key === group.key ? { ...item, loading: true } : item)),
       );
       const additions = await Promise.all(
-        group.sources.map(async (source) => {
+        active.map(async (source) => {
           try {
             if (source.kind === "forge") {
               const next = source.page + 1;
-              const result = await api().listForgeIssues(source.repo, filter, next, search || null);
+              const result = await api().listForgeIssues(
+                source.accountId,
+                source.repo,
+                filter,
+                next,
+                search || null,
+              );
               return {
                 rows: result.issues.map((issue) => forgeIssueRow(source.accountId, issue)),
-                hasMore: result.hasMore,
-                source: { ...source, page: next } as Source,
+                source: { ...source, page: next, hasMore: result.hasMore } as Source,
                 error: null as string | null,
               };
             }
@@ -337,20 +426,23 @@ export function IssuesPage() {
             );
             return {
               rows: result.issues.map((issue) => linearIssueRow(source.accountId, issue)),
-              hasMore: result.nextCursor !== null,
-              source: { ...source, cursor: result.nextCursor } as Source,
+              source: {
+                ...source,
+                cursor: result.nextCursor,
+                hasMore: result.nextCursor !== null,
+              } as Source,
               error: null as string | null,
             };
           } catch (cause) {
             return {
               rows: [] as IssueRow[],
-              hasMore: false,
-              source,
+              source: { ...source, hasMore: false } as Source,
               error: issueError(cause),
             };
           }
         }),
       );
+      if (token !== queryToken.current) return;
       setGroups((current) =>
         current.map((item) => {
           if (item.key !== group.key) return item;
@@ -361,13 +453,17 @@ export function IssuesPage() {
           const errors = additions
             .map((addition) => addition.error)
             .filter((message): message is string => Boolean(message));
+          const updated = new Map(
+            additions.map((addition) => [sourceKey(addition.source), addition.source]),
+          );
+          const sources = item.sources.map((source) => updated.get(sourceKey(source)) ?? source);
           return {
             ...item,
             rows,
-            hasMore: additions.some((addition) => addition.hasMore),
+            hasMore: sources.some((source) => source.hasMore),
             loading: false,
             error: errors[0] ?? null,
-            sources: additions.map((addition) => addition.source),
+            sources,
           };
         }),
       );
@@ -385,6 +481,7 @@ export function IssuesPage() {
     });
   };
 
+  const filters = ISSUE_FILTERS.filter((item) => filterSupported(groups, item.key));
   const threadId = selectedThreadId;
 
   return (
@@ -396,7 +493,7 @@ export function IssuesPage() {
           aria-label="Search issues"
           onSubmit={(event) => {
             event.preventDefault();
-            setSearch(searchInput.trim());
+            runSearch(searchInput.trim());
           }}
         >
           <SearchIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
@@ -412,7 +509,7 @@ export function IssuesPage() {
               className="q-link"
               onClick={() => {
                 setSearchInput("");
-                setSearch("");
+                runSearch("");
               }}
             >
               Clear
@@ -420,13 +517,13 @@ export function IssuesPage() {
           ) : null}
         </form>
         <div className="q-seg" role="tablist" aria-label="Issue filters">
-          {ISSUE_FILTERS.map((item) => (
+          {filters.map((item) => (
             <button
               key={item.key}
               type="button"
               role="tab"
               aria-selected={filter === item.key}
-              onClick={() => setFilter(item.key)}
+              onClick={() => changeFilter(item.key)}
             >
               {item.label}
             </button>
@@ -496,8 +593,8 @@ export function IssuesPage() {
                   key={row.key}
                   type="button"
                   className="q-issue-row"
-                  aria-current={selected?.row.key === row.key ? "true" : undefined}
-                  onClick={() => setSelected({ row, readOnly: false })}
+                  aria-current={selected?.key === row.key ? "true" : undefined}
+                  onClick={() => setSelected(row)}
                 >
                   <CircleDotIcon
                     className={row.state === "closed" ? "q-icon s14 q-faint" : "q-icon s14 q-ok"}
@@ -529,10 +626,14 @@ export function IssuesPage() {
         <div className="q-issues-detail">
           {selected ? (
             <IssueDetail
-              key={`${selected.row.key}:${refresh}`}
-              row={selected.row}
+              key={`${selected.key}:${refresh}`}
+              row={selected}
+              capabilities={
+                groups.find((group) => group.rows.some((row) => row.key === selected.key))
+                  ?.capabilities ?? issueCapabilitiesFor("forge", undefined, forgeCapabilities)
+              }
               threadId={threadId}
-              linked={linked.has(selected.row.key)}
+              linked={linked.has(selected.key)}
               onChanged={() => {
                 setRefresh((value) => value + 1);
               }}
@@ -554,18 +655,28 @@ export function IssuesPage() {
   );
 }
 
+function sourceKey(source: Source): string {
+  return source.kind === "forge"
+    ? `forge:${source.repo.base_url}:${source.repo.owner}/${source.repo.repo}`
+    : `linear:${source.projectId}`;
+}
+
 function stateTone(state: ForgeIssueState): string {
   return state === "closed" ? "q-faint" : "q-ok";
 }
 
+type CloseReason = "completed" | "not_planned" | "duplicate";
+
 function IssueDetail({
   row,
+  capabilities,
   threadId,
   linked,
   onChanged,
   onLinkChange,
 }: {
   row: IssueRow;
+  capabilities: ForgeIssueCapabilities;
   threadId: string | null;
   linked: boolean;
   onChanged: () => void;
@@ -574,6 +685,8 @@ function IssueDetail({
   const [forge, setForge] = useState<ForgeIssue | null>(null);
   const [linear, setLinear] = useState<LinearIssue | null>(null);
   const [comments, setComments] = useState<ForgeIssueComment[]>([]);
+  const [commentsCursor, setCommentsCursor] = useState<string | null>(null);
+  const [linearCommentsCursor, setLinearCommentsCursor] = useState<string | null>(null);
   const [readOnly, setReadOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -583,9 +696,8 @@ function IssueDetail({
   const [labels, setLabels] = useState(row.labels.map((label) => label.name).join(", "));
   const [assignees, setAssignees] = useState(row.assignees.join(", "));
   const [comment, setComment] = useState("");
-  const [closeReason, setCloseReason] = useState<"completed" | "not_planned" | "duplicate">(
-    "completed",
-  );
+  const [closeReason, setCloseReason] = useState<CloseReason>("completed");
+  const [duplicateNumber, setDuplicateNumber] = useState("");
 
   const repo = row.scope.tracker === "forge" ? row.scope.repo : null;
   const number = Number(row.id);
@@ -595,11 +707,15 @@ function IssueDetail({
     setLoading(true);
     setError(null);
     if (row.scope.tracker === "forge" && repo) {
-      Promise.all([api().getForgeIssue(repo, number), api().forgeIssueComments(repo, number)])
+      Promise.all([
+        api().getForgeIssue(row.accountId, repo, number),
+        api().forgeIssueComments(row.accountId, repo, number, null),
+      ])
         .then(([detail, page]) => {
           if (cancelled) return;
           setForge(detail.issue);
           setComments(page.comments);
+          setCommentsCursor(page.next_cursor);
           setReadOnly(detail.readOnly);
           setTitle(detail.issue.summary.title);
           setBody(detail.issue.body);
@@ -614,10 +730,11 @@ function IssueDetail({
         });
     } else {
       api()
-        .getLinearIssue(row.accountId, row.id)
+        .getLinearIssue(row.accountId, row.id, null)
         .then(({ issue, readOnly: readOnlyIssue }) => {
           if (cancelled) return;
           setLinear(issue);
+          setLinearCommentsCursor(issue.comments_next_cursor);
           setReadOnly(readOnlyIssue);
           setTitle(issue.summary.title);
           setBody(issue.description);
@@ -664,11 +781,12 @@ function IssueDetail({
   const update = (change: Partial<ForgeIssueUpdate>) =>
     run(async () => {
       if (!repo) return;
-      const result = await api().updateForgeIssue(repo, number, {
+      const result = await api().updateForgeIssue(row.accountId, repo, number, {
         title: null,
         body: null,
         state: null,
         close_reason: null,
+        duplicate_issue_id: null,
         labels: null,
         assignees: null,
         ...change,
@@ -682,11 +800,38 @@ function IssueDetail({
       onChanged();
     });
 
+  const loadMoreComments = () =>
+    run(async () => {
+      if (!repo || !commentsCursor) return;
+      const page = await api().forgeIssueComments(row.accountId, repo, number, commentsCursor);
+      setComments((current) => [...current, ...page.comments]);
+      setCommentsCursor(page.next_cursor);
+    });
+
+  const loadMoreLinearComments = () =>
+    run(async () => {
+      if (!linearCommentsCursor) return;
+      const { issue } = await api().getLinearIssue(row.accountId, row.id, linearCommentsCursor);
+      const seen = new Set((linear?.comments ?? []).map((item) => item.id));
+      setLinear((current) =>
+        current
+          ? {
+              ...current,
+              comments: [
+                ...current.comments,
+                ...issue.comments.filter((item) => !seen.has(item.id)),
+              ],
+            }
+          : issue,
+      );
+      setLinearCommentsCursor(issue.comments_next_cursor);
+    });
+
   const postComment = () =>
     run(async () => {
       if (!comment.trim()) return;
       if (repo) {
-        const posted = await api().commentForgeIssue(repo, number, comment);
+        const posted = await api().commentForgeIssue(row.accountId, repo, number, comment);
         setComments((current) => [...current, posted]);
       } else {
         const posted = await api().commentLinearIssue(row.accountId, row.id, comment);
@@ -729,8 +874,18 @@ function IssueDetail({
   const commentsFor = forge ? comments : (linear?.comments ?? []);
   const linkedPrs = forge?.linked_pull_requests ?? [];
   const linearPrs = linear?.linked_pull_requests ?? [];
-  const canWrite = !readOnly && row.scope.tracker === "forge";
-  const canComment = !readOnly;
+  const canWrite = !readOnly && row.scope.tracker === "forge" && capabilities.write;
+  const canComment = !readOnly && capabilities.comments;
+  const duplicateInvalid =
+    closeReason === "duplicate" && !/^[1-9][0-9]*$/.test(duplicateNumber.trim());
+  const closeChange = (): Partial<ForgeIssueUpdate> => {
+    if (!capabilities.close_reason) return { state: "closed" };
+    return {
+      state: "closed",
+      close_reason: closeReason,
+      duplicate_issue_id: closeReason === "duplicate" ? Number(duplicateNumber.trim()) : null,
+    };
+  };
 
   return (
     <article className="q-issues-detail-inner" aria-label="Issue">
@@ -812,65 +967,82 @@ function IssueDetail({
           <Markdown text={body || "_No description._"} />
         </div>
       )}
-      {canWrite ? (
+      {canWrite && (capabilities.labels || capabilities.assignees) ? (
         <div className="q-issues-fields">
-          <label>
-            <span>Labels</span>
-            <input
-              value={labels}
-              onChange={(event) => setLabels(event.target.value)}
-              onBlur={() => {
-                const next = labels
-                  .split(",")
-                  .map((value) => value.trim())
-                  .filter(Boolean);
-                const before = forge?.summary.labels.map((label) => label.name) ?? [];
-                if (next.join("\u0000") !== before.join("\u0000")) {
-                  void update({ labels: next });
-                }
-              }}
-              placeholder="bug, frontend"
-            />
-          </label>
-          <label>
-            <span>Assignees</span>
-            <input
-              value={assignees}
-              onChange={(event) => setAssignees(event.target.value)}
-              onBlur={() => {
-                const next = assignees
-                  .split(",")
-                  .map((value) => value.trim())
-                  .filter(Boolean);
-                const before = forge?.summary.assignees.map((person) => person.login) ?? [];
-                if (next.join("\u0000") !== before.join("\u0000")) {
-                  void update({ assignees: next });
-                }
-              }}
-              placeholder="alice, bob"
-            />
-          </label>
+          {capabilities.labels ? (
+            <label>
+              <span>Labels</span>
+              <input
+                value={labels}
+                onChange={(event) => setLabels(event.target.value)}
+                onBlur={() => {
+                  const next = labels
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean);
+                  const before = forge?.summary.labels.map((label) => label.name) ?? [];
+                  if (next.join("\u0000") !== before.join("\u0000")) {
+                    void update({ labels: next });
+                  }
+                }}
+                placeholder="bug, frontend"
+              />
+            </label>
+          ) : null}
+          {capabilities.assignees ? (
+            <label>
+              <span>Assignees</span>
+              <input
+                value={assignees}
+                onChange={(event) => setAssignees(event.target.value)}
+                onBlur={() => {
+                  const next = assignees
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean);
+                  const before = forge?.summary.assignees.map((person) => person.login) ?? [];
+                  if (next.join("\u0000") !== before.join("\u0000")) {
+                    void update({ assignees: next });
+                  }
+                }}
+                placeholder="alice, bob"
+              />
+            </label>
+          ) : null}
         </div>
       ) : null}
       {canWrite ? (
         <div className="q-issues-actions">
           {state === "open" ? (
             <>
-              <ChipSelect
-                label="Close reason"
-                value={closeReason}
-                options={[
-                  { value: "completed", label: "Completed" },
-                  { value: "not_planned", label: "Not planned" },
-                  { value: "duplicate", label: "Duplicate" },
-                ]}
-                onChange={setCloseReason}
-              />
+              {capabilities.close_reason ? (
+                <ChipSelect
+                  label="Close reason"
+                  value={closeReason}
+                  options={[
+                    { value: "completed", label: "Completed" },
+                    { value: "not_planned", label: "Not planned" },
+                    { value: "duplicate", label: "Duplicate" },
+                  ]}
+                  onChange={(value) => setCloseReason(value as CloseReason)}
+                />
+              ) : null}
+              {capabilities.close_reason && closeReason === "duplicate" ? (
+                <input
+                  className="q-issue-duplicate"
+                  aria-label="Duplicate of issue number"
+                  inputMode="numeric"
+                  placeholder="Issue number"
+                  value={duplicateNumber}
+                  onChange={(event) => setDuplicateNumber(event.target.value)}
+                />
+              ) : null}
               <button
                 type="button"
                 className="q-btn secondary"
-                disabled={busy}
-                onClick={() => void update({ state: "closed", close_reason: closeReason })}
+                disabled={busy || duplicateInvalid}
+                title={duplicateInvalid ? "Name the issue this one duplicates" : undefined}
+                onClick={() => void update(closeChange())}
               >
                 Close issue
               </button>
@@ -941,6 +1113,26 @@ function IssueDetail({
             </div>
           ),
         )}
+        {forge && commentsCursor ? (
+          <button
+            type="button"
+            className="q-btn ghost"
+            disabled={busy}
+            onClick={() => void loadMoreComments()}
+          >
+            {busy ? "Loading…" : "Load more comments"}
+          </button>
+        ) : null}
+        {!forge && linearCommentsCursor ? (
+          <button
+            type="button"
+            className="q-btn ghost"
+            disabled={busy}
+            onClick={() => void loadMoreLinearComments()}
+          >
+            {busy ? "Loading…" : "Load more comments"}
+          </button>
+        ) : null}
         {canComment ? (
           <div className="q-issues-comment-form">
             <textarea
@@ -965,51 +1157,3 @@ function IssueDetail({
     </article>
   );
 }
-
-/** Display a forge account label, shared by tests. */
-export function accountLabel(account: ForgeAccount): string {
-  return `${forgeLabel(account.forge)} · ${account.username ?? account.base_url}`;
-}
-
-/** The scope a row links with; exported so tests can assert it. */
-export function rowScope(row: IssueRow): IssueScope {
-  return row.scope;
-}
-
-/** Rows are grouped by tracker, not by repository. */
-export function groupRows(rows: IssueRow[]): Map<string, IssueRow[]> {
-  const groups = new Map<string, IssueRow[]>();
-  for (const row of rows) {
-    const key = `${row.scope.tracker}:${row.accountId}`;
-    groups.set(key, [...(groups.get(key) ?? []), row]);
-  }
-  return groups;
-}
-
-/** Filter labels for the compact header, exported for tests. */
-export function filterLabel(filter: ForgeIssueFilter): string {
-  return ISSUE_FILTERS.find((item) => item.key === filter)?.label ?? "Open";
-}
-
-/** The linked key for a stored thread issue, exported for tests. */
-export function linkedIssueKey(issue: ThreadIssue): string {
-  return issueKey(issue.scope, issue.issue_id);
-}
-
-/** A testable summary of what the detail header says. */
-export function issueHeading(row: IssueRow): string {
-  return `${row.number} ${row.title}`;
-}
-
-export function forgeIssueSummaryRows(accountId: string, issues: ForgeIssueSummary[]): IssueRow[] {
-  return issues.map((issue) => forgeIssueRow(accountId, issue));
-}
-
-export function linearIssueSummaryRows(
-  accountId: string,
-  issues: LinearIssue["summary"][],
-): IssueRow[] {
-  return issues.map((issue) => linearIssueRow(accountId, issue));
-}
-
-export const issueRowHelpers = { sortRows, mergeRows };

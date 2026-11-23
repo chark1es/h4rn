@@ -1089,7 +1089,11 @@ repo: ForgeRepoRef,
 /**
  * Issue number.
  */
-number: number, } | { "type": "forge_comment_issue", 
+number: number, 
+/**
+ * Provider continuation from the previous page, carried unchanged.
+ */
+cursor: string | null, } | { "type": "forge_comment_issue", 
 /**
  * Account to use.
  */
@@ -1165,7 +1169,11 @@ account_id: string,
 /**
  * Linear issue id.
  */
-issue_id: string, } | { "type": "linear_comment_issue", 
+issue_id: string, 
+/**
+ * Provider continuation for the next comment page.
+ */
+comments_after: string | null, } | { "type": "linear_comment_issue", 
 /**
  * Connection to comment with.
  */

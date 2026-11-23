@@ -500,8 +500,9 @@ impl Forge for GitLabClient {
         &self,
         repo: &ForgeRepoRef,
         number: u32,
+        cursor: Option<&str>,
     ) -> Result<ForgeIssueCommentPage> {
-        crate::issues::gitlab::comments(&self.http, &self.api, repo, number).await
+        crate::issues::gitlab::comments(&self.http, &self.api, repo, number, cursor).await
     }
 
     async fn comment_issue(

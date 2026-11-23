@@ -502,8 +502,9 @@ impl Forge for GiteaClient {
         &self,
         repo: &ForgeRepoRef,
         number: u32,
+        cursor: Option<&str>,
     ) -> Result<ForgeIssueCommentPage> {
-        crate::issues::gitea::comments(&self.http, &self.api, repo, number).await
+        crate::issues::gitea::comments(&self.http, &self.api, repo, number, cursor).await
     }
 
     async fn comment_issue(

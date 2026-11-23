@@ -21,4 +21,8 @@ comments: Array<ForgeIssueComment>,
 /**
  * The tracker has more comments than this page returned.
  */
-has_more: boolean, };
+has_more: boolean, 
+/**
+ * The provider continuation for the next page, carried unchanged.
+ */
+next_cursor: string | null, };

@@ -26,6 +26,10 @@ state: ForgeIssueState | null,
  */
 close_reason: ForgeIssueCloseReason | null, 
 /**
+ * The issue this one duplicates, for a duplicate close reason.
+ */
+duplicate_issue_id: number | null, 
+/**
  * Replacement label names.
  */
 labels: Array<string> | null, 

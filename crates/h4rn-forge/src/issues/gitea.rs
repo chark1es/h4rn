@@ -5,7 +5,6 @@
 //! are sent as repository label ids, so a replacement name is resolved first
 //! and an unknown label is reported rather than silently dropped.
 
-use chrono::Utc;
 use h4rn_protocol::{
     ForgeIssue, ForgeIssueComment, ForgeIssueCommentPage, ForgeIssueFilter, ForgeIssuePage,
     ForgeIssueState, ForgeIssueSummary, ForgeIssueUpdate, ForgeRepoRef,
@@ -40,6 +39,18 @@ fn query(pairs: &[(&str, String)]) -> String {
         .join("&")
 }
 
+/// The authenticated account's login, for the username-based filters.
+async fn current_login(http: &ForgeHttp, api: &str) -> Result<String> {
+    let value = http.get_json(&format!("{api}/user")).await?;
+    let login = text(&value, "login");
+    if login.is_empty() {
+        return Err(ForgeError::Parse(
+            "Gitea returned no login for the authenticated account".into(),
+        ));
+    }
+    Ok(login)
+}
+
 /// Lists issues.
 pub(crate) async fn list(
     http: &ForgeHttp,
@@ -64,10 +75,14 @@ pub(crate) async fn list(
         ("limit", "50".to_owned()),
         ("page", page.to_string()),
     ];
+    // The repository issue list filters by an explicit username, not a
+    // boolean "me"; the authenticated login comes from `/user`.
     match filter {
-        ForgeIssueFilter::Assigned => params.push(("assigned", "true".to_owned())),
-        ForgeIssueFilter::Created => params.push(("created", "true".to_owned())),
-        ForgeIssueFilter::Mentioning => params.push(("mentioned", "true".to_owned())),
+        ForgeIssueFilter::Assigned => params.push(("assigned_by", current_login(http, api).await?)),
+        ForgeIssueFilter::Created => params.push(("created_by", current_login(http, api).await?)),
+        ForgeIssueFilter::Mentioning => {
+            params.push(("mentioned_by", current_login(http, api).await?))
+        }
         _ => {}
     }
     if let Some(search) = search.map(str::trim).filter(|search| !search.is_empty()) {
@@ -105,8 +120,7 @@ pub(crate) async fn get(
     Ok(ForgeIssue {
         summary,
         body: text(&value, "body"),
-        created_at: parse_datetime(&value["created_at"], "created_at")
-            .unwrap_or_else(|_| Utc::now()),
+        created_at: parse_datetime(&value["created_at"], "created_at").ok(),
         closed_at: parse_optional_datetime(value.get("closed_at"), "closed_at")
             .ok()
             .flatten(),
@@ -115,27 +129,34 @@ pub(crate) async fn get(
     })
 }
 
-/// Reads one issue's comments.
+/// Reads one issue's comments. The protocol cursor is the next page number.
 pub(crate) async fn comments(
     http: &ForgeHttp,
     api: &str,
     repo: &ForgeRepoRef,
     number: u32,
+    cursor: Option<&str>,
 ) -> Result<ForgeIssueCommentPage> {
     validate_repo(repo)?;
+    let page = cursor
+        .and_then(|cursor| cursor.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
     let url = format!(
-        "{}/issues/{number}/comments?limit=100&page=1",
+        "{}/issues/{number}/comments?limit=100&page={page}",
         repo_url(api, repo)
     );
     let value = http.get_json(&url).await?;
     let items = value
         .as_array()
         .ok_or_else(|| ForgeError::Parse("Gitea returned no issue comments".into()))?;
+    let has_more = items.len() == 100;
     Ok(ForgeIssueCommentPage {
         repo: repo.clone(),
         number,
         comments: items.iter().filter_map(map_comment).collect(),
-        has_more: items.len() == 100,
+        has_more,
+        next_cursor: has_more.then(|| (page + 1).to_string()),
     })
 }
 
@@ -196,15 +217,23 @@ pub(crate) async fn update(
             }),
         );
     }
-    if let Some(names) = &update.labels {
-        let ids = label_ids(http, &base, names).await?;
-        body.insert("labels".into(), json!(ids));
-    }
     if let Some(assignees) = &update.assignees {
         body.insert("assignees".into(), json!(assignees));
     }
-    http.patch_json(&format!("{base}/issues/{number}"), &Value::Object(body))
+    if !body.is_empty() {
+        http.patch_json(&format!("{base}/issues/{number}"), &Value::Object(body))
+            .await?;
+    }
+    // Gitea replaces labels through their own endpoint, by repository label
+    // id; the issue PATCH body does not carry them.
+    if let Some(names) = &update.labels {
+        let ids = label_ids(http, &base, names).await?;
+        http.put_json(
+            &format!("{base}/issues/{number}/labels"),
+            &json!({"labels": ids}),
+        )
         .await?;
+    }
     get(http, api, repo, number).await
 }
 
@@ -242,7 +271,7 @@ fn map_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgeIssueSummary> 
         labels: labels(&value["labels"]),
         assignees: people(&value["assignees"]),
         comment_count: value["comments"].as_u64().unwrap_or(0) as u32,
-        updated_at: parse_datetime(&value["updated_at"], "updated_at").ok()?,
+        updated_at: parse_datetime(&value["updated_at"], "updated_at").ok(),
         web_url: optional_text(value, "html_url").unwrap_or_default(),
     })
 }

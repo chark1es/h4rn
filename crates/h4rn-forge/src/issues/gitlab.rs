@@ -5,7 +5,6 @@
 //! so and the daemon never sends one. Assignee updates need member ids, which
 //! are resolved by exact username before the issue is patched.
 
-use chrono::Utc;
 use h4rn_protocol::{
     ForgeIssue, ForgeIssueComment, ForgeIssueCommentPage, ForgeIssueFilter, ForgeIssueLinkedPr,
     ForgeIssuePage, ForgeIssuePerson, ForgeIssueState, ForgeIssueSummary, ForgeIssueUpdate,
@@ -110,8 +109,7 @@ pub(crate) async fn get(
     Ok(ForgeIssue {
         summary,
         body: text(&value, "description"),
-        created_at: parse_datetime(&value["created_at"], "created_at")
-            .unwrap_or_else(|_| Utc::now()),
+        created_at: parse_datetime(&value["created_at"], "created_at").ok(),
         closed_at: parse_optional_datetime(value.get("closed_at"), "closed_at")
             .ok()
             .flatten(),
@@ -120,22 +118,28 @@ pub(crate) async fn get(
     })
 }
 
-/// Reads one issue's notes.
+/// Reads one issue's notes. The protocol cursor is the next page number.
 pub(crate) async fn comments(
     http: &ForgeHttp,
     api: &str,
     repo: &ForgeRepoRef,
     number: u32,
+    cursor: Option<&str>,
 ) -> Result<ForgeIssueCommentPage> {
     validate_repo(repo)?;
+    let page = cursor
+        .and_then(|cursor| cursor.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
     let url = format!(
-        "{}/issues/{number}/notes?per_page=100&page=1&sort=asc",
+        "{}/issues/{number}/notes?per_page=100&page={page}&sort=asc",
         project_url(api, repo)
     );
     let value = http.get_json(&url).await?;
     let items = value
         .as_array()
         .ok_or_else(|| ForgeError::Parse("GitLab returned no issue notes".into()))?;
+    let has_more = items.len() == 100;
     Ok(ForgeIssueCommentPage {
         repo: repo.clone(),
         number,
@@ -144,7 +148,8 @@ pub(crate) async fn comments(
             .filter(|note| !note["system"].as_bool().unwrap_or(false))
             .filter_map(map_comment)
             .collect(),
-        has_more: items.len() == 100,
+        has_more,
+        next_cursor: has_more.then(|| (page + 1).to_string()),
     })
 }
 
@@ -224,8 +229,7 @@ pub(crate) async fn update(
     Ok(ForgeIssue {
         summary,
         body: text(&value, "description"),
-        created_at: parse_datetime(&value["created_at"], "created_at")
-            .unwrap_or_else(|_| Utc::now()),
+        created_at: parse_datetime(&value["created_at"], "created_at").ok(),
         closed_at: parse_optional_datetime(value.get("closed_at"), "closed_at")
             .ok()
             .flatten(),
@@ -312,7 +316,7 @@ fn map_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgeIssueSummary> 
             })
             .unwrap_or_default(),
         comment_count: value["user_notes_count"].as_u64().unwrap_or(0) as u32,
-        updated_at: parse_datetime(&value["updated_at"], "updated_at").ok()?,
+        updated_at: parse_datetime(&value["updated_at"], "updated_at").ok(),
         web_url: optional_text(value, "web_url").unwrap_or_default(),
     })
 }

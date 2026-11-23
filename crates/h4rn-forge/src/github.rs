@@ -635,8 +635,9 @@ impl Forge for GitHubClient {
         &self,
         repo: &ForgeRepoRef,
         number: u32,
+        cursor: Option<&str>,
     ) -> Result<ForgeIssueCommentPage> {
-        crate::issues::github::comments(&self.http, &self.api, repo, number).await
+        crate::issues::github::comments(&self.http, &self.api, repo, number, cursor).await
     }
 
     async fn comment_issue(

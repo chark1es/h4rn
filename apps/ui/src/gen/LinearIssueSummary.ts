@@ -42,9 +42,9 @@ assignees: Array<string>,
  */
 labels: Array<string>, 
 /**
- * Last update.
+ * Last update, when Linear reports one.
  */
-updated_at: string, 
+updated_at: string | null, 
 /**
  * Browser URL.
  */

@@ -553,10 +553,18 @@ fn redact_json_strings(value: &mut Value, sanitize: &dyn Fn(&str) -> String) {
     }
 }
 
-/// Token prefixes that identify a forge credential. Azure DevOps personal
+/// Token prefixes that identify a tracker credential. Azure DevOps personal
 /// access tokens have no prefix of their own, so they cannot be recognised by
-/// shape; the Atlassian and GitHub/GitLab forms can.
-const TOKEN_PREFIXES: [&str; 6] = ["ghp_", "gho_", "glpat-", "github_pat_", "ATBB", "ATATT"];
+/// shape; the Atlassian, GitHub/GitLab and Linear forms can.
+const TOKEN_PREFIXES: [&str; 7] = [
+    "ghp_",
+    "gho_",
+    "glpat-",
+    "github_pat_",
+    "ATBB",
+    "ATATT",
+    "lin_api_",
+];
 
 /// Removes anything that looks like a token from a forge message.
 ///
@@ -611,6 +619,19 @@ fn token_run_len(value: &str) -> usize {
 /// original. Scanning the normalised haystack once for every match offset
 /// (instead of re-normalising the remaining text per replacement) keeps a body
 /// that echoes the secret thousands of times linear rather than quadratic.
+/// Redacts a configured credential in every spelling an upstream body can
+/// echo: raw, percent-encoded (either hex case), Base64 or JSON-escaped.
+///
+/// The pattern pass stays as a second layer for a token this account does not
+/// own.
+pub(crate) fn redact_configured(value: &str, secret: &str) -> String {
+    let mut output = value.to_owned();
+    for form in secret_forms(secret) {
+        output = redact_secret(&output, &form);
+    }
+    redact(&output)
+}
+
 fn redact_secret(value: &str, secret: &str) -> String {
     let needle = normalize_escapes(secret);
     if needle.is_empty() {
@@ -914,6 +935,23 @@ mod tests {
         assert_eq!(redact("glpat-xyz"), "[redacted]");
         assert_eq!(redact("ATBBtoken"), "[redacted]");
         assert_eq!(redact("ATATT3xFfGF0abc"), "[redacted]");
+        // Linear personal API keys are recognisable by their prefix too.
+        let linear = format!("{}_abc123", "lin_api");
+        assert_eq!(redact(&format!("bad key {linear}")), "bad key [redacted]");
+    }
+
+    #[test]
+    fn a_configured_secret_is_redacted_even_without_a_known_prefix() {
+        // The exact-secret pass is what protects a key Linear accepts in any
+        // shape, including the percent-encoded spelling an upstream body can
+        // quote.
+        let secret = ["fixture", "/linear", "+key"].concat();
+        let escaped = encode_path_segment(&secret);
+        let body = format!("the upstream said {secret} and also {escaped}");
+        let message = redact_configured(&body, &secret);
+        assert!(!message.contains(&secret), "{message}");
+        assert!(!message.contains(&escaped), "{message}");
+        assert_eq!(message.matches("[redacted]").count(), 2, "{message}");
     }
 
     #[test]

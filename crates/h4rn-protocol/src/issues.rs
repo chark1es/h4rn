@@ -94,8 +94,9 @@ pub struct ForgeIssueSummary {
     pub assignees: Vec<ForgeIssuePerson>,
     /// Number of comments the tracker reports.
     pub comment_count: u32,
-    /// Last update on the tracker.
-    pub updated_at: DateTime<Utc>,
+    /// Last update on the tracker, when it reports one.
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     /// Browser URL.
     pub web_url: String,
 }
@@ -107,8 +108,9 @@ pub struct ForgeIssue {
     pub summary: ForgeIssueSummary,
     /// Markdown body.
     pub body: String,
-    /// When it was opened.
-    pub created_at: DateTime<Utc>,
+    /// When it was opened, when the tracker reports it.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
     /// When it was closed.
     pub closed_at: Option<DateTime<Utc>>,
     /// Close reason, where the tracker records one.
@@ -158,6 +160,9 @@ pub struct ForgeIssueCommentPage {
     pub comments: Vec<ForgeIssueComment>,
     /// The tracker has more comments than this page returned.
     pub has_more: bool,
+    /// The provider continuation for the next page, carried unchanged.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 /// The fields a write request may change.
@@ -178,6 +183,9 @@ pub struct ForgeIssueUpdate {
     /// Why it was closed, where the tracker records one.
     #[serde(default)]
     pub close_reason: Option<ForgeIssueCloseReason>,
+    /// The issue this one duplicates, for a duplicate close reason.
+    #[serde(default)]
+    pub duplicate_issue_id: Option<u32>,
     /// Replacement label names.
     #[serde(default)]
     pub labels: Option<Vec<String>>,
@@ -193,6 +201,7 @@ impl ForgeIssueUpdate {
             && self.body.is_none()
             && self.state.is_none()
             && self.close_reason.is_none()
+            && self.duplicate_issue_id.is_none()
             && self.labels.is_none()
             && self.assignees.is_none()
     }
@@ -301,8 +310,9 @@ pub struct LinearIssueSummary {
     pub assignees: Vec<String>,
     /// Label names.
     pub labels: Vec<String>,
-    /// Last update.
-    pub updated_at: DateTime<Utc>,
+    /// Last update, when Linear reports one.
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     /// Browser URL.
     pub url: String,
 }
@@ -314,10 +324,15 @@ pub struct LinearIssue {
     pub summary: LinearIssueSummary,
     /// Markdown description.
     pub description: String,
-    /// When it was opened.
-    pub created_at: DateTime<Utc>,
+    /// When it was opened, when Linear reports it.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
     /// Comments, oldest first.
     pub comments: Vec<LinearIssueComment>,
+    /// The provider continuation for the next comment page, when Linear has
+    /// more comments than this page returned.
+    #[serde(default)]
+    pub comments_next_cursor: Option<String>,
     /// Pull requests Linear links to the issue.
     pub linked_pull_requests: Vec<LinearIssueLinkedPr>,
 }

@@ -207,14 +207,15 @@ impl LinearService {
             .await?)
     }
 
-    /// Reads one issue and its comments.
+    /// Reads one issue and a page of its comments.
     pub async fn get_issue(
         &self,
         account_id: &str,
         issue_id: &str,
+        comments_after: Option<&str>,
     ) -> Result<LinearIssue, ForgeServiceError> {
         let client = self.client(account_id)?;
-        Ok(client.get_issue(issue_id).await?)
+        Ok(client.get_issue(issue_id, comments_after).await?)
     }
 
     /// Reads one issue for a linked thread, resolving the account itself.
@@ -223,7 +224,7 @@ impl LinearService {
         account_id: &str,
         issue_id: &str,
     ) -> Result<LinearIssue, ForgeServiceError> {
-        self.get_issue(account_id, issue_id).await
+        self.get_issue(account_id, issue_id, None).await
     }
 
     /// Posts a comment.

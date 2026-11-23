@@ -47,6 +47,8 @@ const KEYCHAIN_SERVICE: &str = "h4rn-forge";
 const DEFAULT_POLL_SECS: u64 = 30;
 /// Maximum poll backoff after repeated failures.
 const MAX_BACKOFF_SECS: u64 = 300;
+/// How long a repository write-ownership answer is reused.
+const WRITE_OWNERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One checks snapshot broadcast to connected clients.
 #[derive(Clone, Debug)]
@@ -125,9 +127,13 @@ fn forge_proto_error(error: ForgeError) -> ProtoError {
             ProtoErrorCode::InvalidRequest,
             "Fix the request; the message names the field the forge rejected",
         ),
-        ForgeError::RateLimited { .. } => (
+        ForgeError::RateLimited { .. } | ForgeError::LinearRateLimited { .. } => (
             ProtoErrorCode::RateLimited,
             "Wait for the reset, or add a second account with its own quota",
+        ),
+        ForgeError::LinearForbidden { .. } => (
+            ProtoErrorCode::Forbidden,
+            "Check the Linear workspace's permissions for this key",
         ),
         ForgeError::Unsupported(_) => (
             ProtoErrorCode::Unsupported,
@@ -289,6 +295,9 @@ pub struct ForgeService {
     poller: Mutex<Option<JoinHandle<()>>>,
     /// Device authorizations in flight, keyed by the id handed to the client.
     flows: Mutex<HashMap<String, DeviceFlowState>>,
+    /// Repository write ownership, keyed by forge and repository, cached for
+    /// [`WRITE_OWNERSHIP_TTL`] because every issue read and write asks.
+    owned_repos: Mutex<HashMap<String, (bool, std::time::Instant)>>,
     requests_per_minute: u32,
 }
 
@@ -316,6 +325,7 @@ impl ForgeService {
             watches: RwLock::new(HashMap::new()),
             poller: Mutex::new(None),
             flows: Mutex::new(HashMap::new()),
+            owned_repos: Mutex::new(HashMap::new()),
             requests_per_minute,
         });
         service.start_poller();
@@ -642,6 +652,51 @@ impl ForgeService {
         Ok(detect_repos(Path::new(workspace), &self.hosts)?)
     }
 
+    /// Whether `repo` is the repository a local project designates for writes.
+    ///
+    /// The PR features read the first detected remote (`origin`, or the first
+    /// forge remote when a checkout has no origin). That remote, and only
+    /// that one, is the project's repository: a fork whose `origin` is the
+    /// fork and whose `upstream` is the parent must never let an issue write
+    /// reach the parent. The git scan runs off the async runtime, and the
+    /// answer is cached briefly because every issue read and write asks.
+    pub async fn repo_is_designated(
+        &self,
+        projects: &[h4rn_protocol::Project],
+        repo: &ForgeRepoRef,
+    ) -> bool {
+        let key = format!(
+            "{:?}|{}|{}/{}",
+            repo.forge, repo.base_url, repo.owner, repo.repo
+        );
+        if let Ok(cache) = self.owned_repos.lock()
+            && let Some((owned, at)) = cache.get(&key)
+            && at.elapsed() < WRITE_OWNERSHIP_TTL
+        {
+            return *owned;
+        }
+        let paths = projects
+            .iter()
+            .map(|project| project.path.clone())
+            .collect::<Vec<_>>();
+        let hosts = self.hosts.clone();
+        let target = repo.clone();
+        let owned = tokio::task::spawn_blocking(move || {
+            paths.iter().any(|path| {
+                detect_repos(Path::new(path), &hosts)
+                    .ok()
+                    .and_then(|remotes| remotes.into_iter().next())
+                    .is_some_and(|remote| remote.repo == target)
+            })
+        })
+        .await
+        .unwrap_or(false);
+        if let Ok(mut cache) = self.owned_repos.lock() {
+            cache.insert(key, (owned, std::time::Instant::now()));
+        }
+        owned
+    }
+
     /// Lists PRs for one repository.
     pub async fn list_prs(
         &self,
@@ -888,9 +943,10 @@ impl ForgeService {
         account_id: Option<&str>,
         repo: &ForgeRepoRef,
         number: u32,
+        cursor: Option<&str>,
     ) -> Result<h4rn_protocol::ForgeIssueCommentPage, ForgeServiceError> {
         let (_account, client) = self.resolve_client(account_id, repo)?;
-        Ok(client.list_issue_comments(repo, number).await?)
+        Ok(client.list_issue_comments(repo, number, cursor).await?)
     }
 
     /// Posts a comment on an issue.
@@ -1755,5 +1811,60 @@ mod tests {
         let body: serde_json::Value = requests[0].body_json().expect("json");
         assert_eq!(body["draft"], true);
         assert_eq!(body["head"], "main");
+    }
+
+    /// A fork's checkout has `upstream` pointing at the parent. Only the
+    /// designated remote (`origin`) is a write target; a write aimed at the
+    /// parent's repository is refused before a forge client is built.
+    #[tokio::test]
+    async fn only_the_projects_designated_remote_is_a_write_target() {
+        let repo_dir = tempfile::tempdir().expect("repo");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_dir.path())
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&[
+            "remote",
+            "add",
+            "upstream",
+            "https://github.com/parent/widget.git",
+        ]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ]);
+
+        let data = tempfile::tempdir().expect("data dir");
+        let service = ForgeService::open(data.path()).expect("forge service");
+        service.shutdown();
+        let projects = vec![h4rn_protocol::Project {
+            id: "proj_1".into(),
+            host: h4rn_protocol::HostId::new("host_local"),
+            path: repo_dir.path().to_string_lossy().into_owned(),
+            name: "widget".into(),
+            created_at: Utc::now(),
+            git: true,
+        }];
+        let repo = |owner: &str| ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: "https://github.com".into(),
+            owner: owner.into(),
+            repo: "widget".into(),
+        };
+        assert!(service.repo_is_designated(&projects, &repo("acme")).await);
+        assert!(!service.repo_is_designated(&projects, &repo("parent")).await);
     }
 }

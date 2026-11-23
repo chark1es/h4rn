@@ -5,7 +5,6 @@
 //! the only REST view that reports the pull requests cross-referenced from an
 //! issue, which is why detail costs one extra request.
 
-use chrono::Utc;
 use h4rn_protocol::{
     ForgeIssue, ForgeIssueCloseReason, ForgeIssueComment, ForgeIssueCommentPage, ForgeIssueFilter,
     ForgeIssueLinkedPr, ForgeIssuePage, ForgeIssueState, ForgeIssueSummary, ForgeIssueUpdate,
@@ -165,8 +164,7 @@ pub(crate) async fn get(
     Ok(ForgeIssue {
         summary,
         body: text(&value, "body"),
-        created_at: parse_datetime(&value["created_at"], "created_at")
-            .unwrap_or_else(|_| Utc::now()),
+        created_at: parse_datetime(&value["created_at"], "created_at").ok(),
         closed_at: parse_optional_datetime(value.get("closed_at"), "closed_at")
             .ok()
             .flatten(),
@@ -176,11 +174,15 @@ pub(crate) async fn get(
 }
 
 /// Reads one issue's comments.
+///
+/// GitHub pages with a `Link` header; the protocol cursor is the next page
+/// number, which keeps every provider's continuation a plain opaque string.
 pub(crate) async fn comments(
     http: &ForgeHttp,
     api: &str,
     repo: &ForgeRepoRef,
     number: u32,
+    cursor: Option<&str>,
 ) -> Result<ForgeIssueCommentPage> {
     validate_repo(repo)?;
     let repo_url = format!(
@@ -189,7 +191,11 @@ pub(crate) async fn comments(
         encode(&repo.owner),
         encode(&repo.repo)
     );
-    let url = format!("{repo_url}/issues/{number}/comments?per_page=100");
+    let page = cursor
+        .and_then(|cursor| cursor.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let url = format!("{repo_url}/issues/{number}/comments?per_page=100&page={page}");
     let response = http.request(Method::GET, &url, None, false).await?;
     let more = next_link(&response.headers).is_some();
     let value = http.json(response)?;
@@ -201,6 +207,7 @@ pub(crate) async fn comments(
         number,
         comments: values.iter().filter_map(map_comment).collect(),
         has_more: more,
+        next_cursor: more.then(|| (page + 1).to_string()),
     })
 }
 
@@ -269,6 +276,14 @@ pub(crate) async fn update(
         if state == ForgeIssueState::Closed
             && let Some(reason) = update.close_reason
         {
+            if reason == ForgeIssueCloseReason::Duplicate {
+                let duplicate = update.duplicate_issue_id.ok_or_else(|| {
+                    ForgeError::InvalidRequest(
+                        "closing as a duplicate needs the issue number it duplicates".into(),
+                    )
+                })?;
+                body.insert("duplicate_issue_id".into(), json!(duplicate));
+            }
             body.insert(
                 "state_reason".into(),
                 json!(match reason {
@@ -298,8 +313,7 @@ pub(crate) async fn update(
     Ok(ForgeIssue {
         summary,
         body: text(&value, "body"),
-        created_at: parse_datetime(&value["created_at"], "created_at")
-            .unwrap_or_else(|_| Utc::now()),
+        created_at: parse_datetime(&value["created_at"], "created_at").ok(),
         closed_at: parse_optional_datetime(value.get("closed_at"), "closed_at")
             .ok()
             .flatten(),
@@ -318,7 +332,7 @@ fn map_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgeIssueSummary> 
         labels: labels(&value["labels"]),
         assignees: people(&value["assignees"]),
         comment_count: value["comments"].as_u64().unwrap_or(0) as u32,
-        updated_at: parse_datetime(&value["updated_at"], "updated_at").ok()?,
+        updated_at: parse_datetime(&value["updated_at"], "updated_at").ok(),
         web_url: optional_text(value, "html_url").unwrap_or_default(),
     })
 }

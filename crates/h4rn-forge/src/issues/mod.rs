@@ -17,10 +17,9 @@ use h4rn_protocol::{ForgeKind, ForgeLabel};
 use serde_json::{Value, json};
 
 use crate::error::{ForgeError, Result};
-use crate::http::redact;
+use crate::http::redact_configured;
 
 pub(crate) mod azure;
-pub(crate) mod bitbucket;
 pub(crate) mod gitea;
 pub(crate) mod github;
 pub(crate) mod gitlab;
@@ -67,19 +66,10 @@ pub fn capabilities(kind: ForgeKind) -> ForgeIssueCapabilities {
             mentioning_filter: true,
             linked_pull_requests: false,
         },
-        ForgeKind::Bitbucket => ForgeIssueCapabilities {
-            read: true,
-            write: true,
-            comments: true,
-            labels: false,
-            assignees: true,
-            close_reason: true,
-            search: true,
-            assigned_filter: false,
-            created_filter: false,
-            mentioning_filter: false,
-            linked_pull_requests: false,
-        },
+        // Atlassian removed Bitbucket Cloud's issue tracker API in August
+        // 2026. The tracker is gone, not merely disabled, so the capability
+        // row says unavailable rather than advertising a broken surface.
+        ForgeKind::Bitbucket => ForgeIssueCapabilities::default(),
         ForgeKind::AzureDevOps => ForgeIssueCapabilities {
             read: true,
             write: true,
@@ -94,6 +84,14 @@ pub fn capabilities(kind: ForgeKind) -> ForgeIssueCapabilities {
             linked_pull_requests: true,
         },
     }
+}
+
+/// The refusal for a forge whose issue tracker no longer exists.
+pub(crate) fn unavailable(kind: ForgeKind) -> ForgeError {
+    ForgeError::Unsupported(format!(
+        "{} does not expose an issue tracker: Atlassian removed Bitbucket Cloud's issue API in August 2026",
+        kind.display_name()
+    ))
 }
 
 /// Linear's public GraphQL endpoint.
@@ -143,7 +141,7 @@ impl LinearClient {
             .user_agent(concat!("h4rn-forge/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|error| ForgeError::Network(redact(&error.to_string())))?;
+            .map_err(|error| ForgeError::Network(redact_configured(&error.to_string(), &key)))?;
         Ok(Self {
             client,
             endpoint: endpoint.to_owned(),
@@ -159,45 +157,41 @@ impl LinearClient {
             .json(&json!({"query": query, "variables": variables}))
             .send()
             .await
-            .map_err(|error| ForgeError::Network(redact(&error.to_string())))?;
+            .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| ForgeError::Network(redact(&error.to_string())))?;
+            .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
         let value: Value = serde_json::from_str(&body).map_err(|error| {
-            ForgeError::Parse(format!("Linear returned a non-JSON body: {error}"))
+            ForgeError::Parse(format!(
+                "Linear returned a non-JSON body: {}",
+                self.sanitize(&error.to_string())
+            ))
         })?;
         if !status.is_success() {
-            let message = value["message"]
-                .as_str()
-                .or_else(|| value["errors"][0]["message"].as_str())
-                .unwrap_or("Linear rejected the request")
-                .to_owned();
+            let message = self.sanitize(
+                value["message"]
+                    .as_str()
+                    .or_else(|| value["errors"][0]["message"].as_str())
+                    .unwrap_or("Linear rejected the request"),
+            );
             return Err(match status.as_u16() {
                 401 => ForgeError::InvalidRequest(format!(
                     "the Linear API key was rejected: {message}"
                 )),
-                403 => ForgeError::Forbidden {
-                    forge: h4rn_protocol::ForgeKind::GitHub,
-                    message: format!("Linear refused the request: {}", redact(&message)),
-                },
-                429 => ForgeError::RateLimited {
-                    forge: h4rn_protocol::ForgeKind::GitHub,
-                    retry_after_secs: None,
-                    retry_at: None,
-                    message: redact(&message),
-                },
+                403 => ForgeError::LinearForbidden { message },
+                429 => ForgeError::LinearRateLimited { message },
                 _ => ForgeError::Http {
                     status: status.as_u16(),
-                    message: redact(&message),
+                    message,
                 },
             });
         }
         if let Some(errors) = value["errors"].as_array()
             && let Some(message) = errors.first().and_then(|error| error["message"].as_str())
         {
-            let message = redact(message);
+            let message = self.sanitize(message);
             // Linear reports an invalid key as a GraphQL error with HTTP 200.
             return Err(if message.to_ascii_lowercase().contains("authentication") {
                 ForgeError::InvalidRequest(format!("the Linear API key was rejected: {message}"))
@@ -206,6 +200,13 @@ impl LinearClient {
             });
         }
         Ok(value["data"].clone())
+    }
+
+    /// Removes the configured key, in every spelling an upstream body can
+    /// quote, before a message leaves this client. The pattern pass stays as
+    /// a second layer for a credential this account does not own.
+    fn sanitize(&self, value: &str) -> String {
+        redact_configured(value, &self.key)
     }
 
     /// Validates the key and returns the workspace identity.
@@ -271,14 +272,19 @@ impl LinearClient {
         };
         let state = match filter {
             ForgeIssueFilter::Closed => {
-                Some(json!({"state": {"type": {"in": ["completed", "canceled"]}}}))
+                Some(json!({"state": {"type": {"in": ["completed", "canceled", "duplicate"]}}}))
             }
             ForgeIssueFilter::Open | ForgeIssueFilter::Assigned | ForgeIssueFilter::Created => {
-                Some(json!({"state": {"type": {"in": ["backlog", "unstarted", "started"]}}}))
+                Some(
+                    json!({"state": {"type": {"in": ["triage", "backlog", "unstarted", "started"]}}}),
+                )
             }
             ForgeIssueFilter::All | ForgeIssueFilter::Mentioning => None,
         };
-        let mut filter_value = json!({"team": {"id": {"eq": team_id}}});
+        // The team clause lives in the document (`$teamId`), so both list and
+        // search carry exactly this filter: the same state and involvement
+        // conditions, whichever endpoint answers.
+        let mut filter_value = json!({});
         if let Some(state) = state {
             merge(&mut filter_value, state);
         }
@@ -293,6 +299,7 @@ impl LinearClient {
                 json!({
                     "teamId": team_id,
                     "term": term,
+                    "filter": filter_value,
                     "first": LINEAR_PAGE_SIZE,
                     "after": cursor,
                 }),
@@ -329,9 +336,18 @@ impl LinearClient {
     }
 
     /// Reads one issue and its comments.
-    pub async fn get_issue(&self, issue_id: &str) -> Result<LinearIssue> {
+    ///
+    /// `comments_after` is Linear's comment cursor; page one omits it.
+    pub async fn get_issue(
+        &self,
+        issue_id: &str,
+        comments_after: Option<&str>,
+    ) -> Result<LinearIssue> {
         let data = self
-            .query(LINEAR_DETAIL_QUERY, json!({"id": issue_id}))
+            .query(
+                LINEAR_DETAIL_QUERY,
+                json!({"id": issue_id, "after": comments_after}),
+            )
             .await?;
         let issue = &data["issue"];
         let summary = map_issue_summary(issue).ok_or_else(|| {
@@ -345,12 +361,17 @@ impl LinearClient {
             .as_array()
             .map(|nodes| nodes.iter().filter_map(map_attachment).collect())
             .unwrap_or_default();
+        let comments_next_cursor = issue["comments"]["pageInfo"]["hasNextPage"]
+            .as_bool()
+            .unwrap_or(false)
+            .then(|| optional_text(&issue["comments"]["pageInfo"], "endCursor"))
+            .flatten();
         Ok(LinearIssue {
             summary,
             description: text(issue, "description"),
-            created_at: parse_datetime(&issue["createdAt"], "createdAt")
-                .unwrap_or_else(|_| Utc::now()),
+            created_at: parse_datetime(&issue["createdAt"], "createdAt").ok(),
             comments,
+            comments_next_cursor,
             linked_pull_requests,
         })
     }
@@ -370,29 +391,43 @@ impl LinearClient {
 }
 
 /// GraphQL document that lists a team's issues.
+///
+/// `$teamId` is used inside the filter, and `$filter` carries the state and
+/// involvement conditions the search also sends.
 pub const LINEAR_LIST_QUERY: &str = r#"
-query($teamId: ID!, $filter: IssueFilter, $first: Int!, $after: String) {
-  issues(first: $first, after: $after, filter: $filter, orderBy: updatedAt) {
+query($teamId: ID!, $filter: IssueFilter!, $first: Int!, $after: String) {
+  issues(
+    first: $first
+    after: $after
+    orderBy: updatedAt
+    filter: { and: [{ team: { id: { eq: $teamId } } }, $filter] }
+  ) {
     nodes {
       id identifier title updatedAt url
       state { name type }
       team { id key }
-      assignees { nodes { displayName } }
+      assignee { displayName }
       labels { nodes { name } }
     }
     pageInfo { hasNextPage endCursor }
   }
 }"#;
 
-/// GraphQL document that searches a team's issues.
+/// GraphQL document that searches a team's issues with the list's filter.
 pub const LINEAR_SEARCH_QUERY: &str = r#"
-query($teamId: String!, $term: String!, $first: Int!, $after: String) {
-  searchIssues(term: $term, teamId: $teamId, first: $first, after: $after) {
+query($teamId: String!, $term: String!, $filter: IssueFilter!, $first: Int!, $after: String) {
+  searchIssues(
+    term: $term
+    teamId: $teamId
+    first: $first
+    after: $after
+    filter: { and: [{ team: { id: { eq: $teamId } } }, $filter] }
+  ) {
     nodes {
       id identifier title updatedAt url
       state { name type }
       team { id key }
-      assignees { nodes { displayName } }
+      assignee { displayName }
       labels { nodes { name } }
     }
     pageInfo { hasNextPage endCursor }
@@ -401,15 +436,16 @@ query($teamId: String!, $term: String!, $first: Int!, $after: String) {
 
 /// GraphQL document that reads one issue and its comments.
 pub const LINEAR_DETAIL_QUERY: &str = r#"
-query($id: String!) {
+query($id: String!, $after: String) {
   issue(id: $id) {
     id identifier title description createdAt updatedAt url
     state { name type }
     team { id key }
-    assignees { nodes { displayName } }
+    assignee { displayName }
     labels { nodes { name } }
-    comments(first: 100) {
+    comments(first: 100, after: $after) {
       nodes { id body createdAt updatedAt user { displayName } }
+      pageInfo { hasNextPage endCursor }
     }
     attachments(first: 100) { nodes { title url metadata } }
   }
@@ -433,9 +469,11 @@ fn map_issue_summary(value: &Value) -> Option<LinearIssueSummary> {
         state_type: state_type(&text(&value["state"], "type")),
         team_id: text(&value["team"], "id"),
         team_key: text(&value["team"], "key"),
-        assignees: string_nodes(&value["assignees"]),
+        // Linear has one assignee per issue; the protocol keeps a list so
+        // every tracker shares a row shape.
+        assignees: assignee_names(&value["assignee"]),
         labels: string_nodes_named(&value["labels"]),
-        updated_at: parse_datetime(&value["updatedAt"], "updatedAt").unwrap_or_else(|_| Utc::now()),
+        updated_at: parse_datetime(&value["updatedAt"], "updatedAt").ok(),
         url: text(value, "url"),
     })
 }
@@ -465,11 +503,14 @@ fn map_attachment(value: &Value) -> Option<LinearIssueLinkedPr> {
     })
 }
 
-fn string_nodes(value: &Value) -> Vec<String> {
-    value["nodes"]
-        .as_array()
-        .map(|nodes| nodes.iter().map(|node| text(node, "displayName")).collect())
-        .unwrap_or_default()
+/// Linear returns a single `assignee`, not a connection of them.
+fn assignee_names(value: &Value) -> Vec<String> {
+    let name = text(value, "displayName");
+    if name.is_empty() {
+        Vec::new()
+    } else {
+        vec![name]
+    }
 }
 
 fn string_nodes_named(value: &Value) -> Vec<String> {

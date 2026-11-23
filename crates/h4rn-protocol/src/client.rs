@@ -1016,6 +1016,9 @@ pub enum ClientRequest {
         repo: crate::forge::ForgeRepoRef,
         /// Issue number.
         number: u32,
+        /// Provider continuation from the previous page, carried unchanged.
+        #[serde(default)]
+        cursor: Option<String>,
     },
     /// Post a comment on an issue.
     ForgeCommentIssue {
@@ -1085,6 +1088,9 @@ pub enum ClientRequest {
         account_id: String,
         /// Linear issue id.
         issue_id: String,
+        /// Provider continuation for the next comment page.
+        #[serde(default)]
+        comments_after: Option<String>,
     },
     /// Comment on a Linear issue.
     LinearCommentIssue {
@@ -1757,6 +1763,44 @@ mod tests {
                     repo: repo(),
                     number: 1,
                     update: crate::issues::ForgeIssueUpdate::default(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::ForgeCommentIssue {
+                    account_id: None,
+                    repo: repo(),
+                    number: 1,
+                    body: "Confirmed.".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::LinearCommentIssue {
+                    account_id: "lin_1".into(),
+                    issue_id: "iss_1".into(),
+                    body: "Shipped.".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::LinearSetProjectTeam {
+                    project_id: "proj_1".into(),
+                    team: None,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::LinearRemoveAccount {
+                    account_id: "lin_1".into(),
+                },
+                Admin,
+            ),
+            (
+                ClientRequest::UnlinkIssue {
+                    thread_id: thread(),
+                    scope: crate::issues::IssueScope::Forge { repo: repo() },
+                    issue_id: "1".into(),
                 },
                 Approve,
             ),

@@ -16,13 +16,18 @@ summary: LinearIssueSummary,
  */
 description: string, 
 /**
- * When it was opened.
+ * When it was opened, when Linear reports it.
  */
-created_at: string, 
+created_at: string | null, 
 /**
  * Comments, oldest first.
  */
 comments: Array<LinearIssueComment>, 
+/**
+ * The provider continuation for the next comment page, when Linear has
+ * more comments than this page returned.
+ */
+comments_next_cursor: string | null, 
 /**
  * Pull requests Linear links to the issue.
  */

@@ -16,9 +16,9 @@ summary: ForgeIssueSummary,
  */
 body: string, 
 /**
- * When it was opened.
+ * When it was opened, when the tracker reports it.
  */
-created_at: string, 
+created_at: string | null, 
 /**
  * When it was closed.
  */

@@ -13,8 +13,14 @@ use h4rn_protocol::ForgeRepoRef;
 use h4rn_protocol::issues::{
     ForgeIssueCloseReason, ForgeIssueFilter, ForgeIssueState, ForgeIssueUpdate, LinearStateType,
 };
+use std::collections::BTreeSet;
+
+use graphql_parser::query as gql;
+use graphql_parser::schema as gql_schema;
 use serde_json::{Value, json};
-use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::matchers::{
+    body_json, body_string_contains, header, method, path, query_param, query_param_is_missing,
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn token() -> String {
@@ -152,7 +158,7 @@ async fn github_lists_reads_and_writes_issues() {
     assert_eq!(detail.linked_pull_requests.len(), 1);
     assert_eq!(detail.linked_pull_requests[0].number, 7);
 
-    let comments = client.list_issue_comments(&repo, 12).await.unwrap();
+    let comments = client.list_issue_comments(&repo, 12, None).await.unwrap();
     assert_eq!(comments.comments[0].author, "carol");
     assert!(comments.comments[0].web_url.is_some());
 
@@ -176,6 +182,66 @@ async fn github_lists_reads_and_writes_issues() {
     assert_eq!(updated.summary.state, ForgeIssueState::Closed);
     assert_eq!(updated.close_reason, Some(ForgeIssueCloseReason::Completed));
     let _ = api;
+}
+
+#[tokio::test]
+async fn github_closing_as_a_duplicate_names_the_issue_it_duplicates() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    Mock::given(method("PATCH"))
+        .and(path("/api/v3/repos/acme/widget/issues/12"))
+        .and(body_json(json!({
+            "state": "closed",
+            "state_reason": "duplicate",
+            "duplicate_issue_id": 9
+        })))
+        .respond_with(ok({
+            let mut issue = github_issue();
+            issue["state"] = json!("closed");
+            issue["state_reason"] = json!("duplicate");
+            issue["closed_at"] = json!("2026-01-05T00:00:00Z");
+            issue
+        }))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .respond_with(ok(json!([])))
+        .mount(&server)
+        .await;
+
+    let client = GitHubClient::new(&base, &token(), 600).unwrap();
+    let repo = repo(ForgeKind::GitHub, &base);
+    let updated = client
+        .update_issue(
+            &repo,
+            12,
+            &ForgeIssueUpdate {
+                state: Some(ForgeIssueState::Closed),
+                close_reason: Some(ForgeIssueCloseReason::Duplicate),
+                duplicate_issue_id: Some(9),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.close_reason, Some(ForgeIssueCloseReason::Duplicate));
+
+    // A duplicate close without the number is refused before the request.
+    let missing = client
+        .update_issue(
+            &repo,
+            12,
+            &ForgeIssueUpdate {
+                state: Some(ForgeIssueState::Closed),
+                close_reason: Some(ForgeIssueCloseReason::Duplicate),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(missing.to_string().contains("duplicates"), "{missing}");
 }
 
 #[tokio::test]
@@ -331,7 +397,7 @@ async fn gitlab_lists_reads_and_writes_issues() {
     let detail = client.get_issue(&repo, 5).await.unwrap();
     assert_eq!(detail.linked_pull_requests[0].number, 8);
 
-    let comments = client.list_issue_comments(&repo, 5).await.unwrap();
+    let comments = client.list_issue_comments(&repo, 5, None).await.unwrap();
     assert_eq!(comments.comments.len(), 1, "system notes are hidden");
 
     let posted = client
@@ -367,10 +433,17 @@ async fn gitea_lists_reads_and_writes_issues() {
     let server = MockServer::start().await;
     let base = server.uri();
 
+    // The authenticated login, which the issue-list filters name.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/user"))
+        .respond_with(ok(json!({"login": "me"})))
+        .mount(&server)
+        .await;
+
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/acme/widget/issues"))
         .and(query_param("type", "issues"))
-        .and(query_param("assigned", "true"))
+        .and(query_param("assigned_by", "me"))
         .respond_with(ok(json!([{
             "number": 4,
             "title": "Export CSV",
@@ -435,12 +508,19 @@ async fn gitea_lists_reads_and_writes_issues() {
         .mount(&server)
         .await;
 
+    // Labels go through their own replacement endpoint, by label id.
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .and(body_json(json!({"labels": [2]})))
+        .respond_with(ok(json!([{"id": 2, "name": "bug"}])))
+        .mount(&server)
+        .await;
+
     Mock::given(method("PATCH"))
         .and(path("/api/v1/repos/acme/widget/issues/4"))
         .and(body_json(json!({
             "title": "Export CSV and JSON",
             "state": "closed",
-            "labels": [2],
             "assignees": ["bob"]
         })))
         .respond_with(ok(json!({"number": 4})))
@@ -459,7 +539,7 @@ async fn gitea_lists_reads_and_writes_issues() {
     let detail = client.get_issue(&repo, 4).await.unwrap();
     assert_eq!(detail.body, "A CSV button.");
 
-    let comments = client.list_issue_comments(&repo, 4).await.unwrap();
+    let comments = client.list_issue_comments(&repo, 4, None).await.unwrap();
     assert_eq!(comments.comments[0].body, "+1");
 
     let posted = client
@@ -490,167 +570,72 @@ async fn gitea_lists_reads_and_writes_issues() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn bitbucket_lists_reads_and_writes_issues_when_the_tracker_is_on() {
+async fn bitbucket_reports_issues_as_unavailable_without_calling_it() {
+    // Atlassian removed Bitbucket Cloud's issue tracker API in August 2026.
+    // The client must say so before any request, and the capability row must
+    // not advertise a surface that no longer exists.
     let server = MockServer::start().await;
     let base = server.uri();
-
-    Mock::given(method("GET"))
-        .and(path("/2.0/repositories/acme/widget"))
-        .respond_with(ok(json!({"has_issues": true})))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/2.0/repositories/acme/widget/issues"))
-        .respond_with(ok(json!({
-            "values": [{
-                "id": 6,
-                "title": "Login loop",
-                "status": "open",
-                "content": {"raw": "Signing in loops."},
-                "reporter": {"nickname": "alice", "display_name": "Alice"},
-                "assignee": {"nickname": "bob", "display_name": "Bob"},
-                "comment_count": 1,
-                "created_on": "2026-04-01T00:00:00Z",
-                "updated_on": "2026-04-02T00:00:00Z",
-                "links": {"html": {"href": "https://bitbucket.org/acme/widget/issues/6"}}
-            }],
-            "next": null
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/2.0/repositories/acme/widget/issues/6"))
-        .respond_with(ok(json!({
-            "id": 6,
-            "title": "Login loop",
-            "status": "open",
-            "content": {"raw": "Signing in loops."},
-            "reporter": {"nickname": "alice", "display_name": "Alice"},
-            "assignee": {"nickname": "bob", "display_name": "Bob"},
-            "created_on": "2026-04-01T00:00:00Z",
-            "updated_on": "2026-04-02T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/2.0/repositories/acme/widget/issues/6/comments"))
-        .respond_with(ok(json!({
-            "values": [{
-                "id": 11,
-                "content": {"raw": "Also on Safari."},
-                "user": {"nickname": "carol", "display_name": "Carol"},
-                "created_on": "2026-04-03T00:00:00Z",
-                "updated_on": "2026-04-03T00:00:00Z"
-            }]
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/2.0/repositories/acme/widget/issues/6/comments"))
-        .and(body_json(json!({"content": {"raw": "Fixed."}})))
-        .respond_with(ok(json!({
-            "id": 12,
-            "content": {"raw": "Fixed."},
-            "user": {"nickname": "alice"},
-            "created_on": "2026-04-04T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("PUT"))
-        .and(path("/2.0/repositories/acme/widget/issues/6"))
-        .and(body_json(json!({
-            "title": "Login loop",
-            "content": {"raw": "Signing in loops."},
-            "assignee": {"nickname": "bob"},
-            "status": "resolved"
-        })))
-        .respond_with(ok(json!({
-            "id": 6,
-            "title": "Login loop",
-            "status": "resolved",
-            "content": {"raw": "Signing in loops."},
-            "reporter": {"nickname": "alice"},
-            "assignee": {"nickname": "bob"},
-            "created_on": "2026-04-01T00:00:00Z",
-            "updated_on": "2026-04-05T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    let client = BitbucketClient::new(&base, &token(), Some("alice@example.test"), 600).unwrap();
+    let client = BitbucketClient::new(&base, &token(), None, 600).unwrap();
     let repo = repo(ForgeKind::Bitbucket, &base);
-
-    let page = client
+    let error = client
         .list_issues(&repo, ForgeIssueFilter::Open, 1, None)
         .await
-        .unwrap();
-    assert_eq!(page.issues[0].number, 6);
-    assert_eq!(page.issues[0].assignees[0].login, "bob");
-
-    let detail = client.get_issue(&repo, 6).await.unwrap();
-    assert_eq!(detail.body, "Signing in loops.");
-
-    let comments = client.list_issue_comments(&repo, 6).await.unwrap();
-    assert_eq!(comments.comments[0].body, "Also on Safari.");
-
-    let posted = client.comment_issue(&repo, 6, "Fixed.").await.unwrap();
-    assert_eq!(posted.comment_id, "12");
-
-    let updated = client
-        .update_issue(
-            &repo,
-            6,
-            &ForgeIssueUpdate {
-                state: Some(ForgeIssueState::Closed),
-                close_reason: Some(ForgeIssueCloseReason::Completed),
-                assignees: Some(vec!["bob".into()]),
-                ..ForgeIssueUpdate::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(updated.summary.state, ForgeIssueState::Closed);
-    assert_eq!(updated.close_reason, Some(ForgeIssueCloseReason::Completed));
-}
-
-#[tokio::test]
-async fn bitbucket_says_so_when_the_tracker_is_off() {
-    let server = MockServer::start().await;
-    let base = server.uri();
-    Mock::given(method("GET"))
-        .and(path("/2.0/repositories/acme/widget"))
-        .respond_with(ok(json!({"has_issues": false})))
-        .mount(&server)
-        .await;
-    let client = BitbucketClient::new(&base, &token(), None, 600).unwrap();
-    let error = client
-        .list_issues(
-            &repo(ForgeKind::Bitbucket, &base),
-            ForgeIssueFilter::Open,
-            1,
-            None,
-        )
-        .await
         .unwrap_err();
-    assert!(error.to_string().contains("tracker is disabled"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("removed Bitbucket Cloud's issue API"),
+        "{error}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let capabilities = h4rn_forge::issues::capabilities(ForgeKind::Bitbucket);
+    assert!(!capabilities.read);
+    assert!(!capabilities.write);
 }
 
 // ---------------------------------------------------------------------------
 // Azure DevOps
 // ---------------------------------------------------------------------------
 
+fn azure_states() -> Value {
+    json!({
+        "count": 5,
+        "value": [
+            {"name": "New", "category": "Proposed"},
+            {"name": "Active", "category": "InProgress"},
+            {"name": "Resolved", "category": "Resolved"},
+            {"name": "Done", "category": "Completed"},
+            {"name": "Removed", "category": "Removed"}
+        ]
+    })
+}
+
+async fn azure_states_mocks(server: &MockServer) {
+    for kind in ["Issue", "Bug"] {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/acme/platform/_apis/wit/workitemtypes/{kind}/states"
+            )))
+            .respond_with(ok(azure_states()))
+            .mount(server)
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn azure_lists_reads_and_writes_work_items_as_issues() {
     let server = MockServer::start().await;
     let base = format!("{}/acme", server.uri());
+    azure_states_mocks(&server).await;
 
+    // Scrum names its finished state Done; the WIQL must use the category,
+    // not the GitHub-style names Closed or Active.
     Mock::given(method("POST"))
         .and(path("/acme/platform/_apis/wit/wiql"))
+        .and(body_string_contains(
+            "[System.State] NOT IN ('Done', 'Removed')",
+        ))
         .respond_with(ok(json!({
             "workItems": [{"id": 21}, {"id": 22}]
         })))
@@ -667,6 +652,7 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
                 "fields": {
                     "System.Title": "Crash on save",
                     "System.State": "Active",
+                    "System.WorkItemType": "Bug",
                     "System.CreatedBy": {"uniqueName": "alice@example.test", "displayName": "Alice"},
                     "System.AssignedTo": {"uniqueName": "bob@example.test", "displayName": "Bob"},
                     "System.Tags": "bug; urgent",
@@ -680,10 +666,11 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
                 "id": 22,
                 "fields": {
                     "System.Title": "A bug",
-                    "System.State": "Closed",
+                    "System.State": "Done",
+                    "System.WorkItemType": "Bug",
                     "System.CreatedBy": {"uniqueName": "carol@example.test"},
                     "System.CreatedDate": "2026-05-01T00:00:00Z",
-                    "System.ChangedDate": "2026-05-03T00:00:00Z"
+                    "System.ChangedDate": "2026-05-09T00:00:00Z"
                 }
             }]
         })))
@@ -697,6 +684,7 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
             "fields": {
                 "System.Title": "Crash on save",
                 "System.State": "Active",
+                "System.WorkItemType": "Bug",
                 "System.CreatedBy": {"uniqueName": "alice@example.test"},
                 "System.CreatedDate": "2026-05-01T00:00:00Z",
                 "System.ChangedDate": "2026-05-02T00:00:00Z",
@@ -704,7 +692,7 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
             },
             "relations": [{
                 "rel": "ArtifactLink",
-                "url": "https://dev.azure.com/acme/platform/_git/widget/pullrequest/9",
+                "url": "vstfs:///Git/PullRequestId/6f1c2e40-aaaa-bbbb-cccc-0123456789ab%2F9d2a1b7c-1111-2222-3333-444455556666%2F9",
                 "attributes": {"name": "Pull request 9"}
             }]
         })))
@@ -712,7 +700,25 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
         .await;
 
     Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitems/22"))
+        .respond_with(ok(json!({
+            "id": 22,
+            "fields": {
+                "System.Title": "A bug",
+                "System.State": "Done",
+                "System.WorkItemType": "Bug",
+                "System.CreatedDate": "2026-05-01T00:00:00Z",
+                "System.ChangedDate": "2026-05-09T00:00:00Z",
+                "Microsoft.VSTS.Common.ClosedDate": "2026-05-04T00:00:00Z",
+                "Microsoft.VSTS.Common.StateChangeDate": "2026-05-04T00:00:00Z"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
         .and(path("/acme/platform/_apis/wit/workItems/21/comments"))
+        .and(query_param_is_missing("continuationToken"))
         .respond_with(ok(json!({
             "comments": [{
                 "id": 4,
@@ -720,6 +726,21 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
                 "createdBy": {"uniqueName": "carol@example.test"},
                 "createdDate": "2026-05-04T00:00:00Z",
                 "modifiedDate": "2026-05-04T00:00:00Z"
+            }],
+            "continuationToken": "tok_2"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workItems/21/comments"))
+        .and(query_param("continuationToken", "tok_2"))
+        .respond_with(ok(json!({
+            "comments": [{
+                "id": 5,
+                "text": "Also on Linux 6.9.",
+                "createdBy": {"uniqueName": "dave@example.test"},
+                "createdDate": "2026-05-05T00:00:00Z"
             }]
         })))
         .mount(&server)
@@ -729,20 +750,21 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
         .and(path("/acme/platform/_apis/wit/workItems/21/comments"))
         .and(body_json(json!({"text": "Fix in progress."})))
         .respond_with(ok(json!({
-            "id": 5,
+            "id": 6,
             "text": "Fix in progress.",
             "createdBy": {"uniqueName": "alice@example.test"},
-            "createdDate": "2026-05-05T00:00:00Z"
+            "createdDate": "2026-05-06T00:00:00Z"
         })))
         .mount(&server)
         .await;
 
+    // Closing uses the Completed category's own state name.
     Mock::given(method("PATCH"))
         .and(path("/acme/platform/_apis/wit/workitems/21"))
         .and(header("content-type", "application/json-patch+json"))
         .and(body_json(json!([
             {"op": "add", "path": "/fields/System.Title", "value": "Crash when saving"},
-            {"op": "add", "path": "/fields/System.State", "value": "Closed"}
+            {"op": "add", "path": "/fields/System.State", "value": "Done"}
         ])))
         .respond_with(ok(json!({"id": 21})))
         .mount(&server)
@@ -766,15 +788,38 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
 
     let detail = client.get_issue(&repo, 21).await.unwrap();
     assert_eq!(detail.linked_pull_requests[0].number, 9);
+    assert_eq!(
+        detail.linked_pull_requests[0].web_url,
+        format!("{base}/platform/_git/widget/pullrequest/9")
+    );
 
-    let comments = client.list_issue_comments(&repo, 21).await.unwrap();
+    // The closure date is the real one, not the last edit.
+    let closed = client.get_issue(&repo, 22).await.unwrap();
+    assert_eq!(
+        closed.closed_at.map(|date| date.to_rfc3339()),
+        Some("2026-05-04T00:00:00+00:00".into())
+    );
+    assert_ne!(
+        closed.closed_at.map(|date| date.to_rfc3339()),
+        closed.summary.updated_at.map(|date| date.to_rfc3339())
+    );
+
+    let comments = client.list_issue_comments(&repo, 21, None).await.unwrap();
     assert_eq!(comments.comments[0].body, "Reproduced on Linux.");
+    assert_eq!(comments.next_cursor.as_deref(), Some("tok_2"));
+
+    let more = client
+        .list_issue_comments(&repo, 21, comments.next_cursor.as_deref())
+        .await
+        .unwrap();
+    assert_eq!(more.comments[0].body, "Also on Linux 6.9.");
+    assert!(more.next_cursor.is_none());
 
     let posted = client
         .comment_issue(&repo, 21, "Fix in progress.")
         .await
         .unwrap();
-    assert_eq!(posted.comment_id, "5");
+    assert_eq!(posted.comment_id, "6");
 
     let updated = client
         .update_issue(
@@ -806,7 +851,8 @@ fn linear_issue() -> Value {
         "url": "https://linear.app/acme/issue/ENG-12",
         "state": {"name": "In Progress", "type": "started"},
         "team": {"id": "team_1", "key": "ENG"},
-        "assignees": {"nodes": [{"displayName": "Alice"}]},
+        // Linear exposes a single assignee, not a connection of them.
+        "assignee": {"displayName": "Alice"},
         "labels": {"nodes": [{"name": "backend"}]}
     })
 }
@@ -848,7 +894,7 @@ async fn linear_validates_lists_reads_and_comments() {
             "query": h4rn_forge::issues::LINEAR_LIST_QUERY,
             "variables": {
                 "teamId": "team_1",
-                "filter": {"team": {"id": {"eq": "team_1"}}, "state": {"type": {"in": ["backlog", "unstarted", "started"]}}},
+                "filter": {"state": {"type": {"in": ["triage", "backlog", "unstarted", "started"]}}},
                 "first": 50,
                 "after": null
             }
@@ -866,7 +912,7 @@ async fn linear_validates_lists_reads_and_comments() {
         .and(path("/graphql"))
         .and(body_json(json!({
             "query": h4rn_forge::issues::LINEAR_DETAIL_QUERY,
-            "variables": {"id": "iss_1"}
+            "variables": {"id": "iss_1", "after": null}
         })))
         .respond_with(ok(json!({
             "data": {"issue": {
@@ -879,15 +925,18 @@ async fn linear_validates_lists_reads_and_comments() {
                 "url": "https://linear.app/acme/issue/ENG-12",
                 "state": {"name": "In Progress", "type": "started"},
                 "team": {"id": "team_1", "key": "ENG"},
-                "assignees": {"nodes": [{"displayName": "Alice"}]},
+                "assignee": {"displayName": "Alice"},
                 "labels": {"nodes": [{"name": "backend"}]},
-                "comments": {"nodes": [{
-                    "id": "c1",
-                    "body": "Working on it.",
-                    "createdAt": "2026-06-03T00:00:00Z",
-                    "updatedAt": null,
-                    "user": {"displayName": "Bob"}
-                }]},
+                "comments": {
+                    "nodes": [{
+                        "id": "c1",
+                        "body": "Working on it.",
+                        "createdAt": "2026-06-03T00:00:00Z",
+                        "updatedAt": null,
+                        "user": {"displayName": "Bob"}
+                    }],
+                    "pageInfo": {"hasNextPage": true, "endCursor": "comments_2"}
+                },
                 "attachments": {"nodes": [{
                     "title": "Rate limit",
                     "url": "https://github.com/acme/widget/pull/15",
@@ -932,10 +981,229 @@ async fn linear_validates_lists_reads_and_comments() {
     assert_eq!(page.issues[0].state_type, LinearStateType::Started);
     assert_eq!(page.next_cursor.as_deref(), Some("cursor_2"));
 
-    let detail = client.get_issue("iss_1").await.unwrap();
+    let detail = client.get_issue("iss_1", None).await.unwrap();
     assert_eq!(detail.comments[0].author, "Bob");
+    assert_eq!(detail.comments_next_cursor.as_deref(), Some("comments_2"));
     assert_eq!(detail.linked_pull_requests.len(), 1);
 
     let posted = client.create_comment("iss_1", "Shipped.").await.unwrap();
     assert_eq!(posted.id, "c2");
+}
+
+#[tokio::test]
+async fn linear_search_carries_the_same_filter_as_the_list() {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/graphql", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_json(json!({
+            "query": h4rn_forge::issues::LINEAR_SEARCH_QUERY,
+            "variables": {
+                "teamId": "team_1",
+                "term": "import",
+                "filter": {
+                    "state": {"type": {"in": ["triage", "backlog", "unstarted", "started"]}},
+                    "assignee": {"isMe": {"eq": true}}
+                },
+                "first": 50,
+                "after": null
+            }
+        })))
+        .respond_with(ok(json!({
+            "data": {"searchIssues": {
+                "nodes": [linear_issue()],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}
+        })))
+        .mount(&server)
+        .await;
+    let client = LinearClient::with_endpoint(&token(), &endpoint).unwrap();
+    let page = client
+        .list_issues("team_1", ForgeIssueFilter::Assigned, None, Some("import"))
+        .await
+        .unwrap();
+    assert_eq!(page.issues.len(), 1);
+    assert_eq!(page.issues[0].assignees, vec!["Alice".to_owned()]);
+}
+
+async fn linear_status_error(status: u16, body: Value) -> String {
+    linear_status_error_with_key(status, body, &token()).await
+}
+
+async fn linear_status_error_with_key(status: u16, body: Value, key: &str) -> String {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/graphql", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(&server)
+        .await;
+    let client = LinearClient::with_endpoint(key, &endpoint).unwrap();
+    client.viewer().await.unwrap_err().to_string()
+}
+
+#[tokio::test]
+async fn linear_errors_never_echo_the_configured_key() {
+    let key = ["fixture", "lin", "ear", "key"].join("-");
+    let message = format!("the key {key} is not valid");
+    let error = linear_status_error_with_key(401, json!({"message": message}), &key).await;
+    assert!(!error.contains(&key), "{error}");
+    assert!(error.contains("[redacted]"), "{error}");
+    assert!(error.contains("Linear"), "{error}");
+
+    // A GraphQL error carried with HTTP 200 takes the same path.
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/graphql", server.uri());
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ok(json!({"errors": [{"message": message}]})))
+        .mount(&server)
+        .await;
+    let client = LinearClient::with_endpoint(&key, &endpoint).unwrap();
+    let error = client.viewer().await.unwrap_err().to_string();
+    assert!(!error.contains(&key), "{error}");
+    assert!(error.contains("[redacted]"), "{error}");
+}
+
+#[tokio::test]
+async fn linear_forbidden_and_rate_limited_are_not_github_token_errors() {
+    let forbidden = linear_status_error(403, json!({"message": "workspace restricted"})).await;
+    assert!(forbidden.contains("Linear refused"), "{forbidden}");
+    assert!(!forbidden.contains("GitHub"), "{forbidden}");
+    assert!(!forbidden.contains("token"), "{forbidden}");
+
+    let limited = linear_status_error(429, json!({"message": "slow down"})).await;
+    assert!(limited.contains("Linear is rate limiting"), "{limited}");
+    assert!(!limited.contains("GitHub"), "{limited}");
+}
+
+// ---------------------------------------------------------------------------
+// Linear schema conformance
+// ---------------------------------------------------------------------------
+
+type FieldIndex = std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+
+fn base_type_name(field_type: &gql_schema::Type<'_, String>) -> String {
+    match field_type {
+        gql_schema::Type::NamedType(name) => name.clone(),
+        gql_schema::Type::ListType(inner) | gql_schema::Type::NonNullType(inner) => {
+            base_type_name(inner)
+        }
+    }
+}
+
+fn schema_index() -> FieldIndex {
+    let document = gql_schema::parse_schema::<String>(include_str!("linear_schema.graphql"))
+        .expect("the vendored Linear schema parses");
+    let mut objects = FieldIndex::new();
+    for definition in document.definitions {
+        let gql_schema::Definition::TypeDefinition(gql_schema::TypeDefinition::Object(object)) =
+            definition
+        else {
+            continue;
+        };
+        let mut fields = std::collections::BTreeMap::new();
+        for field in object.fields {
+            fields.insert(field.name, base_type_name(&field.field_type));
+        }
+        objects.insert(object.name, fields);
+    }
+    objects
+}
+
+fn collect_value_variables(value: &gql::Value<'_, String>, used: &mut BTreeSet<String>) {
+    match value {
+        gql::Value::Variable(name) => {
+            used.insert(name.clone());
+        }
+        gql::Value::List(items) => {
+            for item in items {
+                collect_value_variables(item, used);
+            }
+        }
+        gql::Value::Object(fields) => {
+            for value in fields.values() {
+                collect_value_variables(value, used);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_selection_variables(set: &gql::SelectionSet<'_, String>, used: &mut BTreeSet<String>) {
+    for selection in &set.items {
+        let gql::Selection::Field(field) = selection else {
+            panic!("the daemon's documents use no fragments");
+        };
+        for (_, value) in &field.arguments {
+            collect_value_variables(value, used);
+        }
+        collect_selection_variables(&field.selection_set, used);
+    }
+}
+
+fn check_selections(index: &FieldIndex, parent: &str, set: &gql::SelectionSet<'_, String>) {
+    for selection in &set.items {
+        let gql::Selection::Field(field) = selection else {
+            panic!("the daemon's documents use no fragments");
+        };
+        let fields = index
+            .get(parent)
+            .unwrap_or_else(|| panic!("{parent} is not an object in the vendored schema"));
+        let child = fields
+            .get(&field.name)
+            .unwrap_or_else(|| panic!("Linear's schema has no {parent}.{} field", field.name));
+        if !field.selection_set.items.is_empty() {
+            check_selections(index, child, &field.selection_set);
+        }
+    }
+}
+
+fn check_document(document: &str) -> BTreeSet<String> {
+    let index = schema_index();
+    let parsed = gql::parse_query::<String>(document).expect("the document parses");
+    let gql::Definition::Operation(operation) = &parsed.definitions[0] else {
+        panic!("expected one operation");
+    };
+    let (root, definitions, selection_set) = match operation {
+        gql::OperationDefinition::Query(query) => {
+            ("Query", &query.variable_definitions, &query.selection_set)
+        }
+        gql::OperationDefinition::Mutation(mutation) => (
+            "Mutation",
+            &mutation.variable_definitions,
+            &mutation.selection_set,
+        ),
+        _ => panic!("expected a query or mutation"),
+    };
+    let declared = definitions
+        .iter()
+        .map(|definition| definition.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut used = BTreeSet::new();
+    collect_selection_variables(selection_set, &mut used);
+    assert_eq!(
+        declared, used,
+        "every declared variable is used, and every used variable is declared"
+    );
+    check_selections(&index, root, selection_set);
+    declared
+}
+
+#[test]
+fn every_linear_document_matches_the_published_schema() {
+    let documents = [
+        h4rn_forge::issues::LINEAR_LIST_QUERY,
+        h4rn_forge::issues::LINEAR_SEARCH_QUERY,
+        h4rn_forge::issues::LINEAR_DETAIL_QUERY,
+        h4rn_forge::issues::LINEAR_COMMENT_MUTATION,
+    ];
+    for document in documents {
+        check_document(document);
+    }
+    // The list document's team variable is used, not declared and ignored.
+    let list = check_document(h4rn_forge::issues::LINEAR_LIST_QUERY);
+    assert!(list.contains("teamId"), "{list:?}");
+    let search = check_document(h4rn_forge::issues::LINEAR_SEARCH_QUERY);
+    assert!(search.contains("filter"), "{search:?}");
 }

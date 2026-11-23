@@ -200,8 +200,9 @@ pub trait Forge: Send + Sync {
         &self,
         repo: &ForgeRepoRef,
         number: u32,
+        cursor: Option<&str>,
     ) -> Result<ForgeIssueCommentPage> {
-        let _ = (repo, number);
+        let _ = (repo, number, cursor);
         Err(ForgeError::Unsupported(format!(
             "{} does not expose issues",
             self.kind().display_name()

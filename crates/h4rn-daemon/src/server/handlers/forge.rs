@@ -404,13 +404,16 @@ pub(super) async fn handle(
             account_id,
             repo,
             number,
+            cursor,
         } => conn
             .state
             .forge
-            .list_issue_comments(account_id.as_deref(), &repo, number)
+            .list_issue_comments(account_id.as_deref(), &repo, number, cursor.as_deref())
             .await
             .map(|page| ResponseBody::ForgeIssueComments { page })
             .map_err(ForgeServiceError::into_proto),
+        // Issue writes are audited once, by the forge service that performs
+        // them.
         ClientRequest::ForgeCommentIssue {
             account_id,
             repo,
@@ -420,20 +423,10 @@ pub(super) async fn handle(
             if !repo_is_owned(conn, &repo).await {
                 return Err(read_only_repo(&repo));
             }
-            let result = conn
-                .state
+            conn.state
                 .forge
                 .comment_issue(account_id.as_deref(), &repo, number, &body)
-                .await;
-            if result.is_ok() {
-                conn.audit(
-                    "forge.issue_comment",
-                    Some("forge_issue"),
-                    Some(&format!("{}#{number}", repo.full_name())),
-                    json!({"chars": body.len()}),
-                );
-            }
-            result
+                .await
                 .map(|comment| ResponseBody::ForgeIssueCommentPosted { comment })
                 .map_err(ForgeServiceError::into_proto)
         }
@@ -443,24 +436,16 @@ pub(super) async fn handle(
             number,
             update,
         } => {
-            if !repo_is_owned(conn, &repo).await {
+            // One ownership check per request: the write and the read-only
+            // flag the response carries are the same answer.
+            let read_only = !repo_is_owned(conn, &repo).await;
+            if read_only {
                 return Err(read_only_repo(&repo));
             }
-            let result = conn
-                .state
+            conn.state
                 .forge
                 .update_issue(account_id.as_deref(), &repo, number, &update)
-                .await;
-            if result.is_ok() {
-                conn.audit(
-                    "forge.issue_update",
-                    Some("forge_issue"),
-                    Some(&format!("{}#{number}", repo.full_name())),
-                    json!({"labels": update.labels, "assignees": update.assignees}),
-                );
-            }
-            let read_only = !repo_is_owned(conn, &repo).await;
-            result
+                .await
                 .map(|issue| ResponseBody::ForgeIssue { issue, read_only })
                 .map_err(ForgeServiceError::into_proto)
         }
@@ -545,11 +530,12 @@ pub(super) async fn handle(
         ClientRequest::LinearGetIssue {
             account_id,
             issue_id,
+            comments_after,
         } => {
             let read_only = !linear_issue_owned(conn, &account_id, &issue_id).await?;
             conn.state
                 .linear
-                .get_issue(&account_id, &issue_id)
+                .get_issue(&account_id, &issue_id, comments_after.as_deref())
                 .await
                 .map(|issue| ResponseBody::LinearIssue { issue, read_only })
                 .map_err(ForgeServiceError::into_proto)
@@ -644,27 +630,15 @@ pub(super) async fn handle(
     }
 }
 
-/// Whether a registered project owns this repository's remote.
+/// Whether a registered project designates this repository for writes.
 ///
 /// An issue read through a repository no local project checks out is shown
-/// read-only: the daemon cannot prove the person has write access there.
+/// read-only: the daemon cannot prove the person has write access there. Only
+/// the project's first remote counts, so a fork's secondary `upstream` remote
+/// never makes the parent writable.
 async fn repo_is_owned(conn: &Connection, repo: &h4rn_protocol::ForgeRepoRef) -> bool {
-    for project in conn.state.projects.list().await {
-        if let Ok(remotes) = conn.state.forge.detect_repo(&project.path)
-            && repo_in_remotes(&remotes, repo)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Whether any detected remote names the repository.
-fn repo_in_remotes(
-    remotes: &[h4rn_protocol::ForgeRemote],
-    repo: &h4rn_protocol::ForgeRepoRef,
-) -> bool {
-    remotes.iter().any(|remote| remote.repo == *repo)
+    let projects = conn.state.projects.list().await;
+    conn.state.forge.repo_is_designated(&projects, repo).await
 }
 
 /// The refusal for a write through a repository no project owns.
@@ -688,7 +662,7 @@ async fn linear_issue_owned(
     let issue = conn
         .state
         .linear
-        .get_issue(account_id, issue_id)
+        .get_issue(account_id, issue_id, None)
         .await
         .map_err(ForgeServiceError::into_proto)?;
     let mapping = conn
@@ -741,27 +715,19 @@ pub(super) fn spawn(conn: &Connection) -> JoinHandle<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::repo_in_remotes;
-    use h4rn_protocol::{ForgeKind, ForgeRemote, ForgeRepoRef};
-
-    fn repo(owner: &str, name: &str) -> ForgeRepoRef {
-        ForgeRepoRef {
-            forge: ForgeKind::GitHub,
-            base_url: "https://github.com".into(),
-            owner: owner.into(),
-            repo: name.into(),
-        }
-    }
+    use super::read_only_repo;
+    use h4rn_protocol::{ForgeKind, ForgeRepoRef, ProtoErrorCode};
 
     #[test]
-    fn only_a_project_whose_remote_names_the_repository_owns_it() {
-        let remotes = vec![ForgeRemote {
-            remote: "origin".into(),
-            repo: repo("acme", "widget"),
-            url: "https://github.com/acme/widget".into(),
-        }];
-        assert!(repo_in_remotes(&remotes, &repo("acme", "widget")));
-        assert!(!repo_in_remotes(&remotes, &repo("other", "widget")));
-        assert!(!repo_in_remotes(&[], &repo("acme", "widget")));
+    fn a_repository_the_project_does_not_designate_is_refused_for_writes() {
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: "https://github.com".into(),
+            owner: "parent".into(),
+            repo: "widget".into(),
+        };
+        let error = read_only_repo(&repo);
+        assert_eq!(error.code, ProtoErrorCode::Forbidden);
+        assert!(error.message.contains("parent/widget"), "{error:?}");
     }
 }

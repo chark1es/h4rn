@@ -648,42 +648,43 @@ impl Forge for BitbucketClient {
 
     async fn list_issues(
         &self,
-        repo: &ForgeRepoRef,
-        filter: ForgeIssueFilter,
-        page: u32,
-        query: Option<&str>,
+        _repo: &ForgeRepoRef,
+        _filter: ForgeIssueFilter,
+        _page: u32,
+        _query: Option<&str>,
     ) -> Result<ForgeIssuePage> {
-        crate::issues::bitbucket::list(&self.http, &self.api, repo, filter, page, query).await
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
     }
 
-    async fn get_issue(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeIssue> {
-        crate::issues::bitbucket::get(&self.http, &self.api, repo, number).await
+    async fn get_issue(&self, _repo: &ForgeRepoRef, _number: u32) -> Result<ForgeIssue> {
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
     }
 
     async fn list_issue_comments(
         &self,
-        repo: &ForgeRepoRef,
-        number: u32,
+        _repo: &ForgeRepoRef,
+        _number: u32,
+        _cursor: Option<&str>,
     ) -> Result<ForgeIssueCommentPage> {
-        crate::issues::bitbucket::comments(&self.http, &self.api, repo, number).await
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
     }
 
     async fn comment_issue(
         &self,
-        repo: &ForgeRepoRef,
-        number: u32,
-        body: &str,
+        _repo: &ForgeRepoRef,
+        _number: u32,
+        _body: &str,
     ) -> Result<ForgeIssueComment> {
-        crate::issues::bitbucket::comment(&self.http, &self.api, repo, number, body).await
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
     }
 
     async fn update_issue(
         &self,
-        repo: &ForgeRepoRef,
-        number: u32,
-        update: &ForgeIssueUpdate,
+        _repo: &ForgeRepoRef,
+        _number: u32,
+        _update: &ForgeIssueUpdate,
     ) -> Result<ForgeIssue> {
-        crate::issues::bitbucket::update(&self.http, &self.api, repo, number, update).await
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
     }
 }
 

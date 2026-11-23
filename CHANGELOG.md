@@ -13,11 +13,15 @@ All notable changes to h4rn are recorded here. The format follows
   runs on the tracker. Selecting an issue opens it beside the list with its body, state, labels,
   assignees, comments and linked pull requests. Where the account allows it you can comment, edit
   the title and body, replace labels and assignees, and close or reopen (with a reason where the
-  tracker records one); a repository no local project owns is read-only. GitHub, GitLab,
-  Gitea/Forgejo, Bitbucket Cloud (when the repository's issue tracker is on) and Azure Boards work
-  items of type Issue/Bug are supported. A Linear API key connected under Settings → Source
-  control & issues is stored like a forge token and never returned; pick a team per project and
-  its issues appear beside the forge ones, with comments. Issues link to threads through the
+  tracker records one); a repository no local project owns is read-only, and only the project's
+  designated remote is writable, so a fork never writes to its parent. GitHub, GitLab,
+  Gitea/Forgejo and Azure Boards work items of type Issue/Bug are supported; Bitbucket Cloud
+  removed its issue API in August 2026 and reports issues as unavailable. What each tracker can
+  do comes from its capability row, so the page hides a filter, the labels editor or the
+  close-reason picker where it would fail, and a request that names a comment page carries the
+  provider's continuation. A Linear API key connected under Settings → Source control & issues is
+  stored like a forge token, never returned and never echoed in an error; pick a team per project
+  and its issues appear beside the forge ones, with comments. Issues link to threads through the
   journal, survive a restart, are always read live, and appear with pull requests in the thread's
   linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
   `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and

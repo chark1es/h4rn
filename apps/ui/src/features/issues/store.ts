@@ -2,7 +2,9 @@ import { forgeLabel } from "@/features/forge/store";
 import type {
   ClientRequest,
   ForgeAccount,
+  ForgeCapabilityEntry,
   ForgeIssue,
+  ForgeIssueCapabilities,
   ForgeIssueComment,
   ForgeIssueCommentPage,
   ForgeIssueFilter,
@@ -69,9 +71,12 @@ export class IssueApi {
     return response as Extract<ResponseBody, { type: K }>;
   }
 
-  async forgeAccounts(): Promise<ForgeAccount[]> {
+  async forgeAccounts(): Promise<{
+    accounts: ForgeAccount[];
+    capabilities: ForgeCapabilityEntry[];
+  }> {
     const response = await this.call({ type: "forge_list_accounts" }, "forge_accounts");
-    return response.accounts;
+    return { accounts: response.accounts, capabilities: response.capabilities };
   }
 
   async detectRepo(workspace: string): Promise<ForgeRepoRef | null> {
@@ -80,13 +85,14 @@ export class IssueApi {
   }
 
   async listForgeIssues(
+    accountId: string,
     repo: ForgeRepoRef,
     filter: ForgeIssueFilter,
     page: number,
     query: string | null,
   ): Promise<{ issues: ForgeIssueSummary[]; page: number; hasMore: boolean; readOnly: boolean }> {
     const response = await this.call(
-      { type: "forge_list_issues", account_id: null, repo, filter, page, query },
+      { type: "forge_list_issues", account_id: accountId, repo, filter, page, query },
       "forge_issues",
     );
     return {
@@ -98,43 +104,51 @@ export class IssueApi {
   }
 
   async getForgeIssue(
+    accountId: string,
     repo: ForgeRepoRef,
     number: number,
   ): Promise<{ issue: ForgeIssue; readOnly: boolean }> {
     const response = await this.call(
-      { type: "forge_get_issue", account_id: null, repo, number },
+      { type: "forge_get_issue", account_id: accountId, repo, number },
       "forge_issue",
     );
     return { issue: response.issue, readOnly: response.read_only };
   }
 
-  async forgeIssueComments(repo: ForgeRepoRef, number: number): Promise<ForgeIssueCommentPage> {
+  async forgeIssueComments(
+    accountId: string,
+    repo: ForgeRepoRef,
+    number: number,
+    cursor: string | null,
+  ): Promise<ForgeIssueCommentPage> {
     const response = await this.call(
-      { type: "forge_list_issue_comments", account_id: null, repo, number },
+      { type: "forge_list_issue_comments", account_id: accountId, repo, number, cursor },
       "forge_issue_comments",
     );
     return response.page;
   }
 
   async commentForgeIssue(
+    accountId: string,
     repo: ForgeRepoRef,
     number: number,
     body: string,
   ): Promise<ForgeIssueComment> {
     const response = await this.call(
-      { type: "forge_comment_issue", account_id: null, repo, number, body },
+      { type: "forge_comment_issue", account_id: accountId, repo, number, body },
       "forge_issue_comment_posted",
     );
     return response.comment;
   }
 
   async updateForgeIssue(
+    accountId: string,
     repo: ForgeRepoRef,
     number: number,
     update: ForgeIssueUpdate,
   ): Promise<{ issue: ForgeIssue; readOnly: boolean }> {
     const response = await this.call(
-      { type: "forge_update_issue", account_id: null, repo, number, update },
+      { type: "forge_update_issue", account_id: accountId, repo, number, update },
       "forge_issue",
     );
     return { issue: response.issue, readOnly: response.read_only };
@@ -205,9 +219,15 @@ export class IssueApi {
   async getLinearIssue(
     accountId: string,
     issueId: string,
+    commentsAfter: string | null,
   ): Promise<{ issue: LinearIssue; readOnly: boolean }> {
     const response = await this.call(
-      { type: "linear_get_issue", account_id: accountId, issue_id: issueId },
+      {
+        type: "linear_get_issue",
+        account_id: accountId,
+        issue_id: issueId,
+        comments_after: commentsAfter,
+      },
       "linear_issue",
     );
     return { issue: response.issue, readOnly: response.read_only };
@@ -264,7 +284,7 @@ export function forgeIssueRow(accountId: string, issue: ForgeIssueSummary): Issu
     labels: issue.labels.map((label) => ({ name: label.name, color: label.color })),
     assignees: issue.assignees.map((person) => person.login),
     commentCount: issue.comment_count,
-    updatedAt: issue.updated_at,
+    updatedAt: issue.updated_at ?? "",
     webUrl: issue.web_url,
     tracker: `${issue.repo.owner}/${issue.repo.repo}`,
     repository: `${issue.repo.owner}/${issue.repo.repo}`,
@@ -284,7 +304,7 @@ export function linearIssueRow(accountId: string, issue: LinearIssueSummary): Is
     labels: issue.labels.map((name) => ({ name, color: null })),
     assignees: issue.assignees,
     commentCount: 0,
-    updatedAt: issue.updated_at,
+    updatedAt: issue.updated_at ?? "",
     webUrl: issue.url,
     tracker: issue.team_key,
     repository: null,
@@ -303,7 +323,8 @@ export function issueStateLabel(state: ForgeIssueState): string {
   return state === "closed" ? "Closed" : "Open";
 }
 
-export function relativeIssueAge(iso: string): string {
+export function relativeIssueAge(iso: string | null): string {
+  if (!iso) return "";
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) return "";
   const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
@@ -347,4 +368,42 @@ export function groupLabel(
 /** A tracker key that never collides between a forge and Linear. */
 export function trackerKey(kind: "forge" | "linear", accountId: string): string {
   return `${kind}:${accountId}`;
+}
+
+const NO_ISSUE_CAPABILITIES: ForgeIssueCapabilities = {
+  read: false,
+  write: false,
+  comments: false,
+  labels: false,
+  assignees: false,
+  close_reason: false,
+  search: false,
+  assigned_filter: false,
+  created_filter: false,
+  mentioning_filter: false,
+  linked_pull_requests: false,
+};
+
+/** What the daemon says this connection's issue tracker can do. */
+export function issueCapabilitiesFor(
+  kind: "forge" | "linear",
+  account: ForgeAccount | LinearAccount | undefined,
+  entries: ForgeCapabilityEntry[],
+): ForgeIssueCapabilities {
+  if (kind === "linear") {
+    return {
+      ...NO_ISSUE_CAPABILITIES,
+      read: true,
+      comments: true,
+      search: true,
+      assigned_filter: true,
+      created_filter: true,
+      linked_pull_requests: true,
+    };
+  }
+  if (!account) return NO_ISSUE_CAPABILITIES;
+  const forge = (account as ForgeAccount).forge;
+  return (
+    entries.find((entry) => entry.forge === forge)?.capabilities.issues ?? NO_ISSUE_CAPABILITIES
+  );
 }

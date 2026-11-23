@@ -6209,6 +6209,10 @@ fieldset.q-seg-fs {
   font: inherit;
   font-size: 12.5px;
 }
+.q-issues-search:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
 .q-issues-body {
   display: flex;
   flex: 1;
@@ -6231,10 +6235,9 @@ fieldset.q-seg-fs {
   align-items: baseline;
   justify-content: space-between;
   padding: 14px 16px 6px;
-  color: var(--fg-3);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  color: var(--fg-2, var(--fg));
+  font-size: 12px;
+  font-weight: 500;
 }
 .q-issue-row {
   display: flex;
@@ -6302,9 +6305,7 @@ fieldset.q-seg-fs {
   margin-bottom: 8px;
 }
 .q-issue-state {
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 12px;
 }
 .q-issue-title-input {
   width: 100%;
@@ -6318,6 +6319,11 @@ fieldset.q-seg-fs {
   font-size: 20px;
   font-weight: 600;
   letter-spacing: -0.01em;
+}
+.q-issue-title-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 .q-issues-detail-inner h2 {
   margin: 4px 0 8px;
@@ -6374,6 +6380,7 @@ fieldset.q-seg-fs {
 }
 .q-issues-fields input,
 .q-issues-actions select,
+.q-issue-duplicate,
 .q-issue-notes {
   padding: 7px 9px;
   border: 1px solid var(--line);
@@ -6399,11 +6406,9 @@ fieldset.q-seg-fs {
   align-items: center;
   gap: 6px;
   margin: 0 0 10px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  color: var(--fg-3);
+  color: var(--fg-2, var(--fg));
 }
 .q-issue-pr {
   display: flex;
