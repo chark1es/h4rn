@@ -428,16 +428,13 @@ fn commit_blocking(
 ) -> Result<GitCommitResult, GitActionError> {
     let message = validate_message(message)?;
     let status = status_blocking(workspace)?;
+    // A rebase leaves a detached HEAD too; naming the operation is the useful
+    // message, so it is checked first.
+    refuse_in_progress(&status, "committing")?;
     if status.branch.is_none() {
         return Err(GitActionError::Conflict(
             "the workspace has a detached HEAD; check out a branch before committing".into(),
         ));
-    }
-    if let Some(operation) = status.operation {
-        return Err(GitActionError::Conflict(format!(
-            "a {} is in progress; finish or abort it before committing",
-            operation.label()
-        )));
     }
     let paths = paths
         .map(|paths| validate_paths(workspace, paths))
@@ -459,29 +456,49 @@ fn commit_blocking(
         git_text(workspace, &args, COMMIT_TIMEOUT)?;
     }
 
-    // `git commit` records the whole index. Refuse when another folder in the
-    // repository has staged changes this workspace does not show.
-    let prefix =
-        git_opt(workspace, &["rev-parse", "--show-prefix"], STATUS_TIMEOUT).unwrap_or_default();
-    if !prefix.is_empty() {
-        for path in nul_paths(git_bytes(
-            workspace,
-            &["diff", "--cached", "--name-only", "-z"],
-            STATUS_TIMEOUT,
-        )?) {
-            if !path.starts_with(&prefix) {
-                return Err(GitActionError::InvalidRequest(format!(
-                    "the index has staged changes outside this workspace ({path}); commit or unstage them there first"
-                )));
+    // Without paths, `git commit` records the whole index. Refuse when another
+    // folder in the repository has staged changes this workspace does not
+    // show. A path-limited commit uses `--only`, which leaves them alone.
+    if paths.is_none() {
+        let prefix =
+            git_opt(workspace, &["rev-parse", "--show-prefix"], STATUS_TIMEOUT).unwrap_or_default();
+        if !prefix.is_empty() {
+            for path in nul_paths(git_bytes(
+                workspace,
+                &["diff", "--cached", "--name-only", "-z"],
+                STATUS_TIMEOUT,
+            )?) {
+                if !path.starts_with(&prefix) {
+                    return Err(GitActionError::InvalidRequest(format!(
+                        "the index has staged changes outside this workspace ({path}); commit or unstage them there first"
+                    )));
+                }
             }
         }
     }
 
-    let staged = git_bytes(
-        workspace,
-        &["diff", "--cached", "--name-only", "-z", "--relative"],
-        STATUS_TIMEOUT,
-    )?;
+    // The "nothing to commit" answer covers exactly the paths this request
+    // names, so a staged change elsewhere neither enables nor blocks it.
+    let staged = match &paths {
+        Some(paths) => {
+            let mut args = vec![
+                "--literal-pathspecs",
+                "diff",
+                "--cached",
+                "--name-only",
+                "-z",
+                "--relative",
+                "--",
+            ];
+            args.extend(paths.iter().map(String::as_str));
+            git_bytes(workspace, &args, STATUS_TIMEOUT)?
+        }
+        None => git_bytes(
+            workspace,
+            &["diff", "--cached", "--name-only", "-z", "--relative"],
+            STATUS_TIMEOUT,
+        )?,
+    };
     if staged.iter().all(|byte| *byte == 0) {
         return Err(GitActionError::InvalidRequest(if paths.is_some() {
             "nothing under those paths is ready to commit; stage or include changes first".into()
@@ -493,7 +510,16 @@ fn commit_blocking(
     }
 
     // The message is always the value of `-m`, and `--` ends the option list.
-    if let Err(error) = git_text(workspace, &["commit", "-m", message, "--"], COMMIT_TIMEOUT) {
+    // `--only` records these paths and leaves other staged work staged.
+    let mut args = vec!["--literal-pathspecs", "commit"];
+    if paths.is_some() {
+        args.push("--only");
+    }
+    args.extend(["-m", message, "--"]);
+    if let Some(paths) = &paths {
+        args.extend(paths.iter().map(String::as_str));
+    }
+    if let Err(error) = git_text(workspace, &args, COMMIT_TIMEOUT) {
         let GitActionError::Git(message) = error else {
             return Err(error);
         };
@@ -514,75 +540,153 @@ fn commit_blocking(
     })
 }
 
-/// Pushes the current branch, blocking.
-fn push_blocking(workspace: &Path, set_upstream: bool) -> Result<GitPushResult, GitActionError> {
-    let branch = git_opt(
+/// Names an in-progress operation instead of a detached `HEAD` when both are
+/// true, because the rebase tells the person what to do.
+fn refuse_in_progress(status: &GitThreadStatus, action: &str) -> Result<(), GitActionError> {
+    if let Some(operation) = status.operation {
+        return Err(GitActionError::Conflict(format!(
+            "a {} is in progress; finish or abort it before {action}",
+            operation.label()
+        )));
+    }
+    Ok(())
+}
+
+/// The remote a branch is pushed to.
+///
+/// `origin` is the forge remote in every layout h4rn creates. When it is
+/// absent, the branch's configured remote is used, and a repository with one
+/// remote has no choice to make. `push.default` and other push configuration
+/// are never consulted: h4rn names both the remote and the ref.
+fn push_remote(workspace: &Path, branch: &str) -> Result<String, GitActionError> {
+    let remotes: Vec<String> = git_opt(workspace, &["remote"], STATUS_TIMEOUT)
+        .map(|value| {
+            value
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if remotes.iter().any(|remote| remote == "origin") {
+        return Ok("origin".to_owned());
+    }
+    if let Some(remote) = git_opt(
         workspace,
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        &["config", "--get", &format!("branch.{branch}.remote")],
+        STATUS_TIMEOUT,
+    )
+    .map(|value| value.trim().to_owned())
+    .filter(|remote| !remote.is_empty() && remote != ".")
+        && remotes.contains(&remote)
+    {
+        return Ok(remote);
+    }
+    match remotes.len() {
+        1 => Ok(remotes[0].clone()),
+        0 => Err(GitActionError::InvalidRequest(
+            "the workspace has no git remote to push to".into(),
+        )),
+        _ => Err(GitActionError::InvalidRequest(format!(
+            "the workspace has several remotes and none is origin; h4rn will not guess which to push to ({})",
+            remotes.join(", ")
+        ))),
+    }
+}
+
+/// The commit `<remote>/<branch>` points at, when the remote branch exists.
+fn remote_branch_head(workspace: &Path, remote: &str, branch: &str) -> Option<String> {
+    git_opt(
+        workspace,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote}/{branch}"),
+        ],
         STATUS_TIMEOUT,
     )
     .map(|value| value.trim().to_owned())
     .filter(|value| !value.is_empty())
-    .ok_or_else(|| {
+}
+
+/// How many local commits `<remote>/<branch>` does not have.
+fn ahead_of_remote(workspace: &Path, remote: &str, branch: &str) -> Option<u32> {
+    git_opt(
+        workspace,
+        &[
+            "rev-list",
+            "--count",
+            &format!("refs/remotes/{remote}/{branch}..HEAD"),
+        ],
+        STATUS_TIMEOUT,
+    )
+    .and_then(|value| value.trim().parse().ok())
+}
+
+/// The exact push h4rn runs: one branch, named remote, never forced.
+///
+/// The refspec has no `+`, and it is on the command line, so neither
+/// `push.default` nor `remote.<name>.push` can widen or force it.
+fn push_args(branch: &str, remote: &str, set_upstream: bool) -> Vec<String> {
+    let mut args = vec![
+        "-c".to_owned(),
+        "push.default=nothing".to_owned(),
+        "push".to_owned(),
+    ];
+    if set_upstream {
+        args.push("-u".to_owned());
+    }
+    args.push("--".to_owned());
+    args.push(remote.to_owned());
+    args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
+    args
+}
+
+/// Pushes the current branch, blocking.
+fn push_blocking(workspace: &Path, set_upstream: bool) -> Result<GitPushResult, GitActionError> {
+    let status = status_blocking(workspace)?;
+    refuse_in_progress(&status, "pushing")?;
+    let branch = status.branch.clone().ok_or_else(|| {
         GitActionError::Conflict(
             "the workspace has a detached HEAD; check out a branch before pushing".into(),
         )
     })?;
     validate_branch(&branch)?;
-    let has_upstream = git_opt(
-        workspace,
-        &[
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ],
-        STATUS_TIMEOUT,
-    )
-    .is_some_and(|value| !value.trim().is_empty());
-    if !has_upstream && !set_upstream {
+    let remote = push_remote(workspace, &branch)?;
+    validate_remote(&remote)?;
+    if remote_branch_head(workspace, &remote, &branch).is_none() && !set_upstream {
         return Err(GitActionError::InvalidRequest(format!(
-            "branch {branch} has no upstream; push with set_upstream to create origin/{branch}"
+            "branch {branch} has no upstream branch on {remote}; push with set_upstream to create {remote}/{branch}"
         )));
     }
-    if has_upstream {
-        run_push(workspace, &["push"])?;
-    } else {
-        run_push(
-            workspace,
-            &[
-                "push",
-                "-u",
-                "--",
-                "origin",
-                &format!("refs/heads/{branch}"),
-            ],
-        )?;
-    }
+    run_push(workspace, &push_args(&branch, &remote, set_upstream))?;
     let status = status_blocking(workspace)?;
-    let upstream = status
-        .upstream
-        .clone()
-        .unwrap_or_else(|| format!("origin/{branch}"));
     Ok(GitPushResult {
-        branch,
-        upstream,
+        branch: branch.clone(),
+        upstream: format!("{remote}/{branch}"),
         status,
     })
 }
 
 /// Runs one push and turns an auth or rejected answer into an honest error.
-fn run_push(workspace: &Path, args: &[&str]) -> Result<(), GitActionError> {
-    match git::run_with_timeout(workspace, args, PUSH_TIMEOUT) {
+fn run_push(workspace: &Path, args: &[String]) -> Result<(), GitActionError> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match git::run_with_timeout(workspace, &args, PUSH_TIMEOUT) {
         Ok(_) => Ok(()),
         Err(error) => Err(classify_push_error(&error)),
     }
 }
 
 /// Turns git's push stderr into the class the person needs to act on.
+///
+/// The text is redacted first: git can echo a credential-shaped URL back, and
+/// an error is not a place for a token.
 fn classify_push_error(error: &str) -> GitActionError {
+    let error = h4rn_forge::redact(error);
     let lowered = error.to_ascii_lowercase();
-    let detail = tail(error);
+    let detail = tail(&error);
     if [
         "authentication failed",
         "could not read username",
@@ -613,24 +717,33 @@ fn classify_push_error(error: &str) -> GitActionError {
 }
 
 /// Pushes a branch before a PR, blocking; returns whether it pushed.
+///
+/// The decision reads `<remote>/<branch>`, not the branch's configured
+/// upstream, so a branch that tracks `origin/main` is still published as its
+/// own name on the same remote.
 fn push_for_pull_request_blocking(
     workspace: &Path,
     remote: &str,
     branch: &str,
 ) -> Result<bool, GitActionError> {
     validate_branch(branch)?;
+    validate_remote(remote)?;
     let status = status_blocking(workspace)?;
-    if status.upstream.is_some() && status.ahead == 0 {
+    refuse_in_progress(&status, "pushing")?;
+    if status.branch.as_deref() != Some(branch) {
+        return Err(GitActionError::Conflict(format!(
+            "the workspace is on {}, not {branch}; check out {branch} before opening a pull request",
+            status.branch.as_deref().unwrap_or("a detached HEAD")
+        )));
+    }
+    if remote_branch_head(workspace, remote, branch).is_some()
+        && ahead_of_remote(workspace, remote, branch) == Some(0)
+    {
         return Ok(false);
     }
-    if status.upstream.is_some() {
-        run_push(workspace, &["push"])?;
-    } else {
-        run_push(
-            workspace,
-            &["push", "-u", "--", remote, &format!("refs/heads/{branch}")],
-        )?;
-    }
+    let target = format!("{remote}/{branch}");
+    let set_upstream = status.upstream.as_deref() != Some(target.as_str());
+    run_push(workspace, &push_args(branch, remote, set_upstream))?;
     Ok(true)
 }
 
@@ -665,6 +778,16 @@ fn validate_branch(branch: &str) -> Result<(), GitActionError> {
     {
         return Err(GitActionError::InvalidRequest(format!(
             "{branch:?} is not a branch h4rn will push"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates one remote name before it is passed to git as an argument.
+fn validate_remote(remote: &str) -> Result<(), GitActionError> {
+    if remote.is_empty() || remote.starts_with('-') || remote.chars().any(char::is_control) {
+        return Err(GitActionError::InvalidRequest(format!(
+            "{remote:?} is not a git remote h4rn will push to"
         )));
     }
     Ok(())

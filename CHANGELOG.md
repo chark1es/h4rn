@@ -351,6 +351,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
+  Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
+  relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other
+  branches and a `+` refspec in config cannot force an update; "behind or ahead" is measured against
+  `origin/<branch>`, not whatever upstream a branch happens to track, and a fork layout pushes to the
+  fork. Opening a draft on Gitea or Forgejo now prefixes the title with `WIP:` because those APIs
+  have no draft field, and no forge gets a doubled `Draft:` or `WIP:` prefix. The pull request dialog
+  waits as long as the push may take and cannot submit twice. A commit that names paths records only
+  those paths and leaves other staged work staged. An older app that saves a title model no longer
+  turns the Commit & PR mode off. A rebase, merge or cherry-pick is named in the error before the
+  detached `HEAD` it causes, and a credential-shaped string in push output is redacted. The panel
+  keeps a typed message when generation is off, shows the live branch (a detached `HEAD` disables
+  push and the PR dialog with the reason), never guesses `main` as a base, and shows its busy state on
+  **Commit & push** for the whole commit-and-push. Settings → Source control describes the message
+  model in its footer and says plainly that non-Claude threads need a configured text generator.
 - **A PR watch hears every change since it started, exactly once.** The GitHub
   change probe is gone: the watch reads the PR detail conditionally, so a `304`
   is built from the body the account's shared cache returns rather than from the

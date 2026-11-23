@@ -2090,7 +2090,10 @@ mod tests {
                 model: None,
             },
             ClientRequest::SetTextGenerationSettings {
-                settings: TextGenerationSettings::default(),
+                settings: h4rn_protocol::TextGenerationSettingsUpdate {
+                    title: TitleModelSetting::default(),
+                    source_control: None,
+                },
             },
         ] {
             assert_eq!(

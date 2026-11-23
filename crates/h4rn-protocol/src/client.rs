@@ -911,10 +911,12 @@ pub enum ClientRequest {
     },
     /// Stage what was asked and commit it.
     ///
-    /// The commit always records the index. `include_unstaged` stages tracked
-    /// changes and new files first; `paths` narrows what is staged. A
-    /// detached `HEAD`, an in-progress rebase, merge or cherry-pick, or an
-    /// empty index is refused with a message that names the reason.
+    /// Without `paths` the commit records the index. `include_unstaged` stages
+    /// tracked changes and new files first. With `paths`, only those paths are
+    /// committed (`git commit --only`): other staged work stays staged, and the
+    /// "nothing to commit" answer covers exactly the named paths. A detached
+    /// `HEAD`, an in-progress rebase, merge or cherry-pick, or an empty index is
+    /// refused with a message that names the reason.
     GitCommit {
         /// Thread whose workspace is committed.
         thread_id: ThreadId,
@@ -1164,9 +1166,12 @@ pub enum ClientRequest {
     /// Read which model writes thread titles.
     GetTextGenerationSettings,
     /// Replace the title model. Needs the `admin` scope.
+    ///
+    /// A client that predates the Commit & PR mode omits `source_control`; the
+    /// daemon then keeps the mode already configured instead of resetting it.
     SetTextGenerationSettings {
         /// New settings.
-        settings: crate::text_generation::TextGenerationSettings,
+        settings: crate::text_generation::TextGenerationSettingsUpdate,
     },
     /// Rename a thread. A generated title never replaces this name.
     RenameThread {

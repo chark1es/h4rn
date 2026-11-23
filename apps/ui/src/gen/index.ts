@@ -234,6 +234,7 @@ export type * from "./TerminalExitNotice";
 export type * from "./TerminalId";
 export type * from "./TerminalInfo";
 export type * from "./TextGenerationSettings";
+export type * from "./TextGenerationSettingsUpdate";
 export type * from "./TextGenerator";
 export type * from "./TextGeneratorDraft";
 export type * from "./TextGeneratorId";

@@ -112,8 +112,9 @@ pub use terminal::{
 };
 pub use text_generation::{
     MAX_SOURCE_CONTROL_INSTRUCTIONS, SourceControlModelMode, SourceControlModelSetting,
-    TextGenerationSettings, TextGenerator, TextGeneratorDraft, TextGeneratorId, TextGeneratorKind,
-    TextGeneratorPatch, TextGeneratorTestReport, TitleModelMode, TitleModelSetting,
+    TextGenerationSettings, TextGenerationSettingsUpdate, TextGenerator, TextGeneratorDraft,
+    TextGeneratorId, TextGeneratorKind, TextGeneratorPatch, TextGeneratorTestReport,
+    TitleModelMode, TitleModelSetting,
 };
 pub use transport::{
     TransportPathKind, TransportPathState, TransportPathStatus, TransportSessionState,

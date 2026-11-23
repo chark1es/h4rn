@@ -30,7 +30,11 @@ setting **Off**; it never falls back to a coding agent the person did not choose
 A separate setting, **Settings → Source control → Commit & PR messages**, writes commit messages
 and pull request text: **Off** (the default), **Coding agent** or **Text generator**, with optional
 custom instructions. It uses the same backends, the same isolation flags and the same generator
-list as titles. Off starts nothing: **Generate** leaves the field empty and no job runs.
+list as titles. Off starts nothing: **Generate** leaves the field empty and no job runs. With
+**Follow the thread's agent**, Claude Code threads run Claude Code; every other harness has no
+supported coding agent for messages, so it needs a configured text generator — without one,
+**Generate** leaves the field empty and nothing runs. Saving the title model from an app built
+before this setting exists keeps the message mode as it is instead of turning it off.
 
 Only the request's own data is sent:
 
@@ -50,7 +54,9 @@ is committed, pushed or opened by generation. See [git-actions.md](git-actions.m
 Only two things:
 
 1. the text of the thread's **first prompt**, and
-2. the **name of the workspace folder** (the last path component).The prompt is capped at 4,000 characters. h4rn sends no files, diffs, paths, environment variables
+2. the **name of the workspace folder** (the last path component).
+
+The prompt is capped at 4,000 characters. h4rn sends no files, diffs, paths, environment variables
 or thread history. The Claude Code CLI adds its own short environment note to each request (its
 working directory, which is the empty temp directory, plus platform, shell and OS version).
 

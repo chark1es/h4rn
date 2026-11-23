@@ -96,6 +96,21 @@ fn repo_with_remote() -> (Repo, Bare) {
     (repo, bare)
 }
 
+/// The commit a branch points at in a bare repository.
+fn bare_head(path: &Path, name: &str) -> String {
+    let output = Command::new("git")
+        .args(["--git-dir", path.to_str().unwrap(), "rev-parse", name])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("rev-parse");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 #[test]
 fn status_counts_staged_unstaged_and_untracked_paths() {
     let repo = Repo::new();
@@ -171,6 +186,61 @@ fn paths_stage_only_what_was_named() {
     let result = commit_blocking(repo.path(), "Only a.txt", true, Some(&paths)).expect("commit");
     assert_eq!(result.status.staged.count, 0);
     assert_eq!(result.status.unstaged.paths, vec!["b.txt".to_owned()]);
+}
+
+#[test]
+fn a_path_limited_commit_leaves_other_staged_paths_alone() {
+    let repo = Repo::new();
+    repo.write("a.txt", "a staged\n");
+    repo.git(&["add", "a.txt"]);
+    repo.write("b.txt", "b staged\n");
+    repo.git(&["add", "b.txt"]);
+
+    let paths = vec!["a.txt".to_owned()];
+    let result = commit_blocking(repo.path(), "Only a", false, Some(&paths)).expect("commit");
+    let committed = repo.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(committed, "a.txt");
+    assert_eq!(
+        result.status.staged.paths,
+        vec!["b.txt".to_owned()],
+        "b.txt is still staged"
+    );
+}
+
+#[test]
+fn a_path_limited_commit_ignores_a_change_staged_elsewhere() {
+    let repo = Repo::new();
+    repo.write("b.txt", "b staged\n");
+    repo.git(&["add", "b.txt"]);
+    let head = repo.head();
+
+    let paths = vec!["a.txt".to_owned()];
+    let error = commit_blocking(repo.path(), "Nothing here", true, Some(&paths))
+        .expect_err("no change under a.txt");
+    assert!(
+        error.to_string().contains("nothing under those paths"),
+        "{error}"
+    );
+    assert_eq!(repo.head(), head, "nothing was committed");
+    assert_eq!(
+        status_blocking(repo.path()).expect("status").staged.paths,
+        vec!["b.txt".to_owned()]
+    );
+}
+
+#[test]
+fn commit_input_covers_exactly_the_requested_paths() {
+    let repo = Repo::new();
+    repo.write("a.txt", "a changed\n");
+    repo.write("b.txt", "b changed\n");
+    let input =
+        commit_input_blocking(repo.path(), true, Some(&["a.txt".to_owned()])).expect("input");
+    assert!(input.diff.contains("+a changed"), "{}", input.diff);
+    assert!(
+        !input.diff.contains("b changed"),
+        "a path outside the request is not sent: {}",
+        input.diff
+    );
 }
 
 #[test]
@@ -252,6 +322,35 @@ fn a_detached_head_and_a_rebase_both_refuse_a_commit() {
 }
 
 #[test]
+fn a_real_paused_rebase_is_named_instead_of_the_detached_head() {
+    let repo = Repo::new();
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write("a.txt", "feature\n");
+    repo.git(&["add", "a.txt"]);
+    repo.git(&["commit", "-m", "Feature change"]);
+    repo.git(&["checkout", "main"]);
+    repo.write("a.txt", "main\n");
+    repo.git(&["add", "a.txt"]);
+    repo.git(&["commit", "-m", "Main change"]);
+    repo.git(&["checkout", "feature"]);
+
+    let paused = repo.try_git(&["rebase", "main"]);
+    assert!(!paused.status.success(), "the rebase stops on a conflict");
+    let status = status_blocking(repo.path()).expect("status");
+    assert_eq!(status.operation, Some(GitOperation::Rebase));
+    assert_eq!(status.branch, None, "a paused rebase has a detached HEAD");
+
+    let error = commit_blocking(repo.path(), "Resolve it", false, None).expect_err("rebase");
+    let message = error.to_string();
+    assert!(message.contains("rebase is in progress"), "{message}");
+    assert!(!message.contains("detached HEAD"), "{message}");
+
+    let error = push_blocking(repo.path(), true).expect_err("rebase");
+    let message = error.to_string();
+    assert!(message.contains("rebase is in progress"), "{message}");
+}
+
+#[test]
 fn nothing_staged_is_refused_with_a_clear_message() {
     let repo = Repo::new();
     let error = commit_blocking(repo.path(), "Nothing", false, None).expect_err("empty");
@@ -279,6 +378,207 @@ async fn push_needs_an_upstream_unless_asked_to_set_one() {
         String::from_utf8_lossy(&remote_head.stdout).trim(),
         repo.head()
     );
+}
+
+/// `push.default=matching` would move every matching branch. h4rn names one
+/// refspec, so only the checked-out branch moves.
+#[tokio::test]
+async fn push_default_matching_never_pushes_another_branch() {
+    let (repo, bare) = repo_with_remote();
+    repo.git(&["branch", "side"]);
+    push_blocking(repo.path(), true).expect("push main");
+    repo.git(&["checkout", "side"]);
+    push_blocking(repo.path(), true).expect("push side");
+    repo.git(&["checkout", "main"]);
+
+    // Move both branches: only `main` is pushed and `side` stays where it was.
+    repo.write("b.txt", "main moves\n");
+    repo.git(&["add", "b.txt"]);
+    repo.git(&["commit", "-m", "Main moves"]);
+    let main_head = repo.head();
+    repo.git(&["checkout", "side"]);
+    repo.write("c.txt", "side moves\n");
+    repo.git(&["add", "c.txt"]);
+    repo.git(&["commit", "-m", "Side moves"]);
+    repo.git(&["checkout", "main"]);
+
+    repo.git(&["config", "push.default", "matching"]);
+    push_blocking(repo.path(), false).expect("push");
+
+    let bare_head = |name: &str| {
+        let output = Command::new("git")
+            .args(["rev-parse", name])
+            .current_dir(bare.path())
+            .output()
+            .expect("rev-parse");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    assert_eq!(bare_head("main"), main_head);
+    assert_ne!(
+        bare_head("side"),
+        repo.git(&["rev-parse", "side"]),
+        "the other branch must not move"
+    );
+}
+
+/// A configured `remote.origin.push=+…` must never turn the push into a force.
+#[tokio::test]
+async fn a_forced_push_refspec_in_config_is_not_followed() {
+    let (repo, bare) = repo_with_remote();
+    push_blocking(repo.path(), true).expect("first push");
+    let remote_head = bare_head(bare.path(), "main");
+
+    // Another clone advances the remote, so a forced push would lose its work.
+    let clone = tempfile::tempdir().expect("clone dir");
+    let clone_path = clone.path().join("clone");
+    let output = Command::new("git")
+        .args(["clone"])
+        .arg(bare.path())
+        .arg(&clone_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("clone");
+    assert!(output.status.success());
+    let clone_git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&clone_path)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    clone_git(&["config", "user.name", "Someone Else"]);
+    clone_git(&["config", "user.email", "else@example.invalid"]);
+    clone_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(clone_path.join("remote.txt"), "from the other clone\n").expect("write");
+    clone_git(&["add", "remote.txt"]);
+    clone_git(&["commit", "-m", "Remote change"]);
+    clone_git(&["push", "origin", "main"]);
+    let advanced = clone_git(&["rev-parse", "HEAD"]);
+    assert_ne!(advanced, remote_head);
+
+    repo.write("local.txt", "local\n");
+    repo.git(&["add", "local.txt"]);
+    repo.git(&["commit", "-m", "Local change"]);
+    repo.git(&["config", "remote.origin.push", "+refs/heads/*:refs/heads/*"]);
+
+    let error = push_blocking(repo.path(), false).expect_err("rejected");
+    assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+    assert_eq!(
+        bare_head(bare.path(), "main"),
+        advanced,
+        "the remote was not force-updated"
+    );
+}
+
+/// A branch that tracks `origin/main` is still published as `origin/<branch>`.
+#[tokio::test]
+async fn a_branch_tracking_origin_main_pushes_under_its_own_name() {
+    let (repo, bare) = repo_with_remote();
+    push_blocking(repo.path(), true).expect("publish main");
+    let main_head = bare_head(bare.path(), "main");
+
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.git(&["branch", "--set-upstream-to=origin/main"]);
+    repo.write("feature.txt", "feature\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Feature work"]);
+    let feature_head = repo.head();
+
+    let pushed = push_blocking(repo.path(), true).expect("push");
+    assert_eq!(pushed.branch, "feature/widget");
+    assert_eq!(pushed.upstream, "origin/feature/widget");
+    assert_eq!(bare_head(bare.path(), "feature/widget"), feature_head);
+    assert_eq!(
+        bare_head(bare.path(), "main"),
+        main_head,
+        "main is untouched"
+    );
+}
+
+/// Two remotes: the branch tracks `upstream/main`, but the fork's `origin` is
+/// where h4rn pushes.
+#[tokio::test]
+async fn a_fork_layout_pushes_to_origin_not_the_upstream_remote() {
+    let repo = Repo::new();
+    let fork = Bare::new();
+    let upstream = Bare::new();
+    repo.git(&["remote", "add", "origin", fork.path().to_str().unwrap()]);
+    repo.git(&[
+        "remote",
+        "add",
+        "upstream",
+        upstream.path().to_str().unwrap(),
+    ]);
+    // Seed the upstream remote, and make the branch track it.
+    repo.git(&["push", "upstream", "main"]);
+    repo.git(&["fetch", "upstream"]);
+    repo.git(&["branch", "--set-upstream-to=upstream/main"]);
+    let upstream_head = bare_head(upstream.path(), "main");
+
+    repo.write("local.txt", "fork work\n");
+    repo.git(&["add", "local.txt"]);
+    repo.git(&["commit", "-m", "Fork work"]);
+    let head = repo.head();
+
+    let pushed = push_blocking(repo.path(), true).expect("push");
+    assert_eq!(pushed.upstream, "origin/main");
+    assert_eq!(bare_head(fork.path(), "main"), head);
+    assert_eq!(
+        bare_head(upstream.path(), "main"),
+        upstream_head,
+        "the upstream remote is not written"
+    );
+}
+
+#[tokio::test]
+async fn a_pull_request_push_uses_the_named_remote_not_the_upstream() {
+    let repo = Repo::new();
+    let fork = Bare::new();
+    let upstream = Bare::new();
+    repo.git(&["remote", "add", "origin", fork.path().to_str().unwrap()]);
+    repo.git(&[
+        "remote",
+        "add",
+        "upstream",
+        upstream.path().to_str().unwrap(),
+    ]);
+    repo.git(&["push", "upstream", "main"]);
+    repo.git(&["fetch", "upstream"]);
+    repo.git(&["branch", "--set-upstream-to=upstream/main"]);
+    let upstream_head = bare_head(upstream.path(), "main");
+
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.git(&["branch", "--set-upstream-to=upstream/main"]);
+    repo.write("feature.txt", "feature\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Feature work"]);
+    let head = repo.head();
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "feature/widget")
+        .await
+        .expect("push");
+    assert!(pushed);
+    assert_eq!(bare_head(fork.path(), "feature/widget"), head);
+    assert_eq!(
+        bare_head(upstream.path(), "main"),
+        upstream_head,
+        "the upstream remote is not written"
+    );
+
+    // A second call finds the branch published and does nothing.
+    let pushed = push_for_pull_request(repo.path(), "origin", "feature/widget")
+        .await
+        .expect("no-op");
+    assert!(!pushed);
 }
 
 #[tokio::test]
@@ -356,6 +656,26 @@ fn an_auth_failure_is_reported_as_unauthorized() {
         "! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs",
     );
     assert!(matches!(error, GitActionError::Conflict(_)));
+}
+
+#[test]
+fn a_credential_in_push_output_is_redacted() {
+    // Built at runtime so no credential-shaped literal lives in the repository.
+    let prefix = format!("{}{}{}", "g", "hp", "_");
+    let token = format!("{prefix}{}", "x".repeat(32));
+    let url = format!("https://{token}@example.invalid/acme/widget.git");
+    let message = format!("fatal: Authentication failed for '{url}'");
+    let error = classify_push_error(&message);
+    assert!(
+        matches!(error, GitActionError::Unauthorized(_)),
+        "{error:?}"
+    );
+    let shown = error.to_string();
+    assert!(
+        !shown.contains(&token),
+        "the token is not repeated: {shown}"
+    );
+    assert!(shown.contains("[redacted]"), "{shown}");
 }
 
 #[tokio::test]

@@ -3483,6 +3483,10 @@ fieldset.q-seg-fs {
 .q-field:first-of-type {
   border-top: 1px solid var(--line);
 }
+/* A field whose control sits below its label rather than beside it. */
+.q-field-block {
+  display: block;
+}
 .q-field .lab {
   flex: 0 1 320px;
   min-width: 200px;

@@ -1,3 +1,4 @@
+import { ACTION_TIMEOUT_MS } from "@/features/git-actions/store";
 import type {
   ClientRequest,
   ForgeAccount,
@@ -35,7 +36,10 @@ import type {
  * PR number. Keeping the wire details here means the pages never branch on a
  * response tag and the optimistic helpers stay testable without a socket.
  */
-export type ForgeRequest = (request: ClientRequest) => Promise<ResponseBody>;
+export type ForgeRequest = (
+  request: ClientRequest,
+  options?: { timeoutMs?: number },
+) => Promise<ResponseBody>;
 
 export type ForgeAccounts = {
   accounts: ForgeAccount[];
@@ -48,8 +52,9 @@ export class ForgeApi {
   private async call<K extends ResponseBody["type"]>(
     request: ClientRequest,
     type: K,
+    options?: { timeoutMs?: number },
   ): Promise<Extract<ResponseBody, { type: K }>> {
-    const response = await this.request(request);
+    const response = options ? await this.request(request, options) : await this.request(request);
     if (response.type !== type) {
       throw new Error(`expected ${type}, got ${response.type}`);
     }
@@ -177,9 +182,12 @@ export class ForgeApi {
     base: string,
     draft = false,
   ): Promise<ForgePullRequest> {
+    // The daemon pushes the branch before it asks the forge, so this waits as
+    // long as a push may take rather than timing out while the work continues.
     const response = await this.call(
       { type: "forge_open_pr", thread_id: threadId, repo, title, body, base, draft },
       "forge_pr_opened",
+      { timeoutMs: ACTION_TIMEOUT_MS },
     );
     return response.pr;
   }

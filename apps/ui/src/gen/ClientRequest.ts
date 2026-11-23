@@ -28,7 +28,7 @@ import type { SkillConflictResolution } from "./SkillConflictResolution";
 import type { SkillSource } from "./SkillSource";
 import type { SubagentRequest } from "./SubagentRequest";
 import type { TerminalId } from "./TerminalId";
-import type { TextGenerationSettings } from "./TextGenerationSettings";
+import type { TextGenerationSettingsUpdate } from "./TextGenerationSettingsUpdate";
 import type { TextGeneratorDraft } from "./TextGeneratorDraft";
 import type { TextGeneratorId } from "./TextGeneratorId";
 import type { TextGeneratorPatch } from "./TextGeneratorPatch";
@@ -1171,7 +1171,7 @@ model: string | null, } | { "type": "get_text_generation_settings" } | { "type":
 /**
  * New settings.
  */
-settings: TextGenerationSettings, } | { "type": "rename_thread", 
+settings: TextGenerationSettingsUpdate, } | { "type": "rename_thread", 
 /**
  * Thread to rename.
  */

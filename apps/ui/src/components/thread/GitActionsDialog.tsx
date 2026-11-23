@@ -8,7 +8,7 @@ import {
   RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Dialog,
@@ -33,7 +33,7 @@ function describeError(cause: unknown): string {
   return "The git action did not finish.";
 }
 
-const forgeApi = () => new ForgeApi((request) => getClient().request(request));
+const forgeApi = () => new ForgeApi((request, options) => getClient().request(request, options));
 
 /** One group of changes: its exact count and the paths the daemon sent. */
 function ChangeSet({
@@ -126,8 +126,9 @@ export function GitActionsDialog({
     try {
       const generated = await api.generateCommitMessage(threadId, includeUnstaged, null);
       if (!generated) {
+        // Off never touches what the person typed; it only says why nothing
+        // was written.
         setHint("Generation is off. Pick a model in Settings → Source control.");
-        setMessage("");
       } else {
         setMessage(generated);
       }
@@ -176,17 +177,37 @@ export function GitActionsDialog({
   };
 
   const commitAndPush = async () => {
+    // One busy state for the whole pair: the button that started it says so
+    // until both the commit and the push are done.
     setBusy("both");
-    const committed = await commit();
-    if (!committed) {
+    setError(null);
+    try {
+      const committed = await api.commit(threadId, message, includeUnstaged, null);
+      setStatus(committed.status);
+      setMessage("");
+      pushToast({
+        title: `Committed ${committed.short_commit} (${committed.subject}).`,
+        variant: "success",
+      });
+      const pushed = await api.push(threadId, true);
+      setStatus(pushed.status);
+      pushToast({
+        title: `Pushed ${pushed.branch} to ${pushed.upstream}.`,
+        variant: "success",
+      });
+    } catch (cause) {
+      setError(describeError(cause));
+    } finally {
       setBusy(null);
-      return;
     }
-    await push();
   };
 
-  const canCommit = message.trim().length > 0 && busy === null && !loading;
-  const branch = status?.branch ?? summary.branch ?? null;
+  // Once the daemon has answered, its status wins: a detached HEAD it reports
+  // is a real state, not a reason to fall back to the thread's old branch.
+  const detached = status !== null && status.branch === null;
+  const branch = status ? status.branch : (summary.branch ?? null);
+  const canPush = busy === null && !loading && !detached && branch !== null;
+  const canCommit = message.trim().length > 0 && busy === null && !loading && !detached;
 
   return (
     <>
@@ -198,9 +219,11 @@ export function GitActionsDialog({
               {branch ?? "No branch"}
             </DialogTitle>
             <DialogDescription>
-              {status?.upstream
-                ? `Tracking ${status.upstream}`
-                : "This branch has no upstream yet; Push creates one on origin."}
+              {detached
+                ? "This workspace has a detached HEAD; check out a branch before pushing or opening a pull request."
+                : status?.upstream
+                  ? `Tracking ${status.upstream}`
+                  : "This branch has no upstream yet; Push creates one on origin."}
             </DialogDescription>
           </DialogHeader>
 
@@ -269,7 +292,7 @@ export function GitActionsDialog({
             </div>
           ) : null}
 
-          <div className="q-field" style={{ display: "block" }}>
+          <div className="q-field q-field-block">
             <div className="t q-git-label">
               <label htmlFor="git-commit-message">Commit message</label>
               <button
@@ -328,7 +351,7 @@ export function GitActionsDialog({
               type="button"
               className="q-btn secondary"
               onClick={() => setPrOpen(true)}
-              disabled={busy !== null || loading || !branch}
+              disabled={!canPush}
             >
               <GitPullRequestIcon className="q-icon s14" aria-hidden />
               Create pull request…
@@ -338,7 +361,7 @@ export function GitActionsDialog({
               type="button"
               className="q-btn secondary"
               onClick={() => void push()}
-              disabled={busy !== null || loading || !branch}
+              disabled={!canPush}
             >
               {busy === "push" ? "Pushing…" : "Push"}
             </button>
@@ -348,7 +371,7 @@ export function GitActionsDialog({
               onClick={() => void commitAndPush()}
               disabled={!canCommit}
             >
-              {busy === "both" ? "Committing…" : "Commit & push"}
+              {busy === "both" ? "Committing & pushing…" : "Commit & push"}
             </button>
             <button
               type="button"
@@ -392,27 +415,42 @@ export function CreatePullRequestDialog({
   onPushed?: () => void;
 }) {
   const api = useMemo(gitActionsApi, []);
-  const [title, setTitle] = useState(summary.title);
+  // Only a fresh open seeds the fields. A title that changes, or a status that
+  // arrives, must not rewrite text the person is editing.
+  const opening = useRef({
+    title: summary.title,
+    base: status?.default_branch ?? "",
+  });
+  opening.current = {
+    title: summary.title,
+    base: status?.default_branch ?? "",
+  };
+  const [title, setTitle] = useState(opening.current.title);
   const [body, setBody] = useState("");
-  const [base, setBase] = useState(status?.default_branch ?? "main");
+  const [base, setBase] = useState(opening.current.base);
   const [draft, setDraft] = useState(false);
   const [repo, setRepo] = useState<ForgeRepoRef | null>(null);
   const [repoError, setRepoError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    setTitle(summary.title);
+    setTitle(opening.current.title);
     setBody("");
-    setBase(status?.default_branch ?? "main");
+    setBase(opening.current.base);
     setDraft(false);
     setError(null);
     setHint(null);
     setRepo(null);
     setRepoError(null);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -430,7 +468,7 @@ export function CreatePullRequestDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, summary.title, summary.workspace_path, status?.default_branch]);
+  }, [open, summary.workspace_path]);
 
   const generate = async () => {
     setGenerating(true);
@@ -455,7 +493,8 @@ export function CreatePullRequestDialog({
   };
 
   const create = async () => {
-    if (!repo) return;
+    if (!repo || inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -476,6 +515,7 @@ export function CreatePullRequestDialog({
     } catch (cause) {
       setError(describeError(cause));
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
@@ -492,7 +532,7 @@ export function CreatePullRequestDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="q-field" style={{ display: "block" }}>
+        <div className="q-field q-field-block">
           <div className="t q-git-label">
             <label htmlFor="git-pr-title">Title</label>
             <button
@@ -514,7 +554,7 @@ export function CreatePullRequestDialog({
           />
         </div>
 
-        <label className="q-field" style={{ display: "block" }}>
+        <label className="q-field q-field-block">
           <span className="t">Description</span>
           <textarea
             className="q-input"
@@ -526,7 +566,7 @@ export function CreatePullRequestDialog({
         </label>
 
         <div className="q-git-pr-fields">
-          <label className="q-field" style={{ display: "block" }}>
+          <label className="q-field q-field-block">
             <span className="t">Base branch</span>
             <input
               className="q-input q-mono"
@@ -534,6 +574,11 @@ export function CreatePullRequestDialog({
               aria-label="Base branch"
               onChange={(event) => setBase(event.target.value)}
             />
+            <span className="s">
+              {status !== null && !status.default_branch
+                ? "No default branch was detected; name the branch this pull request targets."
+                : "The branch the pull request merges into."}
+            </span>
           </label>
           <label className="q-addp-check q-git-draft">
             <input

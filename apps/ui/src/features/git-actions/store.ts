@@ -28,7 +28,7 @@ export type PullRequestText = {
 /** A commit message can take a model's whole timeout. */
 const GENERATE_TIMEOUT_MS = 40_000;
 /** A hook or a remote may take minutes; keep the socket open for it. */
-const ACTION_TIMEOUT_MS = 200_000;
+export const ACTION_TIMEOUT_MS = 200_000;
 
 export class GitActionsApi {
   constructor(private readonly request: GitActionsRequest) {}

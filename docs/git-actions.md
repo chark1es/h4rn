@@ -23,10 +23,16 @@ commit:
 - off — the commit records what is already staged;
 - on — tracked changes and new files are staged first.
 
-A commit is refused, with the reason, when the workspace has a detached `HEAD`,
-when a rebase, merge or cherry-pick is in progress, or when the index is empty.
+A commit is refused, with the reason, when a rebase, merge or cherry-pick is in
+progress (that is named first, even though a rebase also leaves a detached
+`HEAD`), when the workspace has a detached `HEAD`, or when the index is empty.
 Git hooks run as usual: h4rn never passes `--no-verify`. A hook that fails stops
 the commit, and its last lines are shown in the panel.
+
+A request that names `paths` commits only those paths: h4rn stages nothing else,
+uses `git commit --only`, and leaves work staged for other paths in the index. Its
+"nothing to commit" answer and the diff sent to a model cover exactly the paths
+named, never a change staged elsewhere.
 
 Messages and paths are never handed to git as options. The message is the value
 of `-m`; path selection is validated as workspace-relative (no absolute paths,
@@ -35,21 +41,36 @@ parsed with `--literal-pathspecs`, so a file named `--amend` is only a file.
 
 ## Push
 
-**Push** pushes the current branch to its upstream. A branch without one gets
-`origin/<branch>` created, because the panel's button always asks for it. A push
-is **never forced**: when the remote has commits the branch does not, the panel
-says so and asks you to pull or rebase. A rejected credential is reported as a
-credential problem, not a generic failure.
+**Push** publishes the current branch under its own name on the forge remote
+(`origin` when it exists, otherwise the branch's configured remote, or the only
+remote). It always names one non-forced refspec,
+`refs/heads/<branch>:refs/heads/<branch>`, so `push.default=matching` cannot move
+other branches and a `remote.<name>.push` beginning with `+` cannot force-update
+anything. A branch without one gets `origin/<branch>` created, because the
+panel's button always asks for it. "Ahead" is measured against
+`origin/<branch>`, not whatever upstream a branch happens to track: a branch
+that tracks `origin/main` is still published as `origin/<branch>`, and a fork
+with two remotes pushes to `origin`. A push is **never forced**: when the remote
+has commits the branch does not, the panel says so and asks you to pull or
+rebase. A rejected credential is reported as a credential problem, not a generic
+failure, and any credential-shaped text git prints is redacted.
 
 ## Pull request
 
 **Create pull request…** detects the forge remote from the workspace, then
-offers a title, a description, a base branch (the repository's default branch is
-preselected) and **Open as a draft**. **Generate** fills the title and body and
-does nothing else.
+offers a title, a description, a base branch and **Open as a draft**. The base is
+the repository's default branch when git reports one; when it does not, the field
+is left empty and the panel asks you to name the target rather than guessing
+`main`. **Generate** fills the title and body and does nothing else.
 
-The daemon pushes the branch first when it has no upstream or is ahead, then asks
-the forge to open the request. It does not create one silently from Generate.
+The daemon pushes the branch first when `<remote>/<branch>` does not exist or is
+behind, then asks the forge to open the request. On GitHub, Bitbucket and Azure
+DevOps the draft flag travels in its own field; GitLab and Gitea have no such
+field on the create request and mark a draft with a `Draft:` or `WIP:` title
+prefix (a title that already carries one is sent as it is). The open request
+waits as long as the push may take, and the dialog cannot submit twice. A PR
+opened this way is linked to its thread, so the header badge, the PR page and a
+watch all find it. Opening a request is never done silently from Generate.
 
 ## Generated messages
 

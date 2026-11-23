@@ -718,7 +718,9 @@ pub struct ForgeNewPr {
     pub head: String,
     /// Target branch.
     pub base: String,
-    /// Open as a draft where the forge has a draft state.
+    /// Open as a draft. GitHub, Bitbucket and Azure DevOps carry a draft field;
+    /// GitLab and Gitea have none, so the client marks the title with `Draft:`
+    /// or `WIP:` instead (and never prefixes one twice).
     #[serde(default)]
     pub draft: bool,
 }

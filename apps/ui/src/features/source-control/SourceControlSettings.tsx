@@ -5,7 +5,6 @@ import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessSt
 import {
   installedTitleAgents,
   saveTitleModel,
-  titleModelSummary,
   useTextGeneration,
   useTextGenerationData,
 } from "@/features/text-generation/textGenerationStore";
@@ -64,7 +63,7 @@ export function sourceControlSummary(
     }
     return setting.harness
       ? `${HARNESS_LABELS[setting.harness]} is not used for messages.`
-      : "Claude Code threads use their own agent; other threads use a text generator or write it themselves.";
+      : "Claude Code threads use Claude Code; other threads need a text generator, otherwise nothing is generated.";
   }
   return setting.model
     ? `Messages are written by a text generator with ${setting.model}.`
@@ -171,8 +170,9 @@ export function SourceControlSettings() {
                 <div className="lab">
                   <div className="t">Coding agent</div>
                   <div className="s">
-                    Follow the thread's agent uses Claude Code for Claude Code threads; other
-                    threads keep their own model choice.
+                    Follow the thread's agent runs Claude Code for Claude Code threads. Other
+                    threads need a text generator; without one, Generate leaves the fields empty and
+                    nothing runs.
                   </div>
                   {agents.length === 0 ? (
                     <div className="s q-faint">No Claude Code is installed on this host yet.</div>
@@ -249,7 +249,7 @@ export function SourceControlSettings() {
             ) : null}
 
             {draft.mode !== "off" ? (
-              <label className="q-field" style={{ display: "block" }}>
+              <label className="q-field q-field-block">
                 <span className="t">Custom instructions</span>
                 <span className="s">
                   Optional. Appended to the trusted instruction for every commit message and pull
@@ -276,7 +276,7 @@ export function SourceControlSettings() {
 
           {settings ? (
             <p className="q-faint" style={{ fontSize: 12 }}>
-              {titleModelSummary(settings)}
+              {sourceControlSummary(draft ?? settings.source_control)}
             </p>
           ) : null}
 

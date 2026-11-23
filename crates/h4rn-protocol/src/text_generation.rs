@@ -208,6 +208,32 @@ pub struct TextGenerationSettings {
     pub source_control: SourceControlModelSetting,
 }
 
+/// A settings write from a client.
+///
+/// `source_control` is optional so a client built before the Commit & PR mode
+/// existed can still save a title model without turning messages off.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TextGenerationSettingsUpdate {
+    /// Which model writes thread titles.
+    pub title: TitleModelSetting,
+    /// Which model writes commit messages and pull request text. `None` keeps
+    /// the configured value.
+    #[serde(default)]
+    pub source_control: Option<SourceControlModelSetting>,
+}
+
+impl TextGenerationSettingsUpdate {
+    /// Applies this update to `current`, keeping a field the client omitted.
+    pub fn merged_with(self, current: &TextGenerationSettings) -> TextGenerationSettings {
+        TextGenerationSettings {
+            title: self.title,
+            source_control: self
+                .source_control
+                .unwrap_or_else(|| current.source_control.clone()),
+        }
+    }
+}
+
 /// Longest custom instruction string the daemon accepts.
 pub const MAX_SOURCE_CONTROL_INSTRUCTIONS: usize = 2_000;
 

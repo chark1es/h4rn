@@ -446,7 +446,10 @@ no summary rather than as stale state.
   the current state. `UnlinkPullRequest` removes the link and ends any watch.
 - `ListThreadPullRequests` fills the thread header badge and the linked-items
   panel. `ListPrThreads` is the reverse lookup on the Pull requests page.
-- `ForgeOpenPr` links the PR it just opened automatically.
+- `ForgeOpenPr` links the PR it just opened automatically. A draft travels in
+  the draft field on GitHub, Bitbucket and Azure DevOps; GitLab and Gitea have no
+  such field on their create endpoints, so a draft is a `Draft:` or `WIP:` title
+  prefix there, and a title that already carries one is not prefixed twice.
 - `WatchPullRequest` / `UnwatchPullRequest` start and stop the watch for one
   linked PR.
 

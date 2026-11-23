@@ -118,6 +118,111 @@ describe("GitActionsDialog", () => {
     expect((screen.getByLabelText("Commit message") as HTMLTextAreaElement).value).toBe("");
   });
 
+  it("Generate with the mode off never clears a typed message", async () => {
+    respond((body) => {
+      if (body.type === "git_status") return { type: "git_status", status: STATUS };
+      if (body.type === "generate_git_commit_message") {
+        return { type: "generated_commit_message", message: "" };
+      }
+      throw new Error(`unexpected ${body.type}`);
+    });
+    renderActions();
+    await screen.findByText("feature/widget");
+    const field = screen.getByLabelText("Commit message") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Mine, typed by hand" } });
+    fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+    await screen.findByText(/Generation is off/);
+    expect(field.value).toBe("Mine, typed by hand");
+  });
+
+  it("uses the live status: a detached HEAD disables push and the PR dialog", async () => {
+    respond((body) => {
+      if (body.type === "git_status") {
+        return {
+          type: "git_status",
+          status: {
+            ...STATUS,
+            branch: null,
+            upstream: null,
+            ahead: 0,
+            behind: 0,
+          },
+        };
+      }
+      throw new Error(`unexpected ${body.type}`);
+    });
+    renderActions();
+    await screen.findByText(/detached HEAD/);
+    // The thread's old branch name is not shown as if it were checked out.
+    expect(screen.queryByText("feature/widget")).toBeNull();
+    expect((screen.getByRole("button", { name: "Push" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: /Create pull request/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("shows the live branch once the status has loaded", async () => {
+    respond((body) => {
+      if (body.type === "git_status") {
+        return { type: "git_status", status: { ...STATUS, branch: "release/2" } };
+      }
+      throw new Error(`unexpected ${body.type}`);
+    });
+    renderActions();
+    expect(await screen.findByText("release/2")).toBeTruthy();
+    expect(screen.queryByText("feature/widget")).toBeNull();
+  });
+
+  it("keeps one busy state on Commit & push through the commit and the push", async () => {
+    const pending: {
+      commit: ((value: unknown) => void) | null;
+      push: ((value: unknown) => void) | null;
+    } = { commit: null, push: null };
+    respond((body) => {
+      if (body.type === "git_status") return { type: "git_status", status: STATUS };
+      if (body.type === "git_commit") {
+        return new Promise((resolve) => {
+          pending.commit = resolve;
+        });
+      }
+      if (body.type === "git_push") {
+        return new Promise((resolve) => {
+          pending.push = resolve;
+        });
+      }
+      throw new Error(`unexpected ${body.type}`);
+    });
+    renderActions();
+    await screen.findByText("feature/widget");
+    fireEvent.change(screen.getByLabelText("Commit message"), {
+      target: { value: "Add the widget" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Commit & push" }));
+
+    const busy = await screen.findByRole("button", { name: "Committing & pushing…" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(pending.commit).not.toBeNull());
+    pending.commit?.({
+      type: "git_committed",
+      result: {
+        commit: "c".repeat(40),
+        short_commit: "ccccccc",
+        subject: "Add the widget",
+        status: STATUS,
+      },
+    });
+
+    await waitFor(() => expect(pending.push).not.toBeNull());
+    expect(
+      (screen.getByRole("button", { name: "Committing & pushing…" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    pending.push?.({
+      type: "git_pushed",
+      result: { branch: "feature/widget", upstream: "origin/feature/widget", status: STATUS },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Commit & push" })).toBeTruthy());
+  });
+
   it("commits with the keyboard shortcut and refreshes the counts", async () => {
     respond((body) => {
       if (body.type === "git_status") return { type: "git_status", status: STATUS };
@@ -230,7 +335,117 @@ describe("CreatePullRequestDialog", () => {
     await waitFor(() =>
       expect(request.mock.calls.some(([body]) => body.type === "forge_open_pr")).toBe(true),
     );
+    const openCall = request.mock.calls.find(([body]) => body.type === "forge_open_pr");
+    expect(openCall?.[1]).toEqual({ timeoutMs: 200_000 });
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it("seeds the fields on open only, not when the thread title changes", async () => {
+    respond((body) => {
+      if (body.type === "forge_detect_repo") {
+        return { type: "forge_repos", repos: [{ remote: "origin", repo: REPO }] };
+      }
+      throw new Error(`unexpected ${body.type}`);
+    });
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <CreatePullRequestDialog summary={THREAD} status={STATUS} open onOpenChange={onOpenChange} />,
+    );
+    await screen.findByText(/acme\/widget/);
+    fireEvent.change(screen.getByLabelText("Pull request title"), {
+      target: { value: "Typed by me" },
+    });
+
+    rerender(
+      <CreatePullRequestDialog
+        summary={{ ...THREAD, title: "A generated title arrived" }}
+        status={STATUS}
+        open
+        onOpenChange={onOpenChange}
+      />,
+    );
+    expect((screen.getByLabelText("Pull request title") as HTMLInputElement).value).toBe(
+      "Typed by me",
+    );
+
+    // A fresh open does seed the new title.
+    rerender(
+      <CreatePullRequestDialog
+        summary={{ ...THREAD, title: "A generated title arrived" }}
+        status={STATUS}
+        open={false}
+        onOpenChange={onOpenChange}
+      />,
+    );
+    rerender(
+      <CreatePullRequestDialog
+        summary={{ ...THREAD, title: "A generated title arrived" }}
+        status={STATUS}
+        open
+        onOpenChange={onOpenChange}
+      />,
+    );
+    await waitFor(() =>
+      expect((screen.getByLabelText("Pull request title") as HTMLInputElement).value).toBe(
+        "A generated title arrived",
+      ),
+    );
+  });
+
+  it("leaves a missing default branch empty and says what to do", async () => {
+    respond((body) => {
+      if (body.type === "forge_detect_repo") {
+        return { type: "forge_repos", repos: [{ remote: "origin", repo: REPO }] };
+      }
+      throw new Error(`unexpected ${body.type}`);
+    });
+    render(
+      <CreatePullRequestDialog
+        summary={THREAD}
+        status={{ ...STATUS, default_branch: null }}
+        open
+        onOpenChange={vi.fn()}
+      />,
+    );
+    await screen.findByText(/acme\/widget/);
+    expect((screen.getByLabelText("Base branch") as HTMLInputElement).value).toBe("");
+    expect(screen.getByText(/No default branch was detected/)).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Open pull request" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("disables the submit while the request is in flight and opens one request", async () => {
+    const pending: { open: ((value: unknown) => void) | null } = { open: null };
+    respond((body) => {
+      if (body.type === "forge_detect_repo") {
+        return { type: "forge_repos", repos: [{ remote: "origin", repo: REPO }] };
+      }
+      if (body.type === "forge_open_pr") {
+        return new Promise((resolve) => {
+          pending.open = resolve;
+        });
+      }
+      throw new Error(`unexpected ${body.type}`);
+    });
+    const onOpenChange = vi.fn();
+    render(
+      <CreatePullRequestDialog summary={THREAD} status={STATUS} open onOpenChange={onOpenChange} />,
+    );
+    await screen.findByText(/acme\/widget/);
+    const submit = screen.getByRole("button", { name: "Open pull request" });
+    fireEvent.click(submit);
+    const opening = await screen.findByRole("button", { name: "Opening…" });
+    expect((opening as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(opening);
+    expect(request.mock.calls.filter(([body]) => body.type === "forge_open_pr")).toHaveLength(1);
+
+    pending.open?.({
+      type: "forge_pr_opened",
+      pr: { summary: { repo: REPO, number: 7 } },
+    });
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
   });
 
   it("shows a missing forge remote instead of pretending one exists", async () => {

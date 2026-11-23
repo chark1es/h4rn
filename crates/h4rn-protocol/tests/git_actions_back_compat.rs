@@ -3,7 +3,8 @@
 //! working.
 
 use h4rn_protocol::{
-    ClientFrame, ClientRequest, SourceControlModelMode, TextGenerationSettings, TitleModelMode,
+    ClientFrame, ClientRequest, SourceControlModelMode, SourceControlModelSetting,
+    TextGenerationSettings, TextGenerationSettingsUpdate, TitleModelMode, TitleModelSetting,
 };
 
 fn request(json: &str) -> ClientRequest {
@@ -50,6 +51,60 @@ fn an_older_forge_open_pr_is_not_a_draft() {
         ClientRequest::ForgeOpenPr { draft, .. } => assert!(!draft),
         other => panic!("unexpected request: {other:?}"),
     }
+}
+
+#[test]
+fn an_older_client_saving_a_title_model_keeps_the_commit_and_pr_mode() {
+    // A client built before the Commit & PR mode never sends source_control.
+    let body = request(
+        r#"{"id":1,"body":{"type":"set_text_generation_settings","settings":{"title":{"mode":"off","harness":null,"generator_id":null,"model":null}}}}"#,
+    );
+    let ClientRequest::SetTextGenerationSettings { settings } = body else {
+        panic!("unexpected request: {body:?}");
+    };
+    let current = TextGenerationSettings {
+        title: TitleModelSetting::default(),
+        source_control: SourceControlModelSetting {
+            mode: SourceControlModelMode::CodingAgent,
+            harness: None,
+            generator_id: None,
+            model: None,
+            instructions: Some("Use the imperative mood.".into()),
+        },
+    };
+    let merged = settings.merged_with(&current);
+    assert_eq!(merged.title.mode, TitleModelMode::Off);
+    assert_eq!(
+        merged.source_control.mode,
+        SourceControlModelMode::CodingAgent
+    );
+    assert_eq!(
+        merged.source_control.instructions.as_deref(),
+        Some("Use the imperative mood.")
+    );
+}
+
+#[test]
+fn a_client_that_names_the_commit_and_pr_mode_still_turns_it_off() {
+    let body = request(
+        r#"{"id":1,"body":{"type":"set_text_generation_settings","settings":{"title":{"mode":"coding_agent","harness":null,"generator_id":null,"model":null},"source_control":{"mode":"off","harness":null,"generator_id":null,"model":null,"instructions":null}}}}"#,
+    );
+    let ClientRequest::SetTextGenerationSettings { settings } = body else {
+        panic!("unexpected request: {body:?}");
+    };
+    let update: TextGenerationSettingsUpdate = settings;
+    assert!(update.source_control.is_some());
+    let current = TextGenerationSettings {
+        title: TitleModelSetting::default(),
+        source_control: SourceControlModelSetting {
+            mode: SourceControlModelMode::TextGenerator,
+            ..SourceControlModelSetting::default()
+        },
+    };
+    assert_eq!(
+        update.merged_with(&current).source_control.mode,
+        SourceControlModelMode::Off
+    );
 }
 
 #[test]
