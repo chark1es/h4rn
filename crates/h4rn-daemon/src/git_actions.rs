@@ -895,7 +895,7 @@ fn classify_push_error(error: &str) -> GitActionError {
 /// the query or fragment is not where the URL ends: git prints it raw, so
 /// stopping there would leave the rest of the URL (and its token) in the
 /// message. Nor does whitespace inside the quote end the URL: git prints the
-/// field whole, and a URL with raw whitespace in it cannot be parsed, so the
+/// field whole, and a field with raw whitespace in it is not a URL, so the
 /// whole field becomes a marker instead of being split at the whitespace and
 /// leaving what follows it (often the rest of a token) in the message.
 fn redact_url_credentials(text: &str) -> String {
