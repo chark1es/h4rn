@@ -24,7 +24,7 @@ use h4rn_protocol::{
     RelayServerEvent, RelayService,
 };
 use serde::Deserialize;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::api::{AppState, Authed, ClientIp};
@@ -66,6 +66,8 @@ pub struct Session {
 pub struct RelayHub {
     peers: RwLock<HashMap<Uuid, Peer>>,
     sessions: RwLock<HashMap<String, Session>>,
+    /// Guest HTTP exchanges waiting on a daemon's answer, by request id.
+    guests: RwLock<HashMap<String, oneshot::Sender<h4rn_protocol::GuestHttpResponse>>>,
 }
 
 impl RelayHub {
@@ -272,6 +274,33 @@ impl RelayHub {
             .values()
             .find(|peer| peer.machine_id == Some(machine_id))
             .map(|peer| peer.device_id)
+    }
+
+    /// Registers one guest HTTP exchange before it is sent to the daemon.
+    pub async fn expect_guest(
+        &self,
+        request_id: &str,
+    ) -> oneshot::Receiver<h4rn_protocol::GuestHttpResponse> {
+        let (tx, rx) = oneshot::channel();
+        self.guests.write().await.insert(request_id.to_owned(), tx);
+        rx
+    }
+
+    /// Delivers a daemon's guest answer to the waiting browser request.
+    pub async fn complete_guest(&self, response: h4rn_protocol::GuestHttpResponse) {
+        if let Some(tx) = self.guests.write().await.remove(&response.request_id) {
+            let _ = tx.send(response);
+        }
+    }
+
+    /// Drops a waiter that will never get an answer.
+    pub async fn forget_guest(&self, request_id: &str) {
+        self.guests.write().await.remove(request_id);
+    }
+
+    /// Whether a daemon for this machine is connected right now.
+    pub async fn daemon_for(&self, machine_id: Uuid) -> Option<Uuid> {
+        self.daemon_for_machine(machine_id).await
     }
 }
 
@@ -683,6 +712,16 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
                 }
             }
         }
+        RelayFrameKind::GuestHttp => {
+            // Only a daemon answers a guest exchange; a client device has no
+            // waiting request and its frame is ignored.
+            if let Ok(response) =
+                serde_json::from_slice::<h4rn_protocol::GuestHttpResponse>(&frame.payload)
+            {
+                state.relay.complete_guest(response).await;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -863,5 +902,34 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.body().code, "relay_backpressure");
+    }
+
+    #[tokio::test]
+    async fn a_guest_exchange_is_correlated_by_request_id_and_forgettable() {
+        let hub = RelayHub::new();
+        let waiter = hub.expect_guest("g1").await;
+        hub.complete_guest(h4rn_protocol::GuestHttpResponse {
+            request_id: "g1".into(),
+            status: 200,
+            headers: Vec::new(),
+            body: b"hello".to_vec(),
+        })
+        .await;
+        let answer = waiter.await.expect("answer");
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body, b"hello");
+
+        // A timed-out waiter does not stay in the map.
+        let _dropped = hub.expect_guest("g2").await;
+        hub.forget_guest("g2").await;
+        let orphan = hub.expect_guest("g2").await;
+        hub.complete_guest(h4rn_protocol::GuestHttpResponse {
+            request_id: "g2".into(),
+            status: 204,
+            headers: Vec::new(),
+            body: Vec::new(),
+        })
+        .await;
+        assert_eq!(orphan.await.expect("second waiter").status, 204);
     }
 }

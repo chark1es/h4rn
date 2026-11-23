@@ -28,11 +28,12 @@ use h4rn_protocol::{
     AuditEntry, AuditIngestRequest, AuditPage, ConnectDevice, ConnectMeResponse,
     ConnectSessionTokens, DeviceGrantPollRequest, DeviceGrantPollResponse, DeviceGrantStartRequest,
     DeviceGrantStartResponse, DeviceGrantStatus, DeviceRegistration, DeviceRenameRequest,
-    LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
-    LogoutRequest, MachineAddressesUpdate, MachineHost, MachineHostsUpdate, MachineSummary,
-    PairScope, PairingClaimCodeRequest, PairingClaimRequest, PairingClaimResponse,
+    GuestHttpRequest, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest,
+    LoginStartResponse, LogoutRequest, MachineAddressesUpdate, MachineHost, MachineHostsUpdate,
+    MachineSummary, PairScope, PairingClaimCodeRequest, PairingClaimRequest, PairingClaimResponse,
     PairingCreateRequest, PairingCreateResponse, PairingInfo, ProviderInfo, RefreshRequest,
-    UsageBucket, UsageGroupBy, UsageReport, UsageScope, UsageSyncRequest, UsageSyncResponse,
+    RelayFrame, RelayFrameKind, RelayServerEvent, UsageBucket, UsageGroupBy, UsageReport,
+    UsageScope, UsageSyncRequest, UsageSyncResponse,
 };
 use h4rn_skills::SkillBundle;
 use tower_http::cors::{Any, CorsLayer};
@@ -157,6 +158,14 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/relay", get(relay_upgrade))
+        .merge(
+            Router::new()
+                .route(
+                    "/guest/{machine_id}/{*rest}",
+                    get(guest_proxy).post(guest_proxy),
+                )
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         .merge(api)
         .layer(TraceLayer::new_for_http());
 
@@ -1871,6 +1880,111 @@ async fn usage_aggregate(
         )
         .await?;
     Ok(Json(report))
+}
+
+// ---------------------------------------------------------------------------
+// Guest links (ADR-044)
+// ---------------------------------------------------------------------------
+
+/// Forwards one guest HTTP exchange to the machine's daemon.
+///
+/// This route is unauthenticated: the guest token in the path is the only
+/// credential, and only the daemon can check it. The relay never stores the
+/// path or body; it keeps one waiter per request so the answer can come back
+/// on the daemon's existing socket.
+async fn guest_proxy(
+    State(state): State<AppState>,
+    client: ClientIp,
+    Path((machine_id, rest)): Path<(String, String)>,
+    method: axum::http::Method,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response> {
+    state.rate.check(
+        "guest_http",
+        &client.0,
+        state.config.rate_limits.per_ip_per_minute,
+        Duration::from_secs(60),
+    )?;
+    let machine_id = Uuid::parse_str(&machine_id)
+        .map_err(|_| AppError::bad_request("machine_invalid", "machine_id is not a UUID"))?;
+    let machine = state.store.machine(machine_id).await?;
+    let daemon = machine
+        .daemon_device_id
+        .ok_or_else(|| AppError::unavailable("daemon_missing", "the machine has no daemon"))?;
+    if !state.relay.online(daemon).await {
+        return Err(AppError::unavailable(
+            "daemon_offline",
+            "the machine's daemon is not connected",
+        ));
+    }
+
+    let request_id = Uuid::now_v7().to_string();
+    let mut forwarded = Vec::new();
+    for name in ["cookie", "accept", "content-type"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            forwarded.push((name.to_owned(), value.to_owned()));
+        }
+    }
+    let query = uri
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let request = GuestHttpRequest {
+        request_id: request_id.clone(),
+        method: method.as_str().to_owned(),
+        path: format!("/guest/{rest}{query}"),
+        headers: forwarded,
+        body: body.to_vec(),
+    };
+    let payload = serde_json::to_vec(&request)
+        .map_err(|_| AppError::internal("serialise the guest request"))?;
+
+    let waiter = state.relay.expect_guest(&request_id).await;
+    let frame = RelayFrame {
+        conn_id: format!("guest-{request_id}"),
+        kind: RelayFrameKind::GuestHttp,
+        payload,
+    };
+    let _ = state
+        .relay
+        .send(daemon, RelayServerEvent::Frame { frame })
+        .await;
+    let answer = match tokio::time::timeout(Duration::from_secs(60), waiter).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(_)) => {
+            state.relay.forget_guest(&request_id).await;
+            return Err(AppError::unavailable(
+                "guest_closed",
+                "the machine stopped before answering",
+            ));
+        }
+        Err(_) => {
+            state.relay.forget_guest(&request_id).await;
+            return Err(AppError::unavailable(
+                "guest_timeout",
+                "the machine did not answer in time",
+            ));
+        }
+    };
+
+    let mut response = Response::builder()
+        .status(StatusCode::from_u16(answer.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    for (name, value) in answer.headers {
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "content-length" | "transfer-encoding" | "connection"
+        ) {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) {
+            response = response.header(name, value);
+        }
+    }
+    response
+        .body(axum::body::Body::from(answer.body))
+        .map_err(|_| AppError::internal("build the guest response"))
 }
 
 // ---------------------------------------------------------------------------
