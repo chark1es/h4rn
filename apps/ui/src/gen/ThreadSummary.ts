@@ -77,6 +77,15 @@ reasoning_effort?: string,
  */
 reasoning_efforts: Array<string>, 
 /**
+ * Model ids the live session advertised.
+ *
+ * Empty until a session names a catalogue. Codex publishes its
+ * `model/list` at session start, and the picker offers exactly those ids
+ * (plus the current one) instead of the adapter's static guess. An older
+ * daemon's thread has none, so the picker falls back to the static list.
+ */
+models: Array<string>, 
+/**
  * Whether the thread asks the harness for its fast tier.
  *
  * Only harnesses with a real fast tier (Codex service tiers) report this.

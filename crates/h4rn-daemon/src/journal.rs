@@ -827,6 +827,7 @@ mod tests {
             runtime_mode: RuntimeMode::ApprovalRequired,
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
+            models: Vec::new(),
             fast: false,
             tab: h4rn_protocol::ThreadTab::Working,
             placed_by_user: false,

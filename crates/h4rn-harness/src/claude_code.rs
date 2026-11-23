@@ -346,6 +346,12 @@ struct SharedState {
     /// The stdout task resolves one on the parsed frame; a request that is
     /// never answered times out in [`ClaudeCodeSession::send_control_request`].
     pending_controls: HashMap<String, tokio::sync::oneshot::Sender<ControlReply>>,
+    /// Whether the stdout reader has ended, so no reply can ever arrive.
+    ///
+    /// Set and read under the same lock as `pending_controls`: a request that
+    /// arrives after the CLI is gone fails at once instead of waiting out its
+    /// timeout.
+    control_closed: bool,
 }
 
 impl SharedState {
@@ -358,6 +364,7 @@ impl SharedState {
             last_turn: None,
             touched_paths: Vec::new(),
             pending_controls: HashMap::new(),
+            control_closed: false,
         }
     }
 }
@@ -451,9 +458,19 @@ impl ClaudeCodeSession {
         }
         let request_id = self.next_request_id();
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        lock(&self.shared)
-            .pending_controls
-            .insert(request_id.clone(), reply_tx);
+        {
+            let mut state = lock(&self.shared);
+            if state.control_closed {
+                // The CLI's stdout already ended, so nothing will ever answer.
+                // Failing here is the same answer every other waiting request
+                // gets when the reader notices the end.
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: "claude closed before answering a control request".into(),
+                });
+            }
+            state.pending_controls.insert(request_id.clone(), reply_tx);
+        }
         let frame = json!({
             "type": "control_request",
             "request_id": request_id,
@@ -697,10 +714,10 @@ fn spawn_stdout_reader(
     tokio::spawn(async move {
         let mut parser = ClaudeStreamParser::new();
         let mut lines = BufReader::new(stdout).lines();
-        loop {
+        'read: loop {
             let line = match lines.next_line().await {
                 Ok(Some(line)) => line,
-                Ok(None) => break,
+                Ok(None) => break 'read,
                 Err(error) => {
                     let _ = events_tx
                         .send(HarnessEvent::Error {
@@ -708,7 +725,7 @@ fn spawn_stdout_reader(
                             retryable: false,
                         })
                         .await;
-                    break;
+                    break 'read;
                 }
             };
 
@@ -745,9 +762,20 @@ fn spawn_stdout_reader(
 
             for event in events {
                 if events_tx.send(event).await.is_err() {
-                    return;
+                    // Nobody is left to carry these events, but the control
+                    // waiters still need the end reported.
+                    break 'read;
                 }
             }
+        }
+
+        // The CLI is gone (stdout ended or the read failed): every control
+        // request still waiting can never be answered. Dropping their senders
+        // fails them all at once instead of leaving each to its timeout.
+        {
+            let mut state = lock(&shared);
+            state.control_closed = true;
+            state.pending_controls.clear();
         }
     })
 }
@@ -1374,6 +1402,34 @@ done
         assert_eq!(requests.len(), 1, "the switch was really sent");
         assert_eq!(requests[0]["request"]["subtype"], "set_model");
         assert_eq!(requests[0]["request"]["model"], "nope");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_that_exits_mid_request_fails_the_control_at_once() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // The fake logs the request and exits without answering it.
+        let (install, log) = fake_cli(workspace.path(), "      exit 0");
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(2), session.set_model("m2"))
+                .await
+                .expect("the request must not wait out its 10s timeout")
+                .expect_err("a CLI that exited cannot apply the switch");
+        match error {
+            HarnessError::Transport { message, .. } => assert!(
+                message.contains("closed before answering"),
+                "the failure explains the exit: {message}"
+            ),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        assert_eq!(control_log(&log).len(), 1, "the switch was really sent");
         session.shutdown().await.expect("shutdown");
     }
 

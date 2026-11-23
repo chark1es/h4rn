@@ -374,6 +374,22 @@ pub enum HarnessError {
         /// Requested feature.
         feature: String,
     },
+    /// This live session cannot apply a value it accepts, but the next session
+    /// start can.
+    ///
+    /// Unlike [`Self::Unsupported`] the value is valid. The daemon records it,
+    /// shows it, and starts a session that really uses it on the next turn
+    /// instead of refusing the change. The one case today is an ACP agent's
+    /// default-model alias: ACP has no "reset to the agent's default" method
+    /// and the catalogue does not name which entry is the default, so a live
+    /// session cannot honour the alias while a fresh one can.
+    #[error("{harness:?} will apply {feature} on the next session")]
+    Deferred {
+        /// Harness involved.
+        harness: HarnessKind,
+        /// The value that is deferred.
+        feature: String,
+    },
 }
 
 impl HarnessError {
@@ -584,7 +600,9 @@ pub trait HarnessSession: Send {
     /// Switches the live session to `model`.
     ///
     /// The next turn runs on it; a conversation already in progress keeps its
-    /// history.
+    /// history. A valid value this session cannot apply but a fresh one can
+    /// (ACP's default-model alias) answers [`HarnessError::Deferred`], which the
+    /// daemon records and applies from the next session instead of refusing.
     async fn set_model(&mut self, _model: &str) -> Result<(), HarnessError> {
         Err(HarnessError::Unsupported {
             harness: self.kind(),

@@ -392,6 +392,14 @@ pub struct ThreadSummary {
     /// here rather than guessing.
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
+    /// Model ids the live session advertised.
+    ///
+    /// Empty until a session names a catalogue. Codex publishes its
+    /// `model/list` at session start, and the picker offers exactly those ids
+    /// (plus the current one) instead of the adapter's static guess. An older
+    /// daemon's thread has none, so the picker falls back to the static list.
+    #[serde(default)]
+    pub models: Vec<String>,
     /// Whether the thread asks the harness for its fast tier.
     ///
     /// Only harnesses with a real fast tier (Codex service tiers) report this.
@@ -710,6 +718,7 @@ mod tests {
             runtime_mode: RuntimeMode::ApprovalRequired,
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
+            models: Vec::new(),
             fast: false,
             tab: ThreadTab::Working,
             placed_by_user: false,

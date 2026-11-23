@@ -313,30 +313,36 @@ impl AcpSession {
                 "the resumed session advertised no modes; keeping its current mode"
             );
         } else if !session.modes.is_empty()
-            || spec.runtime_mode == RuntimeMode::Plan
+            || spec.runtime_mode != RuntimeMode::ApprovalRequired
             || (policy.missing_mode_is_error)(spec)
         {
-            // The agent named modes and none of them is this one: say so
-            // instead of warning and starting in a mode the thread did not ask
-            // for. A mode nobody offers must reach the person as a refusal.
-            return Err(HarnessError::Unsupported {
-                harness: policy.harness,
-                feature: format!(
-                    "mode `{wanted_mode}`; the agent offers: {}",
+            // The agent named modes and none of them is this one, or it named
+            // none at all: say so instead of warning and starting in a mode the
+            // thread did not ask for. With no catalogue only "approval
+            // required" is honest, because it asks for no mode change at all.
+            let offered = if session.modes.is_empty() {
+                "the agent advertised no mode catalogue".to_string()
+            } else {
+                format!(
+                    "the agent offers: {}",
                     session
                         .modes
                         .iter()
                         .map(|mode| mode.id.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ),
+                )
+            };
+            return Err(HarnessError::Unsupported {
+                harness: policy.harness,
+                feature: format!("mode `{wanted_mode}`; {offered}"),
             });
         } else {
             tracing::warn!(
                 target: "h4rn_harness::acp",
                 harness = ?policy.harness,
                 mode = %wanted_mode,
-                "the agent did not offer the requested mode; keeping its current mode"
+                "the agent did not offer a mode catalogue; keeping its current mode"
             );
         }
 
@@ -614,14 +620,16 @@ impl HarnessSession for AcpSession {
         let model = model.trim();
         // ACP has no "reset to default" method and the catalogue does not name
         // which entry is the default, so a live session cannot honour the
-        // alias. Refusing is the honest answer; silently keeping the current
-        // model while the summary says `default` would not be.
+        // alias. It is still a valid request: the next session can start from
+        // the agent's own default, so the change is deferred rather than
+        // refused. Silently keeping the current model while the summary says
+        // `default` would not be honest; detaching the session for the next
+        // turn is.
         if self.policy.is_default_model(model) {
-            return Err(HarnessError::Unsupported {
+            return Err(HarnessError::Deferred {
                 harness: self.policy.harness,
                 feature: format!(
-                    "switching back to the agent's default model in a live session; \
-                     choose a model id ({})",
+                    "the agent's default model (choose a model id to switch now: {})",
                     available_models(&self.info)
                 ),
             });
@@ -2484,6 +2492,110 @@ mod tests {
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_non_default_mode_is_refused_when_the_agent_advertised_no_modes() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.runtime_mode = RuntimeMode::FullAccess;
+        let error = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .err()
+            .expect("an empty catalogue cannot map a non-default mode");
+        agent.await.expect("agent");
+        match error {
+            HarnessError::Unsupported { feature, .. } => {
+                assert!(
+                    feature.contains("auto") && feature.contains("no mode catalogue"),
+                    "the refusal explains the missing catalogue: {feature}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_default_mode_still_starts_without_a_mode_catalogue() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+        });
+
+        let mut session = AcpSession::start(
+            &client,
+            &acp_spec(workspace.path()),
+            policy(),
+            workspace.path(),
+        )
+        .await
+        .expect("approval required asks for no mode change")
+        .into_session();
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_default_model_alias_is_deferred_on_a_live_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+            )
+            .await;
+            let new_session = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": new_session["id"],
+                    "result": {
+                        "sessionId": "s-1",
+                        "models": {
+                            "availableModels": [
+                                {"modelId": "m-1", "name": "M one"},
+                                {"modelId": "m-2", "name": "M two"}
+                            ],
+                            "currentModelId": "m-1"
+                        }
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.model = "m-1".into();
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("start session")
+            .into_session();
+        agent.await.expect("agent");
+
+        let error = session
+            .set_model("default")
+            .await
+            .expect_err("a live session cannot reset to the agent's default");
+        match error {
+            HarnessError::Deferred { feature, .. } => assert!(
+                feature.contains("default"),
+                "the deferral names the value: {feature}"
+            ),
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+        session.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "current_thread")]

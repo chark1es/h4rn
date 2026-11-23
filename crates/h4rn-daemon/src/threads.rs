@@ -508,6 +508,12 @@ struct ThreadRecord {
     limit: Option<LimitBrief>,
     /// Effort values the live session advertised.
     advertised_efforts: Vec<String>,
+    /// Model ids the live session advertised, when it named a catalogue.
+    ///
+    /// Codex publishes its `model/list` at session start; the summary carries
+    /// it so the picker offers what the session really has instead of the
+    /// adapter's static guess. Empty before the first session.
+    advertised_models: Vec<String>,
     /// The thread settings the live session was started with, or was last
     /// switched to in place.
     ///
@@ -1144,6 +1150,7 @@ impl ThreadRecord {
             runtime_mode: self.meta.runtime_mode,
             reasoning_effort: self.meta.reasoning_effort.clone(),
             reasoning_efforts: self.advertised_efforts.clone(),
+            models: self.advertised_models.clone(),
             fast: self.meta.fast,
             tab,
             // The manual override sticks until the next turn starts, so this
@@ -1241,6 +1248,7 @@ impl ThreadRecord {
             }
         }
         self.advertised_efforts.clear();
+        self.advertised_models.clear();
         self.session_settings = None;
         match std::mem::replace(&mut self.session, SessionSlot::None) {
             SessionSlot::Live { session, .. } => Some(session),
@@ -1288,6 +1296,7 @@ impl ThreadRecord {
         );
         self.pump = None;
         self.advertised_efforts.clear();
+        self.advertised_models.clear();
         self.session_settings = None;
         #[cfg(test)]
         self.dying_notify.notify_one();
@@ -1318,10 +1327,27 @@ impl ThreadRecord {
     /// A change a running session could not take is already journaled and
     /// shown; without this the next turns would keep writing to a session that
     /// still runs the old mode, model or effort, so the summary would promise a
-    /// setting the agent never uses. The caller holds the record lock and shuts
-    /// the returned session down outside it. It must not be the pump itself
-    /// (a turn start, not a turn end), because detaching stops the pump.
+    /// setting the agent never uses.
+    ///
+    /// Only a turn whose prompt has not reached the harness yet may be moved
+    /// onto a fresh session. A claimed prompt is already being answered by this
+    /// session: detaching it here would take the turn away from its only
+    /// writer, and the change waits for the turn after this one instead. That
+    /// is also what keeps a change made while a session was starting from
+    /// stranding the first turn: the startup writes that turn's prompt and then
+    /// advances the queue on the very session it just started.
+    ///
+    /// The caller holds the record lock and shuts the returned session down
+    /// outside it. It must not be the pump itself (a turn start, not a turn
+    /// end), because detaching stops the pump.
     fn detach_stale_session(&mut self) -> Option<SharedSession> {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.dispatch.state() != DispatchState::Pending)
+        {
+            return None;
+        }
         let generation = match &self.session {
             SessionSlot::Live { generation, .. } => *generation,
             SessionSlot::None | SessionSlot::Starting(_) => return None,
@@ -2090,6 +2116,7 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
+            advertised_models: Vec::new(),
             session_settings: None,
             ttft_ms: None,
             context_window: None,
@@ -2908,15 +2935,21 @@ impl ThreadManager {
                     }
                     // The adapter said the value itself is unsupported (an
                     // agent's pinned mode, an unknown effort): refuse it rather
-                    // than pretend the next start will differ. Clearing an
-                    // effort is always valid, so that one falls back to a
-                    // restart when the session cannot reset it in place.
+                    // than pretend the next start will differ. A value this
+                    // live session cannot take but a fresh one can is deferred:
+                    // the record keeps it and the next session applies it.
+                    // Clearing an effort is always valid, so that one falls
+                    // back to a restart when the session cannot reset it in
+                    // place.
                     Err(error @ h4rn_harness::HarnessError::Unsupported { .. })
                         if !matches!(change, ThreadSettingsChange::Effort(None)) =>
                     {
                         return Err(ManagerError::Unsupported(error.to_string()));
                     }
-                    Err(h4rn_harness::HarnessError::Unsupported { .. }) => {}
+                    Err(
+                        h4rn_harness::HarnessError::Unsupported { .. }
+                        | h4rn_harness::HarnessError::Deferred { .. },
+                    ) => {}
                     Err(error) => return Err(ManagerError::Internal(error.to_string())),
                 }
             }
@@ -2924,29 +2957,53 @@ impl ThreadManager {
 
         let (summary, parked) = {
             let mut record = handle.lock().await;
-            record.meta.runtime_mode = settings.runtime_mode;
-            record.meta.model = settings.model.clone();
-            record.meta.reasoning_effort = settings.reasoning_effort.clone();
-            record.meta.fast = settings.fast;
-            // A different model can have a different context window; the
-            // proxy catalog fills it again on the next session start.
-            if matches!(change, ThreadSettingsChange::Model(_)) {
-                record.context_window = None;
+            // Apply only this request's field. Another settings request may
+            // have recorded its own field while this one waited for the live
+            // switch; writing this request's whole pre-await snapshot would
+            // silently undo that change.
+            match &change {
+                ThreadSettingsChange::Mode(mode) => record.meta.runtime_mode = *mode,
+                ThreadSettingsChange::Model(_) => {
+                    record.meta.model = settings.model.clone();
+                    // A different model can have a different context window;
+                    // the proxy catalog fills it again on the next session
+                    // start.
+                    record.context_window = None;
+                }
+                ThreadSettingsChange::Effort(_) => {
+                    record.meta.reasoning_effort = settings.reasoning_effort.clone();
+                }
+                ThreadSettingsChange::Fast(_) => record.meta.fast = settings.fast,
             }
             if switched
                 && switched_session
                     .as_ref()
                     .is_some_and(|session| record.session.is_live(session))
             {
-                // The live session really took the values now, so the record
-                // that started them is up to date.
-                record.session_settings = Some(settings.clone());
-                // A new model can advertise a different effort list; the
-                // summary must show the one the session now has, not the old
-                // model's.
-                record.advertised_efforts = switched_controls
-                    .map(|controls| controls.efforts)
-                    .unwrap_or_default();
+                // The live session really took the value now, so the record of
+                // what it runs is up to date for this field. The other fields
+                // are what this session started with or what their own request
+                // switched it to; leaving them untouched keeps two concurrent
+                // changes from reverting each other.
+                if let Some(started) = record.session_settings.as_mut() {
+                    match &change {
+                        ThreadSettingsChange::Mode(mode) => started.runtime_mode = *mode,
+                        ThreadSettingsChange::Model(_) => started.model = settings.model.clone(),
+                        ThreadSettingsChange::Effort(_) => {
+                            started.reasoning_effort = settings.reasoning_effort.clone();
+                        }
+                        ThreadSettingsChange::Fast(_) => started.fast = settings.fast,
+                    }
+                }
+                if matches!(change, ThreadSettingsChange::Model(_)) {
+                    // A new model can advertise a different effort list or a
+                    // different catalogue; the summary must show the one the
+                    // session now has, not the old model's.
+                    if let Some(controls) = switched_controls {
+                        record.advertised_models = controls.models.clone().unwrap_or_default();
+                        record.advertised_efforts = controls.efforts;
+                    }
+                }
             } else {
                 // The switch happened on a session a Send has since replaced,
                 // or the adapter could not take it in place: the record still
@@ -4008,6 +4065,7 @@ impl Inner {
                 resume_at: None,
                 limit: None,
                 advertised_efforts: Vec::new(),
+                advertised_models: Vec::new(),
                 session_settings: None,
                 ttft_ms: None,
                 context_window: None,
@@ -4380,6 +4438,10 @@ impl Inner {
                 session: Arc::clone(&session),
                 applied_limit_reset: None,
             };
+            record.advertised_models = controls
+                .as_ref()
+                .and_then(|controls| controls.models.clone())
+                .unwrap_or_default();
             record.advertised_efforts = controls
                 .map(|controls| controls.efforts)
                 .unwrap_or_default();
@@ -16395,6 +16457,198 @@ mod tests {
         assert_eq!(started, "next-model");
     }
 
+    /// A settings change that lands while the first session is still starting
+    /// must not detach the session that startup is about to write the turn to.
+    #[tokio::test]
+    async fn a_settings_change_during_startup_does_not_strand_the_first_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, start) = FakeHarness::new().with_start_gate();
+        let (harness, completion) = harness.with_completion_gate();
+        let (harness, settings) = harness.with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        // The startup is inside `start_session` and its slot is `Starting`.
+        assert!(wait_until(|| sessions.get() >= 1).await);
+
+        // There is no live session to switch, so the effort is recorded for
+        // the next session while this startup carries the first turn.
+        let summary = manager
+            .set_thread_reasoning_effort(&created.thread_id, Some("high".into()))
+            .await
+            .expect("record the effort");
+        assert_eq!(summary.reasoning_effort.as_deref(), Some("high"));
+
+        start.release();
+        completion.release();
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the first turn never completed");
+        assert_eq!(turn, created.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the session the startup wrote to served the first turn"
+        );
+
+        // The change applies from the turn after this one.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert!(wait_until(|| sessions.get() >= 2).await);
+        let started = settings
+            .get()
+            .iter()
+            .rev()
+            .find_map(|change| match change {
+                h4rn_harness::SettingChange::Started {
+                    reasoning_effort, ..
+                } => Some(reasoning_effort.clone()),
+                _ => None,
+            })
+            .expect("a started session");
+        assert_eq!(started.as_deref(), Some("high"));
+    }
+
+    /// Two settings requests in flight at once each record their own field; a
+    /// later write must not put back the snapshot it took before the other.
+    #[tokio::test]
+    async fn concurrent_settings_changes_do_not_revert_each_other() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // Both requests read the record before either takes it again: the
+        // window in which one request's pre-switch snapshot is stale.
+        let pause = Arc::new(SettingsPause::default());
+        *manager
+            .inner
+            .settings_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let fast = tokio::spawn(async move { this.set_thread_fast(&thread_id, true).await });
+        pause.read.notified().await;
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let model =
+            tokio::spawn(async move { this.set_thread_model(&thread_id, "m2".into()).await });
+        pause.read.notified().await;
+        pause.resume.notify_waiters();
+
+        fast.await
+            .expect("the fast task")
+            .expect("record fast mode");
+        model
+            .await
+            .expect("the model task")
+            .expect("record the model");
+        *manager
+            .inner
+            .settings_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert!(summary.fast, "the fast tier survived the concurrent change");
+        assert_eq!(summary.model, "m2");
+
+        let stored = journal
+            .list_threads()
+            .await
+            .expect("the journal")
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("the thread's metadata");
+        assert!(stored.fast, "the journal kept the fast tier");
+        assert_eq!(stored.model, "m2");
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        let record = handle.lock().await;
+        let started = record
+            .session_settings
+            .clone()
+            .expect("the live session's settings");
+        assert!(
+            started.fast,
+            "the live session is recorded as running with fast mode"
+        );
+        assert_eq!(started.model, "m2");
+    }
+
+    /// An ACP live session cannot go back to the agent's default alias in
+    /// place; that is a deferral, not a refusal.
+    #[tokio::test]
+    async fn a_default_model_change_defers_on_a_live_acp_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Acp)
+            .with_instance("demo")
+            .with_advertised_models(["m-1".to_string(), "m-2".to_string()])
+            .with_default_model("default")
+            .with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("demo".into());
+        request.model = "m-1".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .set_thread_model(&created.thread_id, "default".into())
+            .await
+            .expect("the alias is valid; only this session cannot apply it");
+        assert_eq!(summary.model, "default");
+
+        // The change applies from the next turn, on a session started on the
+        // agent's own default.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(wait_until(|| sessions.get() >= 2).await);
+        let started = settings
+            .get()
+            .iter()
+            .rev()
+            .find_map(|change| match change {
+                h4rn_harness::SettingChange::Started { model, .. } => Some(model.clone()),
+                _ => None,
+            })
+            .expect("a started session");
+        assert_eq!(started, "default");
+    }
+
     #[tokio::test]
     async fn a_mode_change_on_a_thread_created_on_the_default_model_is_not_refused() {
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -16468,6 +16722,11 @@ mod tests {
             .expect("summary")
             .summary;
         assert_eq!(summary.reasoning_efforts, vec!["low"]);
+        assert_eq!(
+            summary.models,
+            vec!["gpt-a", "gpt-b"],
+            "the summary carries the session's own model catalogue, not the static guess"
+        );
 
         let summary = manager
             .set_thread_model(&created.thread_id, "gpt-b".into())
@@ -16477,6 +16736,11 @@ mod tests {
             summary.reasoning_efforts,
             vec!["low", "high"],
             "the summary shows the new model's effort list"
+        );
+        assert_eq!(
+            summary.models,
+            vec!["gpt-a", "gpt-b"],
+            "the model catalogue survives the in-place switch"
         );
     }
 

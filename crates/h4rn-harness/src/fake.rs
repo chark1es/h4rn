@@ -705,7 +705,10 @@ impl FakeHarness {
     /// Treats `alias` as the agent's own default model.
     ///
     /// A test uses this to prove a non-model change on a thread created on the
-    /// alias is not refused as an unknown model.
+    /// alias is not refused as an unknown model. An ACP or Antigravity fake
+    /// also answers an in-place switch to the alias with
+    /// [`HarnessError::Deferred`], the way the real adapters do: only a fresh
+    /// session can start on the agent's default.
     pub fn with_default_model(mut self, alias: impl Into<String>) -> Self {
         self.default_models.push(alias.into());
         self
@@ -1537,6 +1540,21 @@ impl HarnessSession for FakeSession {
             return Err(HarnessError::Unsupported {
                 harness: self.kind,
                 feature: "switching the model on a live session".into(),
+            });
+        }
+        // An ACP agent cannot go back to its own default alias in place (there
+        // is no "reset to default" method), but a fresh session starts on that
+        // default. The fake answers the same way so a daemon test exercises the
+        // deferral the real adapter produces.
+        if matches!(self.kind, HarnessKind::Acp | HarnessKind::Antigravity)
+            && self
+                .default_models
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(model))
+        {
+            return Err(HarnessError::Deferred {
+                harness: self.kind,
+                feature: "the agent's default model".into(),
             });
         }
         self.current_model = model.to_string();

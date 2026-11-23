@@ -17,7 +17,7 @@ pub const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Codex publishes the exact list per model; these are the values every current
 /// coding model accepts, so the picker never shows an empty list for a model it
 /// has not catalogued.
-pub const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+pub const CODEX_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// What one harness offers for a thread's settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +212,10 @@ mod tests {
         );
         let codex = thread_controls(HarnessKind::Codex);
         assert!(codex.offers_effort("ultra"));
+        assert!(
+            codex.offers_effort("minimal"),
+            "Codex's minimal reasoning effort is part of every current model's list"
+        );
         assert!(codex.fast);
         assert!(codex.switch_effort && codex.switch_fast);
         assert!(thread_controls(HarnessKind::Opencode).efforts.is_empty());

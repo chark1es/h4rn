@@ -1951,6 +1951,7 @@ mod tests {
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
+            models: Vec::new(),
             fast: false,
             tab: ThreadTab::Working,
             placed_by_user: false,
