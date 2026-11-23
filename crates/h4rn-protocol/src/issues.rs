@@ -183,9 +183,11 @@ pub struct ForgeIssueUpdate {
     /// Why it was closed, where the tracker records one.
     #[serde(default)]
     pub close_reason: Option<ForgeIssueCloseReason>,
-    /// The issue this one duplicates, for a duplicate close reason.
+    /// Number of the issue this one duplicates, for a duplicate close
+    /// reason. The provider's own id is resolved by its client.
     #[serde(default)]
-    pub duplicate_issue_id: Option<u32>,
+    #[ts(type = "number | null")]
+    pub duplicate_issue_id: Option<u64>,
     /// Replacement label names.
     #[serde(default)]
     pub labels: Option<Vec<String>>,
@@ -287,6 +289,8 @@ pub enum LinearStateType {
     Completed,
     /// Cancelled.
     Canceled,
+    /// Closed as a duplicate of another issue.
+    Duplicate,
 }
 
 /// One Linear issue row.

@@ -13,7 +13,7 @@ use h4rn_protocol::ForgeRepoRef;
 use h4rn_protocol::issues::{
     ForgeIssueCloseReason, ForgeIssueFilter, ForgeIssueState, ForgeIssueUpdate, LinearStateType,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use graphql_parser::query as gql;
 use graphql_parser::schema as gql_schema;
@@ -189,12 +189,23 @@ async fn github_closing_as_a_duplicate_names_the_issue_it_duplicates() {
     let server = MockServer::start().await;
     let base = server.uri();
 
+    // The person picks issue number 9; GitHub's API wants that issue's
+    // repository-wide id, which is not the number.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/9"))
+        .respond_with(ok(json!({
+            "id": 1234567890123u64,
+            "number": 9,
+            "title": "Original bug"
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("PATCH"))
         .and(path("/api/v3/repos/acme/widget/issues/12"))
         .and(body_json(json!({
             "state": "closed",
             "state_reason": "duplicate",
-            "duplicate_issue_id": 9
+            "duplicate_issue_id": 1234567890123u64
         })))
         .respond_with(ok({
             let mut issue = github_issue();
@@ -227,6 +238,15 @@ async fn github_closing_as_a_duplicate_names_the_issue_it_duplicates() {
         .await
         .unwrap();
     assert_eq!(updated.close_reason, Some(ForgeIssueCloseReason::Duplicate));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path() == "/api/v3/repos/acme/widget/issues/9"),
+        "the picked number was resolved to its id"
+    );
 
     // A duplicate close without the number is refused before the request.
     let missing = client
@@ -565,6 +585,95 @@ async fn gitea_lists_reads_and_writes_issues() {
     assert_eq!(updated.summary.number, 4);
 }
 
+#[tokio::test]
+async fn gitea_comments_page_at_the_server_page_limit() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    // Gitea's default page size is 50; a discussion with 51 comments must
+    // offer the next page even though the client would like 100 at once.
+    let comments: Vec<Value> = (1..=50)
+        .map(|id| {
+            json!({
+                "id": id,
+                "user": {"login": "carol"},
+                "body": format!("Comment {id}"),
+                "created_at": "2026-03-03T00:00:00Z"
+            })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/comments"))
+        .and(query_param("limit", "50"))
+        .and(query_param("page", "1"))
+        .respond_with(ok(Value::Array(comments)))
+        .mount(&server)
+        .await;
+
+    let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
+    let repo = repo(ForgeKind::Gitea, &base);
+    let page = client.list_issue_comments(&repo, 4, None).await.unwrap();
+    assert_eq!(page.comments.len(), 50);
+    assert!(page.has_more);
+    assert_eq!(page.next_cursor.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn gitea_resolves_a_label_on_the_second_catalogue_page() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    let first_page: Vec<Value> = (1..=50)
+        .map(|id| json!({"id": id, "name": format!("label-{id}")}))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "1"))
+        .respond_with(ok(Value::Array(first_page)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "2"))
+        .respond_with(ok(json!([{"id": 51, "name": "release"}])))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .and(body_json(json!({"labels": [51]})))
+        .respond_with(ok(json!([{"id": 51, "name": "release"}])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4"))
+        .respond_with(ok(json!({
+            "number": 4,
+            "title": "Export CSV",
+            "state": "open",
+            "user": {"login": "alice"},
+            "labels": [{"id": 51, "name": "release"}],
+            "updated_at": "2026-03-02T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
+    let repo = repo(ForgeKind::Gitea, &base);
+    let updated = client
+        .update_issue(
+            &repo,
+            4,
+            &ForgeIssueUpdate {
+                labels: Some(vec!["release".into()]),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.summary.labels[0].name, "release");
+}
+
 // ---------------------------------------------------------------------------
 // Bitbucket Cloud
 // ---------------------------------------------------------------------------
@@ -612,6 +721,18 @@ fn azure_states() -> Value {
 }
 
 async fn azure_states_mocks(server: &MockServer) {
+    // The project's own type catalogue, not a guessed pair of names.
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes"))
+        .respond_with(ok(json!({
+            "count": 2,
+            "value": [
+                {"name": "Issue", "referenceName": "Microsoft.Issue"},
+                {"name": "Bug", "referenceName": "Microsoft.Bug"}
+            ]
+        })))
+        .mount(server)
+        .await;
     for kind in ["Issue", "Bug"] {
         Mock::given(method("GET"))
             .and(path(format!(
@@ -673,6 +794,19 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
                     "System.ChangedDate": "2026-05-09T00:00:00Z"
                 }
             }]
+        })))
+        .mount(&server)
+        .await;
+
+    // A linked pull request names its own repository by id; the artifact's
+    // project and repository are resolved to that repository's web URL.
+    Mock::given(method("GET"))
+        .and(path(
+            "/acme/6f1c2e40-aaaa-bbbb-cccc-0123456789ab/_apis/git/repositories/9d2a1b7c-1111-2222-3333-444455556666",
+        ))
+        .respond_with(ok(json!({
+            "name": "widget",
+            "webUrl": format!("{base}/platform/_git/widget")
         })))
         .mount(&server)
         .await;
@@ -836,6 +970,205 @@ async fn azure_lists_reads_and_writes_work_items_as_issues() {
     assert_eq!(updated.summary.number, 21);
 }
 
+#[tokio::test]
+async fn azure_skips_a_type_this_process_does_not_define() {
+    let server = MockServer::start().await;
+    let base = format!("{}/acme", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes"))
+        .respond_with(ok(json!({
+            "count": 2,
+            "value": [
+                {"name": "Issue", "referenceName": "Microsoft.Issue"},
+                {"name": "Bug", "referenceName": "Microsoft.Bug"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    // Basic has no Bug and Scrum has no Issue: the states endpoint answers
+    // 404 for the missing type instead of failing the whole list.
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes/Issue/states"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "message": "The work item type Issue does not exist in this project"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes/Bug/states"))
+        .respond_with(ok(azure_states()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/acme/platform/_apis/wit/wiql"))
+        .and(body_string_contains("[System.WorkItemType] = 'Bug'"))
+        .respond_with(ok(json!({"workItems": [{"id": 31}]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitems"))
+        .respond_with(ok(json!({
+            "count": 1,
+            "value": [{
+                "id": 31,
+                "fields": {
+                    "System.Title": "The only type this process has",
+                    "System.State": "Active",
+                    "System.WorkItemType": "Bug",
+                    "System.ChangedDate": "2026-05-02T00:00:00Z"
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AzureDevOpsClient::new(&base, &token(), 600).unwrap();
+    let repo = ForgeRepoRef {
+        forge: ForgeKind::AzureDevOps,
+        base_url: base.clone(),
+        owner: "platform".into(),
+        repo: "widget".into(),
+    };
+    let page = client
+        .list_issues(&repo, ForgeIssueFilter::Open, 1, None)
+        .await
+        .expect("the present type still lists");
+    assert_eq!(page.issues.len(), 1);
+    assert_eq!(page.issues[0].number, 31);
+    let wiql = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == "/acme/platform/_apis/wit/wiql")
+        .expect("the WIQL request");
+    let body = String::from_utf8_lossy(&wiql.body);
+    assert!(!body.contains("'Issue'"), "{body}");
+}
+
+#[tokio::test]
+async fn azure_closes_each_type_with_its_own_finished_state() {
+    let server = MockServer::start().await;
+    let base = format!("{}/acme", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes"))
+        .respond_with(ok(json!({
+            "count": 2,
+            "value": [
+                {"name": "Issue", "referenceName": "Microsoft.Issue"},
+                {"name": "Bug", "referenceName": "Microsoft.Bug"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes/Issue/states"))
+        .respond_with(ok(json!({
+            "value": [
+                {"name": "To Do", "category": "Proposed"},
+                {"name": "Doing", "category": "InProgress"},
+                {"name": "Closed", "category": "Completed"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitemtypes/Bug/states"))
+        .respond_with(ok(azure_states()))
+        .mount(&server)
+        .await;
+
+    // The closed prompt is scoped to each type's own state names.
+    Mock::given(method("POST"))
+        .and(path("/acme/platform/_apis/wit/wiql"))
+        .and(body_string_contains(
+            "[System.WorkItemType] = 'Issue' AND [System.State] IN ('Closed')",
+        ))
+        .and(body_string_contains(
+            "[System.WorkItemType] = 'Bug' AND [System.State] IN ('Done', 'Removed')",
+        ))
+        .respond_with(ok(json!({"workItems": [{"id": 41}, {"id": 42}]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitems"))
+        .respond_with(ok(json!({
+            "count": 2,
+            "value": [{
+                "id": 41,
+                "fields": {
+                    "System.Title": "An issue",
+                    "System.State": "Closed",
+                    "System.WorkItemType": "Issue",
+                    "System.ChangedDate": "2026-05-02T00:00:00Z"
+                }
+            }, {
+                "id": 42,
+                "fields": {
+                    "System.Title": "A bug",
+                    "System.State": "Done",
+                    "System.WorkItemType": "Bug",
+                    "System.ChangedDate": "2026-05-02T00:00:00Z"
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AzureDevOpsClient::new(&base, &token(), 600).unwrap();
+    let repo = ForgeRepoRef {
+        forge: ForgeKind::AzureDevOps,
+        base_url: base.clone(),
+        owner: "platform".into(),
+        repo: "widget".into(),
+    };
+    let page = client
+        .list_issues(&repo, ForgeIssueFilter::Closed, 1, None)
+        .await
+        .expect("closed items list");
+    assert_eq!(page.issues.len(), 2);
+    assert!(
+        page.issues
+            .iter()
+            .all(|issue| issue.state == ForgeIssueState::Closed)
+    );
+
+    // Reopening the Issue moves it to its type's in-progress state, Doing.
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/wit/workitems/41"))
+        .respond_with(ok(json!({
+            "id": 41,
+            "fields": {
+                "System.Title": "An issue",
+                "System.State": "Closed",
+                "System.WorkItemType": "Issue",
+                "System.ChangedDate": "2026-05-02T00:00:00Z"
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/acme/platform/_apis/wit/workitems/41"))
+        .and(body_string_contains("Doing"))
+        .respond_with(ok(json!({"id": 41})))
+        .mount(&server)
+        .await;
+    let reopened = client
+        .update_issue(
+            &repo,
+            41,
+            &ForgeIssueUpdate {
+                state: Some(ForgeIssueState::Open),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .expect("a work item reopens with its own type's state");
+    assert_eq!(reopened.summary.number, 41);
+}
+
 // ---------------------------------------------------------------------------
 // Linear
 // ---------------------------------------------------------------------------
@@ -867,7 +1200,7 @@ async fn linear_validates_lists_reads_and_comments() {
         .and(path("/graphql"))
         .and(header("authorization", api_key.as_str()))
         .and(body_json(json!({
-            "query": "query { viewer { name email organization { name } } }",
+            "query": h4rn_forge::issues::LINEAR_VIEWER_QUERY,
             "variables": {}
         })))
         .respond_with(ok(json!({
@@ -879,7 +1212,7 @@ async fn linear_validates_lists_reads_and_comments() {
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(body_json(json!({
-            "query": "query { teams(first: 100) { nodes { id key name } } }",
+            "query": h4rn_forge::issues::LINEAR_TEAMS_QUERY,
             "variables": {}
         })))
         .respond_with(ok(json!({
@@ -1081,34 +1414,163 @@ async fn linear_forbidden_and_rate_limited_are_not_github_token_errors() {
 // Linear schema conformance
 // ---------------------------------------------------------------------------
 
-type FieldIndex = std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+/// A GraphQL type reference, shared by the schema and the documents so the two
+/// can be compared structurally.
+#[derive(Clone, Debug, PartialEq)]
+enum Ty {
+    Named(String),
+    List(Box<Ty>),
+    NonNull(Box<Ty>),
+}
 
-fn base_type_name(field_type: &gql_schema::Type<'_, String>) -> String {
-    match field_type {
-        gql_schema::Type::NamedType(name) => name.clone(),
-        gql_schema::Type::ListType(inner) | gql_schema::Type::NonNullType(inner) => {
-            base_type_name(inner)
+impl Ty {
+    fn from_gql(value: &gql::Type<'_, String>) -> Self {
+        match value {
+            gql::Type::NamedType(name) => Ty::Named(name.clone()),
+            gql::Type::ListType(inner) => Ty::List(Box::new(Ty::from_gql(inner))),
+            gql::Type::NonNullType(inner) => Ty::NonNull(Box::new(Ty::from_gql(inner))),
+        }
+    }
+
+    /// The type with its top-level non-null wrapper removed.
+    fn nullable(&self) -> &Ty {
+        match self {
+            Ty::NonNull(inner) => inner,
+            other => other,
+        }
+    }
+
+    /// The named type at the base of any list or non-null wrappers.
+    fn base(&self) -> Option<&str> {
+        match self {
+            Ty::Named(name) => Some(name),
+            Ty::List(inner) | Ty::NonNull(inner) => inner.base(),
         }
     }
 }
 
-fn schema_index() -> FieldIndex {
-    let document = gql_schema::parse_schema::<String>(include_str!("linear_schema.graphql"))
-        .expect("the vendored Linear schema parses");
-    let mut objects = FieldIndex::new();
-    for definition in document.definitions {
-        let gql_schema::Definition::TypeDefinition(gql_schema::TypeDefinition::Object(object)) =
-            definition
-        else {
-            continue;
-        };
-        let mut fields = std::collections::BTreeMap::new();
-        for field in object.fields {
-            fields.insert(field.name, base_type_name(&field.field_type));
-        }
-        objects.insert(object.name, fields);
+/// Whether a variable declared as `variable` may be used where `expected` is
+/// required. A non-null variable satisfies a nullable argument; the reverse
+/// does not. Scalars never substitute for one another.
+fn accepts(variable: &Ty, expected: &Ty) -> bool {
+    match expected {
+        Ty::NonNull(expected_inner) => match variable {
+            Ty::NonNull(variable_inner) => accepts(variable_inner, expected_inner),
+            _ => false,
+        },
+        _ => match variable {
+            Ty::NonNull(variable_inner) => accepts(variable_inner, expected),
+            Ty::List(variable_inner) => match expected {
+                Ty::List(expected_inner) => accepts(variable_inner, expected_inner),
+                _ => false,
+            },
+            Ty::Named(variable_name) => {
+                matches!(expected, Ty::Named(expected_name) if variable_name == expected_name)
+            }
+        },
     }
-    objects
+}
+
+#[derive(Clone, Debug)]
+struct FieldShape {
+    ty: Ty,
+    arguments: BTreeMap<String, Ty>,
+}
+
+#[derive(Clone, Debug)]
+struct InputShape {
+    ty: Ty,
+    required: bool,
+}
+
+/// The parts of the published schema a document check reads.
+#[derive(Default)]
+struct SchemaIndex {
+    fields: BTreeMap<String, BTreeMap<String, FieldShape>>,
+    inputs: BTreeMap<String, BTreeMap<String, InputShape>>,
+    enums: BTreeMap<String, BTreeSet<String>>,
+    scalars: BTreeSet<String>,
+    types: BTreeSet<String>,
+}
+
+fn schema_index() -> &'static SchemaIndex {
+    static INDEX: std::sync::OnceLock<SchemaIndex> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let document = gql_schema::parse_schema::<String>(include_str!("linear_schema.graphql"))
+            .expect("the vendored Linear schema parses");
+        let mut index = SchemaIndex::default();
+        for definition in document.definitions {
+            match definition {
+                gql_schema::Definition::TypeDefinition(gql_schema::TypeDefinition::Object(
+                    object,
+                )) => {
+                    index.types.insert(object.name.clone());
+                    let mut fields = BTreeMap::new();
+                    for field in object.fields {
+                        let arguments = field
+                            .arguments
+                            .into_iter()
+                            .map(|argument| (argument.name, Ty::from_gql(&argument.value_type)))
+                            .collect();
+                        fields.insert(
+                            field.name,
+                            FieldShape {
+                                ty: Ty::from_gql(&field.field_type),
+                                arguments,
+                            },
+                        );
+                    }
+                    index.fields.insert(object.name, fields);
+                }
+                gql_schema::Definition::TypeDefinition(
+                    gql_schema::TypeDefinition::InputObject(input),
+                ) => {
+                    index.types.insert(input.name.clone());
+                    let fields = input
+                        .fields
+                        .into_iter()
+                        .map(|field| {
+                            let ty = Ty::from_gql(&field.value_type);
+                            let required = matches!(ty, Ty::NonNull(_));
+                            (field.name, InputShape { ty, required })
+                        })
+                        .collect();
+                    index.inputs.insert(input.name, fields);
+                }
+                gql_schema::Definition::TypeDefinition(gql_schema::TypeDefinition::Enum(
+                    enumeration,
+                )) => {
+                    index.types.insert(enumeration.name.clone());
+                    index.enums.insert(
+                        enumeration.name,
+                        enumeration
+                            .values
+                            .into_iter()
+                            .map(|value| value.name)
+                            .collect(),
+                    );
+                }
+                gql_schema::Definition::TypeDefinition(gql_schema::TypeDefinition::Scalar(
+                    scalar,
+                )) => {
+                    index.types.insert(scalar.name.clone());
+                    index.scalars.insert(scalar.name);
+                }
+                gql_schema::Definition::TypeDefinition(gql_schema::TypeDefinition::Interface(
+                    interface,
+                )) => {
+                    index.types.insert(interface.name);
+                }
+                gql_schema::Definition::TypeDefinition(gql_schema::TypeDefinition::Union(
+                    union,
+                )) => {
+                    index.types.insert(union.name);
+                }
+                _ => {}
+            }
+        }
+        index
+    })
 }
 
 fn collect_value_variables(value: &gql::Value<'_, String>, used: &mut BTreeSet<String>) {
@@ -1142,25 +1604,151 @@ fn collect_selection_variables(set: &gql::SelectionSet<'_, String>, used: &mut B
     }
 }
 
-fn check_selections(index: &FieldIndex, parent: &str, set: &gql::SelectionSet<'_, String>) {
+/// Checks one argument value against the type the schema declares for it.
+///
+/// This is the part field-name checks miss: an `ID` used where the schema
+/// takes a `String`, a required input left out, or an enum value that does not
+/// exist all fail here instead of at runtime.
+fn check_value(
+    schema: &SchemaIndex,
+    expected: &Ty,
+    value: &gql::Value<'_, String>,
+    variables: &BTreeMap<String, Ty>,
+    at: &str,
+) {
+    match value {
+        gql::Value::Variable(name) => {
+            let declared = variables
+                .get(name)
+                .unwrap_or_else(|| panic!("{at} uses the undeclared variable ${name}"));
+            assert!(
+                accepts(declared, expected),
+                "{at} passes ${name} ({declared:?}) where the schema takes {expected:?}"
+            );
+        }
+        gql::Value::Null => assert!(
+            !matches!(expected, Ty::NonNull(_)),
+            "{at} passes null to a required {expected:?}"
+        ),
+        gql::Value::Int(_) => assert!(
+            matches!(
+                expected.nullable(),
+                Ty::Named(name) if matches!(name.as_str(), "Int" | "Float" | "ID" | "BigInt")
+            ),
+            "{at} passes an int where the schema takes {expected:?}"
+        ),
+        gql::Value::Float(_) => assert!(
+            matches!(
+                expected.nullable(),
+                Ty::Named(name) if matches!(name.as_str(), "Float" | "ID")
+            ),
+            "{at} passes a float where the schema takes {expected:?}"
+        ),
+        gql::Value::String(_) => {
+            let accepted = match expected.nullable() {
+                Ty::Named(name) => {
+                    name == "String" || name == "ID" || schema.scalars.contains(name)
+                }
+                _ => false,
+            };
+            assert!(
+                accepted,
+                "{at} passes a string where the schema takes {expected:?}"
+            );
+        }
+        gql::Value::Boolean(_) => assert!(
+            matches!(expected.nullable(), Ty::Named(name) if name == "Boolean"),
+            "{at} passes a boolean where the schema takes {expected:?}"
+        ),
+        gql::Value::Enum(name) => {
+            let Ty::Named(type_name) = expected.nullable() else {
+                panic!("{at} passes an enum where the schema takes {expected:?}");
+            };
+            let values = schema
+                .enums
+                .get(type_name)
+                .unwrap_or_else(|| panic!("{at}: {type_name} is not an enum"));
+            assert!(
+                values.contains(name),
+                "{at} passes {name}, which {type_name} does not define"
+            );
+        }
+        gql::Value::List(items) => {
+            let Ty::List(inner) = expected.nullable() else {
+                panic!("{at} passes a list where the schema takes {expected:?}");
+            };
+            for item in items {
+                check_value(schema, inner, item, variables, at);
+            }
+        }
+        gql::Value::Object(fields) => {
+            let Ty::Named(type_name) = expected.nullable() else {
+                panic!("{at} passes an object where the schema takes {expected:?}");
+            };
+            let input = schema
+                .inputs
+                .get(type_name)
+                .unwrap_or_else(|| panic!("{at}: {type_name} is not an input object"));
+            for (key, value) in fields {
+                let field = input
+                    .get(key)
+                    .unwrap_or_else(|| panic!("{at}: {type_name} has no {key} field"));
+                check_value(schema, &field.ty, value, variables, at);
+            }
+            for (key, field) in input {
+                assert!(
+                    !field.required || fields.contains_key(key),
+                    "{at}: required input {type_name}.{key} is missing"
+                );
+            }
+        }
+    }
+}
+
+fn check_selections(
+    schema: &SchemaIndex,
+    parent: &str,
+    set: &gql::SelectionSet<'_, String>,
+    variables: &BTreeMap<String, Ty>,
+) {
     for selection in &set.items {
         let gql::Selection::Field(field) = selection else {
             panic!("the daemon's documents use no fragments");
         };
-        let fields = index
+        let fields = schema
+            .fields
             .get(parent)
             .unwrap_or_else(|| panic!("{parent} is not an object in the vendored schema"));
-        let child = fields
+        let shape = fields
             .get(&field.name)
             .unwrap_or_else(|| panic!("Linear's schema has no {parent}.{} field", field.name));
+        for (name, value) in &field.arguments {
+            let expected = shape.arguments.get(name).unwrap_or_else(|| {
+                panic!(
+                    "Linear's schema has no {parent}.{}({name}:) argument",
+                    field.name
+                )
+            });
+            check_value(
+                schema,
+                expected,
+                value,
+                variables,
+                &format!("{parent}.{}.{name}", field.name),
+            );
+        }
         if !field.selection_set.items.is_empty() {
-            check_selections(index, child, &field.selection_set);
+            let child = shape
+                .ty
+                .base()
+                .unwrap_or_else(|| panic!("{parent}.{} is not an object", field.name));
+            check_selections(schema, child, &field.selection_set, variables);
         }
     }
 }
 
 fn check_document(document: &str) -> BTreeSet<String> {
-    let index = schema_index();
+    let schema = schema_index();
     let parsed = gql::parse_query::<String>(document).expect("the document parses");
     let gql::Definition::Operation(operation) = &parsed.definitions[0] else {
         panic!("expected one operation");
@@ -1176,23 +1764,38 @@ fn check_document(document: &str) -> BTreeSet<String> {
         ),
         _ => panic!("expected a query or mutation"),
     };
-    let declared = definitions
+    let variables = definitions
         .iter()
-        .map(|definition| definition.name.clone())
-        .collect::<BTreeSet<_>>();
+        .map(|definition| {
+            let ty = Ty::from_gql(&definition.var_type);
+            let base = ty
+                .base()
+                .unwrap_or_else(|| panic!("${} has no named type", definition.name));
+            let built_in = matches!(base, "ID" | "String" | "Int" | "Float" | "Boolean");
+            assert!(
+                built_in || schema.types.contains(base),
+                "${} is declared as {ty:?}, which the schema does not define",
+                definition.name
+            );
+            (definition.name.clone(), ty)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let declared = variables.keys().cloned().collect::<BTreeSet<_>>();
     let mut used = BTreeSet::new();
     collect_selection_variables(selection_set, &mut used);
     assert_eq!(
         declared, used,
         "every declared variable is used, and every used variable is declared"
     );
-    check_selections(&index, root, selection_set);
+    check_selections(schema, root, selection_set, &variables);
     declared
 }
 
 #[test]
 fn every_linear_document_matches_the_published_schema() {
     let documents = [
+        h4rn_forge::issues::LINEAR_VIEWER_QUERY,
+        h4rn_forge::issues::LINEAR_TEAMS_QUERY,
         h4rn_forge::issues::LINEAR_LIST_QUERY,
         h4rn_forge::issues::LINEAR_SEARCH_QUERY,
         h4rn_forge::issues::LINEAR_DETAIL_QUERY,
@@ -1201,7 +1804,9 @@ fn every_linear_document_matches_the_published_schema() {
     for document in documents {
         check_document(document);
     }
-    // The list document's team variable is used, not declared and ignored.
+    // The list document's team variable is an ID inside the team filter; the
+    // search document passes the team to `searchIssues`, whose argument is a
+    // String.
     let list = check_document(h4rn_forge::issues::LINEAR_LIST_QUERY);
     assert!(list.contains("teamId"), "{list:?}");
     let search = check_document(h4rn_forge::issues::LINEAR_SEARCH_QUERY);

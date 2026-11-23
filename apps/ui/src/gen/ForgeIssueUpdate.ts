@@ -26,7 +26,8 @@ state: ForgeIssueState | null,
  */
 close_reason: ForgeIssueCloseReason | null, 
 /**
- * The issue this one duplicates, for a duplicate close reason.
+ * Number of the issue this one duplicates, for a duplicate close
+ * reason. The provider's own id is resolved by its client.
  */
 duplicate_issue_id: number | null, 
 /**

@@ -102,6 +102,13 @@ const mock = vi.hoisted(() => {
     hasMore: {} as Record<string, boolean>,
     /** Blocks the second page until the test resolves it. */
     page2Gate: null as Promise<void> | null,
+    /** Details that differ from the list row. */
+    detailLabels: null as { name: string; color: string | null }[] | null,
+    detailAssignees: null as { login: string; name: string | null }[] | null,
+    /** Simulates an issue leaving the list after a write. */
+    hideRow: false,
+    /** The tracker's state after the last update. */
+    closed: false,
   };
   const issue = (target: ForgeRepoRef, title = "Dark mode flickers"): ForgeIssue => ({
     summary: {
@@ -187,24 +194,77 @@ const mock = vi.hoisted(() => {
         if (request.page > 1 && state.page2Gate) await state.page2Gate;
         return {
           type: "forge_issues",
-          issues: [
-            request.page > 1
-              ? {
-                  ...issue(request.repo, "Stale page row").summary,
-                  number: 99,
-                }
-              : {
-                  ...issue(request.repo).summary,
-                  state: request.filter === "closed" ? "closed" : "open",
-                },
-          ],
+          issues:
+            state.hideRow && request.page === 1
+              ? []
+              : [
+                  request.page > 1
+                    ? {
+                        ...issue(request.repo, "Stale page row").summary,
+                        number: 99,
+                      }
+                    : {
+                        ...issue(request.repo).summary,
+                        state: request.filter === "closed" ? "closed" : "open",
+                      },
+                ],
           page: request.page,
           has_more: request.page === 1 ? (state.hasMore[request.repo.repo] ?? false) : false,
           read_only: false,
         };
       }
-      case "forge_get_issue":
-        return { type: "forge_issue", issue: issue(request.repo), read_only: false };
+      case "forge_get_issue": {
+        const detail = issue(request.repo);
+        detail.summary.state = state.closed ? "closed" : "open";
+        if (state.detailLabels) detail.summary.labels = state.detailLabels;
+        if (state.detailAssignees) detail.summary.assignees = state.detailAssignees;
+        return { type: "forge_issue", issue: detail, read_only: false };
+      }
+      case "linear_get_issue": {
+        const after = request.comments_after;
+        return {
+          type: "linear_issue",
+          issue: {
+            summary: {
+              id: request.issue_id,
+              identifier: "ENG-1",
+              title: "Rate limit the import",
+              state_name: "In Progress",
+              state_type: "started",
+              team_id: "team_1",
+              team_key: "ENG",
+              assignees: ["Alice"],
+              labels: [],
+              updated_at: "2026-01-02T00:00:00Z",
+              url: "https://linear.app/acme/issue/ENG-1",
+            },
+            description: "Imports hammer the API.",
+            created_at: "2026-01-01T00:00:00Z",
+            comments: after
+              ? [
+                  {
+                    id: "lc_2",
+                    author: "Dave",
+                    body: "Second page comment.",
+                    created_at: "2026-01-04T00:00:00Z",
+                    updated_at: null,
+                  },
+                ]
+              : [
+                  {
+                    id: "lc_1",
+                    author: "Carol",
+                    body: "First page comment.",
+                    created_at: "2026-01-03T00:00:00Z",
+                    updated_at: null,
+                  },
+                ],
+            comments_next_cursor: after ? null : "lc_2",
+            linked_pull_requests: [],
+          },
+          read_only: false,
+        };
+      }
       case "forge_list_issue_comments": {
         const more = request.cursor === null && state.commentsCursor !== null;
         return {
@@ -239,6 +299,7 @@ const mock = vi.hoisted(() => {
       case "forge_update_issue": {
         const next = issue(request.repo, request.update.title ?? "Dark mode flickers");
         next.summary.state = request.update.state ?? "open";
+        state.closed = next.summary.state === "closed";
         next.close_reason = request.update.close_reason ?? null;
         return { type: "forge_issue", issue: next, read_only: false };
       }
@@ -307,6 +368,7 @@ vi.mock("@/features/projects/store", () => ({
 }));
 
 import { IssuesPage } from "./IssuesPage";
+import { linearIssueRow } from "./store";
 
 function resetTracker(
   options: {
@@ -318,6 +380,8 @@ function resetTracker(
     mappings?: unknown[];
     linearAccounts?: unknown[];
     hasMore?: Record<string, boolean>;
+    detailLabels?: { name: string; color: string | null }[];
+    detailAssignees?: { login: string; name: string | null }[];
   } = {},
 ) {
   mock.state.projects = options.projects ?? [
@@ -341,6 +405,10 @@ function resetTracker(
   mock.state.hasMore = options.hasMore ?? {};
   mock.state.page2Gate = null;
   mock.state.linked = false;
+  mock.state.detailLabels = options.detailLabels ?? null;
+  mock.state.detailAssignees = options.detailAssignees ?? null;
+  mock.state.hideRow = false;
+  mock.state.closed = false;
 }
 
 beforeEach(() => {
@@ -581,6 +649,134 @@ describe("the Issues page", () => {
   });
 });
 
+describe("accounts, filters and detail", () => {
+  it("reads one project through the same-host account the person picks", async () => {
+    resetTracker({
+      accounts: [
+        account(),
+        account({ account_id: "acct_2", username: "bob", display_name: "Bob Example" }),
+      ],
+    });
+    render(<IssuesPage />);
+    await screen.findByText("GitHub · alice");
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Projects" }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "bob" }));
+    expect(await screen.findByText("GitHub · bob")).toBeTruthy();
+    await waitFor(() => {
+      const list = requestsOfType("forge_list_issues");
+      expect(list[list.length - 1]).toMatchObject({
+        type: "forge_list_issues",
+        account_id: "acct_2",
+      });
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /Dark mode flickers/ }));
+    await screen.findByLabelText("Issue title");
+    expect(requestsOfType("forge_get_issue")[0]).toMatchObject({ account_id: "acct_2" });
+    expect(requestsOfType("forge_list_issue_comments")[0]).toMatchObject({
+      account_id: "acct_2",
+    });
+
+    const comment = screen.getByLabelText("New comment");
+    fireEvent.change(comment, { target: { value: "On it." } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() =>
+      expect(requestsOfType("forge_comment_issue")[0]).toMatchObject({ account_id: "acct_2" }),
+    );
+
+    const title = screen.getByLabelText("Issue title");
+    fireEvent.change(title, { target: { value: "Dark mode flickers on load" } });
+    fireEvent.blur(title);
+    await waitFor(() =>
+      expect(requestsOfType("forge_update_issue")[0]).toMatchObject({ account_id: "acct_2" }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /Link to this thread/ }));
+    await waitFor(() =>
+      expect(requestsOfType("link_issue")[0]).toMatchObject({ account_id: "acct_2" }),
+    );
+  });
+
+  it("does not clear the list when the same filter is chosen again", async () => {
+    render(<IssuesPage />);
+    await screen.findByText("#12");
+    fireEvent.click(screen.getByRole("tab", { name: "Closed" }));
+    await waitFor(() =>
+      expect(
+        requestsOfType("forge_list_issues").some(
+          (value) => value.type === "forge_list_issues" && value.filter === "closed",
+        ),
+      ).toBe(true),
+    );
+    expect(await screen.findByText("#12")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Closed" }));
+    expect(screen.getByText("#12")).toBeTruthy();
+    expect(
+      requestsOfType("forge_list_issues").filter(
+        (value) => value.type === "forge_list_issues" && value.filter === "closed",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps comment and reopen actions after the issue leaves the list", async () => {
+    await openIssue();
+    mock.state.hideRow = true;
+    fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reopen issue" })).toBeTruthy());
+    expect(screen.getByLabelText("New comment")).toBeTruthy();
+  });
+
+  it("renders labels and assignees from the fetched detail", async () => {
+    resetTracker({
+      detailLabels: [{ name: "detail-only-label", color: null }],
+      detailAssignees: [{ login: "carol-detail", name: null }],
+    });
+    await openIssue();
+    expect(await screen.findByText("detail-only-label")).toBeTruthy();
+    expect(screen.getByText("carol-detail")).toBeTruthy();
+    expect(screen.queryByText("d73a4a")).toBeNull();
+  });
+
+  it("names Bitbucket Cloud's removed tracker per project and reads nothing", async () => {
+    const bitbucketRepo: ForgeRepoRef = {
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      owner: "acme",
+      repo: "widget",
+    };
+    resetTracker({
+      accounts: [
+        account({ account_id: "acct_bb", forge: "bitbucket", base_url: bitbucketRepo.base_url }),
+      ],
+      capabilities: [
+        capabilityEntry("bitbucket", {
+          ...issueCapabilities(),
+          read: false,
+          write: false,
+          comments: false,
+          labels: false,
+          assignees: false,
+          close_reason: false,
+          search: false,
+          assigned_filter: false,
+          created_filter: false,
+          mentioning_filter: false,
+          linked_pull_requests: false,
+        }),
+      ],
+      repos: { "/work/widget": bitbucketRepo },
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText(/Bitbucket Cloud has no issue API/)).toBeTruthy();
+    expect(screen.getByText(/pull requests only/)).toBeTruthy();
+    expect(requestsOfType("forge_list_issues")).toHaveLength(0);
+  });
+});
+
 describe("issue paging", () => {
   it("stores Linear's cursor from page one and uses it for Load more", async () => {
     resetTracker({
@@ -670,5 +866,53 @@ describe("issue paging", () => {
     });
     release();
     await waitFor(() => expect(screen.queryByText("Stale page row")).toBeNull());
+  });
+
+  it("pages a Linear discussion with comments_after and keeps both pages", async () => {
+    resetTracker({
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText("Linear · Acme")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
+    expect(await screen.findByText("First page comment.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load more comments" }));
+    expect(await screen.findByText("Second page comment.")).toBeTruthy();
+    expect(screen.getByText("First page comment.")).toBeTruthy();
+    expect(
+      requestsOfType("linear_get_issue").some(
+        (value) => value.type === "linear_get_issue" && value.comments_after === "lc_2",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("Linear state families", () => {
+  it("shows a duplicate as closed", () => {
+    const row = linearIssueRow("lin_1", {
+      id: "iss_dup",
+      identifier: "ENG-9",
+      title: "Replaced by ENG-1",
+      state_name: "Duplicate",
+      state_type: "duplicate",
+      team_id: "team_1",
+      team_key: "ENG",
+      assignees: [],
+      labels: [],
+      updated_at: "2026-01-02T00:00:00Z",
+      url: "https://linear.app/acme/issue/ENG-9",
+    });
+    expect(row.state).toBe("closed");
   });
 });

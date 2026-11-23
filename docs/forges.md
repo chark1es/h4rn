@@ -375,8 +375,10 @@ locally: the provider's diff (or changed-file list) is read and sliced by
 The Issues page reads the tracker behind every visible project's forge
 remote, grouped by the account the daemon reads it with. Every read and write
 names that account, so two connections on one forge (for example a company
-GitHub Enterprise host and github.com) each use their own credential. Open/
-Closed and involvement filters (assigned, opened by you, mentioning you) use
+GitHub Enterprise host and github.com) each use their own credential. When
+two accounts serve the same host, the Projects menu offers the account choice
+per project, and listing, detail, comments, writes and links all use the
+chosen one. Open/Closed and involvement filters (assigned, opened by you, mentioning you) use
 the provider's own query where it has one: GitHub's issue search, GitLab's
 `scope`, Gitea/Forgejo's `assigned_by`/`created_by`/`mentioned_by` login
 parameters (the login is read from `/user`), and Azure Boards' WIQL `@Me`
@@ -387,40 +389,53 @@ asks the tracker (`is:issue`, `search=`, `q=`, WIQL `CONTAINS`), and **Load
 more** reads the next page.
 
 Bitbucket Cloud exposes no issues: Atlassian removed its native issue tracker
-API in August 2026, so its capability row is false and a request answers
-`unsupported` with that reason. Azure DevOps has no issue collection separate
-from Boards, so this surface reads work items of type `Issue` and `Bug`.
-Their states are read from
+API in August 2026, so its capability row is false, a request answers
+`unsupported` with that reason, and each project whose remote is Bitbucket
+shows that note in the Issues page instead of sending a request. Azure DevOps
+has no issue collection separate from Boards, so this surface reads work items
+of type `Issue` and `Bug`, discovered from the project's own type catalogue
+(`_apis/wit/workitemtypes`). A process need not define both: Basic has no
+`Bug`, Scrum has no `Issue`, and a type whose states endpoint answers 404 is
+skipped as long as one type remains. States are read per type from
 `_apis/wit/workitemtypes/{type}/states`; the state's category, not its name,
-decides whether an item is finished (`Done` on Scrum or Basic, `Closed` on
-Agile), and closing or reopening moves to the Completed or In Progress
-category's state. Tags are shown as labels. A closed item's `closed_at` is
-`Microsoft.VSTS.Common.ClosedDate` (or the state-change date), never the last
-edit.
+decides whether an item is finished (`Done` on Scrum, `Closed` on Agile), and
+a type's own categories decide the state it moves to when closing or
+reopening. WIQL filters type and state together, so a closed `Issue` and a
+closed `Bug` each use that type's own finished state names. Tags are shown as
+labels. A closed item's `closed_at` is `Microsoft.VSTS.Common.ClosedDate` (or
+the state-change date), never the last edit.
 
 Each row comes from the tracker. GitHub's `/issues` list also returns pull
 requests, so those rows are removed. Issue detail shows the body, state,
 labels, assignees, comments and the pull requests the tracker reports
 (GitHub's timeline, GitLab's related merge requests, Azure's
-`vstfs:///Git/PullRequestId` artifact links, decoded and linked to the
-repository's web URL). Comment paging carries the provider's continuation
-through `ForgeListIssueComments.cursor` and `ForgeIssueCommentPage.next_cursor`
+`vstfs:///Git/PullRequestId` artifact links). An Azure link names its own
+project and repository ids, which are resolved to that repository's web URL,
+so a pull request in another repository links there rather than to the
+checked-out one. Comment paging carries the provider's continuation through
+`ForgeListIssueComments.cursor` and `ForgeIssueCommentPage.next_cursor`
 (GitHub's page number, GitLab/Gitea page numbers, Azure's
 `continuationToken`); the discussion offers **Load more comments** until the
-tracker stops returning one.
+tracker stops returning one. Gitea/Forgejo clamp a page to their configured
+size (50 by default), so the daemon pages at that size and treats a full page
+as another page.
 
 Writes are `ForgeCommentIssue` and `ForgeUpdateIssue`: comment, title, body,
 labels, assignees, and close/reopen. Gitea/Forgejo replace labels through
 `PUT /repos/{owner}/{repo}/issues/{index}/labels` with label ids, not through
-the issue PATCH body. The daemon only sends the fields the caller named, so
-an edit never clears the others. GitHub closes with a `state_reason`, and a
-duplicate close also sends `duplicate_issue_id`, which the UI collects with a
-number picker. GitLab, Gitea/Forgejo and Azure record no reason and never
-receive one. Only the project's designated remote (`origin`, or its first
-forge remote) is writable: a fork whose `upstream` is the parent can read the
-parent but not write to it. An issue read through a repository no registered
-project checks out is marked read-only and every write is refused. Ownership
-is computed once per request off the async runtime and cached briefly.
+the issue PATCH body; the daemon reads the label catalogue page by page until
+every requested name resolves. The daemon only sends the fields the caller
+named, so an edit never clears the others. GitHub closes with a
+`state_reason`, and a duplicate close also sends `duplicate_issue_id`; the UI
+collects the duplicate's number, and the daemon reads that issue so it can
+send GitHub's 64-bit issue id, which is not the number. GitLab, Gitea/Forgejo
+and Azure record no reason and never receive one. Only the project's
+designated remote (`origin`, or its first forge remote) is writable: a fork
+whose `upstream` is the parent can read the parent but not write to it. An
+issue read through a repository no registered project checks out is marked
+read-only and every write is refused. Ownership runs off the async runtime;
+reads may reuse a brief cache, but every write scans the checkouts again, so
+removing a project or repointing `origin` stops the next write immediately.
 Requests that read are a paired device's `view` scope; comments, edits and
 links need `approve`; connecting Linear needs `admin`.
 
@@ -433,7 +448,11 @@ the OS keychain or the encrypted secret file, and never returns it;
 project there; the Issues page lists that team's issues beside the project's
 forge issues (GraphQL `issues` / `searchIssues`, cursor paging, workflow
 state families), shows their comments and lets you comment
-(`commentCreate`). Linear issues can be linked to threads like forge issues.
+(`commentCreate`). The search document passes the team through
+`searchIssues`'s own `teamId` argument (typed `String`), while the list keeps
+it in the team filter (typed `ID`). Linear's `duplicate` workflow state is a
+closed family, like completed and canceled. Linear issues can be linked to
+threads like forge issues.
 
 ### Thread links
 

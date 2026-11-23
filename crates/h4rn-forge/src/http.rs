@@ -608,17 +608,6 @@ fn token_run_len(value: &str) -> usize {
         .unwrap_or(value.len())
 }
 
-/// Replaces every copy of one configured secret, matching percent escapes
-/// regardless of hex case.
-///
-/// Both sides are normalised with every `%xx` escape uppercased, then every
-/// matching span in the text is replaced. Normalising once up front means a
-/// body that carries the plain value and an uppercase- and a lowercase-escaped
-/// copy has all three removed; uppercasing changes no byte lengths or offsets,
-/// so a match index in the normalised copy is the index to replace in the
-/// original. Scanning the normalised haystack once for every match offset
-/// (instead of re-normalising the remaining text per replacement) keeps a body
-/// that echoes the secret thousands of times linear rather than quadratic.
 /// Redacts a configured credential in every spelling an upstream body can
 /// echo: raw, percent-encoded (either hex case), Base64 or JSON-escaped.
 ///
@@ -632,6 +621,17 @@ pub(crate) fn redact_configured(value: &str, secret: &str) -> String {
     redact(&output)
 }
 
+/// Replaces every copy of one configured secret, matching percent escapes
+/// regardless of hex case.
+///
+/// Both sides are normalised with every `%xx` escape uppercased, then every
+/// matching span in the text is replaced. Normalising once up front means a
+/// body that carries the plain value and an uppercase- and a lowercase-escaped
+/// copy has all three removed; uppercasing changes no byte lengths or offsets,
+/// so a match index in the normalised copy is the index to replace in the
+/// original. Scanning the normalised haystack once for every match offset
+/// (instead of re-normalising the remaining text per replacement) keeps a body
+/// that echoes the secret thousands of times linear rather than quadratic.
 fn redact_secret(value: &str, secret: &str) -> String {
     let needle = normalize_escapes(secret);
     if needle.is_empty() {

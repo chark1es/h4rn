@@ -3,4 +3,4 @@
 /**
  * Linear's workflow state family.
  */
-export type LinearStateType = "backlog" | "unstarted" | "started" | "completed" | "canceled";
+export type LinearStateType = "backlog" | "unstarted" | "started" | "completed" | "canceled" | "duplicate";

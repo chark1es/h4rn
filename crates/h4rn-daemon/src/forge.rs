@@ -659,7 +659,11 @@ impl ForgeService {
     /// that one, is the project's repository: a fork whose `origin` is the
     /// fork and whose `upstream` is the parent must never let an issue write
     /// reach the parent. The git scan runs off the async runtime, and the
-    /// answer is cached briefly because every issue read and write asks.
+    /// answer is cached briefly because every issue read asks.
+    ///
+    /// Writes use [`Self::repo_is_designated_fresh`] instead: a cached
+    /// positive would keep accepting writes after the project was removed or
+    /// its `origin` became a fork.
     pub async fn repo_is_designated(
         &self,
         projects: &[h4rn_protocol::Project],
@@ -675,13 +679,38 @@ impl ForgeService {
         {
             return *owned;
         }
+        let owned = self.scan_designated(projects, repo).await;
+        if let Ok(mut cache) = self.owned_repos.lock() {
+            cache.insert(key, (owned, std::time::Instant::now()));
+        }
+        owned
+    }
+
+    /// The same ownership answer, read from the checkouts again.
+    ///
+    /// Every issue write asks this so a project removal or a changed `origin`
+    /// takes effect on the next write, not after the read cache expires.
+    pub async fn repo_is_designated_fresh(
+        &self,
+        projects: &[h4rn_protocol::Project],
+        repo: &ForgeRepoRef,
+    ) -> bool {
+        self.scan_designated(projects, repo).await
+    }
+
+    /// Scans each project's first remote off the async runtime.
+    async fn scan_designated(
+        &self,
+        projects: &[h4rn_protocol::Project],
+        repo: &ForgeRepoRef,
+    ) -> bool {
         let paths = projects
             .iter()
             .map(|project| project.path.clone())
             .collect::<Vec<_>>();
         let hosts = self.hosts.clone();
         let target = repo.clone();
-        let owned = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             paths.iter().any(|path| {
                 detect_repos(Path::new(path), &hosts)
                     .ok()
@@ -690,11 +719,7 @@ impl ForgeService {
             })
         })
         .await
-        .unwrap_or(false);
-        if let Ok(mut cache) = self.owned_repos.lock() {
-            cache.insert(key, (owned, std::time::Instant::now()));
-        }
-        owned
+        .unwrap_or(false)
     }
 
     /// Lists PRs for one repository.
@@ -1866,5 +1891,115 @@ mod tests {
         };
         assert!(service.repo_is_designated(&projects, &repo("acme")).await);
         assert!(!service.repo_is_designated(&projects, &repo("parent")).await);
+        // Reads may still answer from the brief cache, but the write answer
+        // follows the checkouts: a removed project stops authorising at once.
+        assert!(
+            service.repo_is_designated(&[], &repo("acme")).await,
+            "a read reuses the positive answer"
+        );
+        assert!(
+            !service.repo_is_designated_fresh(&[], &repo("acme")).await,
+            "a write does not"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_issue_write_leaves_exactly_one_audit_entry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": "alice"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/repos/acme/widget/issues/4/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 11,
+                "user": {"login": "alice"},
+                "body": "hi",
+                "created_at": "2026-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v3/repos/acme/widget/issues/4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "number": 4,
+                "title": "New title",
+                "state": "open",
+                "user": {"login": "alice"},
+                "updated_at": "2026-01-01T00:00:00Z",
+                "html_url": "https://github.com/acme/widget/issues/4"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/repos/acme/widget/issues/4/timeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("data dir");
+        let service = ForgeService::open(dir.path()).expect("forge service");
+        service.shutdown();
+        let account = ForgeAccount {
+            account_id: "acct_audit".into(),
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            username: None,
+            display_name: None,
+            scopes: Vec::new(),
+            source: ForgeCredentialSource::Pat,
+            created_at: Utc::now(),
+        };
+        let client: Arc<dyn Forge> =
+            Arc::new(h4rn_forge::GitHubClient::new(&server.uri(), "fixture-token", 120).unwrap());
+        service
+            .finish_add_account(account, "fixture-token", client, None)
+            .await
+            .expect("store the account");
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            owner: "acme".into(),
+            repo: "widget".into(),
+        };
+        service
+            .comment_issue(Some("acct_audit"), &repo, 4, "hi")
+            .await
+            .expect("comment");
+        service
+            .update_issue(
+                Some("acct_audit"),
+                &repo,
+                4,
+                &h4rn_protocol::issues::ForgeIssueUpdate {
+                    title: Some("New title".into()),
+                    ..h4rn_protocol::issues::ForgeIssueUpdate::default()
+                },
+            )
+            .await
+            .expect("update");
+
+        let trail = std::fs::read_to_string(dir.path().join(AUDIT_FILE)).expect("audit trail");
+        let entries = trail
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("entry"))
+            .collect::<Vec<_>>();
+        for action in ["issue.comment", "issue.updated"] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry["action"] == action)
+                    .count(),
+                1,
+                "exactly one {action} entry: {trail}"
+            );
+        }
     }
 }

@@ -14,12 +14,19 @@ All notable changes to h4rn are recorded here. The format follows
   assignees, comments and linked pull requests. Where the account allows it you can comment, edit
   the title and body, replace labels and assignees, and close or reopen (with a reason where the
   tracker records one); a repository no local project owns is read-only, and only the project's
-  designated remote is writable, so a fork never writes to its parent. GitHub, GitLab,
-  Gitea/Forgejo and Azure Boards work items of type Issue/Bug are supported; Bitbucket Cloud
-  removed its issue API in August 2026 and reports issues as unavailable. What each tracker can
-  do comes from its capability row, so the page hides a filter, the labels editor or the
-  close-reason picker where it would fail, and a request that names a comment page carries the
-  provider's continuation. A Linear API key connected under Settings → Source control & issues is
+  designated remote is writable, so a fork never writes to its parent; ownership is read from the
+  checkouts on every write, so removing a project or repointing `origin` takes effect at once
+  rather than after a cache window. Choosing a filter or search that is already applied leaves the
+  list alone, and two accounts on the same host let the person choose which one reads each project
+  in the Projects menu. GitHub, GitLab, Gitea/Forgejo and Azure Boards are supported; Azure reads
+  the work-item types the project actually defines, keyed by type, so a process without `Issue` or
+  without `Bug` still lists, and each type closes on its own finished state. Bitbucket Cloud
+  removed its issue API in August 2026, so each such project shows a note and no request is sent.
+  What each tracker can do comes from its capability row, so the page hides a filter, the labels
+  editor or the close-reason picker where it would fail, and a request that names a comment page
+  carries the provider's continuation (Gitea pages comments at its 50-item limit and reads the
+  whole label catalogue). A GitHub duplicate close resolves the picked number to that issue's own
+  id, and Linear's `duplicate` workflow state shows as closed. A Linear API key connected under Settings → Source control & issues is
   stored like a forge token, never returned and never echoed in an error; pick a team per project
   and its issues appear beside the forge ones, with comments. Issues link to threads through the
   journal, survive a restart, are always read live, and appear with pull requests in the thread's

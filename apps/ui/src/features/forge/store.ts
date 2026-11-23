@@ -365,7 +365,18 @@ export function accountForRepo(
   accounts: ForgeAccount[],
   repo: ForgeRepoRef,
 ): ForgeAccount | undefined {
-  return accounts.find(
+  return accountsForRepo(accounts, repo)[0];
+}
+
+/**
+ * Every account that can read `repo`.
+ *
+ * More than one means the person must choose: two accounts on the same host
+ * are both valid credentials, and the daemon refuses to guess when neither is
+ * named.
+ */
+export function accountsForRepo(accounts: ForgeAccount[], repo: ForgeRepoRef): ForgeAccount[] {
+  return accounts.filter(
     (account) =>
       account.forge === repo.forge && baseUrlsMatch(account.forge, account.base_url, repo.base_url),
   );

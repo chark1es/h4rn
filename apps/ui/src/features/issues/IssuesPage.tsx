@@ -15,10 +15,14 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { accountsForRepo } from "@/features/forge/store";
 import { useProjects } from "@/features/projects/store";
 import type {
   ForgeAccount,
@@ -48,6 +52,7 @@ import {
   issueKey,
   issueStateLabel,
   linearIssueRow,
+  linearStateIsClosed,
   relativeIssueAge,
   type TrackerGroup,
   trackerKey,
@@ -57,6 +62,7 @@ import { notifyThreadIssueLinks } from "./threadLinks";
 const api = () => new IssueApi((request) => getClient().request(request));
 
 const HIDDEN_PROJECTS = "h4rn:issues:hidden-projects";
+const PROJECT_ACCOUNTS = "h4rn:issues:project-accounts";
 
 function readHidden(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -73,6 +79,24 @@ function writeHidden(hidden: Set<string>): void {
     window.localStorage.setItem(HIDDEN_PROJECTS, JSON.stringify([...hidden]));
   } catch {
     // A blocked storage still leaves the toggle working for this session.
+  }
+}
+
+function readProjectAccounts(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(PROJECT_ACCOUNTS);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeProjectAccounts(choices: Record<string, string>): void {
+  try {
+    window.localStorage.setItem(PROJECT_ACCOUNTS, JSON.stringify(choices));
+  } catch {
+    // A blocked storage still leaves the choice working for this session.
   }
 }
 
@@ -145,25 +169,38 @@ export function IssuesPage() {
   const [mappings, setMappings] = useState<LinearProjectTeam[]>([]);
   const [repos, setRepos] = useState<Record<string, ForgeRepoRef>>({});
   const [hidden, setHidden] = useState<Set<string>>(() => readHidden());
+  const [accountChoices, setAccountChoices] = useState<Record<string, string>>(() =>
+    readProjectAccounts(),
+  );
   const [filter, setFilter] = useState<ForgeIssueFilter>("open");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<IssueRow | null>(null);
+  // The chosen row keeps the capabilities it was opened with, so an issue
+  // that a filter change or a close removes from the list keeps its comment
+  // and edit actions.
+  const [selected, setSelected] = useState<{
+    row: IssueRow;
+    capabilities: ForgeIssueCapabilities;
+  } | null>(null);
   const [linked, setLinked] = useState<Set<string>>(new Set());
   const [refresh, setRefresh] = useState(0);
   // Bumped whenever the query changes, so a page that arrives late for a
   // superseded search or filter is discarded instead of spliced in.
   const queryToken = useRef(0);
 
+  // Choosing the filter or search already applied is not a new query: it
+  // must leave the list alone instead of blanking it with no effect to rerun.
   const changeFilter = (next: ForgeIssueFilter) => {
+    if (next === filter) return;
     queryToken.current += 1;
     setGroups([]);
     setFilter(next);
   };
   const runSearch = (term: string) => {
+    if (term === search) return;
     queryToken.current += 1;
     setGroups([]);
     setSearch(term);
@@ -246,11 +283,12 @@ export function IssuesPage() {
     for (const project of visible) {
       const repo = repos[project.id];
       if (!repo) continue;
-      const account = accounts.find(
-        (candidate) =>
-          candidate.forge === repo.forge &&
-          candidate.base_url.replace(/\/$/, "") === repo.base_url.replace(/\/$/, ""),
-      );
+      // Two accounts on one host are both valid; the person's choice for the
+      // project decides, and only the named account is read.
+      const candidates = accountsForRepo(accounts, repo);
+      const account =
+        candidates.find((candidate) => candidate.account_id === accountChoices[project.id]) ??
+        candidates[0];
       if (!account) continue;
       const capabilities = issueCapabilitiesFor("forge", account, forgeCapabilities);
       if (!capabilities.read) continue;
@@ -369,6 +407,7 @@ export function IssuesPage() {
     projects,
     repos,
     hidden,
+    accountChoices,
     filter,
     search,
     refresh,
@@ -483,6 +522,18 @@ export function IssuesPage() {
 
   const filters = ISSUE_FILTERS.filter((item) => filterSupported(groups, item.key));
   const threadId = selectedThreadId;
+  const chooseAccount = (projectId: string, accountId: string) => {
+    setAccountChoices((current) => {
+      const next = { ...current, [projectId]: accountId };
+      writeProjectAccounts(next);
+      return next;
+    });
+  };
+  // Bitbucket Cloud's tracker was removed by Atlassian; each such project
+  // says so instead of sending a request that cannot work.
+  const unavailableProjects = projects
+    .filter((project) => !hidden.has(project.id))
+    .filter((project) => repos[project.id]?.forge === "bitbucket");
 
   return (
     <main className="q-main" aria-label="Issues">
@@ -544,16 +595,41 @@ export function IssuesPage() {
                 No projects yet.
               </p>
             ) : (
-              projects.map((project) => (
-                <DropdownMenuCheckboxItem
-                  key={project.id}
-                  checked={!hidden.has(project.id)}
-                  onCheckedChange={() => toggleProject(project.id)}
-                  onSelect={(event) => event.preventDefault()}
-                >
-                  {project.name}
-                </DropdownMenuCheckboxItem>
-              ))
+              projects.map((project) => {
+                const repo = repos[project.id];
+                const candidates = repo ? accountsForRepo(accounts, repo) : [];
+                const chosen =
+                  candidates.find(
+                    (candidate) => candidate.account_id === accountChoices[project.id],
+                  ) ?? candidates[0];
+                return (
+                  <DropdownMenuGroup key={project.id}>
+                    <DropdownMenuCheckboxItem
+                      checked={!hidden.has(project.id)}
+                      onCheckedChange={() => toggleProject(project.id)}
+                      onSelect={(event) => event.preventDefault()}
+                    >
+                      {project.name}
+                    </DropdownMenuCheckboxItem>
+                    {candidates.length > 1 ? (
+                      <DropdownMenuRadioGroup
+                        value={chosen?.account_id ?? ""}
+                        onValueChange={(accountId) => chooseAccount(project.id, accountId)}
+                        aria-label={`Account for ${project.name}`}
+                      >
+                        {candidates.map((candidate) => (
+                          <DropdownMenuRadioItem
+                            key={candidate.account_id}
+                            value={candidate.account_id}
+                          >
+                            {candidate.username ?? candidate.display_name ?? candidate.account_id}
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    ) : null}
+                  </DropdownMenuGroup>
+                );
+              })
             )}
           </DropdownMenuContent>
         </DropdownMenu>
@@ -571,7 +647,13 @@ export function IssuesPage() {
               {error}
             </div>
           ) : null}
-          {!loading && !error && groups.length === 0 ? (
+          {unavailableProjects.map((project) => (
+            <div key={project.id} className="q-issues-note" role="note">
+              <strong>{project.name}</strong>: Bitbucket Cloud has no issue API. Atlassian removed
+              it in August 2026, so this project shows pull requests only.
+            </div>
+          ))}
+          {!loading && !error && groups.length === 0 && unavailableProjects.length === 0 ? (
             <div className="q-empty q-issues-empty">
               <CircleDotIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
               <h3>No issues to show</h3>
@@ -593,8 +675,8 @@ export function IssuesPage() {
                   key={row.key}
                   type="button"
                   className="q-issue-row"
-                  aria-current={selected?.key === row.key ? "true" : undefined}
-                  onClick={() => setSelected(row)}
+                  aria-current={selected?.row.key === row.key ? "true" : undefined}
+                  onClick={() => setSelected({ row, capabilities: group.capabilities })}
                 >
                   <CircleDotIcon
                     className={row.state === "closed" ? "q-icon s14 q-faint" : "q-icon s14 q-ok"}
@@ -626,14 +708,11 @@ export function IssuesPage() {
         <div className="q-issues-detail">
           {selected ? (
             <IssueDetail
-              key={`${selected.key}:${refresh}`}
-              row={selected}
-              capabilities={
-                groups.find((group) => group.rows.some((row) => row.key === selected.key))
-                  ?.capabilities ?? issueCapabilitiesFor("forge", undefined, forgeCapabilities)
-              }
+              key={`${selected.row.key}:${refresh}`}
+              row={selected.row}
+              capabilities={selected.capabilities}
               threadId={threadId}
-              linked={linked.has(selected.key)}
+              linked={linked.has(selected.row.key)}
               onChanged={() => {
                 setRefresh((value) => value + 1);
               }}
@@ -757,11 +836,23 @@ function IssueDetail({
   const state: ForgeIssueState = summary
     ? "state" in summary
       ? summary.state
-      : summary.state_type === "completed" || summary.state_type === "canceled"
+      : linearStateIsClosed(summary.state_type)
         ? "closed"
         : "open"
     : row.state;
   const webUrl = summary && "url" in summary ? summary.url : (forge?.summary.web_url ?? row.webUrl);
+  // The header reads what the detail returned, so labels and assignees a
+  // stale list row carries never replace the tracker's current answer.
+  const detailAssignees = forge
+    ? forge.summary.assignees.map((person) => person.login)
+    : linear
+      ? linear.summary.assignees
+      : row.assignees;
+  const detailLabels: Array<{ name: string; color: string | null }> = forge
+    ? forge.summary.labels
+    : linear
+      ? linear.summary.labels.map((name) => ({ name, color: null }))
+      : row.labels;
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -940,10 +1031,10 @@ function IssueDetail({
       )}
       <div className="q-issues-detail-meta">
         {summary && "author" in summary && summary.author ? <span>{summary.author}</span> : null}
-        {row.assignees.length > 0 ? <span>{row.assignees.join(", ")}</span> : null}
-        {row.labels.length > 0 ? (
+        {detailAssignees.length > 0 ? <span>{detailAssignees.join(", ")}</span> : null}
+        {detailLabels.length > 0 ? (
           <span className="q-issue-labels">
-            {row.labels.map((label) => (
+            {detailLabels.map((label) => (
               <span key={label.name} className="q-issue-label">
                 {label.name}
               </span>

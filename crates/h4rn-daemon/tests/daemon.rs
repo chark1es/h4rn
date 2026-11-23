@@ -3257,6 +3257,205 @@ async fn a_provider_test_does_not_block_the_connection() {
 }
 
 #[tokio::test]
+async fn an_issue_write_checks_ownership_against_the_checkouts_not_a_cache() {
+    use h4rn_protocol::issues::{ForgeIssueFilter, ForgeIssueUpdate};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "login": "alice",
+            "name": "Alice"
+        })))
+        .mount(&server)
+        .await;
+    // A read populates the ownership cache. A write after this must not
+    // reuse it.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let repo_dir = tempfile::tempdir().expect("repo");
+    git_in(repo_dir.path(), &["init", "-b", "main"]);
+    git_in(
+        repo_dir.path(),
+        &[
+            "remote",
+            "add",
+            "upstream",
+            &format!("{}/parent/widget.git", server.uri()),
+        ],
+    );
+    git_in(
+        repo_dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("{}/acme/widget.git", server.uri()),
+        ],
+    );
+
+    // The mock server stands in for a forge host the daemon knows, so its
+    // URL is what the checkout's remotes name and what ownership compares.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    std::fs::write(
+        data_dir.path().join(h4rn_daemon::forge::HOSTS_FILE),
+        serde_json::to_vec(&serde_json::json!({
+            "hosts": [{
+                "host": "127.0.0.1",
+                "forge": "github",
+                "base_url": server.uri()
+            }]
+        }))
+        .expect("host config"),
+    )
+    .expect("write host config");
+    let daemon = boot_in_dir(
+        data_dir,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        false,
+        None,
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let account = match client
+        .request(ClientRequest::ForgeAddAccount {
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            token: "fixture-token".into(),
+            username: None,
+            source: ForgeCredentialSource::Pat,
+            repository: None,
+        })
+        .await
+        .expect("add the forge account")
+    {
+        ResponseBody::ForgeAccount { account } => account,
+        other => panic!("unexpected account response: {other:?}"),
+    };
+    let project = match client
+        .request(ClientRequest::AddProject {
+            host: host.clone(),
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: repo_dir.path().to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the checkout")
+    {
+        ResponseBody::Project { project } => project,
+        other => panic!("unexpected project response: {other:?}"),
+    };
+
+    let repo = |owner: &str| h4rn_protocol::ForgeRepoRef {
+        forge: ForgeKind::GitHub,
+        base_url: server.uri(),
+        owner: owner.into(),
+        repo: "widget".into(),
+    };
+    client
+        .request(ClientRequest::ForgeListIssues {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("acme"),
+            filter: ForgeIssueFilter::Open,
+            page: 1,
+            query: None,
+        })
+        .await
+        .expect("the designated repository lists");
+
+    // A fork checkout designates its `origin`, never its `upstream`.
+    let comment = client
+        .request(ClientRequest::ForgeCommentIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            number: 4,
+            body: "Should be refused".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(comment.code, ProtoErrorCode::Forbidden);
+    let update = client
+        .request(ClientRequest::ForgeUpdateIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("parent"),
+            number: 4,
+            update: ForgeIssueUpdate {
+                title: Some("Should be refused".into()),
+                ..ForgeIssueUpdate::default()
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(update.code, ProtoErrorCode::Forbidden);
+
+    // The read above cached a positive answer for acme. Moving origin to a
+    // fork must refuse the very next write, not 30 seconds later.
+    git_in(
+        repo_dir.path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            &format!("{}/moved/widget.git", server.uri()),
+        ],
+    );
+    let moved = client
+        .request(ClientRequest::ForgeCommentIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("acme"),
+            number: 4,
+            body: "Should be refused".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(moved.code, ProtoErrorCode::Forbidden);
+
+    // Removing the project must also take effect at once.
+    client
+        .request(ClientRequest::RemoveProject {
+            host,
+            project_id: project.id,
+        })
+        .await
+        .expect("remove the project");
+    let removed = client
+        .request(ClientRequest::ForgeUpdateIssue {
+            account_id: Some(account.account_id.clone()),
+            repo: repo("acme"),
+            number: 4,
+            update: ForgeIssueUpdate {
+                title: Some("Should be refused".into()),
+                ..ForgeIssueUpdate::default()
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(removed.code, ProtoErrorCode::Forbidden);
+
+    let writes = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .into_iter()
+        .filter(|request| request.method.as_str() != "GET")
+        .collect::<Vec<_>>();
+    assert!(writes.is_empty(), "no tracker write was sent: {writes:?}");
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_large_editor_read_is_delivered_whole_on_the_plain_path() {
     // The plain loopback WebSocket has no transport frame bound. The session
     // limit is chosen by the request handler from the connection's origin, so

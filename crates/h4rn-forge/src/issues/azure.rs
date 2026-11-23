@@ -88,17 +88,9 @@ impl StateCategories {
     }
 }
 
-/// Reads the states of both issue work-item types.
-async fn state_categories(
-    http: &ForgeHttp,
-    api: &str,
-    repo: &ForgeRepoRef,
-) -> Result<StateCategories> {
-    let project = project_api(api, repo);
-    let mut categories = StateCategories::default();
-    for kind in ISSUE_TYPES {
-        let url = format!("{project}/_apis/wit/workitemtypes/{kind}/states?api-version=7.1");
-        let value = http.get_json(&url).await?;
+impl StateCategories {
+    fn from_states(value: &Value) -> Self {
+        let mut categories = Self::default();
         for state in value["value"].as_array().into_iter().flatten() {
             let name = text(state, "name");
             let category = text(state, "category");
@@ -123,13 +115,109 @@ async fn state_categories(
                 _ => {}
             }
         }
+        categories
     }
-    if categories.by_name.is_empty() {
+}
+
+/// Every issue work-item type the project defines, with its own states.
+///
+/// Azure processes do not share a type catalogue: Basic has no `Bug`, Scrum
+/// has no `Issue`, and each type can name its finished state differently.
+/// States are therefore kept per type, and an operation on one work item uses
+/// that item's own type.
+#[derive(Clone, Debug, Default)]
+struct TypeStates {
+    by_type: HashMap<String, StateCategories>,
+    order: Vec<String>,
+}
+
+impl TypeStates {
+    fn is_closed(&self, kind: &str, state: &str) -> bool {
+        match self.by_type.get(kind) {
+            Some(categories) => categories.is_closed(state),
+            // A work item type the project has since changed: fall back to
+            // every known type rather than reporting a closed item as open.
+            None => self
+                .by_type
+                .values()
+                .any(|categories| categories.is_closed(state)),
+        }
+    }
+
+    fn closed_states(&self, kind: &str) -> &[String] {
+        self.by_type
+            .get(kind)
+            .map(|categories| categories.closed.as_slice())
+            .unwrap_or_default()
+    }
+}
+
+fn is_not_found(error: &ForgeError) -> bool {
+    match error {
+        ForgeError::NotFound(_) => true,
+        ForgeError::Http { status, .. } => *status == 404,
+        _ => false,
+    }
+}
+
+/// Reads one work-item type's states, or `None` when the process has no such
+/// type (Azure answers 404).
+async fn state_categories_for(
+    http: &ForgeHttp,
+    project: &str,
+    kind: &str,
+) -> Result<Option<StateCategories>> {
+    let url = format!("{project}/_apis/wit/workitemtypes/{kind}/states?api-version=7.1");
+    match http.get_json(&url).await {
+        Ok(value) => {
+            let categories = StateCategories::from_states(&value);
+            Ok((!categories.by_name.is_empty()).then_some(categories))
+        }
+        Err(error) if is_not_found(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Discovers the project's issue work-item types and reads each one's states.
+///
+/// A type whose states endpoint 404s is not defined by this process and is
+/// skipped; at least one type must remain.
+async fn type_states(http: &ForgeHttp, api: &str, repo: &ForgeRepoRef) -> Result<TypeStates> {
+    let project = project_api(api, repo);
+    let available = http
+        .get_json(&format!(
+            "{project}/_apis/wit/workitemtypes?api-version=7.1"
+        ))
+        .await?;
+    let mut order: Vec<String> = Vec::new();
+    for kind in available["value"].as_array().into_iter().flatten() {
+        let name = text(kind, "name");
+        let reference = text(kind, "referenceName");
+        let documented = ISSUE_TYPES.iter().any(|known| *known == name)
+            || matches!(reference.as_str(), "Microsoft.Issue" | "Microsoft.Bug");
+        if name.is_empty() || !documented || order.contains(&name) {
+            continue;
+        }
+        order.push(name);
+    }
+    if order.is_empty() {
         return Err(ForgeError::Parse(
-            "Azure Boards returned no work-item states for Issue or Bug".into(),
+            "this Azure Boards process has no Issue or Bug work-item type".into(),
         ));
     }
-    Ok(categories)
+    let mut by_type = HashMap::new();
+    for kind in &order {
+        if let Some(categories) = state_categories_for(http, &project, kind).await? {
+            by_type.insert(kind.clone(), categories);
+        }
+    }
+    order.retain(|kind| by_type.contains_key(kind));
+    if by_type.is_empty() {
+        return Err(ForgeError::Parse(
+            "Azure Boards returned no states for this project's Issue or Bug work-item type".into(),
+        ));
+    }
+    Ok(TypeStates { by_type, order })
 }
 
 async fn fetch_work_items(
@@ -158,44 +246,67 @@ fn quoted_list(names: &[String]) -> String {
         .join(", ")
 }
 
+/// Builds the WIQL, filtering each work-item type by its own state names.
+///
+/// `[System.State] IN ('Done')` is wrong for an `Issue` in a process whose
+/// finished state is `Closed`, so the state clause is scoped to the type.
 fn query_text(
     filter: ForgeIssueFilter,
     search: Option<&str>,
-    categories: &StateCategories,
+    states: &TypeStates,
 ) -> Result<String> {
-    let work_types = ISSUE_TYPES
-        .iter()
-        .map(|kind| format!("'{kind}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut clauses = vec![
-        "[System.TeamProject] = @project".to_owned(),
-        format!("[System.WorkItemType] IN ({work_types})"),
-    ];
-    match filter {
-        ForgeIssueFilter::Open | ForgeIssueFilter::Assigned | ForgeIssueFilter::Created => {
-            if !categories.closed.is_empty() {
-                clauses.push(format!(
-                    "[System.State] NOT IN ({})",
-                    quoted_list(&categories.closed)
+    let mut clauses = vec!["[System.TeamProject] = @project".to_owned()];
+    let mut type_clauses = Vec::new();
+    for kind in &states.order {
+        let closed = states.closed_states(kind);
+        let type_clause = match filter {
+            ForgeIssueFilter::Open | ForgeIssueFilter::Assigned | ForgeIssueFilter::Created => {
+                if closed.is_empty() {
+                    format!("[System.WorkItemType] = '{kind}'")
+                } else {
+                    format!(
+                        "([System.WorkItemType] = '{kind}' AND [System.State] NOT IN ({}))",
+                        quoted_list(closed)
+                    )
+                }
+            }
+            ForgeIssueFilter::Closed => {
+                if closed.is_empty() {
+                    continue;
+                }
+                format!(
+                    "([System.WorkItemType] = '{kind}' AND [System.State] IN ({}))",
+                    quoted_list(closed)
+                )
+            }
+            ForgeIssueFilter::All => format!("[System.WorkItemType] = '{kind}'"),
+            ForgeIssueFilter::Mentioning => {
+                return Err(ForgeError::Unsupported(
+                    "Azure Boards has no issue filter for mentions; use search".into(),
                 ));
             }
-        }
-        ForgeIssueFilter::Closed => {
-            if !categories.closed.is_empty() {
-                clauses.push(format!(
-                    "[System.State] IN ({})",
-                    quoted_list(&categories.closed)
-                ));
-            }
-        }
-        ForgeIssueFilter::All => {}
-        ForgeIssueFilter::Mentioning => {
-            return Err(ForgeError::Unsupported(
-                "Azure Boards has no issue filter for mentions; use search".into(),
-            ));
-        }
+        };
+        type_clauses.push(type_clause);
     }
+    // No type can match a closed prompt because no known state closes one.
+    let type_clause = if type_clauses.is_empty() {
+        if filter == ForgeIssueFilter::Closed {
+            "[System.Id] = 0".to_owned()
+        } else {
+            format!(
+                "[System.WorkItemType] IN ({})",
+                states
+                    .order
+                    .iter()
+                    .map(|kind| format!("'{kind}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    } else {
+        type_clauses.join(" OR ")
+    };
+    clauses.push(format!("({type_clause})"));
     match filter {
         ForgeIssueFilter::Assigned => clauses.push("[System.AssignedTo] = @Me".into()),
         ForgeIssueFilter::Created => clauses.push("[System.CreatedBy] = @Me".into()),
@@ -222,8 +333,8 @@ pub(crate) async fn list(
 ) -> Result<ForgeIssuePage> {
     validate_repo(repo)?;
     let page = page.max(1);
-    let categories = state_categories(http, api, repo).await?;
-    let query = query_text(filter, search, &categories)?;
+    let states = type_states(http, api, repo).await?;
+    let query = query_text(filter, search, &states)?;
     let project = project_api(api, repo);
     let value = http
         .post_json(&wit_query(&project), &json!({"query": query}))
@@ -249,7 +360,7 @@ pub(crate) async fn list(
         repo: repo.clone(),
         issues: items
             .iter()
-            .filter_map(|item| map_summary(repo, item, &categories))
+            .filter_map(|item| map_summary(repo, item, &states))
             .collect(),
         page,
         has_more: ids.len() > end,
@@ -264,13 +375,22 @@ pub(crate) async fn get(
     number: u32,
 ) -> Result<ForgeIssue> {
     validate_repo(repo)?;
-    let url = format!(
-        "{}/_apis/wit/workitems/{number}?$expand=relations&api-version=7.1",
-        project_api(api, repo)
-    );
+    let project = project_api(api, repo);
+    let url = format!("{project}/_apis/wit/workitems/{number}?$expand=relations&api-version=7.1");
     let value = http.get_json(&url).await?;
-    let categories = state_categories(http, api, repo).await?;
-    map_issue(repo, &value, &categories)
+    let kind = text(&value["fields"], "System.WorkItemType");
+    let categories = state_categories_for(http, &project, &kind)
+        .await?
+        .ok_or_else(|| {
+            ForgeError::Parse(format!(
+                "Azure Boards has no work-item type {kind} to read the item's states"
+            ))
+        })?;
+    let states = TypeStates {
+        by_type: HashMap::from([(kind.clone(), categories)]),
+        order: vec![kind],
+    };
+    map_issue(http, api, repo, &value, &states).await
 }
 
 /// Reads one work item's comments.
@@ -356,9 +476,23 @@ pub(crate) async fn update(
         patch.push(json!({"op": "add", "path": "/fields/System.Description", "value": body}));
     }
     if let Some(state) = update.state {
-        // Scrum and Basic call the finished state `Done`; only the category
-        // is portable across processes.
-        let categories = state_categories(http, api, repo).await?;
+        // The item's own type decides which state names exist: Scrum and
+        // Basic call the finished state `Done`, Agile calls it `Closed`, and
+        // a project may define either type.
+        let project = project_api(api, repo);
+        let current = http
+            .get_json(&format!(
+                "{project}/_apis/wit/workitems/{number}?api-version=7.1"
+            ))
+            .await?;
+        let kind = text(&current["fields"], "System.WorkItemType");
+        let categories = state_categories_for(http, &project, &kind)
+            .await?
+            .ok_or_else(|| {
+                ForgeError::Parse(format!(
+                    "Azure Boards has no work-item type {kind} to read the item's states"
+                ))
+            })?;
         let target = match state {
             ForgeIssueState::Closed => categories.close_state(),
             ForgeIssueState::Open => categories.reopen_state(),
@@ -406,24 +540,27 @@ pub(crate) async fn update(
     get(http, api, repo, number).await
 }
 
-fn map_issue(
+async fn map_issue(
+    http: &ForgeHttp,
+    api: &str,
     repo: &ForgeRepoRef,
     value: &Value,
-    categories: &StateCategories,
+    states: &TypeStates,
 ) -> Result<ForgeIssue> {
-    let summary = map_summary(repo, value, categories)
+    let summary = map_summary(repo, value, states)
         .ok_or_else(|| ForgeError::Parse("Azure DevOps returned an incomplete work item".into()))?;
     let closed = summary.state == ForgeIssueState::Closed;
-    let linked_pull_requests = value["relations"]
+    let mut linked_pull_requests = Vec::new();
+    for relation in value["relations"]
         .as_array()
-        .map(|relations| {
-            relations
-                .iter()
-                .filter(|relation| relation["rel"].as_str() == Some("ArtifactLink"))
-                .filter_map(|relation| map_linked_pr(repo, relation))
-                .collect()
-        })
-        .unwrap_or_default();
+        .into_iter()
+        .flatten()
+        .filter(|relation| relation["rel"].as_str() == Some("ArtifactLink"))
+    {
+        if let Some(linked) = map_linked_pr(http, api, relation).await {
+            linked_pull_requests.push(linked);
+        }
+    }
     Ok(ForgeIssue {
         summary,
         body: text(&value["fields"], "System.Description"),
@@ -452,10 +589,11 @@ fn map_issue(
 fn map_summary(
     repo: &ForgeRepoRef,
     value: &Value,
-    categories: &StateCategories,
+    states: &TypeStates,
 ) -> Option<ForgeIssueSummary> {
     let fields = &value["fields"];
     let state = text(fields, "System.State");
+    let kind = text(fields, "System.WorkItemType");
     let web_url = optional_text(&value["_links"]["html"], "href").unwrap_or_else(|| {
         format!(
             "{}/{}/_workitems/edit/{}",
@@ -468,7 +606,7 @@ fn map_summary(
         repo: repo.clone(),
         number: value["id"].as_u64()? as u32,
         title: text(fields, "System.Title"),
-        state: if categories.is_closed(&state) {
+        state: if states.is_closed(&kind, &state) {
             ForgeIssueState::Closed
         } else {
             ForgeIssueState::Open
@@ -564,31 +702,61 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// The browser URL of a repository an artifact link names.
+///
+/// The link carries the team project id and repository id, and the pull
+/// request may live in a different repository than the work item. Azure
+/// resolves the ids to the repository's own `webUrl`; a failure falls back to
+/// the ids, which Azure also accepts in a browser URL.
+async fn repository_web_url(
+    http: &ForgeHttp,
+    api: &str,
+    project: &str,
+    repository: &str,
+) -> Option<String> {
+    let url = format!(
+        "{}/{}/_apis/git/repositories/{}?api-version=7.1",
+        api.trim_end_matches('/'),
+        encode(project),
+        encode(repository)
+    );
+    let value = http.get_json(&url).await.ok()?;
+    optional_text(&value, "webUrl").filter(|url| !url.is_empty())
+}
+
 /// Parses a documented `vstfs:///Git/PullRequestId/{project}%2F{repo}%2F{pr}`
-/// artifact link. The web URL is built from the repository being read, not
-/// trusted from the link.
-fn map_linked_pr(repo: &ForgeRepoRef, relation: &Value) -> Option<ForgeIssueLinkedPr> {
+/// artifact link and points it at that repository's web URL, which may differ
+/// from the repository checked out.
+async fn map_linked_pr(
+    http: &ForgeHttp,
+    api: &str,
+    relation: &Value,
+) -> Option<ForgeIssueLinkedPr> {
     let url = optional_text(relation, "url")?;
     let artifact = url.strip_prefix("vstfs:///Git/PullRequestId/")?;
     let decoded = percent_decode(artifact);
     let mut parts = decoded.split('/');
-    let (Some(_project), Some(_repository), Some(number)) =
+    let (Some(project), Some(repository), Some(number)) =
         (parts.next(), parts.next(), parts.next())
     else {
         return None;
     };
     let number = number.parse::<u32>().ok()?;
+    let web_url = match repository_web_url(http, api, project, repository).await {
+        Some(web_url) => format!("{}/pullrequest/{number}", web_url.trim_end_matches('/')),
+        None => format!(
+            "{}/{}/_git/{}/pullrequest/{number}",
+            api.trim_end_matches('/'),
+            encode(project),
+            encode(repository)
+        ),
+    };
     Some(ForgeIssueLinkedPr {
         number,
         title: optional_text(&relation["attributes"], "name")
             .unwrap_or_else(|| format!("Pull request #{number}")),
         state: None,
-        web_url: format!(
-            "{}/{}/_git/{}/pullrequest/{number}",
-            repo.base_url.trim_end_matches('/'),
-            encode(&repo.owner),
-            encode(&repo.repo)
-        ),
+        web_url,
     })
 }
 
@@ -596,34 +764,66 @@ fn map_linked_pr(repo: &ForgeRepoRef, relation: &Value) -> Option<ForgeIssueLink
 mod tests {
     use super::*;
 
-    fn scrum() -> StateCategories {
+    fn categories(states: &[(&str, &str)]) -> StateCategories {
         let mut categories = StateCategories::default();
-        for (name, category) in [
-            ("New", PROPOSED),
-            ("Active", IN_PROGRESS),
-            ("Resolved", "Resolved"),
-            ("Done", COMPLETED),
-            ("Removed", "Removed"),
-        ] {
-            categories.by_name.insert(name.into(), category.into());
-            match category {
+        for (name, category) in states {
+            categories
+                .by_name
+                .insert((*name).into(), (*category).into());
+            match *category {
                 COMPLETED | "Removed" => categories.push_closed(name),
                 _ => categories.push_open(name),
             }
-            match category {
+            match *category {
                 COMPLETED if categories.completed.is_none() => {
-                    categories.completed = Some(name.into());
+                    categories.completed = Some((*name).into());
                 }
                 IN_PROGRESS if categories.in_progress.is_none() => {
-                    categories.in_progress = Some(name.into());
+                    categories.in_progress = Some((*name).into());
                 }
                 PROPOSED if categories.proposed.is_none() => {
-                    categories.proposed = Some(name.into());
+                    categories.proposed = Some((*name).into());
                 }
                 _ => {}
             }
         }
         categories
+    }
+
+    fn scrum() -> StateCategories {
+        categories(&[
+            ("New", PROPOSED),
+            ("Active", IN_PROGRESS),
+            ("Resolved", "Resolved"),
+            ("Done", COMPLETED),
+            ("Removed", "Removed"),
+        ])
+    }
+
+    fn bug_types() -> TypeStates {
+        TypeStates {
+            by_type: HashMap::from([("Bug".to_owned(), scrum())]),
+            order: vec!["Bug".to_owned()],
+        }
+    }
+
+    /// Basic has only an Issue type; Scrum has only a Bug. Agile names the
+    /// finished state Closed, while Scrum's Bug calls it Done.
+    fn two_types() -> TypeStates {
+        TypeStates {
+            by_type: HashMap::from([
+                (
+                    "Issue".to_owned(),
+                    categories(&[
+                        ("To Do", PROPOSED),
+                        ("Doing", IN_PROGRESS),
+                        ("Closed", COMPLETED),
+                    ]),
+                ),
+                ("Bug".to_owned(), scrum()),
+            ]),
+            order: vec!["Issue".to_owned(), "Bug".to_owned()],
+        }
     }
 
     fn repo() -> ForgeRepoRef {
@@ -642,12 +842,13 @@ mod tests {
                 "id": 3,
                 "fields": {
                     "System.State": state,
+                    "System.WorkItemType": "Bug",
                     "System.ChangedDate": "2026-01-01T00:00:00Z",
                     "System.CreatedDate": "2026-01-01T00:00:00Z"
                 }
             });
             assert_eq!(
-                map_summary(&repo(), &value, &scrum()).map(|issue| issue.state),
+                map_summary(&repo(), &value, &bug_types()).map(|issue| issue.state),
                 Some(ForgeIssueState::Closed),
                 "{state}"
             );
@@ -656,52 +857,157 @@ mod tests {
         // because a different process calls its open state `New`.
         let value = json!({
             "id": 3,
-            "fields": {"System.State": "Active", "System.ChangedDate": "2026-01-01T00:00:00Z"}
+            "fields": {
+                "System.State": "Active",
+                "System.WorkItemType": "Bug",
+                "System.ChangedDate": "2026-01-01T00:00:00Z"
+            }
         });
         assert_eq!(
-            map_summary(&repo(), &value, &scrum()).map(|issue| issue.state),
+            map_summary(&repo(), &value, &bug_types()).map(|issue| issue.state),
             Some(ForgeIssueState::Open)
         );
-        assert_eq!(scrum().close_state(), Some("Done"));
-        assert_eq!(scrum().reopen_state(), Some("Active"));
+        assert_eq!(bug_types().by_type["Bug"].close_state(), Some("Done"));
+        assert_eq!(bug_types().by_type["Bug"].reopen_state(), Some("Active"));
     }
 
     #[test]
-    fn the_filters_name_the_processes_own_states() {
-        let open = query_text(ForgeIssueFilter::Open, None, &scrum()).unwrap();
+    fn each_type_is_closed_by_its_own_finished_state() {
+        let states = two_types();
+        for (kind, state, closed) in [
+            ("Issue", "Closed", true),
+            ("Issue", "Done", false),
+            ("Bug", "Done", true),
+            ("Bug", "Closed", false),
+        ] {
+            assert_eq!(states.is_closed(kind, state), closed, "{kind} {state}");
+        }
+        assert_eq!(states.by_type["Issue"].close_state(), Some("Closed"));
+        assert_eq!(states.by_type["Bug"].close_state(), Some("Done"));
+    }
+
+    #[test]
+    fn the_filters_name_each_types_own_states() {
+        let open = query_text(ForgeIssueFilter::Open, None, &bug_types()).unwrap();
         assert!(
-            open.contains("[System.State] NOT IN ('Done', 'Removed')"),
+            open.contains(
+                "[System.WorkItemType] = 'Bug' AND [System.State] NOT IN ('Done', 'Removed')"
+            ),
             "{open}"
         );
-        let closed = query_text(ForgeIssueFilter::Closed, None, &scrum()).unwrap();
+        let closed = query_text(ForgeIssueFilter::Closed, None, &two_types()).unwrap();
         assert!(
-            closed.contains("[System.State] IN ('Done', 'Removed')"),
+            closed.contains("[System.WorkItemType] = 'Issue' AND [System.State] IN ('Closed')"),
+            "{closed}"
+        );
+        assert!(
+            closed.contains(
+                "[System.WorkItemType] = 'Bug' AND [System.State] IN ('Done', 'Removed')"
+            ),
             "{closed}"
         );
     }
 
-    #[test]
-    fn a_pull_request_artifact_link_is_decoded_and_url_built_from_the_repo() {
+    fn azure_http(server: &wiremock::MockServer) -> ForgeHttp {
+        ForgeHttp::new(
+            h4rn_protocol::ForgeKind::AzureDevOps,
+            &server.uri(),
+            None,
+            "application/json",
+            600,
+        )
+        .expect("http")
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_artifact_link_resolves_a_different_repository() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let other_repo = format!("{}/other/_git/other", server.uri());
+        Mock::given(method("GET"))
+            .and(path(
+                "/acme/6f1c2e40-aaaa-bbbb-cccc-0123456789ab/_apis/git/repositories/9d2a1b7c-1111-2222-3333-444455556666",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"webUrl": other_repo})),
+            )
+            .mount(&server)
+            .await;
         let relation = json!({
             "rel": "ArtifactLink",
             "url": "vstfs:///Git/PullRequestId/6f1c2e40-aaaa-bbbb-cccc-0123456789ab%2F9d2a1b7c-1111-2222-3333-444455556666%2F42",
             "attributes": {"name": "Pull request 42"}
         });
-        let linked = map_linked_pr(&repo(), &relation).expect("linked");
+        let linked = map_linked_pr(
+            &azure_http(&server),
+            &format!("{}/acme", server.uri()),
+            &relation,
+        )
+        .await
+        .expect("linked");
         assert_eq!(linked.number, 42);
         assert_eq!(
             linked.web_url,
-            "https://dev.azure.com/acme/Platform/_git/widget/pullrequest/42"
+            format!("{other_repo}/pullrequest/42"),
+            "the link points at the artifact's repository, not the checkout"
         );
     }
 
-    #[test]
-    fn an_http_relation_is_not_a_documented_pr_artifact() {
+    #[tokio::test]
+    async fn a_pull_request_artifact_link_falls_back_to_its_repository_ids() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/acme/6f1c2e40-aaaa-bbbb-cccc-0123456789ab/_apis/git/repositories/9d2a1b7c-1111-2222-3333-444455556666",
+            ))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "message": "not found"
+            })))
+            .mount(&server)
+            .await;
+        let relation = json!({
+            "rel": "ArtifactLink",
+            "url": "vstfs:///Git/PullRequestId/6f1c2e40-aaaa-bbbb-cccc-0123456789ab%2F9d2a1b7c-1111-2222-3333-444455556666%2F42"
+        });
+        let linked = map_linked_pr(
+            &azure_http(&server),
+            &format!("{}/acme", server.uri()),
+            &relation,
+        )
+        .await
+        .expect("linked");
+        assert_eq!(
+            linked.web_url,
+            format!(
+                "{}/acme/6f1c2e40-aaaa-bbbb-cccc-0123456789ab/_git/9d2a1b7c-1111-2222-3333-444455556666/pullrequest/42",
+                server.uri()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_relation_is_not_a_documented_pr_artifact() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
         let relation = json!({
             "rel": "ArtifactLink",
             "url": "https://dev.azure.com/acme/Platform/_git/widget/pullrequest/9"
         });
-        assert!(map_linked_pr(&repo(), &relation).is_none());
+        assert!(
+            map_linked_pr(
+                &azure_http(&server),
+                &format!("{}/acme", server.uri()),
+                &relation
+            )
+            .await
+            .is_none()
+        );
     }
 
     #[test]
@@ -718,7 +1024,7 @@ mod tests {
 
     #[test]
     fn wiql_escapes_quotes() {
-        let query = query_text(ForgeIssueFilter::Open, Some("it's broken"), &scrum()).unwrap();
+        let query = query_text(ForgeIssueFilter::Open, Some("it's broken"), &bug_types()).unwrap();
         assert!(query.contains("it''s broken"));
     }
 }

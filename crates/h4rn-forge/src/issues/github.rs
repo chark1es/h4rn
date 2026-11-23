@@ -279,10 +279,21 @@ pub(crate) async fn update(
             if reason == ForgeIssueCloseReason::Duplicate {
                 let duplicate = update.duplicate_issue_id.ok_or_else(|| {
                     ForgeError::InvalidRequest(
-                        "closing as a duplicate needs the issue number it duplicates".into(),
+                        "closing as a duplicate needs the number of the issue it duplicates".into(),
                     )
                 })?;
-                body.insert("duplicate_issue_id".into(), json!(duplicate));
+                // REST names the duplicate by its repository-wide 64-bit id,
+                // not the number the person typed into the picker, so the
+                // number is resolved to the issue first.
+                let picked = http
+                    .get_json(&format!("{repo_url}/issues/{duplicate}"))
+                    .await?;
+                let id = picked["id"].as_u64().ok_or_else(|| {
+                    ForgeError::Parse(format!(
+                        "GitHub did not report the id of issue #{duplicate}"
+                    ))
+                })?;
+                body.insert("duplicate_issue_id".into(), json!(id));
             }
             body.insert(
                 "state_reason".into(),

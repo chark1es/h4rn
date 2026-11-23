@@ -420,7 +420,7 @@ pub(super) async fn handle(
             number,
             body,
         } => {
-            if !repo_is_owned(conn, &repo).await {
+            if !repo_is_owned_fresh(conn, &repo).await {
                 return Err(read_only_repo(&repo));
             }
             conn.state
@@ -436,9 +436,10 @@ pub(super) async fn handle(
             number,
             update,
         } => {
-            // One ownership check per request: the write and the read-only
-            // flag the response carries are the same answer.
-            let read_only = !repo_is_owned(conn, &repo).await;
+            // One fresh ownership check per request: the write and the
+            // read-only flag the response carries are the same answer, and a
+            // cached read answer must never authorise the write.
+            let read_only = !repo_is_owned_fresh(conn, &repo).await;
             if read_only {
                 return Err(read_only_repo(&repo));
             }
@@ -639,6 +640,18 @@ pub(super) async fn handle(
 async fn repo_is_owned(conn: &Connection, repo: &h4rn_protocol::ForgeRepoRef) -> bool {
     let projects = conn.state.projects.list().await;
     conn.state.forge.repo_is_designated(&projects, repo).await
+}
+
+/// The ownership answer for a write, read from the checkouts again.
+///
+/// Reads may reuse the brief cache, but a write must see a project that was
+/// just removed or whose `origin` just became a fork.
+async fn repo_is_owned_fresh(conn: &Connection, repo: &h4rn_protocol::ForgeRepoRef) -> bool {
+    let projects = conn.state.projects.list().await;
+    conn.state
+        .forge
+        .repo_is_designated_fresh(&projects, repo)
+        .await
 }
 
 /// The refusal for a write through a repository no project owns.

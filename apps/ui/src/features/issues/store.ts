@@ -291,6 +291,11 @@ export function forgeIssueRow(accountId: string, issue: ForgeIssueSummary): Issu
   };
 }
 
+/** Linear's completed, canceled and duplicate families are all closed. */
+export function linearStateIsClosed(state: LinearIssueSummary["state_type"]): boolean {
+  return state === "completed" || state === "canceled" || state === "duplicate";
+}
+
 export function linearIssueRow(accountId: string, issue: LinearIssueSummary): IssueRow {
   return {
     key: `linear:${issue.id}`,
@@ -299,7 +304,7 @@ export function linearIssueRow(accountId: string, issue: LinearIssueSummary): Is
     id: issue.id,
     number: issue.identifier,
     title: issue.title,
-    state: issue.state_type === "completed" || issue.state_type === "canceled" ? "closed" : "open",
+    state: linearStateIsClosed(issue.state_type) ? "closed" : "open",
     author: "",
     labels: issue.labels.map((name) => ({ name, color: null })),
     assignees: issue.assignees,

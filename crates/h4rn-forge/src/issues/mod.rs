@@ -211,12 +211,7 @@ impl LinearClient {
 
     /// Validates the key and returns the workspace identity.
     pub async fn viewer(&self) -> Result<LinearViewer> {
-        let data = self
-            .query(
-                "query { viewer { name email organization { name } } }",
-                json!({}),
-            )
-            .await?;
+        let data = self.query(LINEAR_VIEWER_QUERY, json!({})).await?;
         let name = text(&data["viewer"]["organization"], "name");
         let name = if name.is_empty() {
             text(&data["viewer"], "name")
@@ -231,12 +226,7 @@ impl LinearClient {
 
     /// Teams visible to the key.
     pub async fn teams(&self) -> Result<Vec<LinearTeam>> {
-        let data = self
-            .query(
-                "query { teams(first: 100) { nodes { id key name } } }",
-                json!({}),
-            )
-            .await?;
+        let data = self.query(LINEAR_TEAMS_QUERY, json!({})).await?;
         Ok(data["teams"]["nodes"]
             .as_array()
             .map(|teams| {
@@ -390,6 +380,18 @@ impl LinearClient {
     }
 }
 
+/// GraphQL document that validates a key and reads the workspace identity.
+pub const LINEAR_VIEWER_QUERY: &str = r#"
+query {
+  viewer { name email organization { name } }
+}"#;
+
+/// GraphQL document that lists the teams a key can see.
+pub const LINEAR_TEAMS_QUERY: &str = r#"
+query {
+  teams(first: 100) { nodes { id key name } }
+}"#;
+
 /// GraphQL document that lists a team's issues.
 ///
 /// `$teamId` is used inside the filter, and `$filter` carries the state and
@@ -414,14 +416,18 @@ query($teamId: ID!, $filter: IssueFilter!, $first: Int!, $after: String) {
 }"#;
 
 /// GraphQL document that searches a team's issues with the list's filter.
+///
+/// `searchIssues` takes the team as its own `teamId` argument and types it as
+/// `String`, unlike `issues`, whose team filter compares `ID`s. The team is
+/// therefore not repeated inside `$filter`.
 pub const LINEAR_SEARCH_QUERY: &str = r#"
-query($teamId: String!, $term: String!, $filter: IssueFilter!, $first: Int!, $after: String) {
+query($teamId: String, $term: String!, $filter: IssueFilter, $first: Int!, $after: String) {
   searchIssues(
     term: $term
     teamId: $teamId
     first: $first
     after: $after
-    filter: { and: [{ team: { id: { eq: $teamId } } }, $filter] }
+    filter: $filter
   ) {
     nodes {
       id identifier title updatedAt url
@@ -527,6 +533,7 @@ fn state_type(value: &str) -> LinearStateType {
         "started" => LinearStateType::Started,
         "completed" => LinearStateType::Completed,
         "canceled" => LinearStateType::Canceled,
+        "duplicate" => LinearStateType::Duplicate,
         _ => LinearStateType::Unstarted,
     }
 }

@@ -5,6 +5,8 @@
 //! are sent as repository label ids, so a replacement name is resolved first
 //! and an unknown label is reported rather than silently dropped.
 
+use std::collections::HashMap;
+
 use h4rn_protocol::{
     ForgeIssue, ForgeIssueComment, ForgeIssueCommentPage, ForgeIssueFilter, ForgeIssuePage,
     ForgeIssueState, ForgeIssueSummary, ForgeIssueUpdate, ForgeRepoRef,
@@ -16,6 +18,10 @@ use super::{labels, people, state_from_closed};
 use crate::common::{optional_text, parse_datetime, parse_optional_datetime, text, validate_repo};
 use crate::error::{ForgeError, Result};
 use crate::http::ForgeHttp;
+
+/// Gitea's default page size, and the largest page a server returns unless
+/// its `MAX_RESPONSE_ITEMS` setting raises it.
+const PAGE_LIMIT: usize = 50;
 
 fn repo_url(api: &str, repo: &ForgeRepoRef) -> String {
     format!(
@@ -72,7 +78,7 @@ pub(crate) async fn list(
                 _ => "open".to_owned(),
             },
         ),
-        ("limit", "50".to_owned()),
+        ("limit", PAGE_LIMIT.to_string()),
         ("page", page.to_string()),
     ];
     // The repository issue list filters by an explicit username, not a
@@ -100,7 +106,7 @@ pub(crate) async fn list(
             .filter_map(|item| map_summary(repo, item))
             .collect(),
         page,
-        has_more: items.len() == 50,
+        has_more: items.len() >= PAGE_LIMIT,
     })
 }
 
@@ -142,15 +148,18 @@ pub(crate) async fn comments(
         .and_then(|cursor| cursor.parse::<u32>().ok())
         .unwrap_or(1)
         .max(1);
+    // Gitea clamps `limit` to its configured page size (50 by default), so
+    // asking for 100 silently returns 50 and never looks like another page.
+    // Page at the documented default and let a full page mean "more".
     let url = format!(
-        "{}/issues/{number}/comments?limit=100&page={page}",
+        "{}/issues/{number}/comments?limit={PAGE_LIMIT}&page={page}",
         repo_url(api, repo)
     );
     let value = http.get_json(&url).await?;
     let items = value
         .as_array()
         .ok_or_else(|| ForgeError::Parse("Gitea returned no issue comments".into()))?;
-    let has_more = items.len() == 100;
+    let has_more = items.len() >= PAGE_LIMIT;
     Ok(ForgeIssueCommentPage {
         repo: repo.clone(),
         number,
@@ -237,28 +246,50 @@ pub(crate) async fn update(
     get(http, api, repo, number).await
 }
 
+/// Resolves label names to repository label ids, paging through the
+/// catalogue until every requested label has been seen.
 async fn label_ids(http: &ForgeHttp, repo: &str, names: &[String]) -> Result<Vec<u64>> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    let value = http
-        .get_json(&format!("{repo}/labels?limit=50&page=1"))
-        .await?;
-    let available = value.as_array().cloned().unwrap_or_default();
-    let mut ids = Vec::with_capacity(names.len());
-    for name in names {
-        let id = available
-            .iter()
-            .find(|label| text(label, "name").eq_ignore_ascii_case(name))
-            .and_then(|label| label["id"].as_u64())
-            .ok_or_else(|| {
+    let mut resolved: HashMap<String, u64> = HashMap::new();
+    let mut page = 1u32;
+    loop {
+        let value = http
+            .get_json(&format!("{repo}/labels?limit={PAGE_LIMIT}&page={page}"))
+            .await?;
+        let available = value.as_array().cloned().unwrap_or_default();
+        for name in names {
+            if resolved.contains_key(name) {
+                continue;
+            }
+            if let Some(id) = available
+                .iter()
+                .find(|label| text(label, "name").eq_ignore_ascii_case(name))
+                .and_then(|label| label["id"].as_u64())
+            {
+                resolved.insert(name.clone(), id);
+            }
+        }
+        if resolved.len() == names.len() || available.len() < PAGE_LIMIT {
+            break;
+        }
+        // A server that ignores `page` must not spin forever.
+        page += 1;
+        if page > 100 {
+            break;
+        }
+    }
+    names
+        .iter()
+        .map(|name| {
+            resolved.get(name).copied().ok_or_else(|| {
                 ForgeError::InvalidRequest(format!(
                     "the repository has no label called {name}; create it on the forge first"
                 ))
-            })?;
-        ids.push(id);
-    }
-    Ok(ids)
+            })
+        })
+        .collect()
 }
 
 fn map_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgeIssueSummary> {
