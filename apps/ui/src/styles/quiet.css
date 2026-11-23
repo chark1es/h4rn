@@ -6200,6 +6200,25 @@ fieldset.q-seg-fs {
   margin: 0;
   font-size: 12px;
 }
+
+/* Limits a scan hit, in the same quiet voice as the list's metadata. */
+.q-imp-warn {
+  display: grid;
+  gap: 3px;
+  padding: 2px 2px 0;
+}
+.q-imp .q-imp-warn p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--fg-3);
+  text-wrap: pretty;
+}
+
+.q-imp-row:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
 .q-pg-rename {
   height: 28px;
   margin: 0 4px 0 6px;

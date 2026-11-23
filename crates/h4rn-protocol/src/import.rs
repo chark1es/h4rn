@@ -49,17 +49,21 @@ pub struct ImportProject {
     /// Display name: `owner/name` for GitHub, otherwise the folder name.
     pub name: String,
     /// Whether the folder is a git work tree.
+    #[serde(default)]
     pub git: bool,
     /// Newest conversation activity in the group.
     pub last_active: DateTime<Utc>,
     /// Conversations found in this project.
+    #[serde(default)]
     pub conversations: u32,
     /// Conversations that have not been imported yet.
+    #[serde(default)]
     pub importable: u32,
     /// Whether this project is offered already checked.
     ///
     /// A git repository with at least three conversations, active in the last
     /// 30 days, that is not already registered as a project in h4rn.
+    #[serde(default)]
     pub recommended: bool,
 }
 
@@ -67,39 +71,58 @@ pub struct ImportProject {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ImportScan {
     /// Projects, newest activity first.
+    #[serde(default)]
     pub projects: Vec<ImportProject>,
     /// Limits that were hit or folders that could not be read.
+    #[serde(default)]
     pub warnings: Vec<String>,
     /// When the scan ran.
+    #[serde(default = "Utc::now")]
     pub scanned_at: DateTime<Utc>,
+}
+
+fn default_import_id() -> String {
+    String::new()
 }
 
 /// How far an import has got.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ImportProgress {
     /// Identifies one import run.
+    #[serde(default = "default_import_id")]
     pub import_id: String,
     /// Whether the run is still going.
+    #[serde(default)]
     pub running: bool,
     /// Projects finished.
+    #[serde(default)]
     pub projects_done: u32,
     /// Projects selected.
+    #[serde(default)]
     pub projects_total: u32,
     /// Conversations finished.
+    #[serde(default)]
     pub conversations_done: u32,
     /// Conversations selected.
+    #[serde(default)]
     pub conversations_total: u32,
     /// New threads created.
+    #[serde(default)]
     pub imported: u32,
     /// Conversations already imported, skipped, or empty.
+    #[serde(default)]
     pub skipped: u32,
     /// Conversations that could not be imported.
+    #[serde(default)]
     pub failed: u32,
     /// Project currently being imported, for the progress line.
+    #[serde(default)]
     pub current_project: Option<String>,
     /// Limits hit during this run.
+    #[serde(default)]
     pub warnings: Vec<String>,
     /// When the run finished; absent while it is still running.
+    #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
 }
 
@@ -138,8 +161,10 @@ pub struct ImportedSource {
     /// Thread the conversation became.
     pub thread_id: crate::ids::ThreadId,
     /// Transcript the conversation came from.
+    #[serde(default)]
     pub path: String,
     /// When it was imported.
+    #[serde(default = "Utc::now")]
     pub imported_at: DateTime<Utc>,
 }
 
@@ -149,6 +174,14 @@ pub fn source_key(source: ImportSource, session_id: Option<&str>, path: &str) ->
         Some(id) => format!("{}:{id}", source.as_str()),
         None => format!("{}:path:{path}", source.as_str()),
     }
+}
+
+/// The key for a transcript that names no session id.
+///
+/// Its identity is the path plus the file's size and content fingerprint, so a
+/// rewritten transcript is a new conversation instead of a silent duplicate.
+pub fn path_source_key(source: ImportSource, path: &str, size: u64, fingerprint: &str) -> String {
+    format!("{}:path:{path}:{size}:{fingerprint}", source.as_str())
 }
 
 #[cfg(test)]
@@ -165,6 +198,25 @@ mod tests {
             source_key(ImportSource::Codex, None, "/tmp/a.jsonl"),
             "codex:path:/tmp/a.jsonl"
         );
+    }
+
+    #[test]
+    fn an_older_progress_shape_still_deserialises() {
+        // A daemon from before warnings and the current project existed.
+        let progress: ImportProgress = serde_json::from_str(
+            r#"{"import_id":"imp_1","running":false,"projects_done":1,"projects_total":1,
+                "conversations_done":2,"conversations_total":2,"imported":2,"skipped":0,
+                "failed":0,"finished_at":null}"#,
+        )
+        .expect("older progress");
+        assert!(progress.warnings.is_empty());
+        assert_eq!(progress.current_project, None);
+
+        // A scan that predates warnings.
+        let scan: ImportScan =
+            serde_json::from_str(r#"{"projects":[],"scanned_at":"2026-11-20T10:00:00Z"}"#)
+                .expect("older scan");
+        assert!(scan.warnings.is_empty());
     }
 
     #[test]

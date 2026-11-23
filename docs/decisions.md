@@ -1517,34 +1517,46 @@ process runner are injectable seams, so no test touches the network or a real gl
 Claude Code and Codex already keep their conversations on disk, so h4rn reads
 those transcripts instead of asking the person to copy them. Discovery and
 parsing live in `crates/h4rn-daemon/src/import/` and are read-only; a scan peeks
-at the head of each transcript to group it, and a full parse streams one file at
-a time, never loading a whole transcript into memory.
+at the head of each transcript to group it and to skip a session that never wrote
+a visible message, and a full parse streams one JSONL record at a time and names
+only the fields it keeps, so a megabyte-sized attachment or tool result is read
+past instead of being loaded or deciding that the line is malformed.
 
 An imported thread is an ordinary thread whose transcript is journaled as message
 items and whose `ThreadMeta` carries the imported origin: source, transcript
-path, native session id, the kept messages with their timestamps, and whether a
-native resume is still worth trying. It has no live session, so it costs nothing
-until the person writes again.
+path, native session id, the project it belongs to when that differs from the
+folder it ran in, the kept messages with their timestamps, and whether a native
+resume is still worth trying. It has no live session, so it costs nothing until
+the person writes again. It lands in Done with its hand down; that placement and
+each message's time replay from the origin and the wire events, so a restart
+shows the same thread, not a Settled or freshly-timed one.
 
 The first new message prefers the harness's own resume (`--resume` for Claude
 Code, `thread/resume` for Codex) because that restores the provider's real
 context, including tool work the import intentionally leaves out. When the
-harness refuses the resume, the daemon clears the dead id, records
-`native_resume: false` in the same turn, and retries once with a bounded handoff:
-the original request plus the newest messages, in order, under a byte budget
-(16,000 by default, `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000). The person's
-new request is appended verbatim and is never shortened. Imported history has its
-own 64,000-byte ceiling at import time, so the stored transcript is bounded
-independently of the handoff setting.
+harness refuses the resume — either by failing the start, or, as the real Claude
+Code adapter does, by exiting after it returned a session that never reported
+`SessionStarted` — the daemon clears the dead id, records `native_resume: false`
+in the same turn, and retries once with a bounded handoff: the original request
+plus the newest messages, in order, under a byte budget (16,000 by default,
+`H4RN_HANDOFF_BYTES` clamped to 1,024–64,000). The budget covers the serialised
+envelope and the person's request, which is appended verbatim and never
+shortened. The journal keeps the transcript as it was imported (only the hard
+32 MiB kept-text limit applies); the handoff applies its own ceiling when the
+person writes again.
 
 The handoff builder is separate (`crates/h4rn-daemon/src/handoff.rs`) and takes
 only roles and text, so provider switching and forking can reuse the same
 selection later. Import identity is the source session id, or the transcript path
-when none exists, recorded in `daemon_imported_sources`; a second run therefore
-adds only conversations h4rn has not imported.
+with its size and a content fingerprint when none exists, recorded in
+`daemon_imported_sources`. The source is claimed and its thread written in one
+transaction, so overlapping runs, two copies of one session in a run, or a crash
+between the claim and the write all import the conversation exactly once.
 
-Discovery caps each attempt at 100 conversations and 4 GiB per project, newest
-first, and skips a transcript over 4 GiB, a conversation over 32 MiB of kept text
-or 100,000 records. Warnings say a limit was reached without naming message text.
-Kept text and titles pass through the existing token redactor before they reach
-the journal, and nothing is logged from a transcript.
+Discovery caps each attempt at 100 not-yet-imported conversations and 4 GiB per
+project, newest first, and skips a transcript over 4 GiB, a conversation over
+32 MiB of kept text or 100,000 records. Paths are compared after canonicalising
+them and stripping a Windows extended-length prefix, so a symlinked
+`~/Downloads` stays excluded. Warnings say a limit was reached without naming
+message text. Kept text and titles pass through the existing token redactor
+before they reach the journal, and nothing is logged from a transcript.

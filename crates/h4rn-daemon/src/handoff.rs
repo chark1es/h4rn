@@ -59,22 +59,28 @@ pub fn clamp_budget(bytes: usize) -> usize {
 /// Selects the history block of a handoff, or `None` when there is no history.
 ///
 /// The first user request is always offered first; the rest of the budget goes
-/// to the newest messages, kept in their original order. The block ends with a
-/// line that introduces the person's new request, which the caller appends
-/// verbatim.
-pub fn build(messages: &[HandoffMessage<'_>], budget: usize) -> Option<String> {
+/// to the newest messages, kept in their original order. `budget` covers the
+/// whole handoff: the header, every message exactly as it is serialised, the
+/// request lead and `request` itself. The block ends with the lead line, and
+/// the caller appends `request` verbatim with [`with_request`], so the result
+/// never exceeds the budget.
+pub fn build(messages: &[HandoffMessage<'_>], budget: usize, request: &str) -> Option<String> {
     if messages.is_empty() {
         return None;
     }
     let budget = clamp_budget(budget).min(IMPORTED_HISTORY_BYTES);
+    let envelope = HEADER.len() + REQUEST_LEAD.len() + request.len();
+    if envelope >= budget {
+        return None;
+    }
     let mut indices: Vec<usize> = Vec::new();
-    let mut used = HEADER.len();
+    let mut used = envelope;
     let first_user = messages
         .iter()
         .position(|message| message.role == MessageRole::User);
     if let Some(first) = first_user {
         let cost = cost(messages[first]);
-        if cost <= budget {
+        if used + cost <= budget {
             indices.push(first);
             used += cost;
         }
@@ -101,13 +107,7 @@ pub fn build(messages: &[HandoffMessage<'_>], budget: usize) -> Option<String> {
     let mut block = String::from(HEADER);
     for index in indices {
         let message = messages[index];
-        let role = match message.role {
-            MessageRole::User => "User",
-            MessageRole::Assistant => "Assistant",
-            MessageRole::System => "System",
-        };
-        block.push_str(role);
-        block.push_str(":\n");
+        block.push_str(label(message.role));
         block.push_str(message.text.trim_end());
         block.push_str("\n\n");
     }
@@ -126,9 +126,17 @@ const HEADER: &str = "Earlier conversation history, imported from another harnes
 
 const REQUEST_LEAD: &str = "My next message:\n";
 
+fn label(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "User:\n",
+        MessageRole::Assistant => "Assistant:\n",
+        MessageRole::System => "System:\n",
+    }
+}
+
+/// The exact number of bytes one message adds to the block.
 fn cost(message: HandoffMessage<'_>) -> usize {
-    // Role label, separator and text, approximating the serialised block.
-    message.text.len() + 16
+    label(message.role).len() + message.text.trim_end().len() + 2
 }
 
 #[cfg(test)]
@@ -145,7 +153,7 @@ mod tests {
             message(MessageRole::User, "Add a health check"),
             message(MessageRole::Assistant, "Added /healthz"),
         ];
-        let block = build(&history, DEFAULT_HANDOFF_BYTES).expect("block");
+        let block = build(&history, DEFAULT_HANDOFF_BYTES, "now add metrics").expect("block");
         assert!(block.contains("User:\nAdd a health check"));
         assert!(block.contains("Assistant:\nAdded /healthz"));
         assert!(block.ends_with(REQUEST_LEAD));
@@ -164,19 +172,43 @@ mod tests {
         for text in &texts {
             history.push(message(MessageRole::Assistant, text));
         }
-        let block = build(&history, MIN_HANDOFF_BYTES).expect("block");
+        let request = "carry on";
+        let block = build(&history, MIN_HANDOFF_BYTES, request).expect("block");
         assert!(block.contains("the original request"));
-        assert!(block.len() <= MIN_HANDOFF_BYTES + REQUEST_LEAD.len());
+        assert!(with_request(&block, request).len() <= MIN_HANDOFF_BYTES);
         // The newest message wins a place over older ones.
         assert!(block.contains("message 49"));
         assert!(!block.contains("message 0 "));
     }
 
     #[test]
+    fn the_budget_counts_the_whole_handoff_including_the_new_request() {
+        let request = "what next?";
+        let text = "x".repeat(2_000);
+        let history = [message(MessageRole::User, &text)];
+        let envelope = HEADER.len() + REQUEST_LEAD.len() + request.len();
+        let message_cost = "User:\n".len() + text.len() + 2;
+
+        // Exactly at the budget: the first prompt fits.
+        let block = build(&history, envelope + message_cost, request).expect("exact block");
+        assert_eq!(with_request(&block, request).len(), envelope + message_cost);
+
+        // One byte over: the prompt is left out rather than shortened.
+        assert!(build(&history, envelope + message_cost - 1, request).is_none());
+    }
+
+    #[test]
+    fn a_request_that_leaves_no_room_means_no_history() {
+        let request = "x".repeat(MIN_HANDOFF_BYTES);
+        let history = [message(MessageRole::User, "hello")];
+        assert!(build(&history, MIN_HANDOFF_BYTES, &request).is_none());
+    }
+
+    #[test]
     fn the_budget_is_clamped_and_empty_history_builds_nothing() {
         assert_eq!(clamp_budget(1), MIN_HANDOFF_BYTES);
         assert_eq!(clamp_budget(usize::MAX), MAX_HANDOFF_BYTES);
-        assert!(build(&[], DEFAULT_HANDOFF_BYTES).is_none());
+        assert!(build(&[], DEFAULT_HANDOFF_BYTES, "next").is_none());
     }
 
     #[test]
@@ -186,7 +218,7 @@ mod tests {
             message(MessageRole::Assistant, "second"),
             message(MessageRole::User, "third"),
         ];
-        let block = build(&history, DEFAULT_HANDOFF_BYTES).expect("block");
+        let block = build(&history, DEFAULT_HANDOFF_BYTES, "fourth").expect("block");
         let first = block.find("first").expect("first");
         let second = block.find("second").expect("second");
         let third = block.find("third").expect("third");

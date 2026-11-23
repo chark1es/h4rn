@@ -200,4 +200,46 @@ describe("import progress", () => {
     await vi.waitFor(() => expect(loadProjects).toHaveBeenCalled());
     expect(getImportState().progress?.running).toBe(false);
   });
+
+  it("shows the current counts when the dialog is reopened mid-run", async () => {
+    const progress = {
+      import_id: "imp_7",
+      running: true,
+      projects_done: 1,
+      projects_total: 2,
+      conversations_done: 37,
+      conversations_total: 60,
+      imported: 30,
+      skipped: 7,
+      failed: 0,
+      current_project: "api",
+      warnings: ["one transcript was too large"],
+      finished_at: null,
+    };
+    request.mockResolvedValueOnce({ type: "session_imports", scan: scan() });
+    request.mockResolvedValueOnce({ type: "session_import_status", progress });
+    await loadImportScan();
+    // The scan read is followed by the status read without another click.
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenLastCalledWith({
+        type: "session_import_status",
+        host: "host_local",
+      }),
+    );
+    await vi.waitFor(() => expect(getImportState().progress?.conversations_done).toBe(37));
+    expect(getImportState().progress?.conversations_total).toBe(60);
+  });
+
+  it("keeps the scan's warnings for the panel", async () => {
+    const withWarnings = scan();
+    withWarnings.warnings = [
+      "api holds more than 4 GiB of transcripts; older conversations were not scanned.",
+    ];
+    request.mockResolvedValueOnce({ type: "session_imports", scan: withWarnings });
+    request.mockResolvedValueOnce({ type: "session_import_status", progress: null });
+    await loadImportScan();
+    expect(getImportState().scan?.warnings).toEqual([
+      "api holds more than 4 GiB of transcripts; older conversations were not scanned.",
+    ]);
+  });
 });

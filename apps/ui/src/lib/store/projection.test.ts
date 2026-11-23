@@ -119,6 +119,24 @@ describe("foldEvent", () => {
     });
   });
 
+  it("keeps an imported message's own time from the event", () => {
+    const log = foldEvent(createThreadLog(), {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_imported",
+      at: "2026-11-18T09:00:00Z",
+      item: {
+        kind: "message",
+        item_id: "item_imported",
+        role: "user",
+        text: "an imported prompt",
+        attachments: [],
+      },
+    });
+
+    expect(log.turns[0]?.startedAt).toBe("2026-11-18T09:00:00Z");
+  });
+
   it("replaces a matching pending message with the server's user message", () => {
     const log = createThreadLog();
     log.pending.push({

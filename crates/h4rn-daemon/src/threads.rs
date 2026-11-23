@@ -209,6 +209,9 @@ pub struct NewImportedThread {
     pub harness: HarnessKind,
     /// Working directory the conversation used.
     pub workspace_path: String,
+    /// Checkout to group the thread under, when it differs from the working
+    /// directory (a linked worktree or a subdirectory).
+    pub project_path: Option<String>,
     /// Model recorded by the source, when it named one.
     pub model: String,
     /// Title shown in the list.
@@ -223,6 +226,8 @@ pub struct NewImportedThread {
     pub source: h4rn_protocol::ImportSource,
     /// Transcript path, read-only.
     pub source_path: String,
+    /// Identity recorded with the claim, so the conversation imports once.
+    pub source_key: String,
     /// Kept messages, oldest first.
     pub messages: Vec<ImportedThreadMessage>,
 }
@@ -535,6 +540,12 @@ struct ThreadRecord {
     /// fresh, larger number so a startup that returns late can prove the slot
     /// is still the one it claimed.
     session_gen: u64,
+    /// The generation whose session reported `SessionStarted`.
+    ///
+    /// A death of a generation that never reached that point is an agent that
+    /// could not start (a bad `--resume` exits before its init event), which is
+    /// what lets an imported thread fall back to its handoff.
+    started_generation: Option<u64>,
     pump: Option<JoinHandle<()>>,
     pending_approvals: BTreeMap<String, PendingApproval>,
     queued: VecDeque<UserInput>,
@@ -1366,6 +1377,11 @@ impl ThreadRecord {
             agent_id: self.meta.agent_id.clone(),
             title: self.meta.title.clone(),
             workspace_path: self.meta.workspace_path.clone(),
+            project_path: self
+                .meta
+                .imported
+                .as_ref()
+                .and_then(|imported| imported.project_path.clone()),
             branch: self.branch.clone(),
             model: self.meta.model.clone(),
             runtime_mode: self.meta.runtime_mode,
@@ -1407,7 +1423,7 @@ impl ThreadRecord {
     ///
     /// `None` once the thread has a native session id, or when it was not
     /// imported: an ordinary thread's history is already in the harness.
-    fn handoff_block(&self) -> Option<String> {
+    fn handoff_block(&self, request: &str) -> Option<String> {
         let imported = self.meta.imported.as_ref()?;
         if self.meta.resume_id.is_some() {
             return None;
@@ -1420,7 +1436,7 @@ impl ThreadRecord {
                 text: &message.text,
             })
             .collect();
-        crate::handoff::build(&messages, crate::handoff::budget_from_env())
+        crate::handoff::build(&messages, crate::handoff::budget_from_env(), request)
     }
 
     /// Records a new turn and returns its dispatch.
@@ -2548,6 +2564,7 @@ impl ThreadManager {
             last_turn_id: None,
             session: SessionSlot::None,
             session_gen: 0,
+            started_generation: None,
             pump: None,
             pending_approvals: BTreeMap::new(),
             queued: VecDeque::new(),
@@ -2597,6 +2614,7 @@ impl ThreadManager {
                     text: request.prompt.clone(),
                     attachments: resolved_attachments,
                 },
+                at: None,
             },
             Event::TurnStarted {
                 thread_id: thread_id.clone(),
@@ -2643,10 +2661,10 @@ impl ThreadManager {
     /// when the source names a session the harness can take, otherwise a
     /// bounded handoff of the saved messages. No title job runs: the source
     /// already named the conversation.
-    pub async fn import_thread(
-        &self,
-        request: NewImportedThread,
-    ) -> Result<ThreadId, ManagerError> {
+    ///
+    /// `Ok(false)` means another run had already claimed this source, so no
+    /// thread was written.
+    pub async fn import_thread(&self, request: NewImportedThread) -> Result<bool, ManagerError> {
         if self.inner.harnesses.get(request.harness).is_none() {
             return Err(ManagerError::Unsupported(format!(
                 "no {:?} adapter is available in this daemon build",
@@ -2671,6 +2689,9 @@ impl ThreadManager {
         let last_active = request.last_active.min(now);
         let created_at = request.created_at.min(now);
         let native_resume = request.resume_id.is_some();
+        let source_path = request.source_path.clone();
+        let claim_path = source_path.clone();
+        let source_key = request.source_key.clone();
         let branch = crate::fs::git::branch(std::path::Path::new(&workspace_path));
         let meta = ThreadMeta {
             thread_id: thread_id.clone(),
@@ -2694,8 +2715,9 @@ impl ThreadManager {
             parked: None,
             imported: Some(crate::journal::ImportedOrigin {
                 source: request.source,
-                source_path: request.source_path,
+                source_path,
                 session_id: request.resume_id,
+                project_path: request.project_path,
                 native_resume,
                 messages: request
                     .messages
@@ -2719,14 +2741,15 @@ impl ThreadManager {
         state.last_turn_completed_at = Some(last_active);
         state.last_turn_status = Some(TurnStatus::Completed);
         // The import is history, not a finished turn the person has to
-        // acknowledge: it lands in Done without raising a hand.
+        // acknowledge: it lands in Done without raising a hand. The same
+        // placement is restored from `meta.imported` after a restart.
         state.acknowledged = true;
         state.manual = Some(h4rn_core::ManualOverride {
             tab: ThreadTab::Done,
             pinned: false,
             set_at: created_at,
         });
-        let mut wire = Vec::with_capacity(request.messages.len());
+        let mut wire = Vec::with_capacity(request.messages.len() + 1);
         for message in &request.messages {
             let turn_id = TurnId::new_uuid_v7();
             let role = match message.role {
@@ -2743,6 +2766,7 @@ impl ThreadManager {
                     text: message.text.clone(),
                     attachments: Vec::new(),
                 },
+                at: Some(message.at),
             });
         }
         let record = ThreadRecord {
@@ -2752,6 +2776,7 @@ impl ThreadManager {
             last_turn_id: None,
             session: SessionSlot::None,
             session_gen: 0,
+            started_generation: None,
             pump: None,
             pending_approvals: BTreeMap::new(),
             queued: VecDeque::new(),
@@ -2774,17 +2799,39 @@ impl ThreadManager {
             restored_parked: false,
             closed: false,
         };
+        let summary = record.summary(&self.inner.options.settings, now);
+        wire.push(Event::ThreadUpserted(summary));
+        let meta = record.meta.clone();
         let handle: ThreadHandle = Arc::new(Mutex::new(record));
-        {
-            let mut record = handle.lock().await;
-            self.inner.emit(&mut record, Vec::new(), wire).await?;
-        }
+        // The claim and the thread commit in one transaction: a conversation
+        // is imported once even when two runs overlap, and a crash cannot
+        // leave a claim without its thread.
+        let claim = crate::journal::ImportedSourceRecord {
+            key: source_key,
+            thread_id: thread_id.clone(),
+            path: claim_path,
+            imported_at: now,
+        };
+        let seqs = {
+            // Serialise with every other append so the sequence numbers this
+            // import publishes are the gap-free next ones.
+            let _guard = self.inner.emit_lock.lock().await;
+            self.inner
+                .journal
+                .commit_thread_import(&claim, &meta, &[], &wire)
+                .await
+                .map_err(|error| ManagerError::Internal(error.to_string()))?
+        };
+        let Some(seqs) = seqs else {
+            return Ok(false);
+        };
+        self.inner.broadcast(&thread_id, &wire, &seqs);
         self.inner
             .threads
             .lock()
             .await
             .insert(thread_id.as_str().to_owned(), handle);
-        Ok(thread_id)
+        Ok(true)
     }
 
     /// Renames a thread by hand. The name sticks; generation never replaces it.
@@ -2889,6 +2936,7 @@ impl ThreadManager {
                     text,
                     attachments: resolved_attachments,
                 },
+                at: None,
             }];
             let emitted = self.inner.emit(&mut record, domain, wire).await;
             drop(record);
@@ -2906,7 +2954,7 @@ impl ThreadManager {
             });
         }
 
-        let handoff = record.handoff_block();
+        let handoff = record.handoff_block(&text);
         let dispatch = record.begin_turn(
             now,
             UserInput {
@@ -2940,6 +2988,7 @@ impl ThreadManager {
                     text: text.clone(),
                     attachments: resolved_attachments,
                 },
+                at: None,
             },
             Event::TurnStarted {
                 thread_id: thread_id.clone(),
@@ -4759,6 +4808,7 @@ impl Inner {
                 last_turn_id: None,
                 session: SessionSlot::None,
                 session_gen: 0,
+                started_generation: None,
                 pump: None,
                 pending_approvals: BTreeMap::new(),
                 queued: VecDeque::new(),
@@ -4781,6 +4831,23 @@ impl Inner {
                 restored_parked: false,
                 closed: false,
             };
+
+            // An imported conversation lands in Done with its hand down. That
+            // placement is not derivable from its events (it never ran a turn),
+            // so restore it from the imported origin; the first real turn
+            // clears it, exactly like a manual move.
+            if record.meta.imported.is_some()
+                && record.state.turn_count == 0
+                && record.state.manual.is_none()
+                && !record.state.phase.is_active()
+            {
+                record.state.manual = Some(h4rn_core::ManualOverride {
+                    tab: ThreadTab::Done,
+                    pinned: false,
+                    set_at: record.meta.created_at,
+                });
+                record.state.acknowledged = true;
+            }
 
             if record.state.phase.is_active() {
                 // A daemon restart cannot resume an in-flight harness turn.
@@ -5249,47 +5316,26 @@ impl Inner {
         turn: &Arc<TurnDispatch>,
         generation: u64,
     ) -> bool {
-        let meta = {
-            let mut record = handle.lock().await;
-            if !record.session.is_starting(generation) {
+        {
+            let record = handle.lock().await;
+            if !record.session.is_starting(generation)
+                || record.dispatch_for(&turn.turn_id).is_none()
+            {
                 return false;
             }
-            let applies =
-                record.meta.imported.as_ref().is_some_and(|imported| {
-                    imported.native_resume && record.meta.resume_id.is_some()
-                });
-            if !applies || record.dispatch_for(&turn.turn_id).is_none() {
+            // Only an imported thread still holding a native resume falls
+            // back; every other startup failure keeps the ordinary path.
+            let applies = record
+                .meta
+                .imported
+                .as_ref()
+                .is_some_and(|imported| imported.native_resume)
+                && record.meta.resume_id.is_some();
+            if !applies {
                 return false;
             }
-            record.meta.resume_id = None;
-            if let Some(imported) = record.meta.imported.as_mut() {
-                imported.native_resume = false;
-            }
-            record.session = SessionSlot::None;
-            record.meta.clone()
-        };
-        // Persist the cleared id before the retry: a startup that fails again
-        // must not leave the next daemon run trying the same dead session.
-        if let Err(error) = self.journal.upsert_thread(&meta).await {
-            tracing::warn!(%error, "could not clear a failed imported resume id");
         }
-        let block = meta.imported.as_ref().and_then(|imported| {
-            let messages: Vec<crate::handoff::HandoffMessage<'_>> = imported
-                .messages
-                .iter()
-                .map(|message| crate::handoff::HandoffMessage {
-                    role: message.role,
-                    text: &message.text,
-                })
-                .collect();
-            crate::handoff::build(&messages, crate::handoff::budget_from_env())
-        });
-        if let Some(block) = block {
-            let request = turn.input().text;
-            turn.replace_text(crate::handoff::with_request(&block, &request));
-        }
-        self.spawn_session(handle.clone());
-        true
+        self.retry_with_handoff(handle, turn).await
     }
 
     /// Ends the turn a failed startup captured.
@@ -5652,6 +5698,7 @@ impl Inner {
                                     text: active.text.clone(),
                                     attachments: Vec::new(),
                                 },
+                                at: None,
                             });
                         }
                         let settled = self.settle_turn_locked(&mut record, turn_id, end).await;
@@ -6397,6 +6444,7 @@ impl Inner {
             match event {
                 HarnessEvent::SessionStarted { session_id } => {
                     record.meta.resume_id = Some(session_id);
+                    record.started_generation = Some(generation);
                 }
                 HarnessEvent::TextDelta { text } => {
                     if let Some(active) = record.active.as_mut() {
@@ -6816,6 +6864,7 @@ impl Inner {
                                         text,
                                         attachments: Vec::new(),
                                     },
+                                    at: None,
                                 });
                             }
                             end.changes = self.snapshots.get().map(|snapshots| {
@@ -6981,12 +7030,16 @@ impl Inner {
         // The stream ended. Only the pump that still owns the attached session
         // may clear it: a failed write or a restart may already have detached
         // it and started another one.
-        let (settled, advance) = {
+        let (settled, advance, retry) = {
             let mut record = handle.lock().await;
             if !record.session.is_live(&session) || record.session.generation() != Some(generation)
             {
                 return;
             }
+            // Whether this session ever reached the point where the harness
+            // reported a live conversation. A resume that fails after the
+            // spawn (Claude Code's bad `--resume`) never gets that far.
+            let started = record.started_generation == Some(generation);
             let stderr_tail = record
                 .live_session()
                 .and_then(|session| session.try_lock().ok())
@@ -7037,73 +7090,192 @@ impl Inner {
             // The pump is this task, so it must not abort itself.
             record.clear_session(generation);
             record.pump = None;
-            let has_turn = turn.is_some();
-            let settled = match turn {
-                Some((turn_id, message, hint, interrupted)) => {
-                    // Detach and settlement are one lock scope. A delivery that
-                    // saw the empty slot in between would otherwise start a
-                    // replacement and write the prompt before this turn is
-                    // marked failed, running a turn that never can.
-                    let end = if interrupted {
-                        // A Stop owns this turn: it ends interrupted, not as a
-                        // failure. The death the transport reported behind the
-                        // Stop is incidental (the agent went away while its
-                        // cancel was in flight), so its held report is dropped
-                        // rather than taking the turn's one error row. A limit
-                        // the report carried was applied on its own event and
-                        // keeps its schedule.
-                        record.take_transport_report(&turn_id);
-                        TurnEnd::new(TurnStatus::Interrupted, Usage::default())
-                    } else {
-                        TurnEnd::transport_failed(message.into(), Some(hint), true)
-                    };
-                    self.settle_turn_locked(&mut record, &turn_id, end).await
-                }
-                None => {
-                    // A promoted turn this session never wrote to is retried on
-                    // a fresh startup. The transport report this session's death
-                    // left for it describes the old transport, so it must not
-                    // become the retry's error row.
-                    let pending = record.active.as_ref().map(|active| active.turn_id.clone());
-                    if let Some(turn_id) = pending {
-                        record.take_transport_report(&turn_id);
-                    }
-                    false
-                }
-            };
-            if !has_turn && let Some(report) = idle {
-                // The session's stream ended with no turn to blame, so this is
-                // the row for the idle transport death: the generic close
-                // merged with the exit status and stderr that followed it. It
-                // is a diagnostic, not a failed turn: raising a failure here
-                // would flip a thread whose auto-resume just armed from
-                // Scheduled to Error and ask for attention (main published the
-                // row without a lifecycle transition too).
-                let thread_id = record.meta.thread_id.clone();
-                if let Err(error) = self
-                    .emit(
-                        &mut record,
-                        Vec::new(),
-                        vec![Event::Error {
-                            thread_id: Some(thread_id),
-                            message: report.message,
-                            hint: Some("Inspect the thread and retry when ready".into()),
-                            retryable: report.retryable,
-                        }],
+            // An imported conversation asked this startup to resume a saved
+            // session. An agent that died before it reported a session could
+            // not honour that resume: drop the dead id and retry the same turn
+            // once with the bounded handoff instead of failing it.
+            let mut retry: Option<Arc<TurnDispatch>> = None;
+            let retryable = !started
+                && record.active.as_ref().is_some_and(|active| {
+                    !matches!(
+                        active.dispatch.state(),
+                        DispatchState::ClaimedStopped
+                            | DispatchState::Stopped
+                            | DispatchState::Settled
                     )
-                    .await
-                {
-                    tracing::error!(%error, "failed to record a transport failure");
-                }
+                })
+                && record
+                    .meta
+                    .imported
+                    .as_ref()
+                    .is_some_and(|imported| imported.native_resume)
+                && record.meta.resume_id.is_some();
+            if retryable && let Some(active) = record.active.as_ref() {
+                let turn_id = active.turn_id.clone();
+                retry = Some(Arc::clone(&active.dispatch));
+                record.take_transport_report(&turn_id);
             }
-            (settled, record.active.is_some())
+            if retry.is_some() {
+                (false, false, retry)
+            } else {
+                let (settled, advance) = self.finish_stream_end(&mut record, turn, idle).await;
+                (settled, advance, None)
+            }
         };
+        if let Some(turn) = retry {
+            // The retry arms a fresh session for the same turn; `spawn_session`
+            // delivers the handoff-built prompt.
+            if !self.retry_with_handoff(&handle, &turn).await {
+                self.spawn_advance(handle);
+            }
+            return;
+        }
         if settled || advance {
             // A settled turn may have promoted the next queued message under
             // the same lock, and a pending turn this session never reached
             // needs a fresh startup; get either onto a session now.
             self.spawn_advance(handle);
         }
+    }
+
+    /// Settles the turn a session's ended stream leaves behind.
+    ///
+    /// Split out of the pump so the imported-resume retry can decide before
+    /// anything is settled. Returns whether a turn settled and whether the
+    /// caller must start a session for the turn now active.
+    async fn finish_stream_end(
+        &self,
+        record: &mut ThreadRecord,
+        turn: Option<(TurnId, &'static str, String, bool)>,
+        idle: Option<IdleTransportReport>,
+    ) -> (bool, bool) {
+        let has_turn = turn.is_some();
+        let settled = match turn {
+            Some((turn_id, message, hint, interrupted)) => {
+                // Detach and settlement are one lock scope. A delivery that
+                // saw the empty slot in between would otherwise start a
+                // replacement and write the prompt before this turn is
+                // marked failed, running a turn that never can.
+                let end = if interrupted {
+                    // A Stop owns this turn: it ends interrupted, not as a
+                    // failure. The death the transport reported behind the
+                    // Stop is incidental (the agent went away while its
+                    // cancel was in flight), so its held report is dropped
+                    // rather than taking the turn's one error row. A limit
+                    // the report carried was applied on its own event and
+                    // keeps its schedule.
+                    record.take_transport_report(&turn_id);
+                    TurnEnd::new(TurnStatus::Interrupted, Usage::default())
+                } else {
+                    TurnEnd::transport_failed(message.into(), Some(hint), true)
+                };
+                self.settle_turn_locked(record, &turn_id, end).await
+            }
+            None => {
+                // A promoted turn this session never wrote to is retried on
+                // a fresh startup. The transport report this session's death
+                // left for it describes the old transport, so it must not
+                // become the retry's error row.
+                let pending = record.active.as_ref().map(|active| active.turn_id.clone());
+                if let Some(turn_id) = pending {
+                    record.take_transport_report(&turn_id);
+                }
+                false
+            }
+        };
+        if !has_turn && let Some(report) = idle {
+            // The session's stream ended with no turn to blame, so this is
+            // the row for the idle transport death: the generic close
+            // merged with the exit status and stderr that followed it. It
+            // is a diagnostic, not a failed turn: raising a failure here
+            // would flip a thread whose auto-resume just armed from
+            // Scheduled to Error and ask for attention (main published the
+            // row without a lifecycle transition too).
+            let thread_id = record.meta.thread_id.clone();
+            if let Err(error) = self
+                .emit(
+                    record,
+                    Vec::new(),
+                    vec![Event::Error {
+                        thread_id: Some(thread_id),
+                        message: report.message,
+                        hint: Some("Inspect the thread and retry when ready".into()),
+                        retryable: report.retryable,
+                    }],
+                )
+                .await
+            {
+                tracing::error!(%error, "failed to record a transport failure");
+            }
+        }
+        (settled, record.active.is_some())
+    }
+
+    /// Clears a dead imported resume and retries its turn with the handoff.
+    ///
+    /// Returns `false` when the turn is no longer the active one, or the
+    /// thread has no native resume left to replace. The cleared id is
+    /// persisted before the retry, so a daemon restart cannot try the dead
+    /// session again.
+    async fn retry_with_handoff(
+        self: &Arc<Self>,
+        handle: &ThreadHandle,
+        turn: &Arc<TurnDispatch>,
+    ) -> bool {
+        let meta = {
+            let mut record = handle.lock().await;
+            // Only the turn this pump's startup carried can be retried; a turn
+            // that arrived later belongs to a session of its own.
+            let owns = record
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.dispatch, turn));
+            if !owns {
+                return false;
+            }
+            let applies = record
+                .meta
+                .imported
+                .as_ref()
+                .is_some_and(|imported| imported.native_resume)
+                && record.meta.resume_id.is_some();
+            if !applies {
+                return false;
+            }
+            // The prompt never reached a live conversation, so the turn is back
+            // to pending and the retry's session writes it: the failed startup
+            // may already have claimed it on a dead transport.
+            if turn.recover_lost_session().await != RecoveryOutcome::Requeue {
+                return false;
+            }
+            record.meta.resume_id = None;
+            if let Some(imported) = record.meta.imported.as_mut() {
+                imported.native_resume = false;
+            }
+            record.session = SessionSlot::None;
+            record.meta.clone()
+        };
+        if let Err(error) = self.journal.upsert_thread(&meta).await {
+            tracing::warn!(%error, "could not clear a failed imported resume id");
+        }
+        let block = meta.imported.as_ref().and_then(|imported| {
+            let messages: Vec<crate::handoff::HandoffMessage<'_>> = imported
+                .messages
+                .iter()
+                .map(|message| crate::handoff::HandoffMessage {
+                    role: message.role,
+                    text: &message.text,
+                })
+                .collect();
+            let request = turn.input().text;
+            crate::handoff::build(&messages, crate::handoff::budget_from_env(), &request)
+        });
+        if let Some(block) = block {
+            let request = turn.input().text;
+            turn.replace_text(crate::handoff::with_request(&block, &request));
+        }
+        self.spawn_session(handle.clone());
+        true
     }
 
     /// Applies one typed limit signal and projects its rows.
@@ -8015,6 +8187,7 @@ impl Inner {
                     text: prompt.clone(),
                     attachments: Vec::new(),
                 },
+                at: None,
             },
             Event::TurnStarted {
                 thread_id: record.meta.thread_id.clone(),
@@ -8813,6 +8986,18 @@ mod tests {
             record: &crate::journal::ImportedSourceRecord,
         ) -> Result<(), crate::journal::JournalError> {
             self.inner.record_imported_source(record).await
+        }
+
+        async fn commit_thread_import(
+            &self,
+            claim: &crate::journal::ImportedSourceRecord,
+            meta: &ThreadMeta,
+            domain: &[ThreadEvent],
+            wire: &[Event],
+        ) -> Result<Option<Vec<u64>>, crate::journal::JournalError> {
+            self.inner
+                .commit_thread_import(claim, meta, domain, wire)
+                .await
         }
     }
 

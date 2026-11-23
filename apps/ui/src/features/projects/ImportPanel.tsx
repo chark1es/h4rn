@@ -129,6 +129,14 @@ export function ImportPanel() {
         )}
       </div>
 
+      {scan && scan.warnings.length > 0 ? (
+        <div className="q-imp-warn" role="status">
+          {scan.warnings.map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+        </div>
+      ) : null}
+
       <div className="q-imp-foot">
         <button type="button" className="q-imp-link" onClick={selectAllImportProjects}>
           Select all

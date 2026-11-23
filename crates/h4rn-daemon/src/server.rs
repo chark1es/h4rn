@@ -2202,6 +2202,7 @@ mod tests {
             agent_id: None,
             title,
             workspace_path: "/tmp/work".into(),
+            project_path: None,
             branch: None,
             model: "test-model".into(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,

@@ -90,7 +90,7 @@ pub use ids::{
 };
 pub use import::{
     ImportEvent, ImportProgress, ImportProject, ImportScan, ImportSource, ImportedSource,
-    source_key,
+    path_source_key, source_key,
 };
 pub use issues::*;
 pub use mcp::{

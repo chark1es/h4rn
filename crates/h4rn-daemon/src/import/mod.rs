@@ -11,6 +11,7 @@
 
 mod claude;
 mod codex;
+mod record;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -21,12 +22,11 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
     HostId, ImportEvent, ImportProgress, ImportProject, ImportScan, ImportSource, MessageRole,
-    ProtoError, ProtoErrorCode, ThreadId,
+    ProtoError, ProtoErrorCode,
 };
-use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 
-use crate::journal::{ImportedSourceRecord, Journal};
+use crate::journal::Journal;
 use crate::projects::ProjectService;
 use crate::threads::{ImportedThreadMessage, NewImportedThread, ThreadManager};
 
@@ -48,7 +48,10 @@ pub const MAX_RECORDS: usize = 100_000;
 /// Most messages kept from one conversation.
 pub const MAX_KEPT_MESSAGES: usize = 200;
 
-/// A line longer than this is treated as malformed instead of parsed.
+/// A peeked line longer than this is skipped instead of parsed.
+///
+/// Only discovery reads whole lines; the parsers stream a record at a time so
+/// an attachment or tool result cannot hide the prompt beside it.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// How recent a project must be to be offered already checked.
@@ -73,6 +76,11 @@ pub(crate) struct Peek {
     pub cwd: PathBuf,
     /// Harness-native session id, when the record names one.
     pub session_id: Option<String>,
+    /// Whether the head already showed a visible message.
+    ///
+    /// A rollout that only wrote setup metadata is not a conversation and must
+    /// not use up a project's import quota.
+    pub has_visible: bool,
 }
 
 /// Why one conversation was left out.
@@ -140,9 +148,19 @@ pub(crate) struct ParsedConversation {
 }
 
 /// The kept window while a transcript is streamed.
+///
+/// The journal keeps what the transcript said; the handoff applies its own
+/// byte ceiling when the person writes again. Only the hard 32 MiB kept-text
+/// limit is enforced here, so a long first prompt is stored whole.
 pub(crate) struct History {
     first_user: Option<KeptMessage>,
     tail: VecDeque<KeptMessage>,
+    /// Bytes of text in `tail`, so the limit is checked as the window grows.
+    retained_bytes: usize,
+    /// Set when more text was seen than one conversation may keep.
+    overflow: bool,
+    /// When the first message kept was written.
+    first_at: Option<DateTime<Utc>>,
 }
 
 impl History {
@@ -150,18 +168,43 @@ impl History {
         Self {
             first_user: None,
             tail: VecDeque::new(),
+            retained_bytes: 0,
+            overflow: false,
+            first_at: None,
         }
     }
 
     /// Adds one visible message, keeping the first request and the newest rest.
     pub(crate) fn push(&mut self, message: KeptMessage) {
+        if self.first_at.is_none() {
+            self.first_at = Some(message.at);
+        }
         if message.role == MessageRole::User && self.first_user.is_none() {
             self.first_user = Some(message.clone());
         }
+        self.retained_bytes = self.retained_bytes.saturating_add(message_cost(&message));
         self.tail.push_back(message);
-        if self.tail.len() > MAX_KEPT_MESSAGES {
-            self.tail.pop_front();
+        while self.tail.len() > MAX_KEPT_MESSAGES {
+            if let Some(dropped) = self.tail.pop_front() {
+                self.retained_bytes = self.retained_bytes.saturating_sub(message_cost(&dropped));
+            }
         }
+        if self.retained_bytes > MAX_KEPT_BYTES {
+            self.note_overflow();
+        }
+    }
+
+    /// Marks the conversation as one that cannot be kept whole.
+    ///
+    /// Used when the pending window or a single message outgrows the kept-text
+    /// limit, so the importer skips it with a warning instead of dropping text.
+    pub(crate) fn note_overflow(&mut self) {
+        self.overflow = true;
+    }
+
+    /// When the first message kept was written, whether user or assistant.
+    pub(crate) fn first_at(&self) -> Option<DateTime<Utc>> {
+        self.first_at
     }
 
     /// The first user request's text, when one was kept.
@@ -171,6 +214,9 @@ impl History {
 
     /// The final kept messages in order, capped at the import ceiling.
     pub(crate) fn finish(mut self) -> Result<Vec<KeptMessage>, SkipReason> {
+        if self.overflow {
+            return Err(SkipReason::TooMuchText);
+        }
         let mut messages: Vec<KeptMessage> = self.tail.drain(..).collect();
         if let Some(first) = self.first_user.take()
             && !messages.contains(&first)
@@ -181,19 +227,9 @@ impl History {
         while messages.len() > MAX_KEPT_MESSAGES {
             messages.remove(1);
         }
-        let mut bytes: usize = messages.iter().map(message_cost).sum();
+        let bytes: usize = messages.iter().map(message_cost).sum();
         if bytes > MAX_KEPT_BYTES {
             return Err(SkipReason::TooMuchText);
-        }
-        while bytes > crate::handoff::IMPORTED_HISTORY_BYTES && messages.len() > 1 {
-            let dropped = messages.remove(1);
-            bytes = bytes.saturating_sub(message_cost(&dropped));
-        }
-        if bytes > crate::handoff::IMPORTED_HISTORY_BYTES
-            && let Some(first) = messages.first_mut()
-        {
-            let room = crate::handoff::IMPORTED_HISTORY_BYTES.saturating_sub(24);
-            first.text = truncate_on_char(first.text.clone(), room);
         }
         Ok(messages)
     }
@@ -215,33 +251,6 @@ fn truncate_on_char(mut text: String, bytes: usize) -> String {
     text.truncate(cut);
     text.push('…');
     text
-}
-
-/// The visible text of a `message.content` value, in either harness's shape.
-pub(crate) fn extract_content_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.trim().to_owned(),
-        Value::Array(blocks) => {
-            let mut parts = Vec::new();
-            for block in blocks {
-                let kind = block
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if !matches!(kind, "text" | "input_text" | "output_text") {
-                    continue;
-                }
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    let text = text.trim();
-                    if !text.is_empty() {
-                        parts.push(text.to_owned());
-                    }
-                }
-            }
-            parts.join("\n")
-        }
-        _ => String::new(),
-    }
 }
 
 /// The first line of a request, used when the source saved no title.
@@ -266,8 +275,8 @@ fn strip_wake_envelope(text: &str) -> &str {
 }
 
 /// Parses an RFC 3339 timestamp from either format.
-pub(crate) fn parse_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
-    let text = value?.as_str()?.trim();
+pub(crate) fn parse_time(value: Option<&str>) -> Option<DateTime<Utc>> {
+    let text = value?.trim();
     DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|value| value.with_timezone(&Utc))
@@ -433,10 +442,62 @@ pub(crate) fn github_repository(url: &str) -> Option<String> {
     Some(format!("{owner}/{name}"))
 }
 
+/// Resolves a path the same way on every platform.
+///
+/// Windows may report a path with its extended-length prefix (`\\?\C:\…`,
+/// `\\?\UNC\server\share\…`); the prefix describes spelling, not a different
+/// place, so it is stripped before comparing. The rest is canonicalised when
+/// it exists, following a symlinked `~/Downloads` to its real folder.
+fn normalise_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    };
+    std::fs::canonicalize(&plain).unwrap_or(plain)
+}
+
 fn is_under_downloads(path: &Path, home: &Path) -> bool {
-    let downloads = home.join("Downloads");
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    canonical.starts_with(&downloads)
+    let downloads = normalise_path(&home.join("Downloads"));
+    let path = normalise_path(path);
+    path.starts_with(&downloads)
+}
+
+/// Bytes of a transcript hashed when it names no session id.
+const FINGERPRINT_BYTES: usize = 64 * 1024;
+
+/// A stable identity for a transcript that names no session.
+///
+/// The path alone is not enough: a truncated or rewritten transcript is a new
+/// conversation and must be importable. The size and a hash of the head make
+/// the identity change when the content does.
+fn content_fingerprint(path: &Path, size: u64) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&size.to_le_bytes());
+    if let Ok(mut file) = File::open(path) {
+        let mut buffer = vec![0u8; FINGERPRINT_BYTES];
+        if let Ok(read) = std::io::Read::read(&mut file, &mut buffer) {
+            hasher.update(&buffer[..read]);
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// The source identity the journal stores for one transcript.
+fn imported_key(source: ImportSource, session_id: Option<&str>, candidate: &Candidate) -> String {
+    let path = candidate.path.display().to_string();
+    match session_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => h4rn_protocol::source_key(source, Some(id), &path),
+        None => h4rn_protocol::path_source_key(
+            source,
+            &path,
+            candidate.size,
+            &content_fingerprint(&candidate.path, candidate.size),
+        ),
+    }
 }
 
 /// One accepted transcript in a project group.
@@ -446,6 +507,9 @@ struct ConversationFile {
     path: PathBuf,
     imported_key: String,
     already_imported: bool,
+    /// The checkout this conversation belongs to, when it differed from the
+    /// folder the conversation ran in.
+    project_path: Option<String>,
 }
 
 /// A project group while scanning.
@@ -460,6 +524,29 @@ struct Group {
     attempts: u32,
     limited_count: bool,
     limited_bytes: bool,
+}
+
+/// Whether the per-project limits still have room for one conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admission {
+    Accepted,
+    TooMany,
+    TooLarge,
+}
+
+impl Group {
+    /// Counts one not-yet-imported transcript against the per-project limits.
+    fn admit(&mut self, size: u64) -> Admission {
+        self.attempts = self.attempts.saturating_add(1);
+        if self.attempts > MAX_CONVERSATIONS_PER_PROJECT {
+            return Admission::TooMany;
+        }
+        if self.bytes.saturating_add(size) > MAX_PROJECT_BYTES {
+            return Admission::TooLarge;
+        }
+        self.bytes = self.bytes.saturating_add(size);
+        Admission::Accepted
+    }
 }
 
 /// The outcome of one scan with the per-conversation data the importer needs.
@@ -477,6 +564,8 @@ pub struct ImportService {
     home: PathBuf,
     claude_home: PathBuf,
     codex_home: PathBuf,
+    /// Overrides that could not be resolved, shown with the first scan.
+    home_warnings: Vec<String>,
     events: broadcast::Sender<ImportEvent>,
     state: Arc<Mutex<ImportState>>,
 }
@@ -495,15 +584,24 @@ impl ImportService {
         host: HostId,
         home: PathBuf,
     ) -> Self {
-        let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| home.join(".claude"));
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| home.join(".codex"));
-        Self::with_homes(
+        let mut home_warnings = Vec::new();
+        let mut resolved = |kind| {
+            let default = home.join(match kind {
+                h4rn_protocol::HarnessKind::Codex => ".codex",
+                _ => ".claude",
+            });
+            match h4rn_harness::harness_home(kind, &home) {
+                Ok(Some(path)) => path,
+                Ok(None) => default,
+                Err(error) => {
+                    home_warnings.push(format!("{error}. Reading {} instead.", default.display()));
+                    default
+                }
+            }
+        };
+        let claude_home = resolved(h4rn_protocol::HarnessKind::ClaudeCode);
+        let codex_home = resolved(h4rn_protocol::HarnessKind::Codex);
+        let mut service = Self::with_homes(
             journal,
             projects,
             threads,
@@ -511,7 +609,9 @@ impl ImportService {
             home,
             claude_home,
             codex_home,
-        )
+        );
+        service.home_warnings = home_warnings;
+        service
     }
 
     /// Like [`Self::open`] with explicit harness homes (tests).
@@ -532,6 +632,7 @@ impl ImportService {
             home,
             claude_home,
             codex_home,
+            home_warnings: Vec::new(),
             events: broadcast::channel(64).0,
             state: Arc::new(Mutex::new(ImportState {
                 progress: None,
@@ -576,12 +677,16 @@ impl ImportService {
         let home = self.home.clone();
         let claude_home = self.claude_home.clone();
         let codex_home = self.codex_home.clone();
+        let home_warnings = self.home_warnings.clone();
         let result = tokio::task::spawn_blocking(move || {
             scan_blocking(&home, &claude_home, &codex_home, &imported, &registered)
         })
         .await;
         match result {
-            Ok(outcome) => outcome,
+            Ok(mut outcome) => {
+                outcome.scan.warnings.splice(0..0, home_warnings);
+                outcome
+            }
             Err(error) => {
                 tracing::error!(%error, "the import scan worker panicked");
                 ScanOutcome {
@@ -634,13 +739,7 @@ impl ImportService {
         }
         let conversations_total = selected
             .iter()
-            .map(|group| {
-                group
-                    .files
-                    .iter()
-                    .filter(|file| !file.already_imported)
-                    .count() as u32
-            })
+            .map(|group| group.files.len() as u32)
             .sum::<u32>();
         let import_id = format!("imp_{}", uuid::Uuid::now_v7().simple());
         let progress =
@@ -661,17 +760,17 @@ impl ImportService {
             progress: progress.clone(),
         });
         let service = ImportRunner {
-            journal: Arc::clone(&self.journal),
             projects: Arc::clone(&self.projects),
             threads: Arc::clone(&self.threads),
             host: self.host.clone(),
+            home: self.home.clone(),
             events: self.events.clone(),
             warnings: outcome.scan.warnings,
+            state: Arc::clone(&self.state),
         };
-        let state = Arc::clone(&self.state);
         let worker_progress = progress.clone();
         tokio::spawn(async move {
-            service.run(selected, worker_progress, state).await;
+            service.run(selected, worker_progress).await;
         });
         Ok(progress)
     }
@@ -679,21 +778,21 @@ impl ImportService {
 
 /// The work of one import run.
 struct ImportRunner {
-    journal: Arc<dyn Journal>,
     projects: Arc<ProjectService>,
     threads: Arc<ThreadManager>,
     host: HostId,
+    /// The user's home, so a transcript that moved into `~/Downloads` is not
+    /// imported even when its head named another folder.
+    home: PathBuf,
     events: broadcast::Sender<ImportEvent>,
     warnings: Vec<String>,
+    /// The run's state, so every published snapshot is what a reopened dialog
+    /// reads.
+    state: Arc<Mutex<ImportState>>,
 }
 
 impl ImportRunner {
-    async fn run(
-        self,
-        groups: Vec<Group>,
-        progress: ImportProgress,
-        state: Arc<Mutex<ImportState>>,
-    ) {
+    async fn run(self, groups: Vec<Group>, progress: ImportProgress) {
         let mut progress = progress;
         progress.warnings.extend(self.warnings.iter().cloned());
         let registered = self
@@ -705,7 +804,7 @@ impl ImportRunner {
             .collect::<HashSet<_>>();
         for group in groups {
             progress.current_project = Some(group.name.clone());
-            self.publish(&progress);
+            self.publish(&progress).await;
             if !registered.contains(&group.path.display().to_string())
                 && let Err(error) = self
                     .projects
@@ -722,27 +821,18 @@ impl ImportRunner {
                     .push(format!("Could not add {}: {}", group.name, error.message));
             }
             for file in group.files {
-                progress.conversations_done += 1;
                 if file.already_imported {
+                    progress.conversations_done += 1;
                     progress.skipped += 1;
-                    self.publish(&progress);
+                    self.publish(&progress).await;
                     continue;
                 }
-                match self.import_one(&file).await {
-                    Ok(Some(thread_id)) => {
-                        progress.imported += 1;
-                        let record = ImportedSourceRecord {
-                            key: file.imported_key.clone(),
-                            thread_id,
-                            path: file.path.display().to_string(),
-                            imported_at: Utc::now(),
-                        };
-                        if let Err(error) = self.journal.record_imported_source(&record).await {
-                            tracing::warn!(%error, "could not record an imported conversation");
-                            progress.warnings.push("A thread was created but its source could not be recorded, so a later import may repeat it.".to_owned());
-                        }
-                    }
-                    Ok(None) => progress.skipped += 1,
+                let result = self.import_one(&file).await;
+                progress.conversations_done += 1;
+                match result {
+                    Ok(Imported::Created) => progress.imported += 1,
+                    Ok(Imported::AlreadyClaimed) => progress.skipped += 1,
+                    Ok(Imported::Nothing) => progress.skipped += 1,
                     Err(ImportFailure::Skipped(reason)) => {
                         progress.skipped += 1;
                         if reason.is_notable() {
@@ -756,33 +846,31 @@ impl ImportRunner {
                             .push("A conversation could not be turned into a thread.".to_owned());
                     }
                 }
-                self.publish(&progress);
+                self.publish(&progress).await;
             }
             progress.projects_done += 1;
-            self.publish(&progress);
+            self.publish(&progress).await;
         }
         progress.running = false;
         progress.current_project = None;
         progress.finished_at = Some(Utc::now());
         progress.warnings.sort();
         progress.warnings.dedup();
-        {
-            // Record the finished run before announcing it: a client that sees
-            // the final frame can start the next import immediately.
-            let mut state = state.lock().await;
-            state.running = false;
-            state.progress = Some(progress.clone());
-        }
-        self.publish(&progress);
+        self.publish(&progress).await;
     }
 
-    /// Parses and creates one thread; `Ok(None)` when the source was skipped.
-    async fn import_one(&self, file: &ConversationFile) -> Result<Option<ThreadId>, ImportFailure> {
+    /// Parses and creates one thread.
+    async fn import_one(&self, file: &ConversationFile) -> Result<Imported, ImportFailure> {
         let parsed = match file.source {
             ImportSource::ClaudeCode => claude::parse(&file.path),
             ImportSource::Codex => codex::parse(&file.path),
         }
         .map_err(ImportFailure::Skipped)?;
+        // The head named one folder; the full parser may have found another.
+        // Whatever it picked still has to stay out of `~/Downloads`.
+        if is_under_downloads(&parsed.cwd, &self.home) {
+            return Ok(Imported::Nothing);
+        }
         let title = h4rn_forge::redact(parsed.title.trim());
         let messages = parsed
             .messages
@@ -794,12 +882,13 @@ impl ImportRunner {
             })
             .collect::<Vec<_>>();
         if messages.is_empty() {
-            return Ok(None);
+            return Ok(Imported::Nothing);
         }
         let request = NewImportedThread {
             host: self.host.clone(),
             harness: file.source.harness(),
             workspace_path: parsed.cwd.display().to_string(),
+            project_path: file.project_path.clone(),
             model: parsed.model.unwrap_or_default(),
             title: if title.trim().is_empty() {
                 "Imported thread".to_owned()
@@ -811,20 +900,48 @@ impl ImportRunner {
             resume_id: parsed.session_id,
             source: parsed.source,
             source_path: parsed.path.display().to_string(),
+            source_key: file.imported_key.clone(),
             messages,
         };
-        let thread_id = self.threads.import_thread(request).await.map_err(|error| {
-            tracing::warn!(%error, "could not create an imported thread");
-            ImportFailure::Failed
-        })?;
-        Ok(Some(thread_id))
+        self.threads
+            .import_thread(request)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "could not create an imported thread");
+                ImportFailure::Failed
+            })
+            .map(|created| {
+                if created {
+                    Imported::Created
+                } else {
+                    Imported::AlreadyClaimed
+                }
+            })
     }
 
-    fn publish(&self, progress: &ImportProgress) {
+    /// Publishes one progress snapshot and keeps it for a reopening dialog.
+    async fn publish(&self, progress: &ImportProgress) {
+        {
+            let mut state = self.state.lock().await;
+            state.progress = Some(progress.clone());
+            if !progress.running {
+                state.running = false;
+            }
+        }
         let _ = self.events.send(ImportEvent {
             progress: progress.clone(),
         });
     }
+}
+
+/// What one conversation's import attempt did.
+enum Imported {
+    /// A new thread was written.
+    Created,
+    /// Another run had already claimed the source.
+    AlreadyClaimed,
+    /// The transcript has nothing importable.
+    Nothing,
 }
 
 fn canonical(path: &str) -> PathBuf {
@@ -876,6 +993,11 @@ fn scan_blocking(
             warnings.push(format!("Could not read {}.", candidate.path.display()));
             continue;
         };
+        if !peek.has_visible {
+            // A session that only wrote setup metadata has no conversation to
+            // offer, and must not use up the project's quota.
+            continue;
+        }
         if is_under_downloads(&peek.cwd, home) {
             continue;
         }
@@ -889,15 +1011,25 @@ fn scan_blocking(
         let identity = identities
             .entry(peek.cwd.clone())
             .or_insert_with(|| git_group(&peek.cwd));
-        let (key, path, name, git) = match identity {
-            Some(git) => (git.key.clone(), git.path.clone(), git.name.clone(), true),
+        let (key, path, name, git, folded) = match identity {
+            Some(git) => (
+                git.key.clone(),
+                git.path.clone(),
+                git.name.clone(),
+                true,
+                (git.path != peek.cwd && normalise_path(&git.path) != normalise_path(&peek.cwd))
+                    .then(|| git.path.display().to_string()),
+            ),
             None => (
                 format!("path:{}", peek.cwd.display()),
                 peek.cwd.clone(),
                 folder_name(&peek.cwd),
                 false,
+                None,
             ),
         };
+        let imported_key = imported_key(candidate.source, peek.session_id.as_deref(), &candidate);
+        let already_imported = imported.contains(&imported_key);
         let group = groups.entry(key.clone()).or_insert_with(|| Group {
             key,
             path,
@@ -911,38 +1043,39 @@ fn scan_blocking(
             limited_bytes: false,
         });
         group.last_active = group.last_active.max(candidate.mtime);
-        group.attempts = group.attempts.saturating_add(1);
-        if group.attempts > MAX_CONVERSATIONS_PER_PROJECT {
-            if !group.limited_count {
-                group.limited_count = true;
-                warnings.push(format!(
-                    "{} has more than {MAX_CONVERSATIONS_PER_PROJECT} conversations; only the newest are offered.",
-                    group.name
-                ));
+        // A source this daemon already imported costs nothing to read, so it
+        // neither uses the quota nor hides an older conversation behind it.
+        if !already_imported {
+            match group.admit(candidate.size) {
+                Admission::Accepted => {}
+                Admission::TooMany => {
+                    if !group.limited_count {
+                        group.limited_count = true;
+                        warnings.push(format!(
+                            "{} has more than {MAX_CONVERSATIONS_PER_PROJECT} conversations; only the newest are offered.",
+                            group.name
+                        ));
+                    }
+                    continue;
+                }
+                Admission::TooLarge => {
+                    if !group.limited_bytes {
+                        group.limited_bytes = true;
+                        warnings.push(format!(
+                            "{} holds more than 4 GiB of transcripts; older conversations were not scanned.",
+                            group.name
+                        ));
+                    }
+                    continue;
+                }
             }
-            continue;
         }
-        if group.bytes.saturating_add(candidate.size) > MAX_PROJECT_BYTES {
-            if !group.limited_bytes {
-                group.limited_bytes = true;
-                warnings.push(format!(
-                    "{} holds more than 4 GiB of transcripts; older conversations were not scanned.",
-                    group.name
-                ));
-            }
-            continue;
-        }
-        group.bytes = group.bytes.saturating_add(candidate.size);
-        let imported_key = h4rn_protocol::source_key(
-            candidate.source,
-            peek.session_id.as_deref(),
-            &candidate.path.display().to_string(),
-        );
         group.files.push(ConversationFile {
             source: candidate.source,
             path: candidate.path,
-            already_imported: imported.contains(&imported_key),
+            already_imported,
             imported_key,
+            project_path: folded,
         });
     }
     let now = Utc::now();
@@ -1134,16 +1267,42 @@ mod tests {
     }
 
     #[test]
-    fn a_single_huge_request_is_truncated_to_the_import_ceiling() {
+    fn a_long_first_prompt_is_stored_whole() {
         let mut history = History::new();
+        let text = "x".repeat(70_000);
         history.push(KeptMessage {
             role: MessageRole::User,
-            text: "x".repeat(crate::handoff::IMPORTED_HISTORY_BYTES + 200),
+            text: text.clone(),
             at: Utc::now(),
         });
         let messages = history.finish().expect("messages");
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].text.len() <= crate::handoff::IMPORTED_HISTORY_BYTES + 4);
+        assert_eq!(messages[0].text.len(), 70_000);
+        assert_eq!(messages[0].text, text);
+    }
+
+    #[test]
+    fn a_long_conversation_keeps_every_message_within_the_count_ceiling() {
+        let mut history = History::new();
+        for index in 0..200 {
+            history.push(KeptMessage {
+                role: if index % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
+                text: format!("{index}: {}", "y".repeat(1_500)),
+                at: Utc::now(),
+            });
+        }
+        let messages = history.finish().expect("messages");
+        assert_eq!(messages.len(), 200);
+        assert!(
+            messages
+                .iter()
+                .map(|message| message.text.len())
+                .sum::<usize>()
+                > 300_000
+        );
     }
 
     #[test]
@@ -1155,5 +1314,57 @@ mod tests {
             at: Utc::now(),
         });
         assert_eq!(history.finish().err(), Some(SkipReason::TooMuchText));
+    }
+
+    fn group() -> Group {
+        Group {
+            key: "path:/work/api".into(),
+            path: PathBuf::from("/work/api"),
+            name: "api".into(),
+            git: true,
+            last_active: Utc::now(),
+            files: Vec::new(),
+            bytes: 0,
+            attempts: 0,
+            limited_count: false,
+            limited_bytes: false,
+        }
+    }
+
+    #[test]
+    fn a_project_offers_at_most_a_hundred_conversations_per_scan() {
+        let mut group = group();
+        for _ in 0..MAX_CONVERSATIONS_PER_PROJECT {
+            assert_eq!(group.admit(1_024), Admission::Accepted);
+        }
+        assert_eq!(group.admit(1_024), Admission::TooMany);
+    }
+
+    #[test]
+    fn a_project_reads_at_most_four_gigabytes_per_scan() {
+        let mut group = group();
+        let one_gib = 1024 * 1024 * 1024;
+        assert_eq!(group.admit(3 * one_gib), Admission::Accepted);
+        assert_eq!(group.admit(one_gib), Admission::Accepted);
+        assert_eq!(group.admit(1), Admission::TooLarge);
+    }
+
+    #[test]
+    fn downloads_is_recognised_through_a_symlink() {
+        let home = tempfile::tempdir().expect("home");
+        let real = home.path().join("real-downloads");
+        std::fs::create_dir_all(real.join("thing")).expect("downloads");
+        let link = home.path().join("Downloads");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(&link).expect("downloads dir");
+
+        assert!(is_under_downloads(&real.join("thing"), home.path()));
+        assert!(is_under_downloads(&link.join("thing"), home.path()));
+        assert!(!is_under_downloads(
+            &home.path().join("code/api"),
+            home.path()
+        ));
     }
 }

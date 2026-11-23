@@ -129,6 +129,13 @@ pub struct ImportedOrigin {
     pub source_path: String,
     /// Harness-native session id, when the transcript records one.
     pub session_id: Option<String>,
+    /// The checkout the conversation belongs to, when it differed from the
+    /// working directory it ran in (a linked worktree or a subdirectory).
+    ///
+    /// The working directory stays what a native resume needs; this is only
+    /// the sidebar's grouping, saved so it survives a restart.
+    #[serde(default)]
+    pub project_path: Option<String>,
     /// Whether a native resume has not failed yet.
     pub native_resume: bool,
     /// The kept messages, oldest first, each with its original timestamp.
@@ -350,6 +357,19 @@ pub trait Journal: Send + Sync {
         &self,
         record: &ImportedSourceRecord,
     ) -> Result<(), JournalError>;
+
+    /// Claims a source conversation and writes its thread in one transaction.
+    ///
+    /// Returns the new thread's wire sequence numbers, or `None` when another
+    /// run had already claimed the source. A crash between the claim and the
+    /// thread write rolls both back, so a retry imports the conversation once.
+    async fn commit_thread_import(
+        &self,
+        claim: &ImportedSourceRecord,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+    ) -> Result<Option<Vec<u64>>, JournalError>;
 }
 
 /// SQLite-backed journal.
@@ -374,6 +394,12 @@ impl SqliteJournal {
     /// Opens an in-memory journal for tests.
     pub async fn in_memory() -> Result<Self, JournalError> {
         let store = SqliteEventStore::in_memory().await?;
+        Self::from_store(store).await
+    }
+
+    /// Opens (or creates) a journal file.
+    pub async fn open(path: impl AsRef<std::path::Path>) -> Result<Self, JournalError> {
+        let store = SqliteEventStore::connect(path).await?;
         Self::from_store(store).await
     }
 
@@ -1156,6 +1182,46 @@ impl Journal for SqliteJournal {
         .await?;
         Ok(())
     }
+
+    async fn commit_thread_import(
+        &self,
+        claim: &ImportedSourceRecord,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+    ) -> Result<Option<Vec<u64>>, JournalError> {
+        // One transaction: the claim, the thread row, the domain log and the
+        // wire log commit together or not at all. A concurrent run loses the
+        // claim insert and writes nothing; a crash rolls everything back, so
+        // the retry is still the conversation's first import.
+        let mut tx = self.pool.begin().await?;
+        let claimed = sqlx::query(
+            "INSERT INTO daemon_imported_sources (source_key, thread_id, path, imported_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(source_key) DO NOTHING",
+        )
+        .bind(&claim.key)
+        .bind(claim.thread_id.as_str())
+        .bind(&claim.path)
+        .bind(claim.imported_at.to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        upsert_thread_on(&mut tx, meta).await?;
+        if !domain.is_empty() {
+            SqliteEventStore::append_in(&mut tx, &meta.thread_id, domain).await?;
+        }
+        let seqs = if wire.is_empty() {
+            Vec::new()
+        } else {
+            append_wire_on(&mut tx, &meta.thread_id, wire).await?
+        };
+        tx.commit().await?;
+        Ok(Some(seqs))
+    }
 }
 
 /// Inserts one run row inside a transaction and fills in its durable id.
@@ -1533,6 +1599,7 @@ mod tests {
             agent_id: None,
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
+            project_path: None,
             branch: Some("h4rn/first-prompt".into()),
             model: "test-model".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,
@@ -1773,6 +1840,66 @@ mod tests {
             journal.list_threads().await.unwrap().is_empty(),
             "a failed append must not leave the thread row behind"
         );
+    }
+
+    #[tokio::test]
+    async fn a_claimed_source_commits_its_thread_once() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let imported_meta = meta("th_imported");
+        let claim = ImportedSourceRecord {
+            key: "claude_code:session-1".into(),
+            thread_id: imported_meta.thread_id.clone(),
+            path: "/tmp/session-1.jsonl".into(),
+            imported_at: Utc::now(),
+        };
+        let wire = vec![Event::ThreadUpserted(summary())];
+
+        let first = journal
+            .commit_thread_import(&claim, &imported_meta, &[], &wire)
+            .await
+            .unwrap();
+        assert!(first.is_some(), "the first claim writes the thread");
+        assert_eq!(journal.list_threads().await.unwrap().len(), 1);
+
+        // A second run with the same source writes nothing, as an overlapping
+        // run or a retry after a completed import would.
+        let second_meta = meta("th_other");
+        let mut second_claim = claim.clone();
+        second_claim.thread_id = second_meta.thread_id.clone();
+        let second = journal
+            .commit_thread_import(&second_claim, &second_meta, &[], &wire)
+            .await
+            .unwrap();
+        assert!(second.is_none(), "an existing claim is not imported again");
+        let metas = journal.list_threads().await.unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].thread_id.as_str(), "th_imported");
+    }
+
+    #[tokio::test]
+    async fn a_failed_import_write_leaves_no_claim_behind() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let imported_meta = meta("th_imported");
+        let claim = ImportedSourceRecord {
+            key: "claude_code:session-2".into(),
+            thread_id: imported_meta.thread_id.clone(),
+            path: "/tmp/session-2.jsonl".into(),
+            imported_at: Utc::now(),
+        };
+        // A wire event that cannot be written rolls the claim back with it.
+        let wire = vec![Event::ThreadUpserted(summary())];
+        sqlx::query("CREATE TRIGGER fail_wire BEFORE INSERT ON daemon_wire_events BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&journal.pool)
+            .await
+            .unwrap();
+        assert!(
+            journal
+                .commit_thread_import(&claim, &imported_meta, &[], &wire)
+                .await
+                .is_err()
+        );
+        assert!(journal.list_imported_sources().await.unwrap().is_empty());
+        assert!(journal.list_threads().await.unwrap().is_empty());
     }
 
     #[tokio::test]

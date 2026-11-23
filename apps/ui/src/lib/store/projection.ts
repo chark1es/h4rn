@@ -264,6 +264,9 @@ export function foldEvent(
 
     case "item_completed": {
       const { item, turn_id } = event;
+      // An imported message carries when it was written in its own
+      // conversation; a live one has no source time and keeps the journal's.
+      const itemAt = event.at ?? at;
       if (item.kind === "message") {
         if (item.role === "user") {
           if (messageExists(log, item.item_id)) return log;
@@ -274,7 +277,7 @@ export function foldEvent(
           log.pending = log.pending.filter((message) => message.id !== item.item_id);
           log.turns.push({
             id: `cue:user:${item.item_id}`,
-            startedAt: at,
+            startedAt: itemAt,
             status: "completed",
             items: [
               {
@@ -292,7 +295,7 @@ export function foldEvent(
           return log;
         }
 
-        const turn = ensureTurn(log, turn_id, at);
+        const turn = ensureTurn(log, turn_id, itemAt);
         const existing = turn.items.find(
           (candidate): candidate is MessageItem =>
             candidate.kind === "message" && candidate.itemId === item.item_id,
@@ -313,7 +316,7 @@ export function foldEvent(
         return log;
       }
 
-      const turn = ensureTurn(log, turn_id, at);
+      const turn = ensureTurn(log, turn_id, itemAt);
       if (item.kind === "tool_call") {
         upsertTool(turn, item.tool_call);
       } else {

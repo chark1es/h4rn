@@ -934,6 +934,14 @@ pub enum Event {
         turn_id: TurnId,
         /// The completed item.
         item: Item,
+        /// When the item was authored in the conversation it came from.
+        ///
+        /// Imported transcripts carry their own timestamps, so a restored
+        /// thread shows when each message was really written. Absent means the
+        /// item has no source time and the journal's own time applies.
+        #[serde(default)]
+        #[ts(optional)]
+        at: Option<DateTime<Utc>>,
     },
     /// A tool call changed state.
     ToolCall {
