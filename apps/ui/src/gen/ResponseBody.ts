@@ -22,6 +22,7 @@ import type { ForgeHandoff } from "./ForgeHandoff";
 import type { ForgePrSummary } from "./ForgePrSummary";
 import type { ForgePullRequest } from "./ForgePullRequest";
 import type { ForgeRemote } from "./ForgeRemote";
+import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { ForgeReviewComment } from "./ForgeReviewComment";
 import type { FsBranchList } from "./FsBranchList";
 import type { FsDeleteResult } from "./FsDeleteResult";
@@ -43,6 +44,7 @@ import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
 import type { PairScope } from "./PairScope";
 import type { PairingConfirmation } from "./PairingConfirmation";
+import type { PrLinkedThread } from "./PrLinkedThread";
 import type { Project } from "./Project";
 import type { ProxyFailoverChoice } from "./ProxyFailoverChoice";
 import type { ProxyLimits } from "./ProxyLimits";
@@ -66,6 +68,7 @@ import type { TextGenerationSettings } from "./TextGenerationSettings";
 import type { TextGenerator } from "./TextGenerator";
 import type { TextGeneratorTestReport } from "./TextGeneratorTestReport";
 import type { ThreadId } from "./ThreadId";
+import type { ThreadPullRequest } from "./ThreadPullRequest";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { TrackedWorktree } from "./TrackedWorktree";
 import type { TurnId } from "./TurnId";
@@ -379,7 +382,31 @@ pr: ForgePullRequest, } | { "type": "forge_handoff",
 /**
  * Thread, turn and the exact markdown sent.
  */
-handoff: ForgeHandoff, } | { "type": "mcp_servers", 
+handoff: ForgeHandoff, } | { "type": "thread_pull_requests", 
+/**
+ * Thread the links belong to.
+ */
+thread_id: ThreadId, 
+/**
+ * Linked PRs, oldest link first.
+ */
+pulls: Array<ThreadPullRequest>, } | { "type": "thread_pull_request", 
+/**
+ * The link and its latest state.
+ */
+pull: ThreadPullRequest, } | { "type": "pr_threads", 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, 
+/**
+ * Linking threads.
+ */
+threads: Array<PrLinkedThread>, } | { "type": "mcp_servers", 
 /**
  * Servers in configuration order.
  */

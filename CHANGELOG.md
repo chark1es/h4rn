@@ -7,6 +7,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Threads remember the pull requests that belong to them, and can watch one for you.** Link a
+  PR by pasting its URL or picking it from the repository's open PRs in the command palette
+  (`Link pull request…`), or let opening a PR from h4rn link it automatically. Links are stored in
+  the thread journal, so they survive a restart, and the thread header shows a quiet badge with the
+  PR number, its state and `+N` for more; the badge opens a linked-items panel with open, watch and
+  unlink. The PR page lists the threads that link to it. A linked PR can be watched: while the
+  thread is active the daemon polls every two minutes, sharing one poll across threads watching the
+  same PR, and wakes the agent with a plain-language message when a check fails, the required checks
+  pass, the remaining checks finish after a failure, someone else comments or reviews, the branch
+  starts to conflict, or the PR merges or closes. GitHub is polled conditionally, so an unchanged PR
+  costs no full read. Each event is reported once per watch; a watch ends after ten comment-only
+  wakes in a row, eight failed reads in a row, or when the thread is settled, and a rate limit only
+  pauses it. The state beside every link is read from the forge, and a failed read is shown as
+  unavailable rather than guessed.
 - **Thread titles are written by a model.** A new thread still appears immediately with the first
   line of your first prompt, then a title of at most 60 characters replaces it through the normal
   thread update. Settings → Threads → Title model picks Off, Claude Code (run once in an empty
@@ -339,6 +353,23 @@ All notable changes to h4rn are recorded here. The format follows
   See [docs/acp.md](docs/acp.md).
 
 ### Fixed
+
+- **A PR watch hears every change since it started, exactly once.** The GitHub
+  change probe is gone: the watch reads the PR detail conditionally, so a `304`
+  is built from the body the account's shared cache returns rather than from the
+  watch's own earlier snapshot, and a merge, close or conflict another reader
+  already saw is no longer reported late or missed. Each thread keeps its own
+  baseline and seen-failure state, so a second watch or a re-watch neither hides
+  a change another watcher has not seen nor repeats one it has, a new watch
+  starts from the current state, and it never clears a rate-limit pause the
+  poller recorded. A failure wake now fires only for a failing check that was not
+  already failing, so a re-run that passed is not reported as a new failure. When
+  the forge does not report the account's login, the watch skips comment and
+  review triggers rather than treating every author as someone else, and the
+  linked-items panel says so. A damaged `linked_at` in the link journal is an
+  error instead of being replaced with the current time. The badge popover is
+  keyboard reachable, and its rows say what they do instead of showing an icon
+  for the opposite action.
 
 - **Composer drafts survive recall, two tabs and a full quota.** Sending a recalled prompt puts the
   draft that recall preserved back in the box instead of clearing it. Two tabs editing the same

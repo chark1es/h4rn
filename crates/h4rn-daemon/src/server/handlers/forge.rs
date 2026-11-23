@@ -37,6 +37,12 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
             | ClientRequest::ForgeComment { .. }
             | ClientRequest::ForgeOpenPr { .. }
             | ClientRequest::ForgeHandPrToAgent { .. }
+            | ClientRequest::LinkPullRequest { .. }
+            | ClientRequest::UnlinkPullRequest { .. }
+            | ClientRequest::ListThreadPullRequests { .. }
+            | ClientRequest::ListPrThreads { .. }
+            | ClientRequest::WatchPullRequest { .. }
+            | ClientRequest::UnwatchPullRequest { .. }
     )
 }
 
@@ -252,6 +258,26 @@ pub(super) async fn handle(
                 .open_pr(&conn.state.manager, &thread_id, repo, &title, &body, &base)
                 .await;
             if let Ok(pr) = &result {
+                match conn.state.forge.resolve_account_id(None, &pr.summary.repo) {
+                    Ok(account_id) => {
+                        if let Err(error) = conn
+                            .state
+                            .pr_links
+                            .link_known(
+                                &thread_id,
+                                &account_id,
+                                &pr.summary.repo,
+                                pr.summary.number,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, "could not link the PR just opened");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not resolve the PR just opened for linking");
+                    }
+                }
                 conn.audit(
                     "forge.open_pr",
                     Some("forge_pr"),
@@ -266,6 +292,66 @@ pub(super) async fn handle(
             result
                 .map(|pr| ResponseBody::ForgePrOpened { pr })
                 .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::LinkPullRequest {
+            thread_id,
+            account_id,
+            repo,
+            number,
+        } => conn
+            .state
+            .pr_links
+            .link(&thread_id, account_id.as_deref(), &repo, number)
+            .await
+            .map(|pull| ResponseBody::ThreadPullRequest { pull })
+            .map_err(crate::pr_links::PrLinkError::into_proto),
+        ClientRequest::UnlinkPullRequest {
+            thread_id,
+            repo,
+            number,
+        } => conn
+            .state
+            .pr_links
+            .unlink(&thread_id, &repo, number)
+            .await
+            .map(|()| ResponseBody::Ack)
+            .map_err(crate::pr_links::PrLinkError::into_proto),
+        ClientRequest::ListThreadPullRequests { thread_id } => conn
+            .state
+            .pr_links
+            .list(&thread_id)
+            .await
+            .map(|pulls| ResponseBody::ThreadPullRequests { thread_id, pulls })
+            .map_err(crate::pr_links::PrLinkError::into_proto),
+        ClientRequest::ListPrThreads { repo, number } => conn
+            .state
+            .pr_links
+            .list_for_pr(&repo, number)
+            .await
+            .map(|threads| ResponseBody::PrThreads {
+                repo,
+                number,
+                threads,
+            })
+            .map_err(crate::pr_links::PrLinkError::into_proto),
+        ClientRequest::WatchPullRequest {
+            thread_id,
+            repo,
+            number,
+        } => conn
+            .state
+            .pr_links
+            .watch(&thread_id, &repo, number)
+            .await
+            .map(|()| ResponseBody::Ack)
+            .map_err(crate::pr_links::PrLinkError::into_proto),
+        ClientRequest::UnwatchPullRequest {
+            thread_id,
+            repo,
+            number,
+        } => {
+            conn.state.pr_links.unwatch(&thread_id, &repo, number);
+            Ok(ResponseBody::Ack)
         }
         ClientRequest::ForgeHandPrToAgent {
             account_id,

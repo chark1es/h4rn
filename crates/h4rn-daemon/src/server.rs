@@ -80,6 +80,8 @@ pub struct AppState {
     pub fs: Arc<FsService>,
     /// Forge accounts, clients and watched-PR checks polling.
     pub forge: Arc<ForgeService>,
+    /// Thread ↔ pull request links and the PR watch.
+    pub pr_links: Arc<crate::pr_links::PrLinkService>,
     /// Skill registry, installers and connect sync (ADR-034, ADR-035).
     pub skills: Arc<h4rn_skills::SkillsService>,
     /// Noise-encrypted multipath transport, when enabled.
