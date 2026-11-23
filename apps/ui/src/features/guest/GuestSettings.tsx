@@ -6,9 +6,9 @@ import { loadGuestSettings, setGuestLinksEnabled, useGuest } from "./guestStore"
 /**
  * Settings → Labs → Guest links.
  *
- * One setting for this machine, owned by the daemon. Off stops every live link
- * without deleting it; on makes unexpired links work again. Links that were
- * created while it was off do not exist, so the page says what changes.
+ * One setting for this machine, owned by the daemon. Off ends every live link
+ * and deletes the messages waiting for the owner, so turning it back on does
+ * not revive them: the owner shares again. The page says what changes.
  */
 export function GuestSettingsForm() {
   const { settingsEnabled, settingsLoading, settingsSaving, error } = useGuest();
@@ -63,9 +63,9 @@ export function GuestSettingsForm() {
         ) : null}
       </div>
       <p className="q-muted" style={{ fontSize: 12.5 }}>
-        While this is off, every existing guest link on this machine stops working. Turn it back on
-        and links that have not expired work again. Settling a thread, creating a new link or
-        choosing Stop sharing ends a link for good.
+        Turning this off ends every existing guest link on this machine and deletes the messages
+        waiting for you; turning it back on does not revive them. Settling a thread, creating a new
+        link or choosing Stop sharing also ends a link for good.
       </p>
     </div>
   );
