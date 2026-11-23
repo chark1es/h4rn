@@ -1634,6 +1634,28 @@ fn a_porcelain_rejected_record_is_a_conflict() {
     );
 }
 
+/// The `To <url>` line of a push's output is unquoted and keeps the query raw,
+/// whitespace included; nothing after that whitespace may reach the message.
+#[test]
+fn the_unquoted_to_line_never_leaks_a_query_past_whitespace() {
+    let secret = format!("{}-{}", "tail", "q7x2");
+    for separator in ['\u{a0}', '\u{3000}', ' '] {
+        let stdout = format!(
+            "To https://example.invalid/repo.git?token=ab{separator}{secret}#f{separator}{secret}\n\
+             !\trefs/heads/main:refs/heads/main\t[rejected] (non-fast-forward)\nDone"
+        );
+        let stderr = "error: failed to push some refs to 'x'";
+        let error = classify_push_failure(&stdout, stderr);
+        assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+        let detail = error.to_string();
+        assert!(
+            !detail.contains(&secret),
+            "no part of the query survives after {separator:?}: {detail}"
+        );
+        assert!(detail.contains("To [redacted URL]"), "{detail}");
+    }
+}
+
 /// A non-fast-forward rejection is still named when `advice.pushUpdateRejected`
 /// is off: git then prints the record on stdout, not stderr.
 #[tokio::test]

@@ -899,6 +899,42 @@ fn classify_push_error(error: &str) -> GitActionError {
 /// whole field becomes a marker instead of being split at the whitespace and
 /// leaving what follows it (often the rest of a token) in the message.
 fn redact_url_credentials(text: &str) -> String {
+    text.split_inclusive('\n').map(redact_line).collect()
+}
+
+/// Redacts the URLs on one line of git output (with its line break, if any).
+///
+/// A push's `To <url>` line is special: git prints the URL there unquoted and
+/// last on the line, with the userinfo removed but the query kept raw, so any
+/// whitespace in it is part of the URL. That whole run is one field — redacted
+/// as a URL, or replaced as a marker when it contains whitespace — instead of
+/// being cut at the first whitespace, which would leave the rest of a token
+/// in the message.
+fn redact_line(line: &str) -> String {
+    let (body, line_break) = match line.strip_suffix('\n') {
+        Some(body) => (body, "\n"),
+        None => (line, ""),
+    };
+    let indent_len = body.len() - body.trim_start().len();
+    let (indent, content) = body.split_at(indent_len);
+    if let Some(field) = content.strip_prefix("To ") {
+        let field = field.trim_end_matches('\r');
+        if field.contains("://") {
+            let redacted = if field.chars().any(char::is_whitespace) {
+                "[redacted URL]".to_owned()
+            } else {
+                redact_one_url(field)
+            };
+            return format!("{indent}To {redacted}{line_break}");
+        }
+    }
+    let mut output = redact_urls_in_line(body);
+    output.push_str(line_break);
+    output
+}
+
+/// Redacts every URL found in `text`, a single line of git output.
+fn redact_urls_in_line(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(index) = rest.find("://") {
