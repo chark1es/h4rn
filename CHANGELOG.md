@@ -365,16 +365,25 @@ All notable changes to h4rn are recorded here. The format follows
   when the daemon's watch state can have changed — when a wake message is
   appended and when its panel opens — so a merged PR stops offering "Stop
   watching", and messages replayed on reconnect do not each cost a forge read.
-- **Two daemon tests no longer fail under load for reasons the code under test does not
-  control.** The Tailscale "a prompt CLI still answers" test no longer gives its fake CLI the
-  production two-second detection budget: on an oversubscribed runner that budget can expire while
-  a shell that only echoes is still being scheduled, and the test then reported a working CLI as
-  "off". The test now injects a budget that cannot expire spuriously, while the hung-CLI test keeps
-  a short one and still covers the deadline. The Antigravity exit-only limit test no longer races
-  its own reader: its fixture writes the final reply without a line terminator, so the adapter
-  reads that reply together with the end of stdout and always classifies the completion on a closed
-  transport, and the fixture no longer pauses between closing stdout and exiting, so the daemon's
-  bounded wait for the exit report cannot expire first.
+- **The Tailscale CLI tests no longer fail for a reason the code cannot fix.** The prompt-CLI test
+  wrote a fresh executable script and spawned it immediately; when another test thread forked while
+  that write handle was open, the child inherited it and the spawn failed with `Text file busy`
+  (os error 26), which `run_until` reports as "off" - the exact CI failure. The tests now run
+  `/bin/sh`, which is never freshly written, and each test that expects "off" first proves the shell
+  really runs, so a spawn failure cannot pass for the command's result. The hung-CLI test keeps a
+  short budget and still covers the deadline.
+- **A rate limit that only an agent's exit report carries still pauses the thread when the queue was
+  already promoted.** A real ACP peer answers `end_turn` with an ordinary newline-terminated frame
+  and only then exits, and on a multi-threaded runtime the turn's completion can be published before
+  the reader sees the end of stdout. The daemon now holds a queue promotion while a dead session's
+  exit report is pending, and a message that was promoted onto the dead transport is handed back to
+  the exit report's pause instead of being failed: its prompt never reached the provider, so the
+  armed schedule delivers it after the reset, and no fresh agent starts into the limited provider.
+  Only a promoted turn that produced nothing goes back; a message the person sent into a dying
+  session keeps its own failure. An adapter update that arrives for a turn whose prompt is not on the
+  wire yet is dropped instead of being applied to the promoted turn, which used to make a turn that
+  never ran look like it produced output. The fixture no longer pauses between closing stdout and
+  exiting in any of its exit branches, and its tests force both orderings with gates.
 - **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
   Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
   relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other

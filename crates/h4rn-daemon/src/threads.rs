@@ -485,6 +485,15 @@ struct ActiveTurn {
     /// The turn's one dispatch record, shared with every would-be writer and
     /// with Stop.
     dispatch: Arc<TurnDispatch>,
+    /// Whether this turn started as a queued message a finished turn's
+    /// settlement promoted, rather than from a person's Send.
+    ///
+    /// A promoted turn is the daemon's own next step. When the transport it
+    /// was handed dies before the prompt produced anything, the turn never
+    /// reached the provider and is handed back to the queue instead of
+    /// failed (see [`ThreadRecord::requeue_promoted_turn`]). A prompt the
+    /// person sent into a dying session stays their failure to see.
+    promoted: bool,
     /// The reset this turn already armed a schedule for, when it armed one,
     /// together with the session generation that reported it.
     ///
@@ -1136,6 +1145,7 @@ impl ThreadRecord {
             tools: HashMap::new(),
             last_tick: None,
             dispatch: Arc::clone(&dispatch),
+            promoted: false,
             applied_limit_reset: None,
         });
         self.last_turn_id = Some(turn_id);
@@ -1463,18 +1473,108 @@ impl ThreadRecord {
     /// write's prompt is still the active, pending dispatch. The replacement
     /// has to name that prompt too, or a pump-end `advance_queue` would deliver
     /// it into the provider the newer reset paused.
+    ///
+    /// A promoted turn that is still pending is included for the same reason:
+    /// its previous turn ended and the transport died before the promotion
+    /// reached the provider, so the pause this report arms is exactly what has
+    /// to hold it back.
     fn parked_turn_to_keep(&self) -> Option<TurnId> {
         let active = self.active.as_ref()?;
         if active.dispatch.state() != DispatchState::Pending {
             return None;
         }
-        let named = self.pause_parks_turn(&active.turn_id)
+        let named = active.promoted
+            || self.pause_parks_turn(&active.turn_id)
             || self
                 .meta
                 .parked
                 .as_ref()
                 .is_some_and(|parked| parked.turn_id == active.turn_id);
         named.then(|| active.turn_id.clone())
+    }
+
+    /// Whether `turn_id` is the active turn promoted from the queue.
+    fn promoted_turn_is(&self, turn_id: &TurnId) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| &active.turn_id == turn_id && active.promoted)
+    }
+
+    /// Whether the active turn produced nothing the provider could have
+    /// worked on: no text, no tool calls, no usage.
+    ///
+    /// A turn that leaves no trace never reached the provider's work, which is
+    /// what makes handing a promoted one back to the queue safe: nothing is
+    /// replayed that already ran.
+    fn active_turn_is_quiet(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.text.is_empty()
+                && active.tools.is_empty()
+                && active.usage.total_tokens() == 0
+                && active.usage.cost_micros == 0
+        })
+    }
+
+    /// Hands a promoted turn whose transport died before it ran back to the
+    /// pause that holds it.
+    ///
+    /// A message promoted from the queue behind a turn is the daemon's own
+    /// next step. When its prompt never reaches the provider because the
+    /// transport closed first, failing it would blame the person's work for a
+    /// death it never touched, and starting a fresh agent for it would run it
+    /// into the provider the exit report's rate limit is about to pause. The
+    /// turn stays active and pending, the armed schedule names it, and its own
+    /// reset delivers it.
+    ///
+    /// `false` when the turn is not that promoted, quiet turn any more (a Stop
+    /// won, or it produced output): the caller then settles it as usual.
+    async fn requeue_promoted_turn(&mut self, turn_id: &TurnId) -> bool {
+        if !self.promoted_turn_is(turn_id) || !self.active_turn_is_quiet() {
+            return false;
+        }
+        let Some(dispatch) = self
+            .active
+            .as_ref()
+            .map(|active| Arc::clone(&active.dispatch))
+        else {
+            return false;
+        };
+        if !matches!(
+            dispatch.recover_lost_session().await,
+            RecoveryOutcome::Requeue
+        ) {
+            return false;
+        }
+        let parked = ParkedPrompt::of(turn_id, &dispatch.input());
+        self.meta.parked = Some(parked);
+        if let Some(scheduled) = self.scheduled_limit.as_mut() {
+            scheduled.parked_turn = Some(turn_id.clone());
+        }
+        // The death belongs to the session, not to this turn. A held report
+        // would otherwise become the resumed turn's failure row.
+        if self
+            .transport_report
+            .as_ref()
+            .is_some_and(|report| &report.turn_id == turn_id)
+        {
+            self.transport_report = None;
+        }
+        true
+    }
+
+    /// Whether a pending death report holds back the next promoted turn.
+    ///
+    /// A promoted turn is the daemon's own next step, so it can wait one
+    /// bounded window (the exit report's) before it is handed to a provider:
+    /// starting an agent while a dead session's report is still on its way
+    /// could run that work into the very limit the report is about to arm. A
+    /// person's Send is never held back this way; only the queue's own
+    /// promotion is.
+    fn promotion_waits_for_death(&self) -> bool {
+        !self.dying_sessions.is_empty()
+            && self.active.as_ref().is_some_and(|active| {
+                active.promoted && active.dispatch.state() == DispatchState::Pending
+            })
     }
 
     /// The session generation whose prompt the active turn is.
@@ -3673,6 +3773,7 @@ impl Inner {
                     tools: HashMap::new(),
                     last_tick: None,
                     dispatch: Arc::new(TurnDispatch::new(parked.turn_id.clone(), parked.input())),
+                    promoted: false,
                     applied_limit_reset: None,
                 });
                 record.last_turn_id = Some(parked.turn_id);
@@ -3820,6 +3921,12 @@ impl Inner {
             && let Some(input) = record.queued.pop_front()
         {
             let next = record.begin_turn(now, input);
+            // This turn is the daemon's next step, not a person's Send: if the
+            // transport it inherits dies before it runs, it goes back to the
+            // queue instead of failing (see `requeue_promoted_turn`).
+            if let Some(active) = record.active.as_mut() {
+                active.promoted = true;
+            }
             let next_id = next.turn_id.clone();
             domain.push(ThreadEvent::TurnQueued { at: now });
             domain.push(ThreadEvent::TurnStarted { at: now });
@@ -4242,12 +4349,10 @@ impl Inner {
         // arrives late, this is the one row, and it lands before the turn's
         // completion either way. A write that failed on a live transport is an
         // ordinary failure, never a death the bridge also reports.
-        let hint = Some("Check the harness installation with `h4rnd doctor`".into());
-        let mut end = if dead {
-            TurnEnd::transport_failed(message, hint, false)
-        } else {
-            TurnEnd::failed(message, hint, false)
-        };
+        //
+        // The row is built after the recovery decision below: a promoted turn
+        // that goes back to the queue publishes the agent's death on its own
+        // instead of settling a failure.
         // The write lost the session it claimed: a restart, a shutdown or a
         // model change detached it while this prompt was on the wire. The turn
         // is still active and its dispatch is still ours, so returning would
@@ -4265,6 +4370,56 @@ impl Inner {
                 return;
             };
             if record.session.is_live(session) {
+                // The write was rejected before it reached the agent because
+                // its transport was already closed. When the adapter's exit
+                // report names a provider reset and this turn is one the queue
+                // promoted, the turn never ran and the reset is exactly what
+                // has to hold it back: hand it to the pause instead of failing
+                // it, publish the agent's death as the session's own row, and
+                // drop the dead session so the armed schedule resumes it.
+                if dead
+                    && limit
+                        .as_ref()
+                        .is_some_and(|signal| signal.reset_at.is_some())
+                    && record.promoted_turn_is(turn_id)
+                    && record.requeue_promoted_turn(turn_id).await
+                {
+                    let now = self.now();
+                    let mut domain = Vec::new();
+                    let mut wire = Vec::new();
+                    if let Some(signal) = limit.as_ref() {
+                        self.note_limit_hit(
+                            &mut record,
+                            LimitObservation {
+                                generation: Some(claimed_generation),
+                                reset_at: signal.reset_at,
+                                auto_resume: true,
+                            },
+                            now,
+                            &mut domain,
+                            &mut wire,
+                        )
+                        .await;
+                    }
+                    wire.push(Event::Error {
+                        thread_id: Some(record.meta.thread_id.clone()),
+                        message,
+                        hint: Some("Inspect the thread and retry when ready".into()),
+                        retryable: false,
+                    });
+                    // The death belongs to the session, not to the turn that
+                    // is going back to the queue.
+                    record.take_transport_report(turn_id);
+                    let detached = record.detach_session(claimed_generation);
+                    if let Err(error) = self.emit(&mut record, domain, wire).await {
+                        tracing::error!(%error, "failed to record a requeued turn's rate limit");
+                    }
+                    drop(record);
+                    if let Some(detached) = detached {
+                        let _ = detached.lock().await.shutdown().await;
+                    }
+                    return;
+                }
                 (None, false)
             } else {
                 // Test-only interleaving point: the old scope read the record
@@ -4367,6 +4522,12 @@ impl Inner {
                     }
                 }
             }
+        };
+        let hint = Some("Check the harness installation with `h4rnd doctor`".into());
+        let mut end = if dead {
+            TurnEnd::transport_failed(message, hint, false)
+        } else {
+            TurnEnd::failed(message, hint, false)
         };
         if let Some(retarget) = retarget {
             // `advance_queue` starts a session or takes the live one; it is
@@ -4543,6 +4704,9 @@ impl Inner {
                 && record.dispatch_for(&dispatch.turn_id).is_some()
                 && dispatch.state() == DispatchState::Pending
                 && matches!(record.session, SessionSlot::None)
+                // A queue promotion waits for the dead session's report; the
+                // report's own publish path advances the queue after it.
+                && !record.promotion_waits_for_death()
         };
         if start {
             self.spawn_session(handle.clone());
@@ -4720,6 +4884,31 @@ impl Inner {
                 );
                 drop(record);
                 break;
+            }
+            // A turn whose prompt is not on the wire yet cannot own this
+            // output. The adapter publishes a turn's reply itself, while the
+            // bridge forwards that turn's updates on this same channel: the two
+            // producers race, so a delta (or a tool update, a plan, a usage
+            // report) from the turn that just ended can arrive after its
+            // settlement and before the promoted turn is written. Applying it
+            // here would put the previous turn's work on the new one, and make
+            // a turn that never ran look like it produced output.
+            if record.pending_turn()
+                && matches!(
+                    &event,
+                    HarnessEvent::TextDelta { .. }
+                        | HarnessEvent::ToolCall { .. }
+                        | HarnessEvent::Plan { .. }
+                        | HarnessEvent::Usage { .. }
+                )
+            {
+                tracing::debug!(
+                    thread_id = %record.meta.thread_id,
+                    generation,
+                    ?event,
+                    "dropped a late update for a turn whose prompt is not on the wire"
+                );
+                continue;
             }
             let now = self.now();
             let thread_id = record.meta.thread_id.clone();
@@ -4948,190 +5137,233 @@ impl Inner {
                         // session instead of writing into a closed client. The
                         // pump is this task, so it must not abort itself.
                         let closed = session_closed;
-                        // The adapter answers a Stop by closing the transport
-                        // and only then reporting the turn failed. The person
-                        // already ended this turn, so it settles interrupted
-                        // with no error row, exactly as a stream end on a
-                        // stopped turn does; the death is the cancel's, not a
-                        // failure the person needs to see. Only a Failed
-                        // completion is rewritten: a turn ACP already reported
-                        // Completed did its work, and a Stop that arrives while
-                        // the exit report is still on its way must not turn it
-                        // into an interrupted turn.
-                        let stopped = closed
+                        // A message promoted from the queue onto a transport
+                        // that then closed under it never reached the provider.
+                        // Its exit report has already armed the pause (this
+                        // completion was classified on a closed transport, so
+                        // `collect_closed_completion_report` applied the limit
+                        // above), and failing the turn would blame a queued
+                        // message the daemon moved for a death it never
+                        // touched. Hand it back to that pause, publish the
+                        // death as the session's own row, and end this pump with
+                        // the dead session. Nothing is replayed: the turn
+                        // produced no output, so the resumed attempt starts from
+                        // the same prompt.
+                        let turn_id = record.active.as_ref().map(|active| active.turn_id.clone());
+                        if closed
                             && status == TurnStatus::Failed
-                            && record.active.as_ref().is_some_and(|active| {
-                                active.dispatch.state() == DispatchState::ClaimedStopped
-                            });
-                        let status = if stopped {
-                            TurnStatus::Interrupted
-                        } else {
-                            status
-                        };
-                        if closed && record.session.is_live(&session) {
-                            detached = record.clear_session(generation);
-                            record.pump = None;
-                            // This pump's session died under its own turn and
-                            // is now detached. The session it holds keeps its
-                            // stream open, so the pump ends with this turn
-                            // instead of waiting for a stream end.
-                            done = true;
-                        }
-
-                        // A completed turn clears a stale limit unless this
-                        // turn armed an auto-resume: that schedule still
-                        // explains why the thread is paused, so the row keeps
-                        // its reset time.
-                        if status == TurnStatus::Completed && record.scheduled_limit.is_none() {
-                            record.limit = None;
-                        }
-                        // The summary footer shows TTFT after the turn ends, so
-                        // read it from the live meter before the turn is taken.
-                        if let Some(active) = record.active.as_ref()
-                            && let Some(ttft) = active.meter.live(now).ttft_ms
+                            && record
+                                .scheduled_limit
+                                .as_ref()
+                                .is_some_and(|scheduled| scheduled.auto_resume)
+                            && let Some(turn_id) = turn_id
+                            && record.requeue_promoted_turn(&turn_id).await
                         {
-                            record.ttft_ms = Some(ttft);
-                        }
-                        let (turn_id, item_id, text, turn_usage) = {
-                            let active = record.active.as_ref().expect("checked above");
-                            (
-                                active.turn_id.clone(),
-                                active.item_id.clone(),
-                                active.text.clone(),
-                                active.usage.clone(),
-                            )
-                        };
-                        if stopped {
-                            // The death the transport reported behind the Stop
-                            // is incidental to the cancel: it takes no row, or
-                            // the stopped turn would still show a transport
-                            // failure. A limit it carried was applied on its
-                            // own event and keeps its schedule.
-                            record.take_transport_report(&turn_id);
-                        }
-                        let usage = if usage.total_tokens() == 0
-                            && usage.cost_micros == 0
-                            && usage.duration_ms == 0
-                        {
-                            turn_usage.clone()
-                        } else {
-                            usage
-                        };
-                        // Fill gaps from the adapter's own turn report when the
-                        // event carried no accounting (Claude reports it once).
-                        let usage = if usage.total_tokens() == 0
-                            && usage.cost_micros == 0
-                            && usage.duration_ms == 0
-                        {
-                            record
-                                .live_session()
-                                .and_then(|session| session.try_lock().ok())
-                                .and_then(|session| session.last_turn())
-                                .map(|report| Usage {
-                                    cost_micros: report.cost_micros,
-                                    duration_ms: report.duration_ms,
-                                    ..Usage::default()
-                                })
-                                .unwrap_or(usage)
-                        } else {
-                            usage
-                        };
-                        record.meta.usage.merge(&usage);
-
-                        // The ledger row is written before the turn completion
-                        // is projected, so a client that reacts to
-                        // `TurnCompleted` already sees the cost in `GetUsage`.
-                        if let Some(meter) = self.meter.get() {
-                            let context = TurnContext {
-                                thread_id: Some(record.meta.thread_id.as_str().to_owned()),
-                                parent_thread_id: record
-                                    .meta
-                                    .parent_thread_id
-                                    .as_ref()
-                                    .map(|parent| parent.as_str().to_owned()),
-                                run_id: Some(turn_id.as_str().to_owned()),
-                                workspace: Some(record.meta.workspace_path.clone()),
-                                machine: Some(self.local_host.as_str().to_owned()),
-                                account: None,
-                                harness: Some(record.meta.harness.slug().to_owned()),
-                                model: Some(record.meta.model.clone()),
-                                provider: provider_for_model(&record.meta.model),
-                                credential: None,
-                            };
-                            let model = record.meta.model.clone();
-                            let metered = record.active.as_mut().map(|active| {
-                                active.meter.set_final_usage(&usage);
-                                active.meter.finish(now, status, meter.prices(), &model)
-                            });
-                            if let Some(metered) = &metered {
-                                // The meter owns the generation time (wall minus
-                                // tool time); the thread's TPS derives from it.
-                                record.meta.usage.generation_ms = record
-                                    .meta
-                                    .usage
-                                    .generation_ms
-                                    .saturating_add(metered.generation_ms);
-                                record.meta.usage.refresh_tps();
-                            }
-                            if let Some(metered) = metered
-                                && let Err(error) = meter.record_turn(context, &metered).await
-                            {
-                                tracing::warn!(%error, "could not write the usage ledger row");
-                            }
-                        }
-
-                        let mut end = TurnEnd::new(status, usage);
-                        if closed && status == TurnStatus::Failed {
-                            // The transport died under the turn. If the bridge
-                            // already reported it, the settlement's row is
-                            // deduplicated; if it arrives late, this is the one
-                            // row.
-                            end.error = Some(TurnError {
-                                message: "the harness transport closed mid-turn".into(),
-                                hint: Some("Send the message again to resume".into()),
-                                retryable: true,
-                                transport: true,
-                            });
-                        }
-                        // A limit hit earlier in this turn must survive the
-                        // completion event: the thread stays Working/Scheduled
-                        // until the scheduled resume starts.
-                        if let Some(limit) = record.scheduled_limit.clone()
-                            && limit.auto_resume
-                        {
-                            end.domain.push(ThreadEvent::UsageLimitHit {
-                                reset_at: limit.reset_at,
-                                auto_resume: true,
-                                at: now,
-                            });
-                        }
-                        if !text.is_empty() {
-                            end.wire.push(Event::ItemCompleted {
-                                thread_id: thread_id.clone(),
-                                turn_id: turn_id.clone(),
-                                item: Item::Message {
-                                    item_id,
-                                    role: MessageRole::Assistant,
-                                    text,
-                                    attachments: Vec::new(),
-                                },
-                            });
-                        }
-                        end.changes = self.snapshots.get().map(|snapshots| {
-                            let computed = snapshots.turn_changes(
-                                std::path::Path::new(&record.meta.workspace_path),
-                                &thread_id,
-                                &turn_id,
-                            );
                             tracing::info!(
                                 thread_id = %thread_id,
                                 %turn_id,
-                                files = computed.files.len(),
-                                "computed turn change set"
+                                "requeued a promoted turn whose transport died before it ran"
                             );
-                            computed
-                        });
-                        settled = self.settle_turn_locked(&mut record, &turn_id, end).await;
+                            if let Some(report) = record.take_transport_report(&turn_id) {
+                                let death = report.into_error();
+                                wire.push(Event::Error {
+                                    thread_id: Some(thread_id.clone()),
+                                    message: death.message,
+                                    hint: death.hint,
+                                    retryable: death.retryable,
+                                });
+                            }
+                            detached = record.clear_session(generation);
+                            record.pump = None;
+                            done = true;
+                        } else {
+                            // The adapter answers a Stop by closing the
+                            // transport and only then reporting the turn
+                            // failed. The person already ended this turn, so it
+                            // settles interrupted with no error row, exactly as
+                            // a stream end on a stopped turn does; the death is
+                            // the cancel's, not a failure the person needs to
+                            // see. Only a Failed completion is rewritten: a turn
+                            // ACP already reported Completed did its work, and a
+                            // Stop that arrives while the exit report is still
+                            // on its way must not turn it into an interrupted
+                            // turn.
+                            let stopped = closed
+                                && status == TurnStatus::Failed
+                                && record.active.as_ref().is_some_and(|active| {
+                                    active.dispatch.state() == DispatchState::ClaimedStopped
+                                });
+                            let status = if stopped {
+                                TurnStatus::Interrupted
+                            } else {
+                                status
+                            };
+                            if closed && record.session.is_live(&session) {
+                                detached = record.clear_session(generation);
+                                record.pump = None;
+                                // This pump's session died under its own turn
+                                // and is now detached. The session it holds
+                                // keeps its stream open, so the pump ends with
+                                // this turn instead of waiting for a stream
+                                // end.
+                                done = true;
+                            }
+
+                            // A completed turn clears a stale limit unless this
+                            // turn armed an auto-resume: that schedule still
+                            // explains why the thread is paused, so the row keeps
+                            // its reset time.
+                            if status == TurnStatus::Completed && record.scheduled_limit.is_none() {
+                                record.limit = None;
+                            }
+                            // The summary footer shows TTFT after the turn ends, so
+                            // read it from the live meter before the turn is taken.
+                            if let Some(active) = record.active.as_ref()
+                                && let Some(ttft) = active.meter.live(now).ttft_ms
+                            {
+                                record.ttft_ms = Some(ttft);
+                            }
+                            let (turn_id, item_id, text, turn_usage) = {
+                                let active = record.active.as_ref().expect("checked above");
+                                (
+                                    active.turn_id.clone(),
+                                    active.item_id.clone(),
+                                    active.text.clone(),
+                                    active.usage.clone(),
+                                )
+                            };
+                            if stopped {
+                                // The death the transport reported behind the Stop
+                                // is incidental to the cancel: it takes no row, or
+                                // the stopped turn would still show a transport
+                                // failure. A limit it carried was applied on its
+                                // own event and keeps its schedule.
+                                record.take_transport_report(&turn_id);
+                            }
+                            let usage = if usage.total_tokens() == 0
+                                && usage.cost_micros == 0
+                                && usage.duration_ms == 0
+                            {
+                                turn_usage.clone()
+                            } else {
+                                usage
+                            };
+                            // Fill gaps from the adapter's own turn report when the
+                            // event carried no accounting (Claude reports it once).
+                            let usage = if usage.total_tokens() == 0
+                                && usage.cost_micros == 0
+                                && usage.duration_ms == 0
+                            {
+                                record
+                                    .live_session()
+                                    .and_then(|session| session.try_lock().ok())
+                                    .and_then(|session| session.last_turn())
+                                    .map(|report| Usage {
+                                        cost_micros: report.cost_micros,
+                                        duration_ms: report.duration_ms,
+                                        ..Usage::default()
+                                    })
+                                    .unwrap_or(usage)
+                            } else {
+                                usage
+                            };
+                            record.meta.usage.merge(&usage);
+
+                            // The ledger row is written before the turn completion
+                            // is projected, so a client that reacts to
+                            // `TurnCompleted` already sees the cost in `GetUsage`.
+                            if let Some(meter) = self.meter.get() {
+                                let context = TurnContext {
+                                    thread_id: Some(record.meta.thread_id.as_str().to_owned()),
+                                    parent_thread_id: record
+                                        .meta
+                                        .parent_thread_id
+                                        .as_ref()
+                                        .map(|parent| parent.as_str().to_owned()),
+                                    run_id: Some(turn_id.as_str().to_owned()),
+                                    workspace: Some(record.meta.workspace_path.clone()),
+                                    machine: Some(self.local_host.as_str().to_owned()),
+                                    account: None,
+                                    harness: Some(record.meta.harness.slug().to_owned()),
+                                    model: Some(record.meta.model.clone()),
+                                    provider: provider_for_model(&record.meta.model),
+                                    credential: None,
+                                };
+                                let model = record.meta.model.clone();
+                                let metered = record.active.as_mut().map(|active| {
+                                    active.meter.set_final_usage(&usage);
+                                    active.meter.finish(now, status, meter.prices(), &model)
+                                });
+                                if let Some(metered) = &metered {
+                                    // The meter owns the generation time (wall minus
+                                    // tool time); the thread's TPS derives from it.
+                                    record.meta.usage.generation_ms = record
+                                        .meta
+                                        .usage
+                                        .generation_ms
+                                        .saturating_add(metered.generation_ms);
+                                    record.meta.usage.refresh_tps();
+                                }
+                                if let Some(metered) = metered
+                                    && let Err(error) = meter.record_turn(context, &metered).await
+                                {
+                                    tracing::warn!(%error, "could not write the usage ledger row");
+                                }
+                            }
+
+                            let mut end = TurnEnd::new(status, usage);
+                            if closed && status == TurnStatus::Failed {
+                                // The transport died under the turn. If the bridge
+                                // already reported it, the settlement's row is
+                                // deduplicated; if it arrives late, this is the one
+                                // row.
+                                end.error = Some(TurnError {
+                                    message: "the harness transport closed mid-turn".into(),
+                                    hint: Some("Send the message again to resume".into()),
+                                    retryable: true,
+                                    transport: true,
+                                });
+                            }
+                            // A limit hit earlier in this turn must survive the
+                            // completion event: the thread stays Working/Scheduled
+                            // until the scheduled resume starts.
+                            if let Some(limit) = record.scheduled_limit.clone()
+                                && limit.auto_resume
+                            {
+                                end.domain.push(ThreadEvent::UsageLimitHit {
+                                    reset_at: limit.reset_at,
+                                    auto_resume: true,
+                                    at: now,
+                                });
+                            }
+                            if !text.is_empty() {
+                                end.wire.push(Event::ItemCompleted {
+                                    thread_id: thread_id.clone(),
+                                    turn_id: turn_id.clone(),
+                                    item: Item::Message {
+                                        item_id,
+                                        role: MessageRole::Assistant,
+                                        text,
+                                        attachments: Vec::new(),
+                                    },
+                                });
+                            }
+                            end.changes = self.snapshots.get().map(|snapshots| {
+                                let computed = snapshots.turn_changes(
+                                    std::path::Path::new(&record.meta.workspace_path),
+                                    &thread_id,
+                                    &turn_id,
+                                );
+                                tracing::info!(
+                                    thread_id = %thread_id,
+                                    %turn_id,
+                                    files = computed.files.len(),
+                                    "computed turn change set"
+                                );
+                                computed
+                            });
+                            settled = self.settle_turn_locked(&mut record, &turn_id, end).await;
+                        }
                     }
                 }
                 HarnessEvent::Error { message, retryable } => {
@@ -5763,10 +5995,13 @@ impl Inner {
             self.arm_idle_reset(&mut record, generation, reset_at).await;
         }
         let dying = record.dying_sessions.remove(&generation)?;
+        let session = dying.session;
         let Some(report) = dying.report else {
             // Nothing to publish (a report the thread already accounted for),
             // but the session is still this pump's to drop.
-            return Some(dying.session);
+            drop(record);
+            self.advance_after_death(handle);
+            return Some(session);
         };
         let thread_id = record.meta.thread_id.clone();
         // The row is the idle death's diagnostic, not a failed turn. Raising a
@@ -5788,7 +6023,20 @@ impl Inner {
         {
             tracing::error!(%error, "failed to record a transport failure");
         }
-        Some(dying.session)
+        drop(record);
+        self.advance_after_death(handle);
+        Some(session)
+    }
+
+    /// Lets the queue advance once a dead session's report is published.
+    ///
+    /// A promoted turn waits for that report instead of starting an agent
+    /// while the exit report that may pause the thread is still on its way
+    /// (`promotion_waits_for_death`). This is the other half of that wait: the
+    /// verdict is in, so the turn either runs on a fresh agent or is parked by
+    /// the pause the report armed.
+    fn advance_after_death(self: &Arc<Self>, handle: &ThreadHandle) {
+        self.spawn_advance(handle.clone());
     }
 
     /// Arms the reset an idle death's exit report carries.
@@ -5863,6 +6111,13 @@ impl Inner {
                 // into the paused provider. The schedule delivers it when it
                 // fires. A pause armed for a different dispatch does not park
                 // this one (a Send's own replacement turn still starts).
+                return;
+            }
+            if record.promotion_waits_for_death() {
+                // The queue's own promotion waits one bounded window for the
+                // dead session's exit report: starting an agent now could run
+                // it into the limit the report is about to arm. The publish
+                // path advances the queue when the report's verdict is in.
                 return;
             }
             matches!(record.session, SessionSlot::None)

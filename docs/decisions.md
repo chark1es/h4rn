@@ -876,6 +876,28 @@ the restoration releases the turn instead of leaving it pending. The tests that 
 the fake harness's session/send notifications, a start gate and a held clock, and the storage-failure
 and restart paths run on a journal and ledger that are deliberately broken or reopened.
 
+**Addendum: a promoted turn waits for the exit report, and a death hands it back to the pause.** A
+message queued behind a turn is the daemon's own next step, not the person's Send, so it is marked
+as promoted when the settlement moves it out of the queue. A real ACP peer answers `end_turn` with
+an ordinary newline-terminated frame and only then exits; on a multi-threaded runtime the completion
+can be published before the reader observes the end of stdout, so the promotion can land on a
+transport the exit report is about to declare rate limited. Two rules keep the pause authoritative.
+While a dead session's report is pending (the bounded window every idle death gets), the queue's
+promotion waits: it does not start an agent, and the publish path advances the queue once the
+verdict is in, so the promoted turn either runs on a fresh agent or is parked by the reset. If the
+promotion did reach the dead transport first, the turn is handed back to the queue instead of being
+failed: its prompt never reached the provider, so the armed schedule names it and delivers it after
+the reset. Only a promoted turn that produced nothing is requeued; a prompt the person sent into a
+dying session stays their failure to see, and a promoted turn that streamed output keeps its own
+failure rather than replaying work. This also needed one attribution fix: the adapter publishes a
+turn's reply itself while the bridge forwards that turn's updates on the same channel, and the two
+producers race, so an update that arrives for a turn whose prompt is not on the wire yet is dropped
+instead of being applied to the turn that follows it. The `agy-fixture` peer keeps its replies
+ordinary (a newline terminator, as a real peer writes them) and holds the two orderings with gates:
+`H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers, closes stdout and exits with the reset on stderr, and
+`H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the promoted prompt reaches
+it, so the promotion-before-the-limit order is fixed by the test, not by the machine.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed
