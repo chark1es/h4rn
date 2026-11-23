@@ -1973,7 +1973,11 @@ async fn pending_binding_cookie(state: &AppState, machine_id: Uuid, token: &str)
     };
     if state
         .relay
-        .send(daemon, RelayServerEvent::Frame { frame })
+        .send_wait(
+            daemon,
+            RelayServerEvent::Frame { frame },
+            Duration::from_secs(10),
+        )
         .await
         .is_err()
     {
@@ -2218,7 +2222,11 @@ async fn guest_proxy(
     };
     state
         .relay
-        .send(daemon, RelayServerEvent::Frame { frame })
+        .send_wait(
+            daemon,
+            RelayServerEvent::Frame { frame },
+            Duration::from_secs(10),
+        )
         .await?;
 
     if chunked {
@@ -2298,7 +2306,7 @@ async fn send_guest_chunk(
         .map_err(|_| AppError::internal("serialise a guest body slice"))?;
     state
         .relay
-        .send(
+        .send_wait(
             daemon,
             RelayServerEvent::Frame {
                 frame: RelayFrame {
@@ -2307,6 +2315,7 @@ async fn send_guest_chunk(
                     payload,
                 },
             },
+            Duration::from_secs(30),
         )
         .await
 }

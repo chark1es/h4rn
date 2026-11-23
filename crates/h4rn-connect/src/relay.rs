@@ -215,6 +215,40 @@ impl RelayHub {
         })
     }
 
+    /// Sends an event to one device, waiting for queue capacity instead of
+    /// failing the moment the peer's queue is momentarily full.
+    ///
+    /// Guest chunk streams can produce dozens of frames in a burst; a short
+    /// backpressure wait keeps an otherwise healthy daemon from seeing a
+    /// spurious 503.
+    pub async fn send_wait(
+        &self,
+        device_id: Uuid,
+        event: RelayServerEvent,
+        wait: Duration,
+    ) -> Result<()> {
+        let tx = self
+            .peers
+            .read()
+            .await
+            .get(&device_id)
+            .map(|peer| peer.tx.clone())
+            .ok_or_else(|| {
+                AppError::unavailable("peer_offline", "the other device is not connected")
+            })?;
+        match tokio::time::timeout(wait, tx.send(event)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(AppError::unavailable(
+                "peer_offline",
+                "the other device is not connected",
+            )),
+            Err(_) => Err(AppError::unavailable(
+                "relay_backpressure",
+                "the other device is too slow",
+            )),
+        }
+    }
+
     /// Sends a relay error scoped to a session, ignoring failures.
     pub async fn send_error(
         &self,

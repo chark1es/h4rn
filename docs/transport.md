@@ -429,7 +429,7 @@ A guest has no Noise key, so a guest link cannot use the device session. Connect
 serves the fixed guest page from its own origin and only forwards JSON and
 allowed media: daemon HTML never runs there. Each exchange is a `GuestHttp`
 frame naming the method, path, public prefix and headers; a body larger than one
-frame arrives in `GuestHttpChunk` frames of at most 256 KB, and a large answer
+frame arrives in `GuestHttpChunk` frames of at most 512 KB, and a large answer
 comes back the same way. Connect registers one waiter per request, bound to the
 selected daemon's device id, so an answer from any other device is ignored.
 

@@ -45,8 +45,8 @@ pub const GUEST_MAX_PENDING_REQUESTS: usize = 8;
 pub const GUEST_MAX_EXCHANGE_BYTES: usize = GUEST_MAX_PENDING_BYTES as usize + 1024 * 1024;
 
 /// Raw bytes per relayed guest chunk. Base64 and JSON keep each frame far
-/// below the relay's frame limit.
-pub const GUEST_CHUNK_BYTES: usize = 256 * 1024;
+/// below the relay's frame limit, and a full exchange fits the relay queue.
+pub const GUEST_CHUNK_BYTES: usize = 512 * 1024;
 
 /// Name of the cookie that binds a link to its first browser.
 pub const GUEST_COOKIE: &str = "h4rn_guest";

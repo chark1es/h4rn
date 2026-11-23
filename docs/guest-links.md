@@ -118,7 +118,7 @@ hash-checked CSP document; Connect never relays a daemon's HTML. Only JSON and
 an allow-list of media types come back from the daemon, and Connect rebuilds the
 headers it passes on, including the binding cookie's path, which must name the
 public `/guest/<machine>/<token>` prefix. Request and response bodies travel in
-bounded 256 KB frames, so a 10 MB upload never grows a shared relay socket frame;
+bounded 512 KB frames, so a 10 MB upload never grows a shared relay socket frame;
 Connect refuses an exchange over the guest limit before it reaches the socket.
 Guest routes are traced by their template (`/guest/{token}/state`), never by the
 raw URI, so the token does not appear in logs.
