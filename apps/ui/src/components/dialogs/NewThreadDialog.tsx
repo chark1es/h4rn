@@ -228,23 +228,26 @@ export function NewThreadDialog() {
     showDraft(session.commitWorkspace(preset.workspace));
   }, [open, preset, hosts, draftSession, showDraft]);
 
-  // The catalogue can arrive after the dialog opens; adopt its default only
-  // while the user has not chosen a model of their own. The static (or, once a
-  // thread reported one on this host, the live) default counts as unchosen.
+  // The live catalogue can arrive after the dialog opens; adopt its default
+  // only while the user has not chosen a model of their own. The static (or,
+  // once a thread reported one on this host, the live) default counts as
+  // unchosen; anything else is a value the person typed and is left alone.
+  // This is the field's one source of truth, so a stale static default can
+  // never be what Start sends.
   const proxyActive = proxyOverrideFor(harness);
   const proxyModels = proxyModelsFor(harness);
   const proxyProfileId = proxyActive?.profile.id ?? null;
   const proxyDefault = proxyDefaultModel(harness);
-  const proxyModelKey = proxyModels.map((model) => model.id).join("|");
   const harnessDefault = newThreadModel(harness, boundHost, threadValues);
+  const defaultModel = proxyDefault ?? harnessDefault;
   useEffect(() => {
-    if (!open || proxyProfileId === null || proxyModelKey === "") return;
+    if (!open) return;
     setModel((current) =>
-      current === DEFAULT_MODELS[harness] || current === harnessDefault
-        ? (proxyDefault ?? current)
+      current === DEFAULT_MODELS[harness] || (proxyProfileId !== null && current === harnessDefault)
+        ? defaultModel
         : current,
     );
-  }, [open, harness, harnessDefault, proxyDefault, proxyModelKey, proxyProfileId]);
+  }, [open, harness, harnessDefault, defaultModel, proxyProfileId]);
 
   const selectedHost = boundHost ? hosts[boundHost] : undefined;
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
@@ -444,13 +447,22 @@ export function NewThreadDialog() {
               onChange={(value) => {
                 if (value === "") return;
                 const nextHost = hosts[value];
+                const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
+                // Reselecting the host that is already bound must not reset the
+                // field: ChipSelect fires on every pick, including the current
+                // one, and a value the person typed must survive it. A real
+                // host or harness change starts from what that host's live
+                // catalogue offers, never the static table.
+                const hostChanged = value !== boundHost;
                 hostChosen.current = true;
                 showDraft(draftSession().selectHost(value));
-                const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
-                if (nextHarness && harness !== "acp") {
+                if (nextHarness && harness !== "acp" && (hostChanged || nextHarness !== harness)) {
                   setHarness(nextHarness);
                   setAgentId(null);
-                  setModel(DEFAULT_MODELS[nextHarness]);
+                  setModel(
+                    proxyDefaultModel(nextHarness) ??
+                      newThreadModel(nextHarness, value, threadValues),
+                  );
                 }
               }}
             />

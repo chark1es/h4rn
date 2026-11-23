@@ -4528,7 +4528,15 @@ impl Inner {
         let health = session.transport_health();
         let controls = session.controls();
         let session: SharedSession = Arc::new(Mutex::new(session));
+        // Serialise the publish with a settings change for this thread, so a
+        // value the person picked while the harness was booting is never
+        // reverted by a reconcile of the older snapshot below. The lock is
+        // taken before the record: `apply_thread_settings` takes the same
+        // settings lock first and the record second, so this order never
+        // deadlocks. Both guards drop before the prompt is delivered.
         {
+            let settings_lock = handle.lock().await.settings_lock.clone();
+            let _settings = settings_lock.lock().await;
             let mut record = handle.lock().await;
             if record.closed
                 || self.closed.load(Ordering::Relaxed)
@@ -4560,13 +4568,20 @@ impl Inner {
                 .map(|controls| controls.efforts.clone())
                 .unwrap_or_default();
             // A resumed session keeps the model the agent restored, which may
-            // not be the id the thread asked for. When the thread asked for the
-            // agent's own default (or named none), the summary and the stored
-            // selection become the model the session really runs, so the
-            // summary never promises an alias the agent already resolved.
+            // not be the id the thread asked for. Only reconcile when the model
+            // this session was STARTED with is the agent's own default alias,
+            // or when the daemon did not select a model at all (the reply
+            // carried no catalogue, so the start skipped `set_model`). The
+            // record must still name what the start read: a model picked during
+            // startup is the person's newer choice and stays as it is. Then the
+            // summary and the stored selection become the model the session
+            // really runs, so the summary never promises a value the agent
+            // already left.
             if let Some(controls) = controls.as_ref()
                 && let Some(current) = controls.current_model.as_deref()
-                && is_default_model(controls, &record.meta.model)
+                && record.meta.model == started_settings.model
+                && (is_default_model(controls, &started_settings.model)
+                    || controls.models.is_none())
                 && record.meta.model != current
             {
                 record.meta.model = current.to_string();
@@ -17013,6 +17028,12 @@ mod tests {
 
     /// A thread created on a model the installed CLI no longer lists keeps the
     /// live catalogue, and a switch is checked against that catalogue.
+    ///
+    /// The catalogue itself comes from the adapter; this test proves the daemon
+    /// keeps whatever the session reported. The root cause — a real Codex
+    /// `model/list` reply whose entries omit the thread's model — is covered by
+    /// `catalog_from_model_list`'s `missing` unit test in codex.rs, which asserts
+    /// that the id list survives and only the per-model options stay unknown.
     #[tokio::test]
     async fn a_thread_whose_model_is_missing_keeps_the_live_catalogue() {
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -17097,6 +17118,100 @@ mod tests {
             sessions.get(),
             1,
             "the next turn reused the session it was reconciled with"
+        );
+    }
+
+    /// A model the person picked while the first session is still starting is
+    /// the one the thread keeps: the startup's older snapshot must not be
+    /// reconciled over it in the summary or the journal.
+    #[tokio::test]
+    async fn a_model_chosen_during_startup_survives_the_startup_reconcile() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, start) = FakeHarness::new().with_start_gate();
+        let (harness, _settings) = harness
+            .with_kind(HarnessKind::Acp)
+            .with_instance("demo")
+            .with_advertised_models(["m-1".to_string(), "m-2".to_string()])
+            .with_default_model("default")
+            .with_restored_model("m-2")
+            .with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("demo".into());
+        request.model = "m-1".into();
+        let created = manager.create_thread(request).await.expect("create");
+
+        // The startup is inside `start_session` and its slot is `Starting`.
+        assert!(wait_until(|| sessions.get() >= 1).await);
+
+        // The person asks for the agent's own default while the harness boots.
+        let summary = manager
+            .set_thread_model(&created.thread_id, "default".into())
+            .await
+            .expect("record the default model");
+        assert_eq!(summary.model, "default");
+
+        start.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(
+            summary.model, "default",
+            "the startup must not reconcile its older model over the one chosen during it"
+        );
+        let stored = journal
+            .list_threads()
+            .await
+            .expect("the journal")
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("the thread's metadata");
+        assert_eq!(
+            stored.model, "default",
+            "the journal keeps the model chosen during startup"
+        );
+    }
+
+    /// A resumed agent with no catalogue in its reply leaves the daemon unable
+    /// to select the model the thread names. The summary then shows the model
+    /// the session really runs, even when the thread asked for a concrete id.
+    #[tokio::test]
+    async fn a_resumed_session_without_a_catalogue_shows_its_restored_model() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Acp)
+            .with_instance("demo")
+            .with_default_model("default")
+            .with_restored_model("m-2")
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("demo".into());
+        request.model = "m-1".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(
+            summary.model, "m-2",
+            "with no catalogue the daemon did not select a model; the summary shows the restored one"
         );
     }
 

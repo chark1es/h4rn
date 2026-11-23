@@ -383,7 +383,13 @@ All notable changes to h4rn are recorded here. The format follows
   serialised, so the summary, the journal and the session record always name the value the session
   ended on. A prompt claimed just as its session died is handed back and delivered on a fresh
   session instead of being written into a dead one. A resumed ACP session now reports the model its
-  agent restored, and the summary shows that model instead of the `default` alias.
+  agent restored, and the summary shows that model instead of the `default` alias. The ACP start
+  records the model it selects in place, so the thread controls never name the model the session
+  left. A model chosen while a session is still starting is not reconciled away by that session's
+  older snapshot, and the New thread dialog adopts the host's live model list whenever it arrives —
+  reselecting the same host, or a catalogue that arrives after the dialog opened, never falls back
+  to a static model the installed CLI may have dropped, and a model typed by hand is never
+  overwritten.
 - **Thread settings apply to the turn they promise, and never to one already running.** A
   settings change that lands while a session is still starting no longer detaches the session that
   startup is about to write the turn to (which left the thread Working forever), and only a turn

@@ -100,7 +100,10 @@ same socket keep answering while an agent finishes its handshake.
 
 A `session/resume` or `session/load` reply may name the session without repeating its catalogue. The
 agent already knows the thread's model and mode from the session it is continuing, so h4rn keeps the
-saved selection and sends the prompt rather than rejecting it against an empty list. A load also
+saved selection and sends the prompt rather than rejecting it against an empty list. When the resumed
+session reports the model it actually restored, the thread keeps that model: the summary, the stored
+thread and the next session all name it, instead of the `default` alias or an id the agent is no
+longer running. Typing `default` afterwards returns the thread to the agent's own choice. A load also
 replays the old conversation as session updates; h4rn consumes that history before the new turn, so
 it is neither shown twice nor able to fill the event queue and stall a long conversation.
 
@@ -119,7 +122,9 @@ advertises it.
 Choosing the `default` model on a live agent is deferred rather than refused: ACP has no "reset to
 the agent's default" method and the catalogue does not say which entry is the default, so the change
 applies from the next session instead of pretending the running one switched. The summary shows
-`default`, and the next turn starts a session on the agent's own choice.
+`default`, and the next turn starts a session on the agent's own choice. Once that session starts it
+reports the model it restored, and the thread keeps that model (above), so `default` is a way back to
+the agent's choice rather than a label that stays on the thread.
 
 When an agent has a fixed working directory, **New thread** shows that directory before Start and
 the thread's workspace (Files and Changes) is that directory, not the thread workspace a built-in

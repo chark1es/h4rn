@@ -269,6 +269,10 @@ impl AcpSession {
                                 .await
                                 .map_err(|error| map_acp_error(error, policy.harness))?,
                         }
+                        // The selection succeeded: the session now runs this
+                        // model, so its controls must name it rather than the
+                        // model the agent restored on resume.
+                        session.current_model_id = Some(model_id);
                     }
                 }
                 None => {
@@ -2431,6 +2435,67 @@ mod tests {
             .expect("start session")
             .into_session();
         agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_start_time_model_selection_is_what_the_controls_report() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+            )
+            .await;
+            let new_session = next_frame(&mut reader).await;
+            assert_eq!(new_session["method"], "session/new");
+            // The agent opened on `m-1`; the thread asked for `m-2`.
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": new_session["id"],
+                    "result": {
+                        "sessionId": "s-1",
+                        "models": {
+                            "availableModels": [
+                                {"modelId": "m-1", "name": "M one"},
+                                {"modelId": "m-2", "name": "M two"}
+                            ],
+                            "currentModelId": "m-1"
+                        }
+                    }
+                }),
+            )
+            .await;
+
+            let model = next_frame(&mut reader).await;
+            assert_eq!(model["method"], "session/set_model");
+            assert_eq!(model["params"]["modelId"], "m-2");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": model["id"], "result": {}}),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.model = "m-2".into();
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("start session")
+            .into_session();
+        agent.await.expect("agent");
+
+        let controls = session.controls().expect("the agent named a catalogue");
+        assert_eq!(
+            controls.current_model.as_deref(),
+            Some("m-2"),
+            "the controls name the model the start selected, not the one the agent opened on"
+        );
         session.shutdown().await.expect("shutdown");
     }
 

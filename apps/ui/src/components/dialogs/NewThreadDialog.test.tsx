@@ -123,6 +123,10 @@ function folderField(): HTMLInputElement {
   return document.getElementById("new-thread-workspace") as HTMLInputElement;
 }
 
+function modelField(): HTMLInputElement {
+  return document.getElementById("new-thread-model") as HTMLInputElement;
+}
+
 function commitFolder(value: string): void {
   fireEvent.change(folderField(), { target: { value } });
   fireEvent.blur(folderField());
@@ -822,5 +826,94 @@ describe("NewThreadDialog drafts", () => {
         "gpt-6.2-sol",
       ),
     );
+  });
+
+  it("keeps the live model when the host already bound is picked again", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
+
+    // ChipSelect fires onChange even for the row that is already selected.
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: atlas" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /atlas/ }));
+
+    // The live catalogue still wins: reselecting must not fall back to the
+    // static `gpt-5.1-codex` the installed CLI no longer lists.
+    await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
+  });
+
+  it("adopts a live catalogue that arrives after the dialog opened", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+
+    const view = render(<NewThreadDialog />);
+    // Nothing has reported the CLI's list yet, so the static default stands.
+    await waitFor(() => expect(modelField().value).toBe("gpt-5.1-codex"));
+
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+    view.rerender(<NewThreadDialog />);
+
+    await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
+  });
+
+  it("never overwrites a model the person typed when the catalogue arrives", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(modelField().value).toBe("gpt-5.1-codex"));
+    fireEvent.change(modelField(), { target: { value: "my-own-model" } });
+
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+    view.rerender(<NewThreadDialog />);
+
+    // Give the adopt effect a chance to run; the typed value stays.
+    await waitFor(() => expect(modelField().value).toBe("my-own-model"));
   });
 });
