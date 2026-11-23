@@ -34,7 +34,9 @@ All notable changes to h4rn are recorded here. The format follows
   costs no full read. Each event is reported once per watch; a watch ends after ten comment-only
   wakes in a row, eight failed reads in a row, or when the thread is settled, and a rate limit only
   pauses it. The state beside every link is read from the forge, and a failed read is shown as
-  unavailable rather than guessed.
+  unavailable rather than guessed. After a reconnect the badge reads the linked PRs once for the
+  wakes the client missed, so a PR that merged offline is not left showing as open; a PR that
+  changed without a wake updates when the panel opens.
 - **Thread titles are written by a model.** A new thread still appears immediately with the first
   line of your first prompt, then a title of at most 60 characters replaces it through the normal
   thread update. Settings → Threads → Title model picks Off, Claude Code (run once in an empty

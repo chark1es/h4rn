@@ -524,11 +524,13 @@ Because the thread list is a client concern, watch changes do not add a
 journaled event. The badge re-reads `ListThreadPullRequests` when its panel
 opens and when a wake message is appended to its thread, so a watch that ended
 (a merge, a close) stops offering "Stop watching" without waiting for a
-reconnect. A reconnect replays the history the client missed as one burst: the
-badge does not treat each replayed message as a new wake, but it reads once per
-burst, so a PR that merged while the client was offline stops showing "Open" as
-soon as the client catches up. The panel's open re-read still covers anything
-that changed without an event.
+reconnect. A reconnect replays the history the client missed. When that replay
+includes a user message for this thread — the shape a wake takes — the badge
+reads once for the whole burst, so a PR that merged while the client was
+offline stops showing "Open" as soon as the client catches up. Replayed
+history for another thread costs no forge read. A PR that changes with no wake
+at all — for example a PR merged while no thread was watching it — updates when
+the panel opens.
 
 ## Polling, rate limits and caching
 
