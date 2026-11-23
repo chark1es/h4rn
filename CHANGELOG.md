@@ -52,7 +52,9 @@ All notable changes to h4rn are recorded here. The format follows
   costs no full read. Each event is reported once per watch; a watch ends after ten comment-only
   wakes in a row, eight failed reads in a row, or when the thread is settled, and a rate limit only
   pauses it. The state beside every link is read from the forge, and a failed read is shown as
-  unavailable rather than guessed.
+  unavailable rather than guessed. After a reconnect the badge reads the linked PRs once for the
+  wakes the client missed, so a PR that merged offline is not left showing as open; a PR that
+  changed without a wake updates when the panel opens.
 - **Thread titles are written by a model.** A new thread still appears immediately with the first
   line of your first prompt, then a title of at most 60 characters replaces it through the normal
   thread update. Settings → Threads → Title model picks Off, Claude Code (run once in an empty
@@ -418,6 +420,15 @@ All notable changes to h4rn are recorded here. The format follows
   when the daemon's watch state can have changed — when a wake message is
   appended and when its panel opens — so a merged PR stops offering "Stop
   watching", and messages replayed on reconnect do not each cost a forge read.
+- **A re-watched PR and a reconnected badge keep their promises.** Every watcher
+  generation now comes from one service-wide counter that never reuses a value,
+  so a poll that started before an unwatch and re-watch cannot hand its older
+  body to the watcher that replaced it. A delivered merge, close or
+  tenth-comment wake removes only the watcher it was computed for: if the
+  thread started watching again while that message was being delivered, the new
+  watch stays. After a reconnect the linked-PR badge re-reads once per replayed
+  burst, so a PR that merged while the client was offline stops showing "Open"
+  without waiting for the panel to open.
 - **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
   Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
   relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other
