@@ -2254,6 +2254,30 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
     ) -> Result<Vec<h4rn_protocol::ScheduleRun>, h4rn_daemon::journal::JournalError> {
         self.0.schedule_runs(task_id, limit).await
     }
+
+    async fn upsert_issue_link(
+        &self,
+        link: &h4rn_daemon::issue_links::IssueLinkRecord,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.upsert_issue_link(link).await
+    }
+
+    async fn remove_issue_link(
+        &self,
+        thread_id: &ThreadId,
+        scope: &h4rn_protocol::IssueScope,
+        issue_id: &str,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.remove_issue_link(thread_id, scope, issue_id).await
+    }
+
+    async fn issue_links_for_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<h4rn_daemon::issue_links::IssueLinkRecord>, h4rn_daemon::journal::JournalError>
+    {
+        self.0.issue_links_for_thread(thread_id).await
+    }
 }
 
 #[tokio::test]
@@ -2316,4 +2340,666 @@ async fn journal_pool(daemon: &TestDaemon) -> sqlx::SqlitePool {
     ))
     .await
     .expect("open journal")
+}
+
+/// The stored status of one guest request, or none when the row is gone.
+async fn request_status(daemon: &TestDaemon, request_id: &str) -> Option<String> {
+    let pool = journal_pool(daemon).await;
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM guest_requests WHERE request_id = ?")
+            .bind(request_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("read request status");
+    pool.close().await;
+    status
+}
+
+/// Writes a request row in the state a crash during publication would leave.
+///
+/// The files and the row exist, but no card was raised: this is the window the
+/// brief names between the row and the owner's event.
+async fn a_row_interrupted_while_publishing(
+    daemon: &TestDaemon,
+    thread_id: &ThreadId,
+    text: &str,
+) -> String {
+    let pool = journal_pool(daemon).await;
+    let link_id: String = sqlx::query_scalar("SELECT link_id FROM guest_links WHERE thread_id = ?")
+        .bind(thread_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("the thread's link");
+    let request_id = format!("greq_{}", uuid::Uuid::now_v7());
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    std::fs::create_dir_all(&directory).expect("request directory");
+    std::fs::write(directory.join("0-note.txt"), b"file").expect("request file");
+    let attachments = serde_json::json!([{
+        "name": "note.txt",
+        "mime": "text/plain",
+        "size": 4,
+        "file": "0-note.txt",
+    }]);
+    sqlx::query(
+        "INSERT INTO guest_requests
+            (request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'publishing')",
+    )
+    .bind(&request_id)
+    .bind(&link_id)
+    .bind(thread_id.as_str())
+    .bind(text)
+    .bind(attachments.to_string())
+    .bind((text.len() + 4) as i64)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&pool)
+    .await
+    .expect("insert a publishing row");
+    pool.close().await;
+    request_id
+}
+
+#[tokio::test]
+async fn a_publishing_row_is_recovered_into_a_card_never_an_orphan() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "publishing").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    // The crash window: the row and its files exist, the card does not.
+    let request_id =
+        a_row_interrupted_while_publishing(&daemon, &thread_id, "half published").await;
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    let removed = daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup recovery");
+    assert_eq!(removed, 0, "a live link was ended by startup");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("pending"),
+        "recovery left the row publishing"
+    );
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        1,
+        "recovery left a row that uses quota and has no card"
+    );
+    let snapshot = browser.state(0).await;
+    assert!(
+        snapshot.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequested { request, .. } if request.request_id == request_id
+        )),
+        "recovery did not raise the guest's waiting card"
+    );
+    assert!(
+        daemon
+            .dir
+            .path()
+            .join("guest")
+            .join(&request_id)
+            .join("0-note.txt")
+            .exists(),
+        "recovery discarded a live request's files"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_publishing_row_with_no_link_is_discarded_with_its_files() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "orphan").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let _browser = bound_browser(&base, &link).await;
+    let request_id = a_row_interrupted_while_publishing(&daemon, &thread_id, "lost row").await;
+
+    // The link went away while the row was mid-publication.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("DELETE FROM guest_links")
+        .execute(&pool)
+        .await
+        .expect("remove the link");
+    pool.close().await;
+
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup recovery");
+    assert_eq!(request_status(&daemon, &request_id).await, None);
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    assert!(
+        !daemon.dir.path().join("guest").join(&request_id).exists(),
+        "a discarded publishing row kept its files"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_sweep_never_touches_a_send_that_claimed_its_row() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "send race").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    // A real file so the sweep has something it could wrongly delete.
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "send me".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "keep.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"keep me"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        1
+    );
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists());
+
+    // Pause the Send after it claimed the row, then run the sweep against it.
+    let gate = daemon.guest.pause_next_claim();
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+    daemon.guest.sweep_expired().await.expect("periodic sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending"),
+        "the sweep stole a row Send owned"
+    );
+    assert!(
+        directory.join("0-keep.txt").exists(),
+        "the sweep deleted an attachment Send had claimed"
+    );
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        1,
+        "the sweep resolved a card Send was answering"
+    );
+
+    gate.release();
+    sending.await.expect("send task").expect("send completed");
+    assert!(!directory.exists(), "the sent request kept its files");
+    // The approved message is in the transcript with its file.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let response = owner
+            .request(ClientRequest::GetThread {
+                thread_id: thread_id.clone(),
+                since_seq: 0,
+            })
+            .await;
+        let found = match response {
+            ResponseBody::Thread { events, .. } => events.iter().any(|entry| {
+                matches!(
+                    &entry.event,
+                    Event::ItemCompleted { item: h4rn_protocol::Item::Message { text, attachments, .. }, .. }
+                        if text == "send me" && !attachments.is_empty()
+                )
+            }),
+            other => panic!("unexpected thread response: {other:?}"),
+        };
+        if found {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sent guest message never reached the transcript"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_paused_reservation_never_leaks_after_a_revocation() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "reserve race").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::AfterReserve);
+    let submitting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post(
+                    "/messages",
+                    &GuestMessageInput {
+                        text: "raced reservation".into(),
+                        attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                            name: "raced.txt".into(),
+                            mime: "text/plain".into(),
+                            data: base64_encode(b"raced"),
+                        }],
+                    },
+                )
+                .await
+        })
+    };
+    gate.arrived().await;
+    // The reservation is held by a live writer; the sweep must leave it alone.
+    daemon.guest.sweep_expired().await.expect("periodic sweep");
+    let pool = journal_pool(&daemon).await;
+    let reserving: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests WHERE status = 'reserving'")
+            .fetch_one(&pool)
+            .await
+            .expect("count reservations");
+    pool.close().await;
+    assert_eq!(
+        reserving, 1,
+        "a sweep released a reservation its writer still owned"
+    );
+    // End the link while the writer still owns it.
+    owner
+        .request(ClientRequest::StopGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    gate.release();
+    let (status, body) = submitting.await.expect("submit task");
+    assert!(
+        status == 410 || status == 400,
+        "the paused reservation answered {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let pool = journal_pool(&daemon).await;
+    let requests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests")
+        .fetch_one(&pool)
+        .await
+        .expect("count requests");
+    pool.close().await;
+    assert_eq!(requests, 0, "a revoked reservation left a row");
+    let leftovers: Vec<_> = std::fs::read_dir(daemon.dir.path().join("guest"))
+        .expect("guest dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert!(leftovers.is_empty(), "a revoked reservation left files");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    let _ = owner
+        .request(ClientRequest::SetGuestSettings { enabled: true })
+        .await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_new_link_never_replays_the_previous_links_requests() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "two links").await;
+
+    // Link A sends text and a file name; the owner dismisses it.
+    let link_a = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser_a = bound_browser(&base, &link_a).await;
+    let (status, body) = browser_a
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "secret from the first guest".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "first-guest-secret.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"first guest secret"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let first_request = request_id_from_snapshot(&browser_a).await;
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: first_request,
+        })
+        .await;
+
+    // An approved message still belongs to the thread and shows for everyone.
+    let (status, _) = browser_a
+        .post("/messages", &guest_text_message("approved for the thread"))
+        .await;
+    assert_eq!(status, 202);
+    let approved = request_id_from_snapshot(&browser_a).await;
+    owner
+        .request(ClientRequest::SendGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: approved,
+        })
+        .await;
+
+    // Link B is a different guest and must not see link A's request text,
+    // dismissed text or attachment names.
+    let link_b = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser_b = bound_browser(&base, &link_b).await;
+    let snapshot = browser_b.state(0).await;
+    let json = serde_json::to_string(&snapshot).expect("snapshot json");
+    assert!(
+        !json.contains("secret from the first guest"),
+        "a new link saw the previous link's dismissed text: {json}"
+    );
+    assert!(
+        !json.contains("first-guest-secret.txt"),
+        "a new link saw the previous link's file name: {json}"
+    );
+    assert!(
+        json.contains("approved for the thread"),
+        "the approved message must appear through the normal transcript"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_sweep_removes_a_row_whose_link_is_gone() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "no link").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("row without a link"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The link row vanishes without running its cleanup: the sweep is the only
+    // remaining owner of a pending row whose link no longer exists.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("DELETE FROM guest_links")
+        .execute(&pool)
+        .await
+        .expect("remove the link row");
+    pool.close().await;
+    daemon.guest.sweep_expired().await.expect("periodic sweep");
+    assert_eq!(request_status(&daemon, &request_id).await, None);
+    assert!(
+        !daemon.dir.path().join("guest").join(&request_id).exists(),
+        "a sweep left the files of a row with no link"
+    );
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_thumbnail_zero_request_serves_the_original_image() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "image").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    // A real image big enough to have a thumbnail of its own.
+    let image = image::RgbaImage::from_pixel(640, 400, image::Rgba([120, 40, 200, 255]));
+    let mut original = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut original),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png");
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "a picture".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "picture.png".into(),
+                    mime: "image/png".into(),
+                    data: base64_encode(&original),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    owner
+        .request(ClientRequest::SendGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id,
+        })
+        .await;
+
+    let response = owner
+        .request(ClientRequest::GetThread {
+            thread_id: thread_id.clone(),
+            since_seq: 0,
+        })
+        .await;
+    let attachment_id = match response {
+        ResponseBody::Thread { events, .. } => events
+            .into_iter()
+            .find_map(|entry| match entry.event {
+                Event::ItemCompleted {
+                    item: h4rn_protocol::Item::Message { attachments, .. },
+                    ..
+                } => attachments
+                    .first()
+                    .map(|attachment| attachment.id.as_str().to_owned()),
+                _ => None,
+            })
+            .expect("the sent image's attachment"),
+        other => panic!("unexpected thread response: {other:?}"),
+    };
+
+    let (status, _, thumbnail) = browser
+        .get(&format!("/blob/{attachment_id}?thumbnail=1"))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let (status, _, full) = browser
+        .get(&format!("/blob/{attachment_id}?thumbnail=0"))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(
+        full, original,
+        "?thumbnail=0 did not serve the original image bytes"
+    );
+    assert!(
+        thumbnail.len() < full.len(),
+        "?thumbnail=1 served the full image ({} vs {})",
+        thumbnail.len(),
+        full.len()
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_create_racing_the_labs_switch_never_leaves_a_link_behind() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "labs race").await;
+
+    for round in 0..20 {
+        owner
+            .request(ClientRequest::SetGuestSettings { enabled: true })
+            .await;
+        let guest = Arc::clone(&daemon.guest);
+        let creating = {
+            let thread_id = thread_id.clone();
+            let prefix = format!("{base}/guest");
+            tokio::spawn(async move { guest.create(&thread_id, &prefix).await.is_ok() })
+        };
+        let disabling = {
+            let guest = Arc::clone(&daemon.guest);
+            tokio::spawn(async move { guest.set_enabled(false).await.is_ok() })
+        };
+        let (created, disabled) = tokio::join!(creating, disabling);
+        let created = created.expect("create task");
+        assert!(disabled.expect("disable task"));
+        // Whatever the order, a switch that ends off leaves no link, and a
+        // create that won must be the one that runs before the disable.
+        if !daemon.guest.enabled().await.expect("setting") {
+            assert_eq!(
+                guest_link_count(&daemon).await,
+                0,
+                "round {round}: a create racing the disable left a live link"
+            );
+        } else if created {
+            assert_eq!(guest_link_count(&daemon).await, 1);
+        }
+    }
+
+    // Re-enabling never revives a link the switch ended.
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    owner
+        .request(ClientRequest::SetGuestSettings { enabled: false })
+        .await;
+    assert_eq!(guest_link_count(&daemon).await, 0);
+    assert_eq!(pending_requests(&daemon, &thread_id).await, 0);
+    owner
+        .request(ClientRequest::SetGuestSettings { enabled: true })
+        .await;
+    let token = link.rsplit('/').next().unwrap().to_owned();
+    let stale = reqwest::get(format!("{base}/guest/{token}/state")).await;
+    let stale = stale.expect("stale link request");
+    assert_eq!(
+        stale.status(),
+        reqwest::StatusCode::GONE,
+        "re-enabling the Labs switch revived a link it had ended"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_publication_after_the_link_expired_is_refused() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "expire at publish").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    // Pause after the quota is reserved; the link expires before publication.
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::AfterReserve);
+    let submitting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post("/messages", &guest_text_message("too late"))
+                .await
+        })
+    };
+    gate.arrived().await;
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("UPDATE guest_links SET expires_at = ?")
+        .bind((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339())
+        .execute(&pool)
+        .await
+        .expect("expire the link");
+    pool.close().await;
+    gate.release();
+    let (status, body) = submitting.await.expect("submit task");
+    assert_eq!(
+        status,
+        410,
+        "a submission whose link expired was answered: {}",
+        String::from_utf8_lossy(&body)
+    );
+    // No row, no directory, no card: publication refused everything.
+    let pool = journal_pool(&daemon).await;
+    let requests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests")
+        .fetch_one(&pool)
+        .await
+        .expect("count requests");
+    pool.close().await;
+    assert_eq!(requests, 0, "an expired publication left a row");
+    assert!(
+        std::fs::read_dir(daemon.dir.path().join("guest"))
+            .expect("guest dir")
+            .next()
+            .is_none(),
+        "an expired publication left files"
+    );
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "an expired publication raised a card"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_dismiss_that_claimed_its_row_is_never_reported_missing() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "dismiss race").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("dismiss me twice"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // Pause the Dismiss after it claimed the row, then let the sweep remove the
+    // claimed row. The Dismiss already has its data, so it must still succeed.
+    let gate = daemon.guest.pause_next_claim();
+    let dismissing = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.dismiss_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    daemon.guest.sweep_expired().await.expect("periodic sweep");
+    gate.release();
+    dismissing
+        .await
+        .expect("dismiss task")
+        .expect("a claimed dismissal reported missing");
+    assert_eq!(request_status(&daemon, &request_id).await, None);
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    daemon.stop().await;
 }

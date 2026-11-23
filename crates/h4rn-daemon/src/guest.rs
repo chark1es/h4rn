@@ -251,6 +251,36 @@ pub struct SubmitGate {
     release: tokio::sync::Notify,
 }
 
+/// A test's hold on one Send or Dismiss, after it claimed its row.
+///
+/// [`GuestService::pause_next_claim`] installs it; the next Send or Dismiss
+/// announces its claim and waits for [`Self::release`], so a test can run a
+/// sweep against a row that is genuinely in flight.
+#[doc(hidden)]
+pub struct ClaimGate {
+    used: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl ClaimGate {
+    /// Waits until a Send reaches the gate.
+    pub async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    /// Lets the paused Send continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+
+    /// Called by the Send itself.
+    async fn hold(&self) {
+        self.arrived.notify_one();
+        self.release.notified().await;
+    }
+}
+
 impl SubmitGate {
     /// The phase this gate pauses.
     pub fn phase(&self) -> SubmitPhase {
@@ -296,6 +326,8 @@ pub struct GuestService {
     submit_lock: tokio::sync::Mutex<()>,
     /// A test's pause point for the next submission.
     submit_gate: Mutex<Option<Arc<SubmitGate>>>,
+    /// A test's pause point for the next Send or Dismiss.
+    claim_gate: Mutex<Option<Arc<ClaimGate>>>,
 }
 
 impl std::fmt::Debug for GuestService {
@@ -338,6 +370,7 @@ impl GuestService {
             local_base: Mutex::new(None),
             submit_lock: tokio::sync::Mutex::new(()),
             submit_gate: Mutex::new(None),
+            claim_gate: Mutex::new(None),
         };
         service.ensure_schema().await?;
         std::fs::create_dir_all(service.guest_root())?;
@@ -387,6 +420,52 @@ impl GuestService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
         gate
+    }
+
+    /// Pauses the next Send or Dismiss after its claim, until the returned gate
+    /// is released.
+    ///
+    /// Used by a test that runs the cleanup sweep against a row a Send or
+    /// Dismiss genuinely owns. It is not read by the production path unless a
+    /// test installs one.
+    #[doc(hidden)]
+    pub fn pause_next_claim(&self) -> Arc<ClaimGate> {
+        let gate = Arc::new(ClaimGate {
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .claim_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// Waits at the claim gate a test installed.
+    async fn hold_claim(&self) {
+        let gate = self
+            .claim_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        if gate.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        gate.hold().await;
+        let mut slot = self
+            .claim_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &gate))
+        {
+            *slot = None;
+        }
     }
 
     /// Waits at the gate a test installed, when it names this phase.
@@ -566,6 +645,12 @@ impl GuestService {
     /// This pass retries the cleanup later. Every row it removes is also
     /// resolved on the wire, so a recovered claim can never leave a card that
     /// has no answer.
+    ///
+    /// Cleanup takes each row with a conditional update, exactly as Send and
+    /// Dismiss do. A row another writer owns (`reserving`, `publishing`,
+    /// `sending`) is therefore never touched by the periodic sweep, and a Send
+    /// that claimed a row between this pass's read and its claim leaves the
+    /// row and its files alone.
     async fn sweep_finished_requests(&self, recover_in_flight: bool) -> Result<(), GuestError> {
         let rows = sqlx::query(
             "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
@@ -575,6 +660,27 @@ impl GuestService {
         .await?;
         for row in rows {
             let request = row_to_request(row)?;
+            // An earlier cleanup stopped after its claim; finish it, never
+            // re-decide whether the request is still wanted.
+            if request.status == "deleting" {
+                self.finish_cleanup(&request).await;
+                continue;
+            }
+            // Startup has no live owner for a half-published request, so it
+            // either completes the card or discards the row and its files.
+            if recover_in_flight {
+                match request.status.as_str() {
+                    "publishing" => {
+                        self.recover_publishing(&request).await?;
+                        continue;
+                    }
+                    "reserving" | "sending" => {
+                        self.claim_and_discard(&request).await?;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             let linked: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM guest_links WHERE link_id = ?")
                     .bind(&request.link_id)
@@ -583,53 +689,142 @@ impl GuestService {
             if request.status == "pending" && linked > 0 {
                 continue;
             }
-            // A Send or a submission that is still running owns its row; the
-            // periodic sweep must never pull the files out from under it, even
-            // after its link is gone. Startup has no such reader and recovers
-            // the row instead.
-            if !recover_in_flight && matches!(request.status.as_str(), "sending" | "reserving") {
+            // A Send, a submission or a publication still running owns its
+            // row; the periodic sweep must never pull the files out from under
+            // it, even after its link is gone. Startup has no such writer and
+            // recovers the row instead.
+            if !recover_in_flight
+                && matches!(
+                    request.status.as_str(),
+                    "reserving" | "publishing" | "sending"
+                )
+            {
                 continue;
             }
-            // The request is no longer visible to anyone: remove its files,
-            // then raise the resolved event, then delete the row. Naming the
-            // request makes a repeated event harmless, and emitting before the
-            // delete means a crash in between leaves the row for the next
-            // sweep instead of leaving a card nobody can answer.
-            match self.delete_request_files(&request) {
-                Ok(()) => {
-                    match self
-                        .manager
-                        .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(ManagerError::NotFound(_)) => {
-                            // The thread is gone, so no card can stay raised.
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                request = %request.request_id,
-                                %error,
-                                "guest cleanup waits for the next sweep"
-                            );
-                            continue;
-                        }
+            self.claim_and_discard(&request).await?;
+        }
+        Ok(())
+    }
+
+    /// Claims one row for cleanup, then removes its files, its card and itself.
+    ///
+    /// The claim is a conditional update from the status this pass saw, so a
+    /// row a Send, a submission or another sweep already moved is left alone.
+    async fn claim_and_discard(&self, request: &RequestRow) -> Result<(), GuestError> {
+        let claimed = sqlx::query(
+            "UPDATE guest_requests SET status = 'deleting'
+             WHERE request_id = ? AND status = ?",
+        )
+        .bind(&request.request_id)
+        .bind(&request.status)
+        .execute(&self.pool)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            return Ok(());
+        }
+        self.finish_cleanup(request).await;
+        Ok(())
+    }
+
+    /// Removes a row already claimed as `deleting`.
+    ///
+    /// The row goes last. A failed file delete leaves it for the next sweep; a
+    /// card is resolved before its row disappears so a crash in between can
+    /// never leave an answerable-looking card.
+    async fn finish_cleanup(&self, request: &RequestRow) {
+        match self.delete_request_files(request) {
+            Ok(()) => {
+                match self
+                    .manager
+                    .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(ManagerError::NotFound(_)) => {
+                        // The thread is gone, so no card can stay raised.
                     }
-                    sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
-                        .bind(&request.request_id)
-                        .execute(&self.pool)
-                        .await?;
+                    Err(error) => {
+                        tracing::warn!(
+                            request = %request.request_id,
+                            %error,
+                            "guest cleanup waits for the next sweep"
+                        );
+                        return;
+                    }
                 }
-                Err(error) => {
+                if let Err(error) = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
+                    .bind(&request.request_id)
+                    .execute(&self.pool)
+                    .await
+                {
                     tracing::warn!(
                         request = %request.request_id,
                         %error,
-                        "guest cleanup is waiting for the next sweep"
+                        "guest cleanup could not remove its row"
                     );
                 }
             }
+            Err(error) => {
+                tracing::warn!(
+                    request = %request.request_id,
+                    %error,
+                    "guest cleanup is waiting for the next sweep"
+                );
+                // Take the card away even though the files must wait: the
+                // request can no longer be answered, and leaving its card up
+                // would offer a Send that can only fail.
+                let _ = self
+                    .manager
+                    .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
+                    .await;
+            }
         }
-        Ok(())
+    }
+
+    /// Completes or discards a request interrupted while publishing its card.
+    ///
+    /// The row was already the one decision's first half: its files are on
+    /// disk and its attachments are recorded, but the card may or may not have
+    /// been raised. A live link gets the card again (the owner's projection
+    /// keys by request id, so a repeat is one card), and an ended link gets
+    /// the row and files removed.
+    async fn recover_publishing(&self, request: &RequestRow) -> Result<(), GuestError> {
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM guest_links WHERE link_id = ? AND expires_at > ?",
+        )
+        .bind(&request.link_id)
+        .bind(Utc::now().to_rfc3339())
+        .fetch_one(&self.pool)
+        .await?;
+        if live > 0 && !self.is_settled(&request.thread_id).await {
+            match self
+                .manager
+                .emit_guest_request(&request.thread_id, request.to_proto())
+                .await
+            {
+                Ok(_) => {
+                    sqlx::query(
+                        "UPDATE guest_requests SET status = 'pending'
+                         WHERE request_id = ? AND status = 'publishing'",
+                    )
+                    .bind(&request.request_id)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
+                Err(ManagerError::NotFound(_)) => {}
+                Err(error) => {
+                    // Leave it publishing so the next startup tries again.
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "a recovered guest card waits for the next startup"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        self.claim_and_discard(request).await
     }
 
     // ------------------------------------------------------------------
@@ -651,7 +846,23 @@ impl GuestService {
     /// Turning the Labs switch off *ends* every link: the token stops working,
     /// waiting messages are discarded and their files are deleted. Turning it
     /// back on does not revive them; the owner shares again.
+    ///
+    /// Saving the setting and ending every link is one transaction, so a crash
+    /// can never leave the switch off (or on) with a link the other half never
+    /// saw. It also takes the submission lock, so a link being created at the
+    /// same moment either exists before the disable and is revoked with it, or
+    /// sees the setting off inside its own transaction and is not created.
     pub async fn set_enabled(&self, enabled: bool) -> Result<GuestSettings, GuestError> {
+        if enabled {
+            self.save_enabled(true).await?;
+        } else {
+            self.disable_and_revoke().await?;
+            self.sweep_finished_requests(false).await?;
+        }
+        Ok(GuestSettings { enabled })
+    }
+
+    async fn save_enabled(&self, enabled: bool) -> Result<(), GuestError> {
         sqlx::query(
             "INSERT INTO guest_settings (id, enabled) VALUES (1, ?)
              ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled",
@@ -659,19 +870,45 @@ impl GuestService {
         .bind(i64::from(enabled))
         .execute(&self.pool)
         .await?;
-        if !enabled {
+        Ok(())
+    }
+
+    /// Saves the switch off and ends every link in one transaction.
+    async fn disable_and_revoke(&self) -> Result<(), GuestError> {
+        let _submission = self.submit_lock.lock().await;
+        let link_ids = {
+            let mut transaction = self.pool.begin().await?;
+            sqlx::query(
+                "INSERT INTO guest_settings (id, enabled) VALUES (1, 0)
+                 ON CONFLICT(id) DO UPDATE SET enabled = 0",
+            )
+            .execute(&mut *transaction)
+            .await?;
             let rows = sqlx::query(
                 "SELECT link_id, thread_id, binding_hash, created_at, expires_at
                  FROM guest_links",
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *transaction)
             .await?;
-            for row in rows {
-                self.end_link(&row_to_link(row)).await?;
-            }
-            self.sweep_finished_requests(false).await?;
+            sqlx::query("DELETE FROM guest_links")
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM guest_bindings")
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            rows.into_iter()
+                .map(|row| row_to_link(row).link_id)
+                .collect::<Vec<_>>()
+        };
+        let mut tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for link_id in &link_ids {
+            tokens.remove(link_id);
         }
-        Ok(GuestSettings { enabled })
+        Ok(())
     }
 
     /// Sharing state for one thread.
@@ -714,16 +951,15 @@ impl GuestService {
 
     /// Creates a link for one thread, ending the thread's previous link and
     /// deleting its waiting files.
+    ///
+    /// The check for the Labs switch, replacing the old link and the insert are
+    /// one step under the submission lock, so a create racing a disable can
+    /// never leave a link that the disable did not see.
     pub async fn create(
         &self,
         thread_id: &ThreadId,
         base: &str,
     ) -> Result<CreatedLink, GuestError> {
-        if !self.enabled().await? {
-            return Err(GuestError::Invalid(
-                "Guest links are off. Turn them on in Settings → Labs → Guest links.".into(),
-            ));
-        }
         if !guest_base_allowed(base) {
             return Err(GuestError::Invalid(
                 "A direct guest link needs HTTPS. Link this machine to Connect to share with a teammate on another machine."
@@ -742,7 +978,13 @@ impl GuestService {
                 "This thread is settled. Reopen it before sharing it with a guest.".into(),
             ));
         }
-        self.end_for_thread(thread_id).await?;
+        let _submission = self.submit_lock.lock().await;
+        if !self.enabled().await? {
+            return Err(GuestError::Invalid(
+                "Guest links are off. Turn them on in Settings → Labs → Guest links.".into(),
+            ));
+        }
+        self.end_for_thread_locked(thread_id).await?;
 
         let token = random_secret();
         let hash = hash_secret(&token);
@@ -781,10 +1023,16 @@ impl GuestService {
     }
 
     async fn end_for_thread(&self, thread_id: &ThreadId) -> Result<(), GuestError> {
+        let _submission = self.submit_lock.lock().await;
+        self.end_for_thread_locked(thread_id).await
+    }
+
+    /// The same, for a caller that already holds the submission lock.
+    async fn end_for_thread_locked(&self, thread_id: &ThreadId) -> Result<(), GuestError> {
         let Some(link) = self.link_for_thread(thread_id).await? else {
             return Ok(());
         };
-        self.end_link(&link).await
+        self.end_link_locked(&link).await
     }
 
     /// Ends a link, revoking access first and cleaning files second.
@@ -796,6 +1044,11 @@ impl GuestService {
     /// not be removed is retried by the periodic sweep.
     async fn end_link(&self, link: &LinkRow) -> Result<(), GuestError> {
         let _submission = self.submit_lock.lock().await;
+        self.end_link_locked(link).await
+    }
+
+    /// The same, for a caller that already holds the submission lock.
+    async fn end_link_locked(&self, link: &LinkRow) -> Result<(), GuestError> {
         sqlx::query("DELETE FROM guest_links WHERE link_id = ?")
             .bind(&link.link_id)
             .execute(&self.pool)
@@ -815,8 +1068,11 @@ impl GuestService {
     /// Settles every waiting message for a link: files first, then the row,
     /// then the event that removes its card.
     ///
-    /// A failed file delete leaves the row for [`Self::sweep_finished_requests`]
-    /// instead of failing the revocation that already happened.
+    /// Each row is claimed with a conditional update, so a Send that claimed it
+    /// in the meantime is left alone and a reservation or publication its
+    /// writer still owns is never touched. A failed file delete leaves the row
+    /// for [`Self::sweep_finished_requests`] instead of failing the revocation
+    /// that already happened.
     async fn discard_pending(&self, link: &LinkRow) {
         let pending = match self.pending_requests(&link.link_id).await {
             Ok(pending) => pending,
@@ -826,60 +1082,13 @@ impl GuestService {
             }
         };
         for request in &pending {
-            let mut deleted = false;
-            for attempt in 0..CLEANUP_ATTEMPTS {
-                match self.delete_request_files(request) {
-                    Ok(()) => {
-                        deleted = true;
-                        break;
-                    }
-                    Err(error) if attempt + 1 == CLEANUP_ATTEMPTS => {
-                        tracing::warn!(
-                            request = %request.request_id,
-                            %error,
-                            "guest files could not be deleted; the sweep will retry"
-                        );
-                    }
-                    Err(_) => {}
-                }
+            if let Err(error) = self.claim_and_discard(request).await {
+                tracing::warn!(
+                    request = %request.request_id,
+                    %error,
+                    "guest cleanup is waiting for the next sweep"
+                );
             }
-            if !deleted {
-                // Keep the row so the sweep knows there is still work to do,
-                // but take the card away: the request is no longer actionable.
-                let _ = sqlx::query(
-                    "UPDATE guest_requests SET status = 'dismissed' WHERE request_id = ?",
-                )
-                .bind(&request.request_id)
-                .execute(&self.pool)
-                .await;
-                let _ = self
-                    .manager
-                    .emit_guest_request_resolved(&link.thread_id, &request.request_id, false)
-                    .await;
-                continue;
-            }
-            // Raise the resolved event before deleting the row. A crash in
-            // between leaves the row for the sweep, whose repeat event is
-            // harmless; a delete first would leave a card with no answer.
-            match self
-                .manager
-                .emit_guest_request_resolved(&link.thread_id, &request.request_id, false)
-                .await
-            {
-                Ok(_) | Err(ManagerError::NotFound(_)) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        request = %request.request_id,
-                        %error,
-                        "guest card resolution waits for the sweep"
-                    );
-                    continue;
-                }
-            }
-            let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
-                .bind(&request.request_id)
-                .execute(&self.pool)
-                .await;
         }
     }
 
@@ -1143,7 +1352,7 @@ impl GuestService {
         };
         let rest: Vec<&str> = parts.collect();
         let cookie = input.cookie.as_deref();
-        let queried_thumbnail = input.path.contains("thumbnail=1");
+        let queried_thumbnail = wants_thumbnail(&input.path);
         match (input.method, rest.as_slice()) {
             (Method::Get, []) => {
                 // A page load never claims the link; a preview crawler cannot
@@ -1251,6 +1460,10 @@ impl GuestService {
     }
 
     /// Reads one thread's visible events and the link's state.
+    ///
+    /// Request events are scoped to this link: a replacement guest never sees a
+    /// previous link's waiting or dismissed text and file names. A message the
+    /// owner sent appears through the normal transcript, so nothing is lost.
     async fn snapshot(&self, resolved: &Resolved, since: u64) -> Result<GuestSnapshot, GuestError> {
         if resolved.state != GuestLinkState::Active {
             return Ok(GuestSnapshot {
@@ -1271,6 +1484,13 @@ impl GuestService {
             events = events.split_off(events.len() - RECENT_EVENTS);
         }
         let next_seq = events.last().map(|event| event.seq).unwrap_or(since);
+        let link_requests: std::collections::HashSet<String> =
+            sqlx::query_scalar("SELECT request_id FROM guest_requests WHERE link_id = ?")
+                .bind(&resolved.link.link_id)
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .collect();
         Ok(GuestSnapshot {
             state: GuestLinkState::Active,
             thread: Some(guest_view(&snapshot.summary)),
@@ -1278,7 +1498,19 @@ impl GuestService {
                 .into_iter()
                 .filter_map(|entry| {
                     let seq = entry.seq;
-                    guest_event(entry.event).map(|event| h4rn_protocol::SeqEvent { seq, event })
+                    let visible = match &entry.event {
+                        Event::GuestRequested { request, .. } => {
+                            link_requests.contains(&request.request_id)
+                        }
+                        Event::GuestRequestResolved { request_id, .. } => {
+                            link_requests.contains(request_id)
+                        }
+                        _ => true,
+                    };
+                    visible
+                        .then(|| guest_event(entry.event))
+                        .flatten()
+                        .map(|event| h4rn_protocol::SeqEvent { seq, event })
                 })
                 .collect(),
             next_seq,
@@ -1366,7 +1598,7 @@ impl GuestService {
         let mut transaction = self.pool.begin().await?;
         let pending: (i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM guest_requests
-             WHERE link_id = ? AND status IN ('pending', 'reserving')",
+             WHERE link_id = ? AND status IN ('pending', 'reserving', 'publishing')",
         )
         .bind(&resolved.link.link_id)
         .fetch_one(&mut *transaction)
@@ -1464,16 +1696,36 @@ impl GuestService {
         // runs after the event it must resolve.
         let _publish = self.submit_lock.lock().await;
 
-        // Only now does the request become visible. An end_link that ran while
-        // the files were written took the submission lock and deleted this
-        // reservation, so the status guard fails and both the files and the
-        // reservation go away.
+        // Publication re-checks everything that allowed the submission, in the
+        // same statement that changes the status: a link that expired, a Labs
+        // switch turned off or a settling thread that ended the link all fail
+        // the update rather than publishing a card for a revoked guest.
+        if self.is_settled(&resolved.link.thread_id).await {
+            self.remove_request(&request_id, &directory).await;
+            return Err(GuestError::Link(
+                "This thread has settled. The owner can share it again after reopening it.".into(),
+            ));
+        }
+        // Only now does the request become visible. The status starts as
+        // `publishing`: the row and its files are the first half of one
+        // decision, and the owner's card is the second. A crash in between
+        // leaves a row startup can complete or discard, never a row that uses
+        // quota and has no card.
         let published = sqlx::query(
-            "UPDATE guest_requests SET attachments_json = ?, status = 'pending'
-             WHERE request_id = ? AND status = 'reserving'",
+            "UPDATE guest_requests SET attachments_json = ?, status = 'publishing'
+             WHERE request_id = ? AND status = 'reserving'
+               AND EXISTS (
+                   SELECT 1 FROM guest_links
+                   WHERE link_id = ? AND expires_at > ?
+               )
+               AND EXISTS (
+                   SELECT 1 FROM guest_settings WHERE id = 1 AND enabled = 1
+               )",
         )
         .bind(&attachments_json)
         .bind(&request_id)
+        .bind(&resolved.link.link_id)
+        .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
         if published.rows_affected() == 0 {
@@ -1490,7 +1742,7 @@ impl GuestService {
             text,
             attachments: stored,
             created_at,
-            status: "pending".into(),
+            status: "publishing".into(),
         };
         // The resolved event and the row are one decision: the submit lock is
         // still held, and ending a link takes it too, so this event cannot be
@@ -1505,6 +1757,16 @@ impl GuestService {
             self.remove_request(&row.request_id, &directory).await;
             return Err(GuestError::NotFound(error.to_string()));
         }
+        // The card is raised and the row becomes the waiting request it claims
+        // to be. If this update is interrupted the row stays `publishing`, and
+        // startup raises the same card again or discards both halves.
+        sqlx::query(
+            "UPDATE guest_requests SET status = 'pending'
+             WHERE request_id = ? AND status = 'publishing'",
+        )
+        .bind(&row.request_id)
+        .execute(&self.pool)
+        .await?;
         Ok(row.to_proto())
     }
 
@@ -1572,7 +1834,7 @@ impl GuestService {
     async fn pending_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
             "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
-             FROM guest_requests WHERE link_id = ? AND status IN ('pending', 'reserving')
+             FROM guest_requests WHERE link_id = ? AND status = 'pending'
              ORDER BY created_at ASC",
         )
         .bind(link_id)
@@ -1594,9 +1856,12 @@ impl GuestService {
 
     /// Sends one waiting guest message as a normal turn.
     ///
-    /// The claim is one conditional update, so a concurrent Send or Dismiss
-    /// cannot run the message twice: exactly one caller moves it out of
-    /// `pending`, and the rest see "no longer exists".
+    /// The row is read before the claim, so the claim is the only step that can
+    /// refuse it. The claim is one conditional update, so a concurrent Send or
+    /// Dismiss cannot run the message twice: exactly one caller moves it out of
+    /// `pending`, and the rest see "no longer exists". A row a sweep removed
+    /// between the read and the claim makes the claim fail, which is the same
+    /// outcome as any other lost race.
     pub async fn send_request(
         &self,
         thread_id: &ThreadId,
@@ -1607,6 +1872,11 @@ impl GuestService {
                 "This thread is settled. Reopen it before sending a guest message.".into(),
             ));
         }
+        let Some(request) = self.request_by_id(request_id).await? else {
+            return Err(GuestError::NotFound(
+                "That request no longer exists.".into(),
+            ));
+        };
         let claimed = sqlx::query(
             "UPDATE guest_requests SET status = 'sending'
              WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
@@ -1620,11 +1890,9 @@ impl GuestService {
                 "That request no longer exists.".into(),
             ));
         }
-        let Some(request) = self.request_by_id(request_id).await? else {
-            return Err(GuestError::NotFound(
-                "That request no longer exists.".into(),
-            ));
-        };
+        // A test can pause here, between the claim and the turn, to prove a
+        // concurrent sweep leaves the claimed row and its files alone.
+        self.hold_claim().await;
         let result = async {
             let mut ids = Vec::new();
             for attachment in &request.attachments {
@@ -1672,7 +1940,8 @@ impl GuestService {
     /// Discards one waiting guest message and its files.
     ///
     /// Dismiss claims the request with the same conditional update as Send, so
-    /// a request can never be both sent and dismissed.
+    /// a request can never be both sent and dismissed. The row is read before
+    /// the claim for the same reason as Send.
     pub async fn dismiss_request(
         &self,
         thread_id: &ThreadId,
@@ -1683,6 +1952,11 @@ impl GuestService {
                 "This thread is settled; its guest messages were already discarded.".into(),
             ));
         }
+        let Some(request) = self.request_by_id(request_id).await? else {
+            return Err(GuestError::NotFound(
+                "That request no longer exists.".into(),
+            ));
+        };
         let claimed = sqlx::query(
             "UPDATE guest_requests SET status = 'dismissed'
              WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
@@ -1696,11 +1970,9 @@ impl GuestService {
                 "That request no longer exists.".into(),
             ));
         }
-        let Some(request) = self.request_by_id(request_id).await? else {
-            return Err(GuestError::NotFound(
-                "That request no longer exists.".into(),
-            ));
-        };
+        // The row was read before the claim, so a cleanup that ran after the
+        // claim cannot turn this successful dismissal into "no longer exists".
+        self.hold_claim().await;
         self.delete_request_files_best_effort(&request);
         let _ = self
             .manager
@@ -1773,15 +2045,6 @@ impl GuestService {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
         }
-    }
-
-    /// Deletes every waiting file for a thread and reports the requests as
-    /// dismissed. Used when a thread is settled or the daemon shuts down.
-    pub async fn delete_pending_for_thread(&self, thread_id: &ThreadId) -> Result<(), GuestError> {
-        if let Some(link) = self.link_for_thread(thread_id).await? {
-            self.end_link(&link).await?;
-        }
-        Ok(())
     }
 }
 
@@ -2001,6 +2264,20 @@ fn guest_token(path: &str) -> &str {
     path.trim_start_matches('/').split('/').nth(1).unwrap_or("")
 }
 
+/// Whether a blob request asked for the thumbnail, not the original.
+///
+/// The path is parsed rather than searched: `thumbnail=0` must serve the full
+/// image, and a substring search would read it as a yes.
+fn wants_thumbnail(path: &str) -> bool {
+    let Some((_, query)) = path.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        name == "thumbnail" && matches!(value, "1" | "true" | "yes")
+    })
+}
+
 /// Whether a submission is a same-origin JSON POST.
 ///
 /// A guest submission changes state, so it must never be reachable from another
@@ -2168,6 +2445,17 @@ mod tests {
             sniff_guest_mime("text/plain", b"hello").unwrap(),
             "text/plain"
         );
+    }
+
+    #[test]
+    fn only_a_thumbnail_request_reads_the_thumbnail() {
+        assert!(!wants_thumbnail("/guest/tok/blob/abc"));
+        assert!(wants_thumbnail("/guest/tok/blob/abc?thumbnail=1"));
+        assert!(wants_thumbnail("/guest/tok/blob/abc?thumbnail=true"));
+        // `?thumbnail=0` means the original image, not a substring hit.
+        assert!(!wants_thumbnail("/guest/tok/blob/abc?thumbnail=0"));
+        assert!(!wants_thumbnail("/guest/tok/blob/abc?other=thumbnail=1"));
+        assert!(!wants_thumbnail("/guest/tok/blob/abc?thumbnail=false"));
     }
 
     #[test]

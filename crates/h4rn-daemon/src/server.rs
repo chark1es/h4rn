@@ -190,23 +190,21 @@ fn core_routes() -> Router<AppState> {
         )
 }
 
-/// Router for the network listener: liveness, the encrypted routes and guest
-/// links.
+/// Router for the network listener: liveness and the encrypted routes.
 ///
 /// Plaintext `/ws` is deliberately absent, so a device on the LAN cannot open
 /// an unencrypted session even if it learns the access token. `/mcp` is absent
 /// too: the hub endpoint carries a bearer token and stays loopback-only.
 ///
-/// Guest routes are the one unauthenticated surface on this listener. They
-/// carry their own bearer token, are rate-limited by nothing but the token, and
-/// never expose a thread to a browser that does not hold it.
+/// Guest routes are absent for the same reason a plaintext `/ws` is: a guest
+/// link is a bearer token in a URL, and serving it over a LAN listener would
+/// put that token on the network in the clear. Direct links live on loopback
+/// only; a teammate on another machine reaches the link through Connect.
 pub fn network_router(state: AppState) -> Router {
-    let guest = guest_router();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/secure", get(secure_handler))
         .route("/secure-mcp", get(secure_mcp_handler))
-        .merge(guest)
         .with_state(state)
 }
 
@@ -340,11 +338,12 @@ async fn guest_blob_handler(
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let suffix = if query.contains_key("thumbnail") {
-        "?thumbnail=1"
-    } else {
-        ""
-    };
+    // Forward the value unchanged: the guest surface decides what `1` and `0`
+    // mean, and a bare `?thumbnail=0` must not turn into a thumbnail request.
+    let suffix = query
+        .get("thumbnail")
+        .map(|value| format!("?thumbnail={value}"))
+        .unwrap_or_default();
     guest_exchange(
         &state,
         crate::guest::Method::Get,
