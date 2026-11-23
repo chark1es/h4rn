@@ -132,6 +132,17 @@ impl Default for ThreadManagerOptions {
     }
 }
 
+/// Told when a thread's placement becomes Settled by the lifecycle itself.
+///
+/// A manual "settle now" is handled where the request is served; this hook
+/// covers the derived cases (the 24-hour auto-settle and a merged branch) so a
+/// guest link never outlives the settled thread it names.
+#[async_trait::async_trait]
+pub trait SettleHook: Send + Sync {
+    /// The thread is Settled now; end anything scoped to it.
+    async fn settled(&self, thread_id: &ThreadId);
+}
+
 /// A request to create a thread (the protocol fields without the wire id).
 #[derive(Clone, Debug)]
 pub struct NewThread {
@@ -297,6 +308,8 @@ struct Inner {
     meter: std::sync::OnceLock<Arc<MeterHub>>,
     /// Title generation, installed once by the daemon assembly.
     text_generation: std::sync::OnceLock<Arc<dyn TextGeneration>>,
+    /// Told when the lifecycle settles a thread (guest links, ADR-044).
+    settle_hook: std::sync::OnceLock<Arc<dyn SettleHook>>,
     /// Threads with a title generation attempt in flight, so a duplicate
     /// never starts a second model call.
     ///
@@ -1741,6 +1754,7 @@ impl ThreadManager {
                 mcp: std::sync::OnceLock::new(),
                 meter: std::sync::OnceLock::new(),
                 text_generation: std::sync::OnceLock::new(),
+                settle_hook: std::sync::OnceLock::new(),
                 title_jobs: std::sync::Mutex::new(HashSet::new()),
                 title_settled: tokio::sync::Notify::new(),
                 last_schedule_check: std::sync::Mutex::new(None),
@@ -1807,6 +1821,11 @@ impl ThreadManager {
     /// harness want.
     pub fn set_text_generation(&self, service: Arc<dyn TextGeneration>) {
         let _ = self.inner.text_generation.set(service);
+    }
+
+    /// Installs the hook that ends guest links when a thread settles by itself.
+    pub fn set_settle_hook(&self, hook: Arc<dyn SettleHook>) {
+        let _ = self.inner.settle_hook.set(hook);
     }
 
     /// The metering hub, when one has been attached.
@@ -1902,7 +1921,10 @@ impl ThreadManager {
                 source: h4rn_core::MessageSource::Guest,
                 at: now,
             },
-            ThreadEvent::GuestRequestAdded { at: now },
+            ThreadEvent::GuestRequestAdded {
+                request_id: request.request_id.clone(),
+                at: now,
+            },
         ];
         let wire = vec![Event::GuestRequested {
             thread_id: thread_id.clone(),
@@ -1924,7 +1946,10 @@ impl ThreadManager {
         let handle = self.inner.handle(thread_id).await?;
         let mut record = handle.lock().await;
         let now = self.now();
-        let domain = vec![ThreadEvent::GuestRequestRemoved { at: now }];
+        let domain = vec![ThreadEvent::GuestRequestRemoved {
+            request_id: request_id.to_owned(),
+            at: now,
+        }];
         let wire = vec![Event::GuestRequestResolved {
             thread_id: thread_id.clone(),
             request_id: request_id.to_owned(),
@@ -7071,6 +7096,7 @@ impl Inner {
             let threads = self.threads.lock().await;
             threads.values().cloned().collect()
         };
+        let mut settled: Vec<ThreadId> = Vec::new();
 
         for handle in handles {
             if self.closed.load(Ordering::Relaxed) {
@@ -7078,6 +7104,19 @@ impl Inner {
             }
             let mut record = handle.lock().await;
             let summary = record.summary(&self.options.settings, self.now());
+            // A thread that became Settled by the lifecycle (the 24-hour idle
+            // rule or a merged branch) must end its guest link even when no
+            // request arrives to trigger it. The very first tick after a
+            // restart has no signature yet, so an already-settled thread is
+            // cleaned up then too.
+            if summary.tab == ThreadTab::Settled
+                && record
+                    .last_signature
+                    .as_ref()
+                    .is_none_or(|signature| signature.tab != ThreadTab::Settled)
+            {
+                settled.push(summary.thread_id.clone());
+            }
             let signature = SummarySignature::of(&summary);
             if record.last_signature.as_ref() == Some(&signature) {
                 continue;
@@ -7098,6 +7137,12 @@ impl Inner {
                     record.last_signature = Some(signature);
                 }
                 Err(error) => tracing::warn!(%error, "failed to append derived tab change"),
+            }
+        }
+
+        if let Some(hook) = self.settle_hook.get() {
+            for thread_id in settled {
+                hook.settled(&thread_id).await;
             }
         }
 

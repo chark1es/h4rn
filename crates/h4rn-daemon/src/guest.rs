@@ -28,12 +28,13 @@ use h4rn_protocol::{
     ThreadSummary, guest_page_csp, guest_page_html,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 use subtle::ConstantTimeEq;
 
 use crate::blobs::{BlobStore, UploadOwner, sanitize_name};
 use crate::journal::JournalError;
-use crate::threads::{ManagerError, ThreadManager};
+use crate::threads::{ManagerError, SettleHook, ThreadManager};
 
 /// Directory, inside the daemon data directory, holding waiting guest files.
 const GUEST_DIR: &str = "guest";
@@ -225,6 +226,54 @@ pub struct CreatedLink {
     pub token: String,
 }
 
+/// Where a test pauses a submission, relative to the quota reservation.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitPhase {
+    /// After the link decision and before the reservation/insert.
+    BeforeReserve,
+    /// After the quota is reserved in the database and before files are
+    /// written.
+    AfterReserve,
+}
+
+/// A test's hold on one submission.
+///
+/// [`GuestService::pause_next_submit`] installs it; the next submission
+/// announces that it reached the phase and waits for [`Self::release`]. It is
+/// public so integration tests can drive the real race instead of timing one.
+#[doc(hidden)]
+pub struct SubmitGate {
+    phase: SubmitPhase,
+    /// One submission holds the gate; a later one must never share it.
+    used: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl SubmitGate {
+    /// The phase this gate pauses.
+    pub fn phase(&self) -> SubmitPhase {
+        self.phase
+    }
+
+    /// Waits until a submission reaches the gate.
+    pub async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    /// Lets the paused submission continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+
+    /// Called by the submission itself.
+    async fn hold(&self) {
+        self.arrived.notify_one();
+        self.release.notified().await;
+    }
+}
+
 /// Guest links, settings and waiting messages for this daemon.
 pub struct GuestService {
     pool: SqlitePool,
@@ -240,7 +289,13 @@ pub struct GuestService {
     local_base: Mutex<Option<String>>,
     /// Serializes the quota check and request insert, so two submissions
     /// cannot both reserve the last of the pending budget.
+    ///
+    /// It also makes ending a link one decision with removing its requests:
+    /// the delete, the resolved events and a submission's insert cannot
+    /// interleave, so a card can never be raised after it was resolved.
     submit_lock: tokio::sync::Mutex<()>,
+    /// A test's pause point for the next submission.
+    submit_gate: Mutex<Option<Arc<SubmitGate>>>,
 }
 
 impl std::fmt::Debug for GuestService {
@@ -265,7 +320,13 @@ impl GuestService {
             None => {
                 // A daemon built with a custom journal still gets a working
                 // guest surface; the store simply does not share that file.
-                SqlitePool::connect("sqlite::memory:").await?
+                // One connection only: every pooled connection to
+                // `sqlite::memory:` is a *different* database, so a second
+                // one would find no tables.
+                SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await?
             }
         };
         let service = Self {
@@ -276,13 +337,86 @@ impl GuestService {
             tokens: Mutex::new(std::collections::HashMap::new()),
             local_base: Mutex::new(None),
             submit_lock: tokio::sync::Mutex::new(()),
+            submit_gate: Mutex::new(None),
         };
         service.ensure_schema().await?;
         std::fs::create_dir_all(service.guest_root())?;
         // A link that expired while the daemon was off must not keep its files
-        // waiting forever.
-        service.sweep_expired().await?;
+        // waiting forever. A submission that was mid-claim when the daemon
+        // stopped has no in-flight reader now, so recover it here: its card is
+        // resolved instead of staying unanswerable.
+        service.sweep_expired_with(true).await?;
         Ok(service)
+    }
+
+    /// The SQLite pool this store uses.
+    ///
+    /// Public for a test that proves the custom-journal fallback is a
+    /// single-connection in-memory database.
+    #[doc(hidden)]
+    pub fn store_pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    /// The startup pass: expires links and recovers interrupted claims.
+    ///
+    /// Public so a test can run the exact code the daemon runs at boot after
+    /// simulating a crash between a claim and its event.
+    #[doc(hidden)]
+    pub async fn recover_after_restart(&self) -> Result<usize, GuestError> {
+        self.sweep_expired_with(true).await
+    }
+
+    /// Pauses the next submission at `phase` until the returned gate is
+    /// released.
+    ///
+    /// Used by integration tests to race Stop sharing, a new link, settling or
+    /// the Labs switch against a submission at the exact moment the link is
+    /// checked. It is not read by the production path unless a test installs
+    /// one.
+    #[doc(hidden)]
+    pub fn pause_next_submit(&self, phase: SubmitPhase) -> Arc<SubmitGate> {
+        let gate = Arc::new(SubmitGate {
+            phase,
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .submit_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// Waits at the gate a test installed, when it names this phase.
+    async fn hold_submit(&self, phase: SubmitPhase) {
+        let gate = self
+            .submit_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        if gate.phase != phase {
+            return;
+        }
+        if gate.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        gate.hold().await;
+        // A gate holds exactly one submission; a later one must not block.
+        let mut slot = self
+            .submit_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &gate))
+        {
+            *slot = None;
+        }
     }
 
     fn guest_root(&self) -> PathBuf {
@@ -378,9 +512,19 @@ impl GuestService {
 
     /// Removes links whose 24 hours passed, and the files waiting for them.
     ///
-    /// Runs at startup and periodically, so an expired link and its attachments
-    /// do not outlive the link just because nobody opened the page again.
+    /// Runs periodically, so an expired link and its attachments do not outlive
+    /// the link just because nobody opened the page again. A submission that is
+    /// in flight right now is left alone.
     pub async fn sweep_expired(&self) -> Result<usize, GuestError> {
+        self.sweep_expired_with(false).await
+    }
+
+    /// The same sweep, with an option to recover in-flight claims.
+    ///
+    /// Only startup passes `true`: no submission can be mid-flight then, so a
+    /// row still marked `sending` or `reserving` was interrupted by the last
+    /// shutdown and must be resolved instead of leaving an unanswerable card.
+    async fn sweep_expired_with(&self, recover_in_flight: bool) -> Result<usize, GuestError> {
         let rows = sqlx::query(
             "SELECT link_id, thread_id, binding_hash, created_at, expires_at
              FROM guest_links WHERE expires_at <= ?",
@@ -394,7 +538,24 @@ impl GuestService {
             self.end_link(&link).await?;
             removed += 1;
         }
-        self.sweep_finished_requests().await?;
+        // A thread that settled while the lifecycle tick could not tell this
+        // service (a restart, or a crash between the settle and its hook) still
+        // refuses its guest. Ending the link here makes the sweep the second
+        // path that keeps a settled thread's link from outliving it.
+        let links = sqlx::query(
+            "SELECT link_id, thread_id, binding_hash, created_at, expires_at
+             FROM guest_links",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in links {
+            let link = row_to_link(row);
+            if self.is_settled(&link.thread_id).await {
+                self.end_link(&link).await?;
+                removed += 1;
+            }
+        }
+        self.sweep_finished_requests(recover_in_flight).await?;
         Ok(removed)
     }
 
@@ -402,8 +563,10 @@ impl GuestService {
     ///
     /// Access revocation and file cleanup are deliberately separate: ending a
     /// link deletes its row first, so a failing disk never keeps a link alive.
-    /// This pass retries the cleanup later.
-    async fn sweep_finished_requests(&self) -> Result<(), GuestError> {
+    /// This pass retries the cleanup later. Every row it removes is also
+    /// resolved on the wire, so a recovered claim can never leave a card that
+    /// has no answer.
+    async fn sweep_finished_requests(&self, recover_in_flight: bool) -> Result<(), GuestError> {
         let rows = sqlx::query(
             "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
              FROM guest_requests",
@@ -420,10 +583,38 @@ impl GuestService {
             if request.status == "pending" && linked > 0 {
                 continue;
             }
+            // A Send or a submission that is still running owns its row; the
+            // periodic sweep must never pull the files out from under it, even
+            // after its link is gone. Startup has no such reader and recovers
+            // the row instead.
+            if !recover_in_flight && matches!(request.status.as_str(), "sending" | "reserving") {
+                continue;
+            }
             // The request is no longer visible to anyone: remove its files,
-            // then the row. A failed delete leaves both for the next sweep.
+            // then raise the resolved event, then delete the row. Naming the
+            // request makes a repeated event harmless, and emitting before the
+            // delete means a crash in between leaves the row for the next
+            // sweep instead of leaving a card nobody can answer.
             match self.delete_request_files(&request) {
                 Ok(()) => {
+                    match self
+                        .manager
+                        .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(ManagerError::NotFound(_)) => {
+                            // The thread is gone, so no card can stay raised.
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                request = %request.request_id,
+                                %error,
+                                "guest cleanup waits for the next sweep"
+                            );
+                            continue;
+                        }
+                    }
                     sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
                         .bind(&request.request_id)
                         .execute(&self.pool)
@@ -478,7 +669,7 @@ impl GuestService {
             for row in rows {
                 self.end_link(&row_to_link(row)).await?;
             }
-            self.sweep_finished_requests().await?;
+            self.sweep_finished_requests(false).await?;
         }
         Ok(GuestSettings { enabled })
     }
@@ -539,13 +730,18 @@ impl GuestService {
                     .into(),
             ));
         }
-        // The thread must exist before a link can point at it.
+        // The thread must exist before a link can point at it, and a settled
+        // thread takes no new guest.
         let snapshot = self
             .manager
             .get_thread(thread_id, u64::MAX)
             .await
             .map_err(|error| GuestError::NotFound(error.to_string()))?;
-        let _ = snapshot;
+        if snapshot.summary.tab == h4rn_protocol::ThreadTab::Settled {
+            return Err(GuestError::Invalid(
+                "This thread is settled. Reopen it before sharing it with a guest.".into(),
+            ));
+        }
         self.end_for_thread(thread_id).await?;
 
         let token = random_secret();
@@ -594,9 +790,12 @@ impl GuestService {
     /// Ends a link, revoking access first and cleaning files second.
     ///
     /// The row is deleted before any file work: a disk error must never leave a
-    /// token live. Waiting messages are settled afterwards, and anything that
-    /// could not be removed is retried by the periodic sweep.
+    /// token live. It runs under the submission lock so a submission cannot
+    /// commit its row after this link deletion and then raise a card nobody can
+    /// answer. Waiting messages are settled afterwards, and anything that could
+    /// not be removed is retried by the periodic sweep.
     async fn end_link(&self, link: &LinkRow) -> Result<(), GuestError> {
+        let _submission = self.submit_lock.lock().await;
         sqlx::query("DELETE FROM guest_links WHERE link_id = ?")
             .bind(&link.link_id)
             .execute(&self.pool)
@@ -659,13 +858,27 @@ impl GuestService {
                     .await;
                 continue;
             }
+            // Raise the resolved event before deleting the row. A crash in
+            // between leaves the row for the sweep, whose repeat event is
+            // harmless; a delete first would leave a card with no answer.
+            match self
+                .manager
+                .emit_guest_request_resolved(&link.thread_id, &request.request_id, false)
+                .await
+            {
+                Ok(_) | Err(ManagerError::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "guest card resolution waits for the sweep"
+                    );
+                    continue;
+                }
+            }
             let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
                 .bind(&request.request_id)
                 .execute(&self.pool)
-                .await;
-            let _ = self
-                .manager
-                .emit_guest_request_resolved(&link.thread_id, &request.request_id, false)
                 .await;
         }
     }
@@ -673,6 +886,17 @@ impl GuestService {
     /// Settling (archiving) a thread ends its link.
     pub async fn thread_settled(&self, thread_id: &ThreadId) -> Result<(), GuestError> {
         self.end_for_thread(thread_id).await
+    }
+
+    /// Whether the thread is Settled, so a guest may not read or write it.
+    ///
+    /// A thread that is gone reports `false`: the caller's thread read then
+    /// produces the honest not-found answer.
+    async fn is_settled(&self, thread_id: &ThreadId) -> bool {
+        self.manager
+            .thread_summary(thread_id)
+            .await
+            .is_some_and(|summary| summary.tab == h4rn_protocol::ThreadTab::Settled)
     }
 
     async fn link_for_thread(&self, thread_id: &ThreadId) -> Result<Option<LinkRow>, GuestError> {
@@ -748,6 +972,17 @@ impl GuestService {
             return Ok(Resolved {
                 link,
                 state: GuestLinkState::Expired,
+                bind_cookie: None,
+            });
+        }
+        // A settled thread takes no guest, even before the periodic tick has
+        // noticed the auto-settle. Ending the link here makes the refusal
+        // durable and removes any waiting card.
+        if self.is_settled(&link.thread_id).await {
+            self.end_link(&link).await?;
+            return Ok(Resolved {
+                link,
+                state: GuestLinkState::Revoked,
                 bind_cookie: None,
             });
         }
@@ -1053,10 +1288,12 @@ impl GuestService {
 
     /// Stores one guest message and queues it for the owner.
     ///
-    /// The submission is one atomic decision: the link must still be live and
-    /// enabled, the pending budget must have room, and the row and its quota
-    /// are written together. Files are written before the row exists, so a
-    /// racing Stop sharing can never observe a half-written request.
+    /// The submission is one decision: the link must still be live, enabled
+    /// and unscoped from a settled thread, the pending budget must have room,
+    /// and the row, its files and the owner's event follow in that order. The
+    /// quota is reserved before any file is written, so concurrent submissions
+    /// cannot exceed the budget even briefly, and a rejected reservation
+    /// leaves neither a row nor a directory.
     async fn submit(
         &self,
         resolved: &Resolved,
@@ -1109,47 +1346,27 @@ impl GuestService {
             ));
         }
 
+        // The gate sits after the token check and before the reservation, so a
+        // test can end the link in between and prove the insert refuses it.
+        self.hold_submit(SubmitPhase::BeforeReserve).await;
+
         let request_id = format!("greq_{}", uuid::Uuid::now_v7());
         let directory = self.guest_root().join(&request_id);
-        std::fs::create_dir_all(&directory)?;
-        let mut stored = Vec::new();
-        let write = (|| -> Result<(), GuestError> {
-            for (index, (name, mime, bytes)) in decoded.iter().enumerate() {
-                let file = format!("{index}-{name}");
-                let path = directory.join(&file);
-                let mut handle = std::fs::File::create(&path)?;
-                handle.write_all(bytes)?;
-                handle.sync_all()?;
-                stored.push(StoredAttachment {
-                    name: name.clone(),
-                    mime: mime.clone(),
-                    size: bytes.len() as u64,
-                    file,
-                });
-            }
-            Ok(())
-        })();
-        if let Err(error) = write {
-            // A failed write must not leave a half-written request behind.
-            let _ = std::fs::remove_dir_all(&directory);
-            return Err(error);
-        }
-
         let created_at = Utc::now();
-        let attachments_json = serde_json::to_string(&stored)
-            .map_err(|error| GuestError::Invalid(error.to_string()))?;
         let size_bytes = total.saturating_add(text.len() as u64);
 
-        // Reserve quota and insert in one transaction. The in-process lock
-        // makes the check and insert one decision for concurrent submissions;
-        // the link guard makes a racing Stop sharing, a new link, an archive
-        // or the Labs switch fail the insert instead of leaving an orphan
-        // request.
+        // The lock makes the quota check, the insert, the files and the event
+        // one decision per link and one per competing submission.
         let _reservation = self.submit_lock.lock().await;
+        if self.is_settled(&resolved.link.thread_id).await {
+            return Err(GuestError::Link(
+                "This thread has settled. The owner can share it again after reopening it.".into(),
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let pending: (i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM guest_requests
-             WHERE link_id = ? AND status = 'pending'",
+             WHERE link_id = ? AND status IN ('pending', 'reserving')",
         )
         .bind(&resolved.link.link_id)
         .fetch_one(&mut *transaction)
@@ -1158,16 +1375,19 @@ impl GuestService {
             || pending.1.saturating_add(size_bytes as i64) > GUEST_MAX_PENDING_BYTES as i64
         {
             transaction.rollback().await?;
-            let _ = std::fs::remove_dir_all(&directory);
             return Err(GuestError::Invalid(
                 "Too many messages are already waiting for the owner. Send or dismiss some first."
                     .into(),
             ));
         }
+        // Reserve the budget and the request id before any file exists. The
+        // link guard makes a racing Stop sharing, a new link, an archive, the
+        // Labs switch or an auto-settle fail the insert instead of leaving an
+        // orphan request.
         let inserted = sqlx::query(
             "INSERT INTO guest_requests
                 (request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status)
-             SELECT ?, ?, ?, ?, ?, ?, ?, 'pending'
+             SELECT ?, ?, ?, ?, '[]', ?, ?, 'reserving'
              WHERE EXISTS (
                  SELECT 1 FROM guest_links
                  WHERE link_id = ? AND expires_at > ?
@@ -1179,7 +1399,6 @@ impl GuestService {
         .bind(&resolved.link.link_id)
         .bind(resolved.link.thread_id.as_str())
         .bind(&text)
-        .bind(&attachments_json)
         .bind(size_bytes as i64)
         .bind(created_at.to_rfc3339())
         .bind(&resolved.link.link_id)
@@ -1188,12 +1407,81 @@ impl GuestService {
         .await?;
         if inserted.rows_affected() == 0 {
             transaction.rollback().await?;
-            let _ = std::fs::remove_dir_all(&directory);
             return Err(GuestError::Link(
                 "The owner stopped sharing this thread.".into(),
             ));
         }
         transaction.commit().await?;
+        // The budget is reserved, so the lock can move on: another submission
+        // will see this row and be refused if the shared cap is reached. The
+        // files are written without holding it, and the publish below re-checks
+        // that the link still exists.
+        drop(_reservation);
+
+        // A test can pause here to prove that no file was written yet.
+        self.hold_submit(SubmitPhase::AfterReserve).await;
+
+        // Files are written outside the async runtime, so a 10 MB fsync never
+        // blocks another task on this worker.
+        let directory_for_write = directory.clone();
+        let written =
+            tokio::task::spawn_blocking(move || -> Result<Vec<StoredAttachment>, GuestError> {
+                std::fs::create_dir_all(&directory_for_write)?;
+                let mut stored = Vec::new();
+                for (index, (name, mime, bytes)) in decoded.iter().enumerate() {
+                    let file = format!("{index}-{name}");
+                    let path = directory_for_write.join(&file);
+                    let mut handle = std::fs::File::create(&path)?;
+                    handle.write_all(bytes)?;
+                    handle.sync_all()?;
+                    stored.push(StoredAttachment {
+                        name: name.clone(),
+                        mime: mime.clone(),
+                        size: bytes.len() as u64,
+                        file,
+                    });
+                }
+                Ok(stored)
+            })
+            .await;
+        let stored = match written {
+            Ok(Ok(stored)) => stored,
+            Ok(Err(error)) => {
+                self.remove_request(&request_id, &directory).await;
+                return Err(error);
+            }
+            Err(error) => {
+                self.remove_request(&request_id, &directory).await;
+                return Err(GuestError::Io(std::io::Error::other(error.to_string())));
+            }
+        };
+        let attachments_json = serde_json::to_string(&stored)
+            .map_err(|error| GuestError::Invalid(error.to_string()))?;
+
+        // Re-take the submission lock for the step that makes the row and the
+        // owner's event one decision: an end_link that ran while the files
+        // were written either deleted the link (the guard below fails) or
+        // runs after the event it must resolve.
+        let _publish = self.submit_lock.lock().await;
+
+        // Only now does the request become visible. An end_link that ran while
+        // the files were written took the submission lock and deleted this
+        // reservation, so the status guard fails and both the files and the
+        // reservation go away.
+        let published = sqlx::query(
+            "UPDATE guest_requests SET attachments_json = ?, status = 'pending'
+             WHERE request_id = ? AND status = 'reserving'",
+        )
+        .bind(&attachments_json)
+        .bind(&request_id)
+        .execute(&self.pool)
+        .await?;
+        if published.rows_affected() == 0 {
+            self.remove_request(&request_id, &directory).await;
+            return Err(GuestError::Link(
+                "The owner stopped sharing this thread.".into(),
+            ));
+        }
 
         let row = RequestRow {
             request_id,
@@ -1204,6 +1492,9 @@ impl GuestService {
             created_at,
             status: "pending".into(),
         };
+        // The resolved event and the row are one decision: the submit lock is
+        // still held, and ending a link takes it too, so this event cannot be
+        // raised after the link's resolved event for the same request.
         if let Err(error) = self
             .manager
             .emit_guest_request(&row.thread_id, row.to_proto())
@@ -1211,14 +1502,19 @@ impl GuestService {
         {
             // The thread disappeared between the guard and the event; the
             // request must not outlive the thread it names.
-            let _ = std::fs::remove_dir_all(&directory);
-            let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
-                .bind(&row.request_id)
-                .execute(&self.pool)
-                .await;
+            self.remove_request(&row.request_id, &directory).await;
             return Err(GuestError::NotFound(error.to_string()));
         }
         Ok(row.to_proto())
+    }
+
+    /// Drops a reserved request and its files after a failed submission.
+    async fn remove_request(&self, request_id: &str, directory: &Path) {
+        let _ = std::fs::remove_dir_all(directory);
+        let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
+            .bind(request_id)
+            .execute(&self.pool)
+            .await;
     }
 
     async fn blob(
@@ -1276,7 +1572,7 @@ impl GuestService {
     async fn pending_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
             "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
-             FROM guest_requests WHERE link_id = ? AND status = 'pending'
+             FROM guest_requests WHERE link_id = ? AND status IN ('pending', 'reserving')
              ORDER BY created_at ASC",
         )
         .bind(link_id)
@@ -1306,6 +1602,11 @@ impl GuestService {
         thread_id: &ThreadId,
         request_id: &str,
     ) -> Result<(), GuestError> {
+        if self.is_settled(thread_id).await {
+            return Err(GuestError::Invalid(
+                "This thread is settled. Reopen it before sending a guest message.".into(),
+            ));
+        }
         let claimed = sqlx::query(
             "UPDATE guest_requests SET status = 'sending'
              WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
@@ -1377,6 +1678,11 @@ impl GuestService {
         thread_id: &ThreadId,
         request_id: &str,
     ) -> Result<(), GuestError> {
+        if self.is_settled(thread_id).await {
+            return Err(GuestError::Invalid(
+                "This thread is settled; its guest messages were already discarded.".into(),
+            ));
+        }
         let claimed = sqlx::query(
             "UPDATE guest_requests SET status = 'dismissed'
              WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
@@ -1809,6 +2115,19 @@ fn guest_base_allowed(base: &str) -> bool {
     authority.starts_with("127.0.0.1")
         || authority.starts_with("localhost")
         || authority.starts_with("[::1]")
+}
+
+#[async_trait::async_trait]
+impl SettleHook for GuestService {
+    async fn settled(&self, thread_id: &ThreadId) {
+        if let Err(error) = self.thread_settled(thread_id).await {
+            tracing::warn!(
+                %error,
+                thread = %thread_id.as_ref(),
+                "could not end the guest link on a settled thread"
+            );
+        }
+    }
 }
 
 impl From<JournalError> for GuestError {

@@ -137,6 +137,12 @@ pub struct ThreadState {
     pub pending_failure: bool,
     /// Guest messages waiting for the owner to send or dismiss (ADR-044).
     pub pending_guest_requests: u32,
+    /// Ids of the requests counted above.
+    ///
+    /// A removal names its request, so replaying the same resolved event (a
+    /// sweep after a crash between the claim and its event) can never lower
+    /// the count for a different waiting message.
+    pub guest_requests: std::collections::BTreeSet<String>,
     /// The host disappeared while work was active.
     pub host_unreachable: bool,
     /// Usage-limit state.
@@ -168,6 +174,7 @@ impl ThreadState {
             pending_question: false,
             pending_failure: false,
             pending_guest_requests: 0,
+            guest_requests: std::collections::BTreeSet::new(),
             host_unreachable: false,
             usage_limit: None,
             link_closed: false,
@@ -353,13 +360,17 @@ impl ThreadState {
                 }
                 if *source == MessageSource::Guest {}
             }
-            ThreadEvent::GuestRequestAdded { at } => {
-                self.pending_guest_requests = self.pending_guest_requests.saturating_add(1);
+            ThreadEvent::GuestRequestAdded { request_id, at } => {
+                if self.guest_requests.insert(request_id.clone()) {
+                    self.pending_guest_requests = self.pending_guest_requests.saturating_add(1);
+                }
                 self.acknowledged = false;
                 self.last_activity = *at;
             }
-            ThreadEvent::GuestRequestRemoved { at } => {
-                self.pending_guest_requests = self.pending_guest_requests.saturating_sub(1);
+            ThreadEvent::GuestRequestRemoved { request_id, at } => {
+                if self.guest_requests.remove(request_id) {
+                    self.pending_guest_requests = self.pending_guest_requests.saturating_sub(1);
+                }
                 self.last_activity = *at;
             }
             ThreadEvent::ManualMove { tab, pinned, at } => {
@@ -712,11 +723,15 @@ pub enum ThreadEvent {
     },
     /// A guest submitted a message that waits for the owner (ADR-044).
     GuestRequestAdded {
+        /// The request that joined the queue.
+        request_id: String,
         /// Event time.
         at: DateTime<Utc>,
     },
     /// A waiting guest message was sent or dismissed.
     GuestRequestRemoved {
+        /// The request that left the queue.
+        request_id: String,
         /// Event time.
         at: DateTime<Utc>,
     },
@@ -792,8 +807,8 @@ impl ThreadEvent {
             | Self::HostRestored { at }
             | Self::FailureRaised { at }
             | Self::MessageReceived { at, .. }
-            | Self::GuestRequestAdded { at }
-            | Self::GuestRequestRemoved { at }
+            | Self::GuestRequestAdded { at, .. }
+            | Self::GuestRequestRemoved { at, .. }
             | Self::ManualMove { at, .. }
             | Self::Acknowledge { at }
             | Self::Reopen { at }
@@ -1098,7 +1113,10 @@ mod tests {
 
     #[test]
     fn a_guest_request_raises_a_hand_until_it_is_answered() {
-        let waiting = ThreadState::new(at(0)).apply(&ThreadEvent::GuestRequestAdded { at: at(1) });
+        let waiting = ThreadState::new(at(0)).apply(&ThreadEvent::GuestRequestAdded {
+            request_id: "greq_1".into(),
+            at: at(1),
+        });
         assert_eq!(waiting.pending_guest_requests, 1);
         assert!(needs_attention(&waiting, at(2), &settings()));
         assert!(holds_settlement(&waiting, at(2)));
@@ -1107,17 +1125,33 @@ mod tests {
             until: Some(at(100)),
             at: at(3),
         });
-        let sent = snoozed
-            .clone()
-            .apply(&ThreadEvent::GuestRequestRemoved { at: at(4) });
+        let sent = snoozed.clone().apply(&ThreadEvent::GuestRequestRemoved {
+            request_id: "greq_1".into(),
+            at: at(4),
+        });
         assert_eq!(sent.pending_guest_requests, 0);
         assert!(!needs_attention(&sent, at(5), &settings()));
         assert!(is_snoozed(&sent, at(5)));
 
-        let two = waiting.apply(&ThreadEvent::GuestRequestAdded { at: at(3) });
+        let two = waiting.apply(&ThreadEvent::GuestRequestAdded {
+            request_id: "greq_2".into(),
+            at: at(3),
+        });
         assert_eq!(two.pending_guest_requests, 2);
-        let one = two.apply(&ThreadEvent::GuestRequestRemoved { at: at(4) });
+        // Resolving the same request twice is one removal, so a recovered
+        // event after a crash cannot clear another guest's hand.
+        let one = two
+            .clone()
+            .apply(&ThreadEvent::GuestRequestRemoved {
+                request_id: "greq_1".into(),
+                at: at(4),
+            })
+            .apply(&ThreadEvent::GuestRequestRemoved {
+                request_id: "greq_1".into(),
+                at: at(5),
+            });
         assert_eq!(one.pending_guest_requests, 1);
+        assert!(one.guest_requests.contains("greq_2"));
     }
 
     #[test]
@@ -1126,7 +1160,10 @@ mod tests {
             until: Some(at(100)),
             at: at(1),
         });
-        let woken = snoozed.apply(&ThreadEvent::GuestRequestAdded { at: at(2) });
+        let woken = snoozed.apply(&ThreadEvent::GuestRequestAdded {
+            request_id: "greq_1".into(),
+            at: at(2),
+        });
         assert!(!is_snoozed(&woken, at(2)));
     }
 

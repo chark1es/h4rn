@@ -299,6 +299,9 @@ impl DaemonBuilder {
             .await
             .map_err(|error| anyhow::anyhow!("open guest links: {error}"))?,
         );
+        // The 24-hour auto-settle and a merged branch are derived placements,
+        // so the manager tells the guest service when a thread becomes Settled.
+        manager.set_settle_hook(Arc::clone(&guest) as Arc<dyn crate::threads::SettleHook>);
 
         // Titles can come from an installed coding agent or a configured text
         // generator; the service decides per thread from its saved settings.
