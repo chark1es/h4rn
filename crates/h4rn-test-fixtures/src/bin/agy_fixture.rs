@@ -15,7 +15,10 @@
 //! Two more orderings cover a rate limit that only the exit report carries
 //! after the turn already ended: an answer, a closed stdout and only then the
 //! exit (`H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN`), and an idle close followed by
-//! the exit (`H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS`). A mid-turn exit with no
+//! the exit (`H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS`). The first writes its
+//! final reply without a line terminator, so the daemon reads it together with
+//! the end of stdout and its completion cannot precede the EOF that the
+//! exit-only limit has to be seen against. A mid-turn exit with no
 //! stderr at all (`H4RN_FIXTURE_SILENT_EXIT`) proves the exit status still names
 //! the row when there is no stderr to outrank it. An idle death with no EOF at
 //! all (`H4RN_FIXTURE_IDLE_EXIT_ONLY`) holds stdout open from a keeper process,
@@ -424,6 +427,13 @@ fn main() {
                 }
                 let closing_stdin = text.contains("H4RN_FIXTURE_CLOSE_STDIN");
                 let limited_stdin = text.contains("H4RN_FIXTURE_STDIN_RATE_LIMITED");
+                // This marker's reply is the stream's last frame and goes out
+                // without a line terminator. Frames are newline-delimited, so
+                // the daemon can only read it once stdout has ended: the turn
+                // completion always lands after the EOF, which is the ordering
+                // an exit-only limit has to be seen against. With a terminator,
+                // a loaded machine could publish the completion first.
+                let exit_after_turn = text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN");
                 let session_id = params
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -442,14 +452,20 @@ fn main() {
                         }
                     }),
                 );
-                reply(
-                    &mut stdout,
-                    id,
-                    json!({
-                        "stopReason": "end_turn",
-                        "usage": {"inputTokens": 3, "outputTokens": 2}
-                    }),
-                );
+                let reply_result = json!({
+                    "stopReason": "end_turn",
+                    "usage": {"inputTokens": 3, "outputTokens": 2}
+                });
+                if exit_after_turn {
+                    if let Some(id) = id {
+                        write_unterminated_frame(
+                            &mut stdout,
+                            &json!({"jsonrpc": "2.0", "id": id, "result": reply_result}),
+                        );
+                    }
+                } else {
+                    reply(&mut stdout, id, reply_result);
+                }
                 if limited_stdin {
                     // Answer this turn, then leave a rate-limit reset on
                     // stderr and close stdin while staying alive: the next
@@ -468,12 +484,12 @@ fn main() {
                     close_stdin_and_wait(None);
                 }
                 if text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN") {
-                    // Answer this turn, close stdout at once, and only then
-                    // leave the reset on stderr and exit. The turn's completion
-                    // sees a closed transport, and the limit arrives solely
-                    // through the exit report that follows. The gate marks that
-                    // the answer was written and stdout closed, so a test can
-                    // queue work behind the turn before the report lands.
+                    // The reply above carried no terminator, so it reached the
+                    // daemon together with the end of stdout. Close the stream,
+                    // then wait for the test's gate, and only then leave the
+                    // reset on stderr and exit: the limit arrives solely
+                    // through the exit report that follows a completion on a
+                    // closed transport.
                     close_stdout();
                     wait_for_gate(
                         ".agy-fixture-limit-after-turn-waiting",
@@ -491,7 +507,10 @@ fn main() {
                         ".agy-fixture-limit-idle-gate",
                     );
                     close_stdout();
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    // No pause here: the report follows the EOF at once, so the
+                    // pump's bounded wait for the death's specific account can
+                    // never expire before it lands. A pause would only make the
+                    // test depend on the loaded machine's scheduling.
                     eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }
@@ -723,6 +742,20 @@ fn write_frame(stdout: &mut std::io::Stdout, frame: &Value) {
         return;
     };
     bytes.push(b'\n');
+    let _ = stdout.write_all(&bytes);
+    let _ = stdout.flush();
+}
+
+/// Writes a frame without its newline terminator, then flushes it.
+///
+/// Frames are newline-delimited, so a reader's line read cannot return this
+/// frame until the stream ends: the reply is delivered together with the EOF.
+/// A test uses it when the ordering between a completion and the stream's end
+/// has to be fixed instead of left to scheduling.
+fn write_unterminated_frame(stdout: &mut std::io::Stdout, frame: &Value) {
+    let Ok(bytes) = serde_json::to_vec(frame) else {
+        return;
+    };
     let _ = stdout.write_all(&bytes);
     let _ = stdout.flush();
 }

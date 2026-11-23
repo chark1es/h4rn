@@ -365,6 +365,16 @@ All notable changes to h4rn are recorded here. The format follows
   when the daemon's watch state can have changed — when a wake message is
   appended and when its panel opens — so a merged PR stops offering "Stop
   watching", and messages replayed on reconnect do not each cost a forge read.
+- **Two daemon tests no longer fail under load for reasons the code under test does not
+  control.** The Tailscale "a prompt CLI still answers" test no longer gives its fake CLI the
+  production two-second detection budget: on an oversubscribed runner that budget can expire while
+  a shell that only echoes is still being scheduled, and the test then reported a working CLI as
+  "off". The test now injects a budget that cannot expire spuriously, while the hung-CLI test keeps
+  a short one and still covers the deadline. The Antigravity exit-only limit test no longer races
+  its own reader: its fixture writes the final reply without a line terminator, so the adapter
+  reads that reply together with the end of stdout and always classifies the completion on a closed
+  transport, and the fixture no longer pauses between closing stdout and exiting, so the daemon's
+  bounded wait for the exit report cannot expire first.
 - **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
   Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
   relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other

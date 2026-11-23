@@ -537,6 +537,10 @@ async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
 /// thread: the completion arrives on a closed transport, so the pump waits for
 /// the report and arms the schedule before promoting the message queued behind
 /// the turn.
+///
+/// The fixture's last reply carries no line terminator, so it is delivered
+/// together with the EOF and the completion is always classified on a closed
+/// transport; the ordering is fixed by the stream, not by scheduling.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
@@ -556,6 +560,18 @@ async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
 
     // The marker turn is answered, then its stdout closes; the reset is only on
     // the exit report that follows. The follow-up queues behind the turn.
+    //
+    // The exit gate already exists before the prompt is sent, so the fixture
+    // exits the moment its stdout is closed: the exit report follows the EOF
+    // immediately, inside the daemon's bounded wait. The reply itself carries
+    // no line terminator, so the daemon reads it only together with the EOF and
+    // the completion is always classified on a closed transport, however the
+    // machine schedules the two tasks.
+    std::fs::write(
+        workspace.path().join(".agy-fixture-limit-after-turn-gate"),
+        b"",
+    )
+    .expect("open the fixture's exit gate");
     let thread_id: ThreadId = created.thread_id.clone();
     manager
         .send_message(
@@ -569,21 +585,6 @@ async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
         .send_message(&thread_id, "queued".into(), Vec::new())
         .await
         .expect("queue");
-    let waiting = workspace
-        .path()
-        .join(".agy-fixture-limit-after-turn-waiting");
-    tokio::time::timeout(TURN_TIMEOUT, async {
-        while !waiting.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the fixture answered and closed stdout");
-    std::fs::write(
-        workspace.path().join(".agy-fixture-limit-after-turn-gate"),
-        b"",
-    )
-    .expect("release the fixture's exit gate");
 
     let ended = next_turn(&mut events).await;
     assert_eq!(ended.status, TurnStatus::Completed, "{:?}", ended.errors);
