@@ -482,17 +482,23 @@ re-watch read that a poll overtakes is discarded, so a body from before a
 failure can never move the baseline back and cause the same failure to be
 reported twice; a poll read that a re-watch overtakes is discarded too, so a
 stale failing body cannot re-report a failure the re-watch already moved past.
-That guard applies to a terminal re-watch as well: when a poll has changed the
-watcher meanwhile, the re-watch does not delete it, so a watcher waiting to
-retry an undelivered merge wake still gets to deliver it. A failure wake fires
-only for a failing check that was not already failing in that watcher's
-previous snapshot, so a re-run that passed and left other checks failing is not
-reported as a new failure. A watch ends after ten wakes in a row that brought
-only comments or reviews, after eight failed reads in a row, or when the thread
-is settled or archived. A tenth comment-only wake that cannot be delivered is
-retried like a terminal one rather than dropped. A rate limit only pauses the
-watch until the forge's `retry-after` (or two minutes when it does not say); it
-is not a failed read.
+Every watcher generation is drawn from one service-wide counter that never
+reuses a value, so a read that captured the generation of a watcher the thread
+has since unwatched and replaced can never apply its older body to the
+replacement. That guard applies to a terminal re-watch as well: when a poll has
+changed the watcher meanwhile, the re-watch does not delete it, so a watcher
+waiting to retry an undelivered merge wake still gets to deliver it. A
+delivered merge, close or tenth-comment wake likewise removes only the watcher
+it was computed for: if the thread starts watching again while that message is
+being delivered, the new watch stays. A failure wake fires only for a failing
+check that was not already failing in that watcher's previous snapshot, so a
+re-run that passed and left other checks failing is not reported as a new
+failure. A watch ends after ten wakes in a row that brought only comments or
+reviews, after eight failed reads in a row, or when the thread is settled or
+archived. A tenth comment-only wake that cannot be delivered is retried like a
+terminal one rather than dropped. A rate limit only pauses the watch until the
+forge's `retry-after` (or two minutes when it does not say); it is not a failed
+read.
 
 The watch reads the forge through the service's read paths without asking the
 30-second checks poller to take on the PR. That poller belongs to the screens
@@ -514,13 +520,17 @@ instead of treating every author as someone else, and
 linked-items panel. The other triggers (checks, conflicts, merge and close)
 still apply.
 
-Because the thread list is a client concern, a client that reconnects re-reads
-`ListThreadPullRequests`; watch changes do not add a journaled event. The badge
-also re-reads when it opens and when a wake message is appended to its thread,
-so a watch that ended (a merge, a close) stops offering "Stop watching" without
-waiting for a reconnect. A reconnect's replayed messages are history, not new
-wakes, so they do not cost a forge read each; the panel's open re-read covers
-anything a replay would have changed.
+Because the thread list is a client concern, watch changes do not add a
+journaled event. The badge re-reads `ListThreadPullRequests` when its panel
+opens and when a wake message is appended to its thread, so a watch that ended
+(a merge, a close) stops offering "Stop watching" without waiting for a
+reconnect. A reconnect replays the history the client missed. When that replay
+includes a user message for this thread — the shape a wake takes — the badge
+reads once for the whole burst, so a PR that merged while the client was
+offline stops showing "Open" as soon as the client catches up. Replayed
+history for another thread costs no forge read. A PR that changes with no wake
+at all — for example a PR merged while no thread was watching it — updates when
+the panel opens.
 
 ## Polling, rate limits and caching
 
