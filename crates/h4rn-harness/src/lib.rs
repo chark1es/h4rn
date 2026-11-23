@@ -37,6 +37,8 @@ mod fake;
 mod opencode;
 pub mod registry;
 pub mod stats;
+#[cfg(test)]
+mod test_scripts;
 pub mod versions;
 
 pub use controls::{

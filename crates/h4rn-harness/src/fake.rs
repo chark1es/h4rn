@@ -79,9 +79,17 @@ enum SendFailure {
 /// the session, so the stream does not end when the agent dies. A test that
 /// needs to report a death the way the adapter does (the generic stdout close,
 /// then the exit status with the stderr it drained) pushes it through this
-/// handle instead of ending the stream.
+/// handle instead of ending the stream. It also carries the session's transport
+/// health, so a test can model an agent that exited while its stream stays
+/// open.
 #[derive(Clone, Debug, Default)]
-pub struct EventInjector(Arc<Mutex<Vec<EventSink>>>);
+pub struct EventInjector(Arc<Mutex<Vec<InjectedSession>>>);
+
+#[derive(Clone, Debug)]
+struct InjectedSession {
+    sink: EventSink,
+    health: crate::TransportHealth,
+}
 
 impl EventInjector {
     /// Queues one event on the most recently started session's stream.
@@ -91,9 +99,27 @@ impl EventInjector {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .last()
-            .cloned();
+            .map(|session| session.sink.clone());
         if let Some(sender) = sender {
             sender.try_send(event);
+        }
+    }
+
+    /// Queues one event on the most recently started session's stream, waiting
+    /// for a bounded queue to have room.
+    ///
+    /// With a one-slot queue this returns only once the pump has taken the
+    /// previous event, which is how a test orders an injected update before a
+    /// later step without a wall-clock wait.
+    pub async fn send(&self, event: HarnessEvent) {
+        let sender = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last()
+            .map(|session| session.sink.clone());
+        if let Some(sender) = sender {
+            sender.send(event).await;
         }
     }
 
@@ -108,9 +134,26 @@ impl EventInjector {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(session)
-            .cloned();
+            .map(|session| session.sink.clone());
         if let Some(sender) = sender {
             sender.try_send(event);
+        }
+    }
+
+    /// Marks the most recently started session's transport closed, the way an
+    /// agent that exited does, without ending its event stream.
+    ///
+    /// A test uses this so the daemon classifies the next completion as one on
+    /// a closed transport, exactly as a real peer's exit does.
+    pub fn close_transport(&self) {
+        let health = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last()
+            .map(|session| session.health.clone());
+        if let Some(health) = health {
+            health.close_with(crate::TransportCloseKind::Exit);
         }
     }
 }
@@ -127,6 +170,8 @@ pub struct FakeHarness {
     send_delay: Option<Duration>,
     /// A test-only latch before a turn's input is answered.
     send_gate: Option<Gate>,
+    /// Which send [`Self::send_gate`] starts holding, counting from one.
+    send_gate_after: usize,
     /// A test-only latch before a write directive's file appears.
     write_gate: Option<Gate>,
     /// A test-only count of prompts the session was asked to write.
@@ -178,6 +223,9 @@ pub struct FakeHarness {
     shutdown_count: Option<ShutdownCount>,
     /// A test-only switch: prompts after the first `n` fail as a dead transport.
     dead_sends_after: Option<usize>,
+    /// Whether a typed limit failure also reports a closed transport, the way
+    /// a write into a session whose agent just exited does.
+    close_on_limit_failure: bool,
     /// A test-only switch: prompts after the first `n` fail with this
     /// (possibly untyped) error instead of being answered.
     send_failure_after: Option<(usize, SendFailure)>,
@@ -493,6 +541,7 @@ impl Default for FakeHarness {
             session_scripts: None,
             send_delay: None,
             send_gate: None,
+            send_gate_after: 1,
             write_gate: None,
             send_count: None,
             interrupt_count: None,
@@ -516,6 +565,7 @@ impl Default for FakeHarness {
             session_count: None,
             shutdown_count: None,
             dead_sends_after: None,
+            close_on_limit_failure: false,
             send_failure_after: None,
             stream_end_gate: None,
             trailing_completion_gate: None,
@@ -592,6 +642,19 @@ impl FakeHarness {
     pub fn with_send_gate(mut self) -> (Self, Gate) {
         let gate = Gate::new();
         self.send_gate = Some(gate.clone());
+        self.send_gate_after = 1;
+        (self, gate)
+    }
+
+    /// Holds every `send` after the first `sends` until the gate is released.
+    ///
+    /// A test uses this to block one later prompt in its write while the turns
+    /// before it run normally: the daemon's first `send` primes the script, so
+    /// a gate after `2` holds the third prompt written to a session.
+    pub fn with_send_gate_after(mut self, sends: usize) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.send_gate = Some(gate.clone());
+        self.send_gate_after = sends;
         (self, gate)
     }
 
@@ -827,6 +890,30 @@ impl FakeHarness {
         self
     }
 
+    /// Lets the first `ok_sends` prompts succeed, then fails later sends with
+    /// the typed limit *and* a transport that reports itself closed.
+    ///
+    /// A test uses this for a promoted prompt written into a session whose
+    /// agent already exited with the reset on stderr: the prompt never reaches
+    /// the provider, the write fails on the dead transport, and the limit on
+    /// the failure is what must hold the queued turn.
+    pub fn with_closed_limit_after(
+        mut self,
+        ok_sends: usize,
+        message: impl Into<String>,
+        reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        self.close_on_limit_failure = true;
+        self.send_failure_after = Some((
+            ok_sends,
+            SendFailure::RateLimited(LimitSignal {
+                message: message.into(),
+                reset_at,
+            }),
+        ));
+        self
+    }
+
     /// Lets the first `ok_sends` prompts succeed, then fails every later send
     /// with an ordinary transport error whose text is `message`.
     ///
@@ -1002,12 +1089,16 @@ impl Harness for FakeHarness {
         sender
             .send(HarnessEvent::SessionStarted { session_id })
             .await;
+        let health = TransportHealth::new();
         if let Some(injector) = &self.event_injector {
             injector
                 .0
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(sender.clone());
+                .push(InjectedSession {
+                    sink: sender.clone(),
+                    health: health.clone(),
+                });
         }
 
         let session_scripts = self.session_scripts.clone();
@@ -1048,11 +1139,15 @@ impl Harness for FakeHarness {
             switchable: self.switchable,
             primed,
             delay,
-            send_gate: self.send_gate.clone(),
+            send_gate: self
+                .send_gate
+                .clone()
+                .map(|gate| (self.send_gate_after, gate)),
             send_count: self.send_count.clone(),
             interrupt_count: self.interrupt_count.clone(),
             interrupt_failures: self.interrupt_failures.clone(),
             dead_sends_after: self.dead_sends_after,
+            close_on_limit_failure: self.close_on_limit_failure,
             send_failure_after: self.send_failure_after.clone(),
             sends: 0,
             has_answered: false,
@@ -1065,7 +1160,7 @@ impl Harness for FakeHarness {
             trailing_completion_gate: self.trailing_completion_gate.clone(),
             stderr: self.stderr.clone().unwrap_or_default(),
             closed: false,
-            health: TransportHealth::new(),
+            health,
             streaming_send: self.streaming_send.clone(),
             diagnostic_before_death: self.diagnostic_before_death.clone(),
             immediate_stream_end: self.immediate_stream_end,
@@ -1102,8 +1197,8 @@ pub struct FakeSession {
     primed: bool,
     /// Env-gated pause before an echo turn, for cancel-flow e2e tests.
     delay: Duration,
-    /// A test-controlled latch on a turn's input.
-    send_gate: Option<Gate>,
+    /// A test-controlled latch on a turn's input, from this send on.
+    send_gate: Option<(usize, Gate)>,
     /// A shared count of prompts this session was asked to write.
     send_count: Option<SendCount>,
     /// A shared count of cancels this session received.
@@ -1112,6 +1207,8 @@ pub struct FakeSession {
     interrupt_failures: Option<Arc<AtomicUsize>>,
     /// Sends after this many fail as a dead transport and close the session.
     dead_sends_after: Option<usize>,
+    /// Whether a typed limit failure also reports a closed transport.
+    close_on_limit_failure: bool,
     /// Sends after this many fail with this test-only failure.
     send_failure_after: Option<(usize, SendFailure)>,
     /// Prompts this session has been asked to write.
@@ -1231,8 +1328,8 @@ impl HarnessSession for FakeSession {
             gate.wait().await;
             return Ok(());
         }
-        if let Some(gate) = &self.send_gate
-            && !first_send
+        if let Some((after, gate)) = &self.send_gate
+            && self.sends > *after
         {
             gate.wait().await;
         }
@@ -1240,6 +1337,10 @@ impl HarnessSession for FakeSession {
         if let Some((after, failure)) = self.send_failure_after.clone()
             && self.sends > after
         {
+            if self.close_on_limit_failure && matches!(failure, SendFailure::RateLimited(_)) {
+                self.closed = true;
+                self.health.close();
+            }
             return Err(match failure {
                 SendFailure::Transport(message) => HarnessError::Transport {
                     harness: self.kind,
