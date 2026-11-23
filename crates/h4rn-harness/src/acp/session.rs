@@ -557,6 +557,7 @@ impl HarnessSession for AcpSession {
                     .map(|model| model.model_id.clone())
                     .collect()
             }),
+            current_model: self.info.current_model_id.clone(),
             default_models: self
                 .policy
                 .default_models
@@ -2206,6 +2207,78 @@ mod tests {
         }
         drop(events);
         agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    /// A resumed ACP session keeps the model the agent restored. The controls
+    /// must report that model so the daemon can show what the session really
+    /// runs instead of the `default` alias the thread asked for.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resumed_session_reports_the_model_the_agent_restored() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            assert_eq!(initialize["method"], "initialize");
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {"loadSession": true}
+                    }
+                }),
+            )
+            .await;
+            let load = next_frame(&mut reader).await;
+            assert_eq!(load["method"], "session/load");
+            assert_eq!(load["params"]["sessionId"], "s-old");
+            // The conversation was on `m-restored`; the reply names it as the
+            // current selection along with the catalogue.
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": load["id"],
+                    "result": {
+                        "sessionId": "s-old",
+                        "models": {
+                            "availableModels": [
+                                {"modelId": "m-default", "name": "Default"},
+                                {"modelId": "m-restored", "name": "Restored"}
+                            ],
+                            "currentModelId": "m-restored"
+                        }
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.model = "default".into();
+        spec.resume_id = Some("s-old".into());
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("start the resumed session")
+            .into_session();
+        let mut events = session.events();
+        match events.next().await.expect("session started") {
+            HarnessEvent::SessionStarted { session_id } => assert_eq!(session_id, "s-old"),
+            other => panic!("unexpected first event {other:?}"),
+        }
+        drop(events);
+        agent.await.expect("agent");
+
+        let controls = session.controls().expect("the agent named a catalogue");
+        assert_eq!(
+            controls.current_model.as_deref(),
+            Some("m-restored"),
+            "the session says which model it is really running"
+        );
         session.shutdown().await.expect("shutdown");
     }
 

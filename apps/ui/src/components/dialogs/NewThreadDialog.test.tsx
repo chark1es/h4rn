@@ -9,6 +9,7 @@ const mock = vi.hoisted(() => {
     connection: { status: string };
     hosts: Record<string, HostSummary>;
     localHostId: string | null;
+    threads: Record<string, unknown>;
     ui: {
       newThreadOpen: boolean;
       newThreadPreset: { host: string; workspace: string } | null;
@@ -17,6 +18,7 @@ const mock = vi.hoisted(() => {
     connection: { status: "online" },
     hosts: {},
     localHostId: null,
+    threads: {},
     ui: { newThreadOpen: true, newThreadPreset: null },
   };
   const harness: {
@@ -134,6 +136,7 @@ describe("NewThreadDialog drafts", () => {
     mock.state.connection.status = "online";
     mock.state.hosts = {};
     mock.state.localHostId = null;
+    mock.state.threads = {};
     mock.state.ui.newThreadOpen = true;
     mock.state.ui.newThreadPreset = null;
     mock.harness.agents = [];
@@ -791,5 +794,33 @@ describe("NewThreadDialog drafts", () => {
 
     expect(readNewThreadDraft("host_a", "~/code/api")).toBe("");
     expect(readNewThreadDraft("host_a", "~/code/web")).toBe("web work");
+  });
+
+  it("starts a new Codex thread on the model the host's live catalogue lists", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+    // A thread on this host already reported Codex's own `model/list`; the
+    // static default (`gpt-5.1-codex`) is not in the installed CLI any more.
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect((document.getElementById("new-thread-model") as HTMLInputElement).value).toBe(
+        "gpt-6.2-sol",
+      ),
+    );
   });
 });

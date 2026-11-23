@@ -5,6 +5,7 @@ import {
   effortLabel,
   fastSupported,
   modeLabel,
+  newThreadModel,
   nonDefaultSettings,
   runtimeModeForModeId,
   threadEffortChoices,
@@ -142,5 +143,28 @@ describe("thread controls", () => {
     const fallback = threadModelChoices("codex", "gpt-5.1-codex", [], ["proxy/model"]);
     expect(fallback).toContain("gpt-5.1-codex-mini");
     expect(fallback).toContain("proxy/model");
+  });
+
+  it("starts a new Codex thread on the model the host's CLI really lists", () => {
+    // codex-cli 0.171.0 no longer offers the static default, so a new thread
+    // would be refused if it asked for it once a live catalogue is known.
+    const reported = summary({
+      thread_id: "th_codex",
+      harness: "codex",
+      model: "gpt-6.2-sol",
+      models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+    });
+    expect(newThreadModel("codex", "host_1", [reported])).toBe("gpt-6.2-sol");
+    // The same list from another host says nothing about this one.
+    expect(newThreadModel("codex", "host_2", [reported])).toBe("gpt-5.1-codex");
+    // Before any thread reported a catalogue the static default stands.
+    expect(newThreadModel("codex", "host_1", [])).toBe("gpt-5.1-codex");
+    // Other harnesses keep their static default; their live lists are not a
+    // per-host catalogue the dialog can read.
+    expect(
+      newThreadModel("claude_code", "host_1", [
+        summary({ harness: "claude_code", models: ["claude-opus-5-5"] }),
+      ]),
+    ).toBe("claude-sonnet-5-5");
   });
 });

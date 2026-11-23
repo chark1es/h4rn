@@ -335,6 +335,13 @@ struct Inner {
     /// decision must re-read the record instead of trusting the first snapshot.
     #[cfg(test)]
     settings_pause: std::sync::Mutex<Option<Arc<SettingsPause>>>,
+    /// Pauses a settings change after its live switch and before its record
+    /// write.
+    ///
+    /// Test-only: a second request for the same field must not read the record
+    /// in that window, or it could write a value the session already left.
+    #[cfg(test)]
+    settings_commit_pause: std::sync::Mutex<Option<Arc<SettingsCommitPause>>>,
     /// Pauses a due-schedule fire between claiming its attempt and acting on
     /// the record.
     ///
@@ -342,6 +349,13 @@ struct Inner {
     /// the old fire must not act on a pause that is no longer its own.
     #[cfg(test)]
     fire_pause: std::sync::Mutex<Option<Arc<FirePause>>>,
+    /// Pauses a delivery between its liveness pre-check and its claim.
+    ///
+    /// Test-only: a settings change and a queue advance can empty the session
+    /// slot in that window, and the claim must then refuse the detached session
+    /// instead of writing a prompt nobody will answer.
+    #[cfg(test)]
+    deliver_pause: std::sync::Mutex<Option<Arc<DeliveryPause>>>,
     /// Pauses the startup resync between reading the ledger and binding a
     /// record.
     ///
@@ -373,6 +387,26 @@ struct RestartPause {
 struct SettingsPause {
     read: tokio::sync::Notify,
     resume: tokio::sync::Notify,
+}
+
+/// A test's hold on a settings change between its live switch and its record
+/// write.
+#[cfg(test)]
+#[derive(Default)]
+struct SettingsCommitPause {
+    switched: tokio::sync::Notify,
+    commit: tokio::sync::Notify,
+}
+
+/// A test's hold on a delivery: before its claim, and after the claim before
+/// the prompt is written.
+#[cfg(test)]
+#[derive(Default)]
+struct DeliveryPause {
+    checked: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    claimed: tokio::sync::Notify,
+    write: tokio::sync::Notify,
 }
 
 /// A test's hold on the resync's read-to-bind window.
@@ -508,11 +542,14 @@ struct ThreadRecord {
     limit: Option<LimitBrief>,
     /// Effort values the live session advertised.
     advertised_efforts: Vec<String>,
-    /// Model ids the live session advertised, when it named a catalogue.
+    /// Model ids the live session reported, when it named a catalogue.
     ///
     /// Codex publishes its `model/list` at session start; the summary carries
     /// it so the picker offers what the session really has instead of the
-    /// adapter's static guess. Empty before the first session.
+    /// adapter's static guess. Empty before the first session. A session that
+    /// ends does not empty it: the harness and agent have not changed, so the
+    /// last catalogue still describes what the next session of the same CLI
+    /// offers. A new session that reports a list replaces it.
     advertised_models: Vec<String>,
     /// The thread settings the live session was started with, or was last
     /// switched to in place.
@@ -521,6 +558,15 @@ struct ThreadRecord {
     /// the next session starts; comparing this with the record's settings is
     /// what makes the next turn start a session that really uses them.
     session_settings: Option<ThreadSettings>,
+    /// Serialises this thread's settings requests.
+    ///
+    /// One request is a live switch followed by a record write. Two requests
+    /// for the same field could otherwise switch the session in one order and
+    /// write their values in the other, leaving the summary (and the journal)
+    /// naming a value the session had already left. Held from before the first
+    /// record read to after the record write; never taken while the record lock
+    /// is held, so it cannot deadlock with a path that only takes that.
+    settings_lock: Arc<Mutex<()>>,
     /// Time to first token of the most recent metered turn (ADR-024).
     ttft_ms: Option<u64>,
     /// Context window of the model the session is running (ADR-015/024).
@@ -1248,7 +1294,6 @@ impl ThreadRecord {
             }
         }
         self.advertised_efforts.clear();
-        self.advertised_models.clear();
         self.session_settings = None;
         match std::mem::replace(&mut self.session, SessionSlot::None) {
             SessionSlot::Live { session, .. } => Some(session),
@@ -1296,7 +1341,6 @@ impl ThreadRecord {
         );
         self.pump = None;
         self.advertised_efforts.clear();
-        self.advertised_models.clear();
         self.session_settings = None;
         #[cfg(test)]
         self.dying_notify.notify_one();
@@ -1704,6 +1748,10 @@ impl ThreadManager {
                 restart_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 settings_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                settings_commit_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                deliver_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 fire_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
@@ -2118,6 +2166,7 @@ impl ThreadManager {
             advertised_efforts: Vec::new(),
             advertised_models: Vec::new(),
             session_settings: None,
+            settings_lock: Arc::new(Mutex::new(())),
             ttft_ms: None,
             context_window: None,
             branch: None,
@@ -2430,6 +2479,22 @@ impl ThreadManager {
         if let Some(pause) = pause {
             pause.read.notify_one();
             pause.resume.notified().await;
+        }
+    }
+
+    /// Waits between a settings change's live switch and its record write,
+    /// when a test installed one.
+    #[cfg(test)]
+    async fn pause_settings_commit(&self) {
+        let pause = self
+            .inner
+            .settings_commit_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.switched.notify_one();
+            pause.commit.notified().await;
         }
     }
 
@@ -2809,6 +2874,12 @@ impl ThreadManager {
         change: ThreadSettingsChange,
     ) -> Result<ThreadSummary, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
+        // One settings change at a time per thread: the live switch and the
+        // record write that describes it must not interleave with another
+        // request for the same field, or the record could name the value the
+        // session switched away from.
+        let settings_lock = handle.lock().await.settings_lock.clone();
+        let _settings = settings_lock.lock().await;
         let (harness, mut settings, session) = {
             let record = handle.lock().await;
             (
@@ -2954,6 +3025,12 @@ impl ThreadManager {
                 }
             }
         }
+
+        // Test-only interleaving point: the live switch is done and the record
+        // write has not happened yet. The settings lock is still held here, so
+        // a second request cannot read the record in between.
+        #[cfg(test)]
+        self.pause_settings_commit().await;
 
         let (summary, parked) = {
             let mut record = handle.lock().await;
@@ -4020,6 +4097,36 @@ impl Inner {
         Ok((summary, seq))
     }
 
+    /// Waits between a delivery's liveness check and its claim, when a test
+    /// installed one.
+    #[cfg(test)]
+    async fn pause_delivery(&self) {
+        let pause = self
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.checked.notify_one();
+            pause.resume.notified().await;
+        }
+    }
+
+    /// Waits between a delivery's claim and its prompt write, when a test
+    /// installed one.
+    #[cfg(test)]
+    async fn pause_delivery_write(&self) {
+        let pause = self
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.claimed.notify_one();
+            pause.write.notified().await;
+        }
+    }
+
     fn broadcast(&self, thread_id: &ThreadId, wire: &[Event], seqs: &[u64]) {
         for (event, seq) in wire.iter().zip(seqs.iter()) {
             let _ = self.events.send(WireEvent {
@@ -4067,6 +4174,7 @@ impl Inner {
                 advertised_efforts: Vec::new(),
                 advertised_models: Vec::new(),
                 session_settings: None,
+                settings_lock: Arc::new(Mutex::new(())),
                 ttft_ms: None,
                 context_window: None,
                 branch,
@@ -4295,7 +4403,7 @@ impl Inner {
         // an agent for nobody would leave a session no turn asked for, and a
         // failure would be blamed on whichever turn arrived next. The slot stays
         // `None`, so a Send that arrives now starts its own session.
-        let (harness, snapshot, mut spec, generation, turn, started_settings) = {
+        let (harness, snapshot, mut spec, generation, turn, mut started_settings) = {
             let mut record = handle.lock().await;
             if record.closed || self.closed.load(Ordering::Relaxed) {
                 return;
@@ -4438,13 +4546,32 @@ impl Inner {
                 session: Arc::clone(&session),
                 applied_limit_reset: None,
             };
-            record.advertised_models = controls
+            // A new session that names a catalogue replaces the last one; a
+            // session that names none leaves it alone, because the harness and
+            // agent have not changed and the last list still describes them.
+            if let Some(models) = controls
                 .as_ref()
                 .and_then(|controls| controls.models.clone())
-                .unwrap_or_default();
+            {
+                record.advertised_models = models;
+            }
             record.advertised_efforts = controls
-                .map(|controls| controls.efforts)
+                .as_ref()
+                .map(|controls| controls.efforts.clone())
                 .unwrap_or_default();
+            // A resumed session keeps the model the agent restored, which may
+            // not be the id the thread asked for. When the thread asked for the
+            // agent's own default (or named none), the summary and the stored
+            // selection become the model the session really runs, so the
+            // summary never promises an alias the agent already resolved.
+            if let Some(controls) = controls.as_ref()
+                && let Some(current) = controls.current_model.as_deref()
+                && is_default_model(controls, &record.meta.model)
+                && record.meta.model != current
+            {
+                record.meta.model = current.to_string();
+                started_settings.model = current.to_string();
+            }
             // The session was started from this snapshot of the thread's
             // settings; a later change it cannot switch in place is what
             // `detach_stale_session` notices.
@@ -4913,6 +5040,13 @@ impl Inner {
     /// ordered either before the claim (where it drops the prompt) or after it
     /// is on the wire (where a cancel works). The claim is the only authority on
     /// whether the prompt may be written.
+    ///
+    /// The claim itself is taken under the record lock ([`Self::claim_delivery`])
+    /// together with the liveness check. A parallel `advance_queue` detaches a
+    /// stale session only while its dispatch is still `Pending`, under that same
+    /// record lock, so it can never detach the session whose prompt is being
+    /// claimed: before the claim it is a legitimate detach and the claim is then
+    /// refused; after it the dispatch is `Claimed` and the detach is skipped.
     async fn deliver(
         self: &Arc<Self>,
         handle: ThreadHandle,
@@ -4928,14 +5062,29 @@ impl Inner {
             return;
         }
         let mut guard = session.lock().await;
-        let Some(generation) = self.attached_generation(&handle, &dispatch, &session).await else {
+        let Some(generation) = self.claim_delivery(&handle, &dispatch, &session).await else {
             // The turn ended, or its session was replaced, while this waited
-            // for the session lock.
+            // for the session lock or the record lock.
             drop(guard);
             self.recover_delivery(&handle, &dispatch).await;
             return;
         };
-        if !dispatch.claim() {
+        // Test-only interleaving point: the dispatch is claimed and its prompt
+        // is not on the wire yet.
+        #[cfg(test)]
+        self.pause_delivery_write().await;
+        // A session can still die between the claim and the write (a transport
+        // death detaches it without consulting the dispatch, and a detached
+        // session's pump no longer answers for a turn). Writing into it would
+        // leave the turn Working with nobody to settle it, so give the claim
+        // back before the prompt is written; a fresh session delivers it.
+        if self
+            .attached_generation(&handle, &dispatch, &session)
+            .await
+            .is_none()
+        {
+            drop(guard);
+            self.requeue_claim(handle, dispatch).await;
             return;
         }
         let turn_id = dispatch.turn_id.clone();
@@ -4958,6 +5107,69 @@ impl Inner {
                 limit,
             )
             .await;
+        }
+    }
+
+    /// Claims `dispatch` for delivery, proving in the same record lock read
+    /// that `session` is still the live slot for it.
+    ///
+    /// Splitting the check from the claim would let a settings change record a
+    /// value the session cannot take and an `advance_queue` detach that session
+    /// in between; the claim would then write the prompt to a session whose pump
+    /// was already stopped. `None` means another path owns the turn or the
+    /// session it was going to write to.
+    async fn claim_delivery(
+        &self,
+        handle: &ThreadHandle,
+        dispatch: &Arc<TurnDispatch>,
+        session: &SharedSession,
+    ) -> Option<u64> {
+        // Test-only interleaving point: the session is still attached and the
+        // prompt is not claimed yet.
+        #[cfg(test)]
+        self.pause_delivery().await;
+        let record = handle.lock().await;
+        if record.dispatch_for(&dispatch.turn_id).is_none() || !record.session.is_live(session) {
+            return None;
+        }
+        let generation = record.session.generation()?;
+        dispatch.claim().then_some(generation)
+    }
+
+    /// Gives a claimed prompt back when its session disappeared before the
+    /// write.
+    ///
+    /// The prompt never reached a harness, so it is safe to deliver again: the
+    /// turn returns to Pending and the next queue advance starts a session (or
+    /// uses the one already starting). A Stop that landed in this window already
+    /// marked the dispatch stopped; that turn settles as interrupted instead of
+    /// being replayed, exactly as a failed write would settle it.
+    async fn requeue_claim(self: &Arc<Self>, handle: ThreadHandle, dispatch: Arc<TurnDispatch>) {
+        let (settled, requeued) = {
+            let mut record = handle.lock().await;
+            if record.dispatch_for(&dispatch.turn_id).is_none() {
+                return;
+            }
+            match dispatch.recover_lost_session().await {
+                RecoveryOutcome::Requeue => (false, true),
+                RecoveryOutcome::Settled => return,
+                RecoveryOutcome::Stopped => {
+                    let settled = self
+                        .settle_turn_locked(
+                            &mut record,
+                            &dispatch.turn_id,
+                            TurnEnd::new(TurnStatus::Interrupted, Usage::default()),
+                        )
+                        .await;
+                    (settled, false)
+                }
+            }
+        };
+        // A settlement may have promoted the next queued turn under the same
+        // lock; a requeued prompt needs a session. Either way the queue advance
+        // picks up the work.
+        if settled || requeued {
+            self.spawn_advance(handle);
         }
     }
 
@@ -6868,6 +7080,20 @@ fn runtime_mode_label(mode: RuntimeMode) -> &'static str {
         RuntimeMode::Plan => "plan",
         RuntimeMode::FullAccess => "full access",
     }
+}
+
+/// Whether `model` asks the session for the adapter's own default.
+///
+/// A thread may name one of the session's default aliases, or name no model at
+/// all; both mean "let the agent pick", so the session's restored model is the
+/// honest one to show.
+fn is_default_model(controls: &h4rn_harness::SessionControls, model: &str) -> bool {
+    let model = model.trim();
+    model.is_empty()
+        || controls
+            .default_models
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(model))
 }
 
 /// Refuses a mode, effort or fast tier the harness cannot honour.
@@ -16519,8 +16745,9 @@ mod tests {
         assert_eq!(started.as_deref(), Some("high"));
     }
 
-    /// Two settings requests in flight at once each record their own field; a
-    /// later write must not put back the snapshot it took before the other.
+    /// Two settings requests each record their own field; a later write must not
+    /// put back the snapshot it took before the other. Changes are serialised
+    /// per thread, so the second reads the record after the first has written.
     #[tokio::test]
     async fn concurrent_settings_changes_do_not_revert_each_other() {
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -16536,8 +16763,6 @@ mod tests {
         let created = manager.create_thread(request).await.expect("create");
         wait_for_idle(&manager, &created.thread_id).await;
 
-        // Both requests read the record before either takes it again: the
-        // window in which one request's pre-switch snapshot is stale.
         let pause = Arc::new(SettingsPause::default());
         *manager
             .inner
@@ -16548,16 +16773,17 @@ mod tests {
         let thread_id = created.thread_id.clone();
         let fast = tokio::spawn(async move { this.set_thread_fast(&thread_id, true).await });
         pause.read.notified().await;
+        pause.resume.notify_one();
+        fast.await
+            .expect("the fast task")
+            .expect("record fast mode");
+
         let this = manager.clone();
         let thread_id = created.thread_id.clone();
         let model =
             tokio::spawn(async move { this.set_thread_model(&thread_id, "m2".into()).await });
         pause.read.notified().await;
-        pause.resume.notify_waiters();
-
-        fast.await
-            .expect("the fast task")
-            .expect("record fast mode");
+        pause.resume.notify_one();
         model
             .await
             .expect("the model task")
@@ -16601,6 +16827,348 @@ mod tests {
             "the live session is recorded as running with fast mode"
         );
         assert_eq!(started.model, "m2");
+    }
+
+    /// Two switches of the same field are serialised: the value the session
+    /// ends on is the value the summary, the journal and the session record
+    /// name, whichever request arrived first.
+    #[tokio::test]
+    async fn same_field_switches_record_the_value_the_session_ended_on() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "m0".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let pause = Arc::new(SettingsPause::default());
+        *manager
+            .inner
+            .settings_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        let commit = Arc::new(SettingsCommitPause::default());
+        *manager
+            .inner
+            .settings_commit_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(commit.clone());
+
+        // The first switch reaches the live session and then waits before it
+        // records what it switched to.
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let first =
+            tokio::spawn(async move { this.set_thread_model(&thread_id, "m1".into()).await });
+        pause.read.notified().await;
+        pause.resume.notify_one();
+        commit.switched.notified().await;
+
+        // A second switch of the same field must wait for the first to record:
+        // otherwise it could apply its own live switch and then lose the record
+        // write to the first, leaving the summary on a model the session left.
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let second =
+            tokio::spawn(async move { this.set_thread_model(&thread_id, "m2".into()).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), pause.read.notified())
+                .await
+                .is_err(),
+            "a second settings change read the record while the first still owned the switch"
+        );
+
+        commit.commit.notify_one();
+        let summary = first
+            .await
+            .expect("the first settings task")
+            .expect("record the first model");
+        assert_eq!(summary.model, "m1");
+
+        // Only now does the second request run.
+        pause.read.notified().await;
+        pause.resume.notify_one();
+        commit.switched.notified().await;
+        commit.commit.notify_one();
+        let summary = second
+            .await
+            .expect("the second settings task")
+            .expect("record the second model");
+        assert_eq!(summary.model, "m2");
+        *manager
+            .inner
+            .settings_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *manager
+            .inner
+            .settings_commit_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+
+        // The summary, the journal and the session all name the last switch.
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(summary.model, "m2");
+        let stored = journal
+            .list_threads()
+            .await
+            .expect("the journal")
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("the thread's metadata");
+        assert_eq!(stored.model, "m2");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        let record = handle.lock().await;
+        assert_eq!(
+            record
+                .session_settings
+                .as_ref()
+                .expect("the live session's settings")
+                .model,
+            "m2"
+        );
+        drop(record);
+        let switches: Vec<String> = settings
+            .get()
+            .iter()
+            .filter_map(|change| match change {
+                h4rn_harness::SettingChange::Model(model) => Some(model.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            switches,
+            vec!["m1".to_string(), "m2".to_string()],
+            "the live session took the switches in the recorded order"
+        );
+    }
+
+    /// The last catalogue a session reported survives the session ending: the
+    /// harness and agent have not changed, so the picker still knows what they
+    /// offer while the thread is idle.
+    #[tokio::test]
+    async fn the_model_catalogue_survives_an_idle_session_ending() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_advertised_models(["gpt-a".to_string(), "gpt-b".to_string()])
+            .with_unswitchable_settings()
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "gpt-a".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(summary.models, vec!["gpt-a", "gpt-b"]);
+
+        // This session cannot switch in place, so an idle change detaches it.
+        let summary = manager
+            .set_thread_reasoning_effort(&created.thread_id, Some("high".into()))
+            .await
+            .expect("record the effort");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        assert!(
+            handle.lock().await.live_session().is_none(),
+            "the idle session was detached"
+        );
+        assert_eq!(
+            summary.models,
+            vec!["gpt-a", "gpt-b"],
+            "the summary still lists the models the CLI offers after its session ended"
+        );
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(summary.models, vec!["gpt-a", "gpt-b"]);
+        assert_eq!(summary.model, "gpt-a");
+    }
+
+    /// A thread created on a model the installed CLI no longer lists keeps the
+    /// live catalogue, and a switch is checked against that catalogue.
+    #[tokio::test]
+    async fn a_thread_whose_model_is_missing_keeps_the_live_catalogue() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_advertised_models(["gpt-a".to_string(), "gpt-b".to_string()])
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "gpt-retired".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(
+            summary.models,
+            vec!["gpt-a", "gpt-b"],
+            "a model missing from the catalogue does not drop the catalogue"
+        );
+        assert_eq!(summary.model, "gpt-retired");
+
+        let error = manager
+            .set_thread_model(&created.thread_id, "gpt-nope".into())
+            .await
+            .expect_err("a model the catalogue does not list is refused");
+        assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
+        let summary = manager
+            .set_thread_model(&created.thread_id, "gpt-b".into())
+            .await
+            .expect("a listed model is accepted");
+        assert_eq!(summary.model, "gpt-b");
+    }
+
+    /// A resumed agent keeps the model its conversation was using; the summary
+    /// shows that model instead of the `default` alias the thread asked for.
+    #[tokio::test]
+    async fn a_resumed_session_shows_the_model_the_agent_restored() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Acp)
+            .with_instance("demo")
+            .with_advertised_models(["m-1".to_string(), "m-2".to_string()])
+            .with_default_model("default")
+            .with_restored_model("m-2")
+            .with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("demo".into());
+        request.model = "default".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(
+            summary.model, "m-2",
+            "the summary names the model the session really runs"
+        );
+        assert_eq!(summary.models, vec!["m-1", "m-2"]);
+
+        // The reconciled value is what the session was started on, so the next
+        // turn keeps this session rather than restarting for a stale setting.
+        let mut events = manager.subscribe();
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the next turn reused the session it was reconciled with"
+        );
+    }
+
+    /// A session that dies after the claim but before the prompt is written
+    /// must not swallow the turn: the claim goes back and a fresh session
+    /// delivers the prompt.
+    #[tokio::test]
+    async fn a_claim_whose_session_dies_before_the_write_is_delivered_again() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, sessions) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        // Walk the delivery through its claim, then hold it before the write.
+        tokio::time::timeout(Duration::from_secs(5), pause.checked.notified())
+            .await
+            .expect("the delivery reached its claim");
+        pause.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), pause.claimed.notified())
+            .await
+            .expect("the delivery claimed the turn");
+
+        // The transport dies between the claim and the write. The slot empties
+        // without consulting the claimed dispatch.
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        {
+            let mut record = handle.lock().await;
+            let generation = record
+                .session
+                .generation()
+                .expect("the session the delivery claimed");
+            record.mark_session_dying(generation);
+        }
+        // Later deliveries must not stop at the same window.
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        pause.write.notify_one();
+
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the turn was never delivered again");
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(
+            sessions.get(),
+            2,
+            "the prompt was delivered on a fresh session"
+        );
     }
 
     /// An ACP live session cannot go back to the agent's default alias in

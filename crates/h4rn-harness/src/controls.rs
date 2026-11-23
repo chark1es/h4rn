@@ -151,6 +151,13 @@ pub struct SessionControls {
     pub modes: Vec<RuntimeMode>,
     /// Model ids the session advertised, when it named a catalogue.
     pub models: Option<Vec<String>>,
+    /// The model the session is actually running, when the adapter knows it.
+    ///
+    /// A resumed ACP session keeps the model the agent restored, which may not
+    /// be the id the thread asked for (the `default` alias, or a catalogue that
+    /// changed): the daemon shows this one in the summary instead of an alias
+    /// the agent has already resolved.
+    pub current_model: Option<String>,
     /// Model ids that mean "the agent's own default" to this adapter.
     ///
     /// A request for one of these is valid even when the advertised catalogue
@@ -179,6 +186,7 @@ impl Default for SessionControls {
         Self {
             modes: Vec::new(),
             models: None,
+            current_model: None,
             default_models: Vec::new(),
             efforts: Vec::new(),
             fast: false,

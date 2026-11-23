@@ -295,6 +295,12 @@ pub struct CodexSession {
 struct CodexCatalog {
     /// Every model id the catalogue offers, in its own order.
     models: Vec<String>,
+    /// Whether the reply had an entry for the thread's model.
+    ///
+    /// The id list is kept even when it did not (an installed CLI can drop the
+    /// model a thread was created on), but the per-model options are then
+    /// unknown rather than empty.
+    listed: bool,
     /// Reasoning efforts this model accepts.
     efforts: Vec<String>,
     /// The effort the model runs at unless the thread overrides it.
@@ -485,7 +491,10 @@ impl CodexSession {
                 ),
             });
         }
+        // An unlisted model's fast tier is unknown, so a thread that asks for
+        // one is not refused on a guess.
         if let Some(catalog) = &self.catalog
+            && catalog.listed
             && self.settings.fast
             && !catalog.fast
         {
@@ -635,6 +644,7 @@ impl HarnessSession for CodexSession {
             });
         }
         if let Some(catalog) = &catalog
+            && catalog.listed
             && self.settings.fast
             && !catalog.fast
         {
@@ -672,6 +682,7 @@ impl HarnessSession for CodexSession {
     async fn set_fast(&mut self, fast: bool) -> Result<(), HarnessError> {
         if fast
             && let Some(catalog) = &self.catalog
+            && catalog.listed
             && !catalog.fast
         {
             return Err(HarnessError::Unsupported {
@@ -686,14 +697,25 @@ impl HarnessSession for CodexSession {
     fn controls(&self) -> Option<crate::SessionControls> {
         let catalog = self.catalog.as_ref()?;
         let base = crate::thread_controls(self.kind);
+        // A model the catalogue does not list leaves its efforts and fast tier
+        // unknown; the harness-wide list stands in, exactly as it does before
+        // the first session, instead of claiming the model offers neither.
+        let (efforts, fast) = if catalog.listed {
+            (catalog.efforts.clone(), catalog.fast)
+        } else {
+            (base.efforts, base.fast)
+        };
         Some(crate::SessionControls {
             modes: base.modes,
             models: (!catalog.models.is_empty()).then(|| catalog.models.clone()),
+            // Codex applies the model per turn; the thread's own value is the
+            // one to show, so there is no separate restored model to report.
+            current_model: None,
             // `default` is Codex's own "let the CLI pick" alias; a turn omits
             // the model field for it.
             default_models: vec!["default".to_string()],
-            efforts: catalog.efforts.clone(),
-            fast: catalog.fast,
+            efforts,
+            fast,
             switch_mode: true,
             switch_model: true,
             switch_effort: true,
@@ -1172,12 +1194,16 @@ fn unknown_codex_model(catalog: Option<&CodexCatalog>, model: &str) -> Option<St
     ))
 }
 
-/// The catalogue entry for one thread's model, from a `model/list` reply.
+/// The catalogue from a `model/list` reply, for one thread's model.
 ///
 /// `requested` is the model the thread named; without one the catalogue's
-/// default entry is the thread's model. An unknown id leaves the catalogue
-/// unknown rather than guessing from another model. The full id list is kept
-/// even then, so the daemon can refuse a model Codex does not offer.
+/// default entry supplies the per-model options. The full id list is always
+/// kept, even when the reply has no entry for the thread's model: an installed
+/// CLI can drop the model a thread was created on (`gpt-5.1-codex` is absent
+/// from codex-cli 0.171.0's list), and the daemon still needs the ids to offer
+/// and validate a switch. Only the per-model options — efforts, fast tier and
+/// default effort — stay unknown in that case, rather than borrowing another
+/// model's.
 fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<CodexCatalog> {
     let entries = result["data"].as_array()?;
     let models = entries
@@ -1188,8 +1214,17 @@ fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<Co
     let entry = match requested {
         Some(id) => entries
             .iter()
-            .find(|entry| entry["id"].as_str() == Some(id))?,
-        None => entries.iter().find(|entry| entry["isDefault"] == true)?,
+            .find(|entry| entry["id"].as_str() == Some(id)),
+        None => entries.iter().find(|entry| entry["isDefault"] == true),
+    };
+    let Some(entry) = entry else {
+        return Some(CodexCatalog {
+            models,
+            listed: false,
+            efforts: Vec::new(),
+            default_effort: None,
+            fast: false,
+        });
     };
     let efforts = entry["supportedReasoningEfforts"]
         .as_array()
@@ -1210,6 +1245,7 @@ fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<Co
     let default_effort = entry["defaultReasoningEffort"].as_str().map(str::to_string);
     Some(CodexCatalog {
         models,
+        listed: true,
         efforts,
         default_effort,
         fast,
@@ -1723,8 +1759,21 @@ mod tests {
         let plain = catalog_from_model_list(&result, Some("gpt-plain")).expect("catalogue");
         assert!(plain.efforts.is_empty());
         assert!(!plain.fast);
-        // An unknown id does not borrow another model's options.
-        assert_eq!(catalog_from_model_list(&result, Some("missing")), None);
+        // An unknown id keeps the id list — the daemon can still offer a switch
+        // to a model the CLI lists — but claims nothing about its options.
+        let missing = catalog_from_model_list(&result, Some("missing")).expect("catalogue");
+        assert_eq!(
+            missing.models,
+            vec!["gpt-6.2-sol".to_string(), "gpt-plain".to_string()],
+            "a model the CLI dropped must not drop the whole catalogue"
+        );
+        assert!(missing.efforts.is_empty());
+        assert!(missing.default_effort.is_none());
+        assert!(!missing.fast);
+        assert!(
+            !missing.listed,
+            "no entry means the per-model options are unknown, not empty"
+        );
     }
 
     #[test]

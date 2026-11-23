@@ -361,6 +361,15 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Thread settings always describe the session that will run the next turn.** The model list a
+  Codex session reports survives the session ending, so an idle thread still offers the models its
+  CLI really has (and a new Codex thread starts on the first of them, not on a static default the
+  installed CLI may have dropped). A thread created on a model the CLI no longer lists keeps the
+  live list, and a switch is still checked against it. Two changes to the same setting are
+  serialised, so the summary, the journal and the session record always name the value the session
+  ended on. A prompt claimed just as its session died is handed back and delivered on a fresh
+  session instead of being written into a dead one. A resumed ACP session now reports the model its
+  agent restored, and the summary shows that model instead of the `default` alias.
 - **Thread settings apply to the turn they promise, and never to one already running.** A
   settings change that lands while a session is still starting no longer detaches the session that
   startup is about to write the turn to (which left the thread Working forever), and only a turn

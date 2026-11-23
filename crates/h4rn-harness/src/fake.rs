@@ -162,6 +162,9 @@ pub struct FakeHarness {
     session_settings: Option<SessionSettings>,
     /// Model ids the fake session advertises, when a test asks for a catalogue.
     advertised_models: Option<Vec<String>>,
+    /// The model a session reports it is running, when a test models an agent
+    /// that restored its own model on resume.
+    restored_model: Option<String>,
     /// Model ids that mean the agent's own default to the fake session.
     default_models: Vec<String>,
     /// Effects each model offers, so a model switch changes the catalogue.
@@ -503,6 +506,7 @@ impl Default for FakeHarness {
             session_models: None,
             session_settings: None,
             advertised_models: None,
+            restored_model: None,
             default_models: Vec::new(),
             model_efforts: None,
             instance: None,
@@ -711,6 +715,16 @@ impl FakeHarness {
     /// session can start on the agent's default.
     pub fn with_default_model(mut self, alias: impl Into<String>) -> Self {
         self.default_models.push(alias.into());
+        self
+    }
+
+    /// Reports `model` as the one every session is running.
+    ///
+    /// A resumed agent keeps the model the conversation was using, which may
+    /// not be the id the thread asked for. A test uses this to prove the daemon
+    /// shows what the session really runs instead of the stale request.
+    pub fn with_restored_model(mut self, model: impl Into<String>) -> Self {
+        self.restored_model = Some(model.into());
         self
     }
 
@@ -1027,6 +1041,7 @@ impl Harness for FakeHarness {
             session_scripts,
             settings: self.session_settings.clone(),
             advertised_models: self.advertised_models.clone(),
+            restored_model: self.restored_model.clone(),
             default_models: self.default_models.clone(),
             model_efforts: self.model_efforts.clone(),
             current_model: spec.model.clone(),
@@ -1073,6 +1088,8 @@ pub struct FakeSession {
     settings: Option<SessionSettings>,
     /// Model ids this session advertises, when a test asked for a catalogue.
     advertised_models: Option<Vec<String>>,
+    /// The model the agent restored on resume, when a test asked for one.
+    restored_model: Option<String>,
     /// Model ids that mean the agent's own default to this session.
     default_models: Vec<String>,
     /// Efforts each model offers, when a test asked for per-model catalogues.
@@ -1158,6 +1175,9 @@ impl HarnessSession for FakeSession {
         Some(crate::SessionControls {
             modes: base.modes,
             models,
+            // The fake runs the model it was started with; a test can ask for
+            // an agent-restored one to model a resumed session.
+            current_model: self.restored_model.clone(),
             default_models: self.default_models.clone(),
             efforts,
             fast: base.fast,

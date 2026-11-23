@@ -43,6 +43,7 @@ import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import {
   effortLabel,
   fastSupported,
+  newThreadModel,
   threadEffortChoices,
   threadModeChoices,
 } from "@/lib/threadControls";
@@ -85,6 +86,8 @@ export function NewThreadDialog() {
   const probeErrors = useHarnesses((value) => value.probeErrors);
   const probingAgents = useHarnesses((value) => value.probing);
   const harnessRows = useHarnesses((value) => (value.loaded ? value.rows : null));
+  const threadList = useApp((state) => state.threads);
+  const threadValues = useMemo(() => Object.values(threadList), [threadList]);
   const installed = useMemo(
     () => harnessRows?.filter((row) => row.installed !== null).map((row) => row.harness) ?? null,
     [harnessRows],
@@ -181,7 +184,10 @@ export function NewThreadDialog() {
           detectedHarnesses(HARNESSES, installed, first.harnesses)[0] ?? "claude_code";
         setHarness(nextHarness);
         setAgentId(null);
-        setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
+        setModel(
+          proxyDefaultModel(nextHarness) ??
+            newThreadModel(nextHarness, first.host_id, threadValues),
+        );
       } else if (
         // A host the user picked stays only while it is still a valid choice;
         // when it is gone (another daemon, or the host went offline) fall back
@@ -194,7 +200,17 @@ export function NewThreadDialog() {
       }
     }
     setStarting(false);
-  }, [open, onlineHosts, localHostId, installed, preset, draftSession, showDraft, hostEligible]);
+  }, [
+    open,
+    onlineHosts,
+    localHostId,
+    installed,
+    preset,
+    draftSession,
+    showDraft,
+    hostEligible,
+    threadValues,
+  ]);
 
   // "New thread in <project>" starts in that project's folder.
   useEffect(() => {
@@ -213,18 +229,22 @@ export function NewThreadDialog() {
   }, [open, preset, hosts, draftSession, showDraft]);
 
   // The catalogue can arrive after the dialog opens; adopt its default only
-  // while the user has not chosen a model of their own.
+  // while the user has not chosen a model of their own. The static (or, once a
+  // thread reported one on this host, the live) default counts as unchosen.
   const proxyActive = proxyOverrideFor(harness);
   const proxyModels = proxyModelsFor(harness);
   const proxyProfileId = proxyActive?.profile.id ?? null;
   const proxyDefault = proxyDefaultModel(harness);
   const proxyModelKey = proxyModels.map((model) => model.id).join("|");
+  const harnessDefault = newThreadModel(harness, boundHost, threadValues);
   useEffect(() => {
     if (!open || proxyProfileId === null || proxyModelKey === "") return;
     setModel((current) =>
-      current === DEFAULT_MODELS[harness] ? (proxyDefault ?? current) : current,
+      current === DEFAULT_MODELS[harness] || current === harnessDefault
+        ? (proxyDefault ?? current)
+        : current,
     );
-  }, [open, harness, proxyDefault, proxyModelKey, proxyProfileId]);
+  }, [open, harness, harnessDefault, proxyDefault, proxyModelKey, proxyProfileId]);
 
   const selectedHost = boundHost ? hosts[boundHost] : undefined;
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
@@ -241,16 +261,23 @@ export function NewThreadDialog() {
   // move to one that is rather than leave an undetected harness selected.
   const firstChoice = harnessChoices[0];
   const agentGone = harness === "acp" && !selectedAgent;
+  // Until a host is bound the dialog has not chosen a harness yet, so the
+  // first host's harness (picked above) is not "missing".
   const harnessMissing =
-    harness !== "acp" && harnessChoices.length > 0 && !harnessChoices.includes(harness);
+    boundHost !== "" &&
+    harness !== "acp" &&
+    harnessChoices.length > 0 &&
+    !harnessChoices.includes(harness);
   useEffect(() => {
     if (!open) return;
     if (!harnessMissing && !agentGone) return;
     if (!firstChoice) return;
     setHarness(firstChoice);
     setAgentId(null);
-    setModel(proxyDefaultModel(firstChoice) ?? DEFAULT_MODELS[firstChoice]);
-  }, [open, harnessMissing, agentGone, firstChoice]);
+    setModel(
+      proxyDefaultModel(firstChoice) ?? newThreadModel(firstChoice, boundHost, threadValues),
+    );
+  }, [open, harnessMissing, agentGone, firstChoice, boundHost, threadValues]);
 
   // The model list comes from the agent's own handshake. Probe once when the
   // picker selects it; the daemon starts the command once and stops it. A
@@ -457,7 +484,7 @@ export function NewThreadDialog() {
                 const kind = next as HarnessKind;
                 setHarness(kind);
                 setAgentId(null);
-                setModel(proxyDefaultModel(kind) ?? DEFAULT_MODELS[kind]);
+                setModel(proxyDefaultModel(kind) ?? newThreadModel(kind, boundHost, threadValues));
               }}
             />
           </div>

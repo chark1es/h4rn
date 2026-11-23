@@ -7,7 +7,7 @@
  * no row for it.
  */
 
-import type { HarnessKind, RuntimeMode, ThreadSummary } from "@/gen";
+import type { HarnessKind, HostId, RuntimeMode, ThreadSummary } from "@/gen";
 import { HARNESS_MODELS } from "@/lib/models";
 
 export type ModeChoice = {
@@ -169,4 +169,30 @@ export function threadModelChoices(
         ? agentModels
         : [...(HARNESS_MODELS[harness]?.models ?? []), ...proxyModels];
   return [...new Set([current, ...known])].filter((model) => model.length > 0);
+}
+
+/**
+ * The model a new thread should start on for `harness` on `host`.
+ *
+ * The static table is only a guess: an installed Codex CLI can drop the model
+ * it names (`gpt-5.1-codex` is absent from codex-cli 0.171.0's `model/list`),
+ * and the daemon refuses a model the live catalogue does not offer. Once a
+ * thread on that host has reported Codex's own list, its first entry is the
+ * default; the static default stands only before any catalogue is known.
+ */
+export function newThreadModel(
+  harness: HarnessKind,
+  host: HostId | "",
+  threads: readonly ThreadSummary[],
+): string {
+  if (harness === "codex" && host !== "") {
+    const reported = threads
+      .filter(
+        (thread) => thread.harness === harness && thread.host === host && thread.models.length > 0,
+      )
+      .sort((left, right) => right.last_activity.localeCompare(left.last_activity))[0];
+    const first = reported?.models[0];
+    if (first) return first;
+  }
+  return HARNESS_MODELS[harness].default;
 }
