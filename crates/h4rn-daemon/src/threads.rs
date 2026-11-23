@@ -1125,6 +1125,13 @@ struct ScheduledLimit {
     /// says nothing about a different prompt a Send is starting, so that
     /// prompt is delivered exactly as it would be with no pause at all.
     parked_turn: Option<TurnId>,
+    /// The ceiling the paused turn ran under, when its sender named one.
+    ///
+    /// The resume that fires after the reset starts a fresh policy prompt. It
+    /// keeps this ceiling: an outside agent's supervised message must not come
+    /// back at full autonomy just because the provider paused the run. The same
+    /// value is persisted on the thread row, so a restart keeps it too.
+    ceiling: Option<RuntimeMode>,
 }
 
 /// One armed schedule read back from the ledger at startup.
@@ -1264,10 +1271,11 @@ impl ThreadRecord {
         input: UserInput,
         ceiling: Option<RuntimeMode>,
     ) -> Arc<TurnDispatch> {
-        // A new turn is a fresh attempt: the previous limit and any resume
-        // target no longer describe the thread.
+        // A new turn is a fresh attempt: the previous limit, any resume target
+        // and the ceiling the paused turn carried no longer describe the thread.
         self.resume_at = None;
         self.limit = None;
+        self.meta.resume_ceiling = None;
         self.transport_error_reported = None;
         self.transport_report = None;
         self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
@@ -1725,6 +1733,7 @@ impl ThreadRecord {
         self.scheduled_limit = None;
         self.resume_at = None;
         self.meta.parked = None;
+        self.meta.resume_ceiling = None;
     }
 
     /// The live session, when there is one.
@@ -2194,6 +2203,7 @@ impl ThreadManager {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            resume_ceiling: None,
         };
         let title_workspace = meta.workspace_path.clone();
 
@@ -2372,6 +2382,7 @@ impl ThreadManager {
                 // The new message is the next turn, so no resume target
                 // describes the thread any more.
                 record.resume_at = None;
+                record.meta.resume_ceiling = None;
             }
             if stale_schedule && let Some(meter) = self.inner.meter.get() {
                 let _ = meter.cancel_schedule(thread_id).await;
@@ -2405,6 +2416,7 @@ impl ThreadManager {
                 // The cancelled schedule explains nothing any more, so drop the
                 // pause it left behind even when it held no prompt to release.
                 record.meta.parked = None;
+                record.meta.resume_ceiling = None;
                 record.limit = None;
             }
             let wire = vec![Event::ItemCompleted {
@@ -3002,6 +3014,20 @@ impl ThreadManager {
         // under the final lock: a Send may have replaced it meanwhile.
         let mut switched_session: Option<SharedSession> = None;
         let mut switched_controls: Option<h4rn_harness::SessionControls> = None;
+        // The mode the live session really run after this request. A capped
+        // turn's ceiling clamps it, so the record of what the session runs must
+        // name the clamped value, never the person's newer choice.
+        let mut applied_mode: Option<RuntimeMode> = None;
+        // A turn that is already running under a ceiling keeps it: the person's
+        // new mode is for their next turn, not for the agent's approval-required
+        // turn that is halfway through. Raising the mode here used to lift the
+        // cap on the live session immediately.
+        let active_ceiling = handle
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .and_then(|active| active.dispatch.ceiling());
         if let Some(session) = session {
             let switched_handle = Arc::clone(&session);
             let mut session = session.lock().await;
@@ -3067,7 +3093,12 @@ impl ThreadManager {
             };
             if switch_in_place {
                 let result = match &change {
-                    ThreadSettingsChange::Mode(mode) => session.set_runtime_mode(*mode).await,
+                    ThreadSettingsChange::Mode(mode) => {
+                        let applied =
+                            active_ceiling.map_or(*mode, |ceiling| mode.clamped_to(ceiling));
+                        applied_mode = Some(applied);
+                        session.set_runtime_mode(applied).await
+                    }
                     ThreadSettingsChange::Model(model) => session.set_model(model).await,
                     ThreadSettingsChange::Effort(effort) => {
                         session.set_reasoning_effort(effort.as_deref()).await
@@ -3140,7 +3171,9 @@ impl ThreadManager {
                 // changes from reverting each other.
                 if let Some(started) = record.session_settings.as_mut() {
                     match &change {
-                        ThreadSettingsChange::Mode(mode) => started.runtime_mode = *mode,
+                        ThreadSettingsChange::Mode(mode) => {
+                            started.runtime_mode = applied_mode.unwrap_or(*mode);
+                        }
                         ThreadSettingsChange::Model(_) => started.model = settings.model.clone(),
                         ThreadSettingsChange::Effort(_) => {
                             started.reasoning_effort = settings.reasoning_effort.clone();
@@ -3396,6 +3429,7 @@ impl ThreadManager {
         if let Some(record) = record.as_mut() {
             let was_paused = record.scheduled_limit.take().is_some();
             record.resume_at = None;
+            record.meta.resume_ceiling = None;
             release_pending = was_paused && record.pending_turn();
             if release_pending {
                 // The person's cancellation releases the parked prompt: the
@@ -3911,6 +3945,10 @@ impl Inner {
                                     // this pause was holding; no other turn may
                                     // be parked by it.
                                     parked_turn,
+                                    // The ceiling came back with the journal row,
+                                    // so a restart before the reset does not
+                                    // resume a capped turn at full autonomy.
+                                    ceiling: record.meta.resume_ceiling,
                                 });
                             }
                             Ok(_) => {
@@ -3922,6 +3960,7 @@ impl Inner {
                                 // change.
                                 release_prompt =
                                     record.pending_turn() && record.parks_persisted_prompt();
+                                record.meta.resume_ceiling = None;
                                 if !release_prompt {
                                     record.resume_at = None;
                                     record.meta.parked = None;
@@ -3979,6 +4018,7 @@ impl Inner {
                 // prompt runs now, so the thread leaves the paused phase and
                 // the limit no longer explains a wait.
                 record.meta.parked = None;
+                record.meta.resume_ceiling = None;
                 record.limit = None;
                 record.resume_at = None;
                 let released = vec![ThreadEvent::LimitResumeReleased { at: self.now() }];
@@ -4852,6 +4892,13 @@ impl Inner {
         // turn is still the active, pending dispatch, and a pump-end advance
         // must not deliver it into the provider this newer reset named.
         let parked_turn = record.parked_turn_to_keep();
+        // The resume this pause owns must keep the capped turn's ceiling: it is
+        // the turn whose autonomy the person's grant limited, and a policy
+        // prompt started later would otherwise run at the thread's own mode.
+        let ceiling = record
+            .active
+            .as_ref()
+            .and_then(|active| active.dispatch.ceiling());
         match meter
             .arm_schedule(&thread_id, reset_at, prompt, None, now)
             .await
@@ -4864,7 +4911,9 @@ impl Inner {
                     generation,
                     schedule_id: Some(schedule.schedule_id),
                     parked_turn,
+                    ceiling,
                 });
+                record.meta.resume_ceiling = ceiling;
                 record.note_applied_reset(generation, reset_at);
                 None
             }
@@ -7022,16 +7071,25 @@ impl Inner {
             return Ok(fired);
         }
 
+        // The ceiling the paused turn ran under, if its sender named one. The
+        // policy resume below is a new prompt, but it continues that turn and
+        // must not run with more autonomy than it had. Captured before
+        // `clear_pause` forgets the pause.
+        let ceiling = record
+            .scheduled_limit
+            .as_ref()
+            .and_then(|scheduled| scheduled.ceiling);
         let prompt = schedule.prompt.clone();
         let now = self.now();
         record.clear_pause();
         record.limit = None;
-        let dispatch = record.begin_turn(
+        let dispatch = record.begin_turn_at_most(
             now,
             UserInput {
                 text: prompt.clone(),
                 attachments: Vec::new(),
             },
+            ceiling,
         );
         let turn_id = dispatch.turn_id.clone();
         let domain = vec![
@@ -17572,5 +17630,355 @@ mod tests {
         assert_eq!(summary.model, "gpt-next");
         assert_eq!(summary.reasoning_effort.as_deref(), Some("xhigh"));
         assert!(summary.fast);
+    }
+
+    /// The permission modes the fake harness was started with, in order.
+    fn started_modes(settings: &h4rn_harness::SessionSettings) -> Vec<RuntimeMode> {
+        settings
+            .get()
+            .into_iter()
+            .filter_map(|change| match change {
+                h4rn_harness::SettingChange::Started { runtime_mode, .. } => Some(runtime_mode),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A supervised message must not run on the person's full-access session.
+    ///
+    /// The session is already live at Full access. The ceiling on the incoming
+    /// message has to replace it with one that starts at approval-required
+    /// before the prompt is written; keeping the permissive session would let
+    /// the agent's turn run with more autonomy than the grant allows.
+    #[tokio::test]
+    async fn a_supervised_message_replaces_a_full_access_session_before_the_write() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // The first session starts normally; the replacement the ceiling forces
+        // is held in `start_session`, before it can answer any prompt.
+        let (harness, start) = FakeHarness::new().with_start_gate_after(1);
+        let (harness, settings) = harness.with_session_settings();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.runtime_mode = RuntimeMode::FullAccess;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        assert_eq!(
+            started_modes(&settings),
+            vec![RuntimeMode::FullAccess],
+            "the person's own session runs at full access"
+        );
+
+        let sent = manager
+            .send_message_at_most(
+                &created.thread_id,
+                "one more thing".into(),
+                Vec::new(),
+                Some(RuntimeMode::ApprovalRequired),
+            )
+            .await
+            .expect("send");
+
+        // The replacement recorded its start before the held startup returns,
+        // so the clamped mode is visible while the prompt cannot have been
+        // written yet.
+        assert!(
+            wait_until(|| started_modes(&settings).len() >= 2).await,
+            "the full-access session was not replaced: {:?}",
+            settings.get()
+        );
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired),
+            "the supervised message ran on the full-access session: {:?}",
+            settings.get()
+        );
+        assert_eq!(
+            sends.get(),
+            1,
+            "the prompt reached the full-access session before it was replaced"
+        );
+        assert_eq!(sessions.get(), 2, "one replacement session");
+
+        start.release();
+        assert!(wait_until(|| sends.get() >= 2).await);
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the clamped turn completed");
+        assert_eq!(turn, sent.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        manager.shutdown().await;
+    }
+
+    /// A mode change during a capped turn belongs to the person's next turn.
+    ///
+    /// The live session is mid-way through an approval-required turn that an
+    /// outside grant capped. Raising the thread to Full access must not lift
+    /// that cap under the running turn; the person's next, uncapped turn then
+    /// runs at Full access.
+    #[tokio::test]
+    async fn raising_the_mode_during_a_capped_turn_waits_for_the_next_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, completion) = FakeHarness::new().with_later_completion_gate();
+        let (harness, settings) = harness.with_session_settings();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // The capped turn is running and its completion is held.
+        let capped = manager
+            .send_message_at_most(
+                &created.thread_id,
+                "capped turn".into(),
+                Vec::new(),
+                Some(RuntimeMode::ApprovalRequired),
+            )
+            .await
+            .expect("send");
+        assert!(wait_until(|| sends.get() >= 2).await);
+        assert_eq!(
+            started_modes(&settings),
+            vec![RuntimeMode::ApprovalRequired],
+            "the capped turn did not run at approval-required"
+        );
+
+        let summary = manager
+            .set_thread_runtime_mode(&created.thread_id, RuntimeMode::FullAccess)
+            .await
+            .expect("raise the mode");
+        assert_eq!(summary.runtime_mode, RuntimeMode::FullAccess);
+        assert!(
+            !settings.get().iter().any(|change| matches!(
+                change,
+                h4rn_harness::SettingChange::Mode(RuntimeMode::FullAccess)
+            )),
+            "the capped turn's session was switched to full access: {:?}",
+            settings.get()
+        );
+        assert!(
+            matches!(
+                settings.get().last(),
+                Some(h4rn_harness::SettingChange::Mode(
+                    RuntimeMode::ApprovalRequired
+                ))
+            ),
+            "the live switch was not clamped to the ceiling: {:?}",
+            settings.get()
+        );
+
+        completion.release();
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the capped turn completed");
+        assert_eq!(turn, capped.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // The person's next turn has no ceiling, so it gets a session that
+        // really runs at the mode they chose.
+        manager
+            .send_message(&created.thread_id, "uncapped".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            wait_until(|| started_modes(&settings).len() >= 2).await,
+            "the uncapped turn kept the clamped session: {:?}",
+            settings.get()
+        );
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::FullAccess),
+            "the next turn did not run at full access: {:?}",
+            settings.get()
+        );
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the uncapped turn completed");
+        assert_eq!(status, TurnStatus::Completed);
+        manager.shutdown().await;
+    }
+
+    /// A resume after a usage limit keeps the ceiling of the paused turn.
+    ///
+    /// A capped turn settles as rate-limited, and the policy prompt that fires
+    /// at the reset is a new prompt. Without carrying the ceiling it would run
+    /// at the thread's own (more permissive) mode; the journal carries it too,
+    /// so a daemon restart between the limit and the reset keeps it.
+    #[tokio::test]
+    async fn a_resume_keeps_the_ceiling_of_the_turn_that_hit_the_limit() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        // The turn stays open long enough for the test to report the provider's
+        // limit while it is running. The capped message starts a new session
+        // (the person's session ran at full access), so a completion latch that
+        // only holds later sends of one session would not cover it.
+        let harness = harness.with_send_delay(Duration::from_millis(500));
+        let (harness, sends) = harness.with_send_count();
+        let (harness, settings) = harness.with_session_settings();
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        manager.set_meter(Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        ));
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        // The person's own mode is Full access. Only the supervised message is
+        // capped, so a resume that loses the ceiling is easy to see.
+        request.runtime_mode = RuntimeMode::FullAccess;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        manager
+            .send_message_at_most(
+                &created.thread_id,
+                "capped turn".into(),
+                Vec::new(),
+                Some(RuntimeMode::ApprovalRequired),
+            )
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired),
+            "the capped turn did not start at approval-required"
+        );
+
+        // The provider pauses the turn while it is still running.
+        harness_events.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        });
+        loop {
+            let wire = tokio::time::timeout(Duration::from_secs(10), next_event(&mut events))
+                .await
+                .expect("the limit row arrived");
+            if matches!(wire.event, Event::UsageLimitHit { .. }) {
+                break;
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the capped turn completed");
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        assert!(
+            wait_until(|| {
+                handle
+                    .try_lock()
+                    .is_ok_and(|record| record.scheduled_limit.is_some())
+            })
+            .await,
+            "the pause was not armed"
+        );
+        {
+            let record = handle.lock().await;
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.ceiling),
+                Some(RuntimeMode::ApprovalRequired),
+                "the pause did not carry the capped turn's ceiling"
+            );
+            assert_eq!(
+                record.meta.resume_ceiling,
+                Some(RuntimeMode::ApprovalRequired),
+                "the ceiling was not recorded for the journal"
+            );
+        }
+
+        // A restart between the limit and the reset keeps the ceiling.
+        manager.shutdown().await;
+        drop(manager);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, restarted_settings) = FakeHarness::new().with_session_settings();
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        manager.set_meter(Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        ));
+        manager.resync_meter_state().await;
+        let mut events = manager.subscribe();
+
+        let meta = manager
+            .thread_meta(&created.thread_id)
+            .await
+            .expect("thread meta");
+        assert_eq!(
+            meta.resume_ceiling,
+            Some(RuntimeMode::ApprovalRequired),
+            "the journal did not carry the paused turn's ceiling"
+        );
+        {
+            let handle = manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.ceiling),
+                Some(RuntimeMode::ApprovalRequired),
+                "the restored pause lost the ceiling"
+            );
+        }
+
+        // The resume fires and the fresh session starts under the ceiling, not
+        // at the thread's full-access mode.
+        manager
+            .resume_now(&created.thread_id)
+            .await
+            .expect("the armed schedule fires");
+        assert!(
+            wait_until(|| !started_modes(&restarted_settings).is_empty()).await,
+            "the resume started no session"
+        );
+        assert_eq!(
+            started_modes(&restarted_settings),
+            vec![RuntimeMode::ApprovalRequired],
+            "the resumed prompt ran above the paused turn's ceiling"
+        );
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the resumed turn completed");
+        assert_eq!(status, TurnStatus::Completed);
+        manager.shutdown().await;
     }
 }

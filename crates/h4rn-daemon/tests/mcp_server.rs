@@ -1887,3 +1887,354 @@ async fn the_harness_mcp_endpoint_refuses_another_site_and_batches_too() {
     assert_eq!(status, StatusCode::OK, "{body}");
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn a_thread_title_never_returns_a_credential_from_a_read_only_grant() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "read_only",
+    )
+    .await;
+    let repo = git_repo_with_remote();
+    // Built here rather than written out: a committed credential-shaped string
+    // is flagged by secret scanners even when it is a fixture.
+    let planted = format!("{}{}", "ghp", "_").to_owned() + &"x".repeat(36);
+    let prompt = format!("deploy this with {planted} please");
+    let thread = daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, repo.path(), &prompt))
+        .await
+        .expect("create thread");
+
+    let listed = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "list_threads",
+        json!({}),
+    )
+    .await;
+    assert!(
+        !listed.to_string().contains(&planted),
+        "list_threads returned the title's credential: {listed}"
+    );
+    assert!(
+        listed.to_string().contains("[redacted]"),
+        "the title was not redacted: {listed}"
+    );
+
+    let read = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "get_thread",
+        json!({"thread_id": thread.thread_id}),
+    )
+    .await;
+    assert!(
+        !read.to_string().contains(&planted),
+        "get_thread returned the title's credential: {read}"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_page_on_another_loopback_port_cannot_mutate() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+
+    // Another local service is another site, even though both are loopback.
+    let response = client
+        .post(format!("{}/oauth/register", daemon.base()))
+        .header(reqwest::header::ORIGIN, "http://127.0.0.1:1455")
+        .json(&json!({"client_name": "Another local app", "redirect_uris": [redirect]}))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // `same-site` covers that other port, so it is not enough either.
+    let response = client
+        .post(format!("{}/oauth/register", daemon.base()))
+        .header("sec-fetch-site", "same-site")
+        .json(&json!({"client_name": "Another local app", "redirect_uris": [redirect]}))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // The daemon's own page is admitted.
+    let response = client
+        .post(format!("{}/oauth/register", daemon.base()))
+        .header(reqwest::header::ORIGIN, daemon.base())
+        .json(&json!({"client_name": "h4rn", "redirect_uris": [redirect]}))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // A non-browser client sends no fetch site or `none`.
+    let response = client
+        .post(format!("{}/oauth/register", daemon.base()))
+        .header("sec-fetch-site", "none")
+        .json(&json!({"client_name": "CLI", "redirect_uris": [redirect]}))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_refused_cross_site_request_does_not_spend_the_aggregate_bucket() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    daemon
+        .outside
+        .set_aggregate_limits(h4rn_daemon::mcp_server::rate::RateLimiter::new(
+            1,
+            Duration::from_secs(60),
+        ));
+
+    let refused = client
+        .post(format!("{}/oauth/register", daemon.base()))
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .json(&json!({"redirect_uris": [redirect]}))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    // The refusal happened before the limiter, so the one legitimate request
+    // still fits.
+    let (status, body) = register(&client, &daemon.base(), redirect).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _) = register(&client, &daemon.base(), redirect).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the bucket's one hit was already spent"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn authorize_requests_count_against_the_aggregate_limit() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let (_, challenge) = pkce();
+    daemon
+        .outside
+        .set_aggregate_limits(h4rn_daemon::mcp_server::rate::RateLimiter::new(
+            1,
+            Duration::from_secs(60),
+        ));
+
+    let authorize = |client: &reqwest::Client| {
+        client
+            .get(format!("{}/oauth/authorize", daemon.base()))
+            .query(&[
+                ("response_type", "code"),
+                ("client_id", client_id),
+                ("redirect_uri", redirect),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+            ])
+            .send()
+    };
+    let first = authorize(&client).await.expect("authorize");
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = authorize(&client).await.expect("authorize");
+    assert_eq!(
+        second.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the authorize endpoint was not counted"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_revocation_that_cannot_be_saved_is_not_reported_as_success() {
+    let daemon = boot(None).await;
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
+
+    // The store replaces its file through this temp path. A directory there
+    // makes the write fail the way a full or read-only disk would.
+    let temp = daemon.data_dir().join("outside_agents.tmp");
+    std::fs::create_dir(&temp).expect("block the store's temp file");
+
+    let response = client
+        .post(format!("{}/oauth/revoke", daemon.base()))
+        .form(&[("token", token.as_str())])
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a revocation that was not saved reported success"
+    );
+
+    let response = client
+        .delete(daemon.mcp_url())
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a revocation that was not saved reported success"
+    );
+
+    std::fs::remove_dir(&temp).expect("unblock the store");
+
+    // RFC 7009: an unknown token is still a successful revocation.
+    let response = client
+        .post(format!("{}/oauth/revoke", daemon.base()))
+        .form(&[("token", "definitely-not-a-token")])
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_token_exchange_must_use_the_resource_its_code_was_approved_for() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let mcp = format!("{}/mcp", daemon.base());
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let (verifier, challenge) = pkce();
+
+    let page = client
+        .get(format!("{}/oauth/authorize", daemon.base()))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("resource", mcp.as_str()),
+        ])
+        .send()
+        .await
+        .expect("authorize")
+        .text()
+        .await
+        .expect("page");
+    let request = page
+        .split("request=")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("approval request id")
+        .to_owned();
+    daemon
+        .outside
+        .respond_sign_in(
+            &request,
+            h4rn_protocol::ApprovalDecision::Approve,
+            Some(OutsideAgentLevel::ReadOnly),
+        )
+        .expect("approve");
+    let code = follow_pending(&client, &daemon.base(), &request).await;
+
+    let refused = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client_id),
+            ("code_verifier", verifier.as_str()),
+            ("resource", "https://elsewhere.example/mcp"),
+        ])
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let body: Value = refused.json().await.expect("error json");
+    assert_eq!(body["error"], "invalid_target");
+
+    let accepted = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client_id),
+            ("code_verifier", verifier.as_str()),
+            ("resource", mcp.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let body: Value = accepted.json().await.expect("token json");
+    assert_eq!(body["resource"], mcp);
+
+    // A grant approved without a resource cannot be widened by naming this
+    // daemon's own endpoint at the token endpoint.
+    let page = client
+        .get(format!("{}/oauth/authorize", daemon.base()))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .expect("authorize")
+        .text()
+        .await
+        .expect("page");
+    let request = page
+        .split("request=")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("approval request id")
+        .to_owned();
+    daemon
+        .outside
+        .respond_sign_in(
+            &request,
+            h4rn_protocol::ApprovalDecision::Approve,
+            Some(OutsideAgentLevel::ReadOnly),
+        )
+        .expect("approve");
+    let code = follow_pending(&client, &daemon.base(), &request).await;
+    let widened = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client_id),
+            ("code_verifier", verifier.as_str()),
+            ("resource", mcp.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(widened.status(), StatusCode::BAD_REQUEST);
+    let body: Value = widened.json().await.expect("error json");
+    assert_eq!(body["error"], "invalid_target");
+    daemon.stop().await;
+}

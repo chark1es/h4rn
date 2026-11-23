@@ -442,6 +442,24 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **An outside agent's grant can no longer be widened, replayed or read from the
+  store.** A supervised ceiling now holds for the whole turn it was attached to:
+  raising the thread's mode partway through that turn no longer switches the live
+  session to full access (the person's next, uncapped turn gets the new mode),
+  and a turn stopped by a provider limit resumes under the same ceiling, including
+  after a daemon restart. `list_threads` and `start_thread` redact the thread
+  title as `get_thread` already did, so a credential pasted into a first prompt
+  never comes back from a read-only grant. A revocation cannot lose a race with a
+  token's last-used write, and revoking an agent frees its registration slot so
+  the "revoke one in h4rn" advice works at the cap; a revocation that could not
+  be saved now reports an error instead of success. The daemon accepts an
+  `Origin` only when it is its own exact `scheme://host:port` (a page on another
+  loopback port is refused) and a `Sec-Fetch-Site` only when it is `same-origin`
+  or `none`; the check runs before the rate limiter, so a refused page cannot
+  spend the aggregate bucket. `/oauth/authorize` is counted in that bucket, and
+  waiting sign-ins are capped per client and in total. The token endpoint checks
+  RFC 8707 `resource` against the code's binding, and an approval keeps its
+  one-time code in memory only, so the store file never holds a live code.
 - **Commit, push and pull request follow what git and the forge really say.** A
   branch deleted on the forge no longer skips the push a pull request needs just
   because the local remote-tracking ref is stale: the daemon asks the remote with

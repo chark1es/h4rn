@@ -110,6 +110,14 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// The permission ceiling the paused turn carried, when its sender named one.
+    ///
+    /// A turn that hits a usage limit settles, and the auto-resume that follows
+    /// starts a fresh policy prompt. That prompt must keep the ceiling its
+    /// predecessor ran under (an outside agent's approval-required turn stays
+    /// approval-required when it resumes), and the daemon may have restarted in
+    /// between, so it is stored with the thread like a parked prompt's ceiling.
+    pub resume_ceiling: Option<RuntimeMode>,
 }
 
 /// A prompt a paused thread still has to deliver, persisted with the thread.
@@ -296,7 +304,8 @@ impl SqliteJournal {
                 subagent_id    TEXT,
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
-                parked_json    TEXT
+                parked_json    TEXT,
+                resume_ceiling TEXT
             )",
         )
         .execute(&self.pool)
@@ -321,6 +330,8 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "agent_fingerprint", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "resume_ceiling", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "reasoning_effort", "TEXT")
             .await?;
@@ -418,8 +429,8 @@ async fn upsert_thread_on(
     let parked_json = serde_json::to_string(&meta.parked)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, resume_ceiling)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -437,7 +448,8 @@ async fn upsert_thread_on(
             subagent_id = excluded.subagent_id,
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
-            parked_json = excluded.parked_json",
+            parked_json = excluded.parked_json,
+            resume_ceiling = excluded.resume_ceiling",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -458,6 +470,7 @@ async fn upsert_thread_on(
     .bind(meta.agent_id.as_deref())
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
+    .bind(meta.resume_ceiling.and_then(|mode| serde_json::to_string(&mode).ok()))
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -495,7 +508,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, resume_ceiling
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -546,6 +559,9 @@ impl Journal for SqliteJournal {
                 parked: row
                     .try_get::<Option<String>, _>("parked_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
+                resume_ceiling: row
+                    .try_get::<Option<String>, _>("resume_ceiling")?
+                    .and_then(|value| serde_json::from_str(&value).ok()),
             });
         }
         Ok(metas)
@@ -787,6 +803,7 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "resume_id": meta.resume_id,
         "agent_fingerprint": meta.agent_fingerprint,
         "parked": meta.parked,
+        "resume_ceiling": meta.resume_ceiling,
     })
 }
 
@@ -816,6 +833,7 @@ mod tests {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            resume_ceiling: None,
         }
     }
 
@@ -850,6 +868,40 @@ mod tests {
             resume_at: None,
             limit: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_parked_prompt_keeps_its_mode_ceiling_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.sqlite");
+        let journal = SqliteJournal::connect(&path).await.expect("journal");
+        let mut one = meta("th_parked");
+        one.parked = Some(ParkedPrompt {
+            turn_id: h4rn_protocol::TurnId::new("turn_one"),
+            text: "carry on".into(),
+            attachments: Vec::new(),
+            mode_ceiling: Some(RuntimeMode::ApprovalRequired),
+        });
+        one.resume_ceiling = Some(RuntimeMode::ApprovalRequired);
+        journal.upsert_thread(&one).await.unwrap();
+        drop(journal);
+
+        let reopened = SqliteJournal::connect(&path).await.expect("reopen");
+        let rows = reopened.list_threads().await.unwrap();
+        assert_eq!(rows, vec![one]);
+        assert_eq!(
+            rows[0]
+                .parked
+                .as_ref()
+                .and_then(|parked| parked.mode_ceiling),
+            Some(RuntimeMode::ApprovalRequired),
+            "the parked prompt lost its ceiling"
+        );
+        assert_eq!(
+            rows[0].resume_ceiling,
+            Some(RuntimeMode::ApprovalRequired),
+            "the resume lost its ceiling"
+        );
     }
 
     #[tokio::test]

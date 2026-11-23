@@ -66,7 +66,9 @@ Redirect URIs are admitted only when they are `https`, or plain `http` to `local
 registration, before a browser is sent anywhere. A token request may omit `redirect_uri` (PKCE
 binds the exchange); when it sends one, it must match the authorization request exactly. A client
 that names an RFC 8707 `resource` gets a token bound to it, and `/mcp` refuses a token issued for
-anything else.
+anything else. The token endpoint checks the same binding: naming a different `resource`, or naming
+this daemon's endpoint for a code approved without one, is refused with `invalid_target` before the
+code is spent.
 
 For Claude Code:
 
@@ -106,27 +108,34 @@ Answering without a level is refused. The level is written into the grant and ch
 every tool call, so a client cannot call a write tool by guessing its name.
 
 Only approve a sign-in you just started. A hostile page cannot approve one for you either: the
-daemon refuses a cross-site `Origin`, a `Sec-Fetch-Site: cross-site` request and any `Host` that is
-not loopback.
+daemon refuses an `Origin` that is not its own exact `scheme://host:port` (another loopback port is
+still another site), a `Sec-Fetch-Site` other than `same-origin` or `none` (so `same-site` is
+refused too) and any `Host` that is not loopback. The sign-in list itself is bounded: at most three
+requests per client and sixteen in total wait for you at once, and a request that this check refuses
+never spends a rate-limit hit.
 
 ### Tokens
 
 - Access tokens last **one hour**; refresh tokens last **thirty days** and rotate on every use.
 - Both are random 256-bit values with a recognisable prefix (`h4rn_at_`, `h4rn_rt_`).
 - Only a BLAKE3 digest is written to `outside_agents.json`; a copy of the file is not a copy of the
-  credentials. No token is ever logged or returned in a tool result.
-- Revoking an agent in Settings → Sharing & access marks every token in its family revoked and
-  deletes its codes and pending approvals. The answer comes only after the file is on disk, so a
-  restart cannot resurrect the grant. The next request gets `401`.
+  credentials. No token is ever logged or returned in a tool result. An approval's redirect carries
+  the one-time code, so it is kept in memory only: the store file never contains a live code, and a
+  restart asks the browser to start the sign-in again instead of replaying one.
+- Revoking an agent in Settings → Sharing & access marks every token in its family revoked, deletes
+  its codes and pending approvals, and frees its registration slot (so the next agent can register
+  once the cap is reached). The answer comes only after the file is on disk, so a restart cannot
+  resurrect the grant. The next request gets `401`; a revocation that could not be saved reports an
+  error rather than success.
 - A replayed authorization code revokes the tokens it issued, and a replayed rotated refresh token
   revokes its whole family: either one means two parties hold the same credential.
 - If `outside_agents.json` cannot be read (corrupt, or written by an older build), the daemon
   quarantines it as `outside_agents.corrupt-<time>.json`, starts with no grants, and logs a
   warning. Agents reconnect by signing in again.
 - Registration is capped and unused registrations expire after a day. The unauthenticated OAuth
-  mutations have an aggregate rate limit checked before the body is read, and the per-client
-  buckets are keyed only on identifiers the daemon has registered — a flood of random values grows
-  nothing.
+  endpoints — registration, authorize, the token endpoint and revocation — have an aggregate rate
+  limit checked before the body is read, and the per-client buckets are keyed only on identifiers
+  the daemon has registered — a flood of random values grows nothing.
 
 ### What an outside agent can call
 
@@ -144,7 +153,10 @@ not loopback.
 `list_providers`. It never creates a worktree. A thread it starts cannot run with more permission
 than its grant allows: a supervised grant always starts at `approval_required`, and a message it
 sends to an existing thread is clamped to that mode for the turn without changing the person's own
-thread setting.
+thread setting. The ceiling holds for the whole turn: raising the thread's mode while that turn runs
+changes the live session only as far as the ceiling allows, and the person's next turn gets the new
+mode. A turn stopped by a provider limit resumes under the same ceiling, even across a daemon
+restart.
 
 An outside agent never sees the person's own upstream MCP servers; it sees only this tool set.
 
@@ -152,7 +164,8 @@ Both MCP endpoints accept one JSON-RPC message per request. A batch is refused, 
 `Origin` is another site is refused, so one scope check and one rate-limit hit always belong to one
 call.
 
-`get_thread` redacts credentials before it builds either output form: the daemon's own access
+`get_thread` and `list_threads` redact credentials before they build either output form, including
+the thread title (which is the first line of the person's first prompt): the daemon's own access
 token, `h4rn_`-prefixed tokens, and the forge token shapes h4rn already recognises (`ghp_`,
 `glpat-`, `ATATT` and the rest).
 
@@ -176,12 +189,16 @@ and cannot be reached by an agent on the internet yet.
   rejected `plain` challenge), the sign-in answered over the protocol, the page's redirect shape,
   level enforcement, aggregate and per-client rate limits, revocation, hashed storage and the
   protocol operations are exercised; approval without an owner session, a cross-site `Origin`, a
-  rebinding `Host`, a non-loopback listener, a foreign `resource`, a JSON-RPC batch, a supervised
-  ceiling raised after queueing, refresh rotation and redacted tool output are proved; and the
-  PR-link tools run against a scripted forge.
+  page on another loopback port, `same-site`, a rebinding `Host`, a non-loopback listener, a foreign
+  `resource`, a resource named at the token endpoint, a JSON-RPC batch, a supervised ceiling raised
+  after queueing, refresh rotation, redacted titles and tool output, and a revocation that cannot be
+  saved are proved; and the PR-link tools run against a scripted forge.
 - Unit tests in `crates/h4rn-daemon/src/mcp_server/` cover redirect allow-listing, PKCE vectors,
-  expiry, one-time codes, replay revocation, resource binding, the revocation-versus-restart race,
-  registration caps, the bounded rate limiter, quarantine of an unreadable store, and the page
-  having no form.
+  expiry, one-time codes, replay revocation, resource binding at the token endpoint, the
+  revocation-versus-use race, a revocation freeing its registration slot, an approval never writing
+  its code to disk, sign-in caps, registration caps, the bounded rate limiter, quarantine of an
+  unreadable store, and the page having no form.
+- `crates/h4rn-daemon/src/threads.rs` covers the ceiling through a capped turn, across a mode change,
+  on a reused session, and through a usage limit and restart.
 - `apps/ui/src/features/access/` covers the Sharing & access list, the waiting sign-in (unverified
   name, callback origin, no preselected level), copy, revoke, and the remote-copy explanation.

@@ -130,7 +130,8 @@ pub fn router(state: AppState) -> Router {
                 .delete(mcp_http_delete),
         )
         .with_state(state.clone())
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&outside),
             crate::mcp_server::http::loopback_guard,
         ));
     Router::new()

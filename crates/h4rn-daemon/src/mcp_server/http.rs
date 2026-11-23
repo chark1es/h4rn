@@ -46,10 +46,16 @@ pub fn router(service: Arc<OutsideAgents>) -> Router {
             "/mcp/outside",
             post(mcp_post).get(mcp_get).delete(mcp_delete),
         )
-        .layer(axum::middleware::from_fn(loopback_guard))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&service),
             aggregate_guard,
+        ))
+        // The loopback check is outermost: a request this daemon did not serve
+        // as its own page is refused before it costs a rate-limit hit or any
+        // other work.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&service),
+            loopback_guard,
         ))
         .with_state(service)
 }
@@ -80,13 +86,43 @@ fn origin_is_loopback(value: &str) -> bool {
     })
 }
 
+/// Whether a request's `Origin` names this listener itself.
+///
+/// Another loopback port is still another site: a page some other local process
+/// serves on `http://127.0.0.1:1455` must not reach h4rn's mutations. Only the
+/// exact `scheme://host:port` the daemon bound is h4rn's own page.
+fn origin_is_listener(value: &str, listener: Option<&str>) -> bool {
+    let Some(origin) = origin_of(value) else {
+        return false;
+    };
+    match listener.and_then(origin_of) {
+        Some(expected) => origin.eq_ignore_ascii_case(&expected),
+        // The listener has not named its address yet. Refusing every origin
+        // would break the first request of a startup; the loopback rule is the
+        // best available until `set_base_url` runs.
+        None => origin_is_loopback(&origin),
+    }
+}
+
+/// Whether `Sec-Fetch-Site` names a request from this daemon's own page.
+///
+/// `same-site` is not enough: another loopback port counts as the same site and
+/// is exactly what the exact-origin check exists to refuse.
+fn fetch_site_allowed(value: &str) -> bool {
+    value.eq_ignore_ascii_case("same-origin") || value.eq_ignore_ascii_case("none")
+}
+
 /// Refuses a request that did not come from this machine's own page.
 ///
-/// A DNS-rebinding page reaches the loopback port with its own `Host`; a
-/// cross-site form post arrives with another site's `Origin` or
-/// `Sec-Fetch-Site: cross-site`. Both are refused before a handler runs, so a
-/// page the person happens to visit cannot register a client or spend a code.
-pub async fn loopback_guard(request: Request, next: Next) -> Response {
+/// A DNS-rebinding page reaches the loopback port with its own `Host`; any other
+/// site's page arrives with another `Origin` or a `Sec-Fetch-Site` of
+/// `cross-site` or `same-site`. All are refused before a handler runs, so a page
+/// the person happens to visit cannot register a client or spend a code.
+pub async fn loopback_guard(
+    State(service): State<Arc<OutsideAgents>>,
+    request: Request,
+    next: Next,
+) -> Response {
     let headers = request.headers();
     let host = headers
         .get(header::HOST)
@@ -94,17 +130,18 @@ pub async fn loopback_guard(request: Request, next: Next) -> Response {
     if !host.is_some_and(host_is_loopback) {
         return refused("this endpoint is only reachable through h4rn's loopback address");
     }
+    let listener = service.base_url();
     if let Some(origin) = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
-        && !origin_is_loopback(origin)
+        && !origin_is_listener(origin, listener.as_deref())
     {
         return refused("a request from another site cannot change anything in h4rn");
     }
     if let Some(site) = headers
         .get("sec-fetch-site")
         .and_then(|value| value.to_str().ok())
-        && site.eq_ignore_ascii_case("cross-site")
+        && !fetch_site_allowed(site)
     {
         return refused("a request from another site cannot change anything in h4rn");
     }
@@ -122,7 +159,7 @@ fn refused(message: &str) -> Response {
     )
 }
 
-/// Caps the unauthenticated mutation endpoints before their body is parsed.
+/// Caps the unauthenticated endpoints before their body is parsed.
 async fn aggregate_guard(
     State(service): State<Arc<OutsideAgents>>,
     request: Request,
@@ -130,7 +167,7 @@ async fn aggregate_guard(
 ) -> Response {
     if matches!(
         request.uri().path(),
-        "/oauth/register" | "/oauth/token" | "/oauth/revoke"
+        "/oauth/register" | "/oauth/authorize" | "/oauth/token" | "/oauth/revoke"
     ) && let Err(seconds) = service.check_aggregate()
     {
         return rate_limited(seconds);
@@ -445,9 +482,19 @@ async fn token(State(service): State<Arc<OutsideAgents>>, Form(form): Form<Token
                     "authorization_code needs code and code_verifier".into(),
                 ));
             };
-            service
-                .store()
-                .exchange_code(code, verifier, client_id, form.redirect_uri.as_deref())
+            // RFC 8707: a resource named now must be one this daemon serves, and
+            // the store then checks it against the code's own binding.
+            let resource = match check_resource(&service, form.resource.as_deref()) {
+                Ok(resource) => resource,
+                Err(message) => return oauth_error(OAuthError::InvalidTarget(message)),
+            };
+            service.store().exchange_code(
+                code,
+                verifier,
+                client_id,
+                form.redirect_uri.as_deref(),
+                resource.as_deref(),
+            )
         }
         Some("refresh_token") => match form.refresh_token.as_deref() {
             Some(token) => service
@@ -501,14 +548,27 @@ async fn revoke(
     State(service): State<Arc<OutsideAgents>>,
     Form(form): Form<RevokeForm>,
 ) -> Response {
-    // RFC 7009: invalid tokens still get 200.
-    let _ = service.store().revoke_token(&form.token);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        "{}",
-    )
-        .into_response()
+    // RFC 7009: an unknown token still gets 200. A store that could not write
+    // the revocation is a different thing: reporting success would tell the
+    // client its token is dead while a restart would bring it back.
+    match service.store().revoke_token(&form.token) {
+        Ok(()) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            "{}",
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "application/json")],
+            json!({
+                "error": "server_error",
+                "error_description": error.description(),
+            })
+            .to_string(),
+        )
+            .into_response(),
+    }
 }
 
 async fn mcp_post(
@@ -555,8 +615,17 @@ async fn mcp_delete(State(service): State<Arc<OutsideAgents>>, headers: HeaderMa
 
 /// Revokes the bearer token on `DELETE /mcp` when it is an outside token.
 pub async fn outside_delete(service: &OutsideAgents, headers: HeaderMap) -> Response {
-    if let Some(token) = super::outside::bearer_token(&headers) {
-        let _ = service.store().revoke_token(token);
+    if let Some(token) = super::outside::bearer_token(&headers)
+        && let Err(error) = service.store().revoke_token(token)
+    {
+        // The revocation did not reach disk. Saying 204 would tell the client
+        // it is disconnected while a restart would reconnect it.
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("the revocation could not be saved: {error}"),
+        )
+            .into_response();
     }
     (StatusCode::NO_CONTENT, "").into_response()
 }
@@ -701,10 +770,24 @@ mod tests {
     }
 
     #[test]
-    fn loopback_origins_are_admitted_and_foreign_ones_are_not() {
-        assert!(origin_is_loopback("http://127.0.0.1:47800"));
-        assert!(origin_is_loopback("http://localhost:1455"));
-        assert!(!origin_is_loopback("https://evil.example"));
-        assert!(!origin_is_loopback("http://127.0.0.1.evil.example"));
+    fn origins_must_match_the_listener_exactly() {
+        let listener = Some("http://127.0.0.1:47800");
+        assert!(origin_is_listener("http://127.0.0.1:47800", listener));
+        assert!(origin_is_listener("http://127.0.0.1:47800/", listener));
+        // Another loopback service is another site, even on this machine.
+        assert!(!origin_is_listener("http://127.0.0.1:1455", listener));
+        assert!(!origin_is_listener("http://localhost:47800", listener));
+        assert!(!origin_is_listener("https://127.0.0.1:47800", listener));
+        assert!(!origin_is_listener("https://evil.example", listener));
+        assert!(!origin_is_listener("not a url", listener));
+    }
+
+    #[test]
+    fn only_same_origin_and_no_fetch_site_are_admitted() {
+        assert!(fetch_site_allowed("same-origin"));
+        assert!(fetch_site_allowed("none"));
+        assert!(!fetch_site_allowed("same-site"));
+        assert!(!fetch_site_allowed("cross-site"));
+        assert!(!fetch_site_allowed(""));
     }
 }

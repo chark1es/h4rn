@@ -53,6 +53,14 @@ const MAX_NAME_CHARS: usize = 80;
 /// Registered clients kept at once. Dynamic registration is unauthenticated, so
 /// the list must be bounded; an unused registration expires first.
 pub const MAX_CLIENTS: usize = 32;
+/// Sign-in requests waiting for the person at once, across every client.
+///
+/// The authorize endpoint is unauthenticated, so a process that reaches the
+/// loopback listener must not be able to bury the person's real request in
+/// thousands of fakes.
+pub const MAX_PENDING: usize = 16;
+/// Sign-in requests one client may have waiting at once.
+pub const MAX_PENDING_PER_CLIENT: usize = 3;
 /// How often the last-used timestamp is written.
 const LAST_USE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -113,7 +121,11 @@ struct CodeRecord {
 }
 
 /// What the browser is eventually sent to.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// The location carries a live authorization code, so it lives in memory only:
+/// a copy of the store is never a copy of a code, and a restart forgets the
+/// answer (the browser is told to start the sign-in again).
+#[derive(Clone, Debug)]
 struct PendingResolution {
     location: String,
     at: DateTime<Utc>,
@@ -136,9 +148,10 @@ pub struct PendingRecord {
     resource: Option<String>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
-    /// Set once the person answered; the waiting page then navigates.
+    /// Set once the person answered. The answer itself (which carries the
+    /// code) is kept in memory, never written.
     #[serde(default)]
-    resolution: Option<PendingResolution>,
+    resolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -251,6 +264,11 @@ pub struct OAuthStore {
     /// taken, released and written later: that is what used to let a revocation
     /// lose a race with a last-used update.
     state: Mutex<StoreState>,
+    /// Where an answered approval sends the browser, by request id.
+    ///
+    /// Memory only: the location holds the one-time code. Lock order is always
+    /// `state` then `resolutions`, never the reverse.
+    resolutions: Mutex<HashMap<String, PendingResolution>>,
 }
 
 struct StoreState {
@@ -302,6 +320,7 @@ impl OAuthStore {
                 file,
                 last_use_write: Instant::now() - LAST_USE_INTERVAL,
             }),
+            resolutions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -443,6 +462,32 @@ impl OAuthStore {
         let redirect_origin = url::origin_of(redirect_uri).ok_or_else(|| {
             OAuthError::InvalidRedirect(format!("redirect_uri `{redirect_uri}` is not a URL"))
         })?;
+        guard.file.pending.retain(|entry| entry.expires_at > now);
+        // The authorize endpoint is unauthenticated. Cap what one client, and
+        // all clients together, may leave waiting for the person: a flood must
+        // not bury the request that is really theirs.
+        let waiting = guard
+            .file
+            .pending
+            .iter()
+            .filter(|entry| entry.resolved_at.is_none())
+            .count();
+        if waiting >= MAX_PENDING {
+            return Err(OAuthError::InvalidRequest(format!(
+                "at most {MAX_PENDING} sign-in requests can wait for approval at once; answer or deny one in h4rn"
+            )));
+        }
+        let waiting_for_client = guard
+            .file
+            .pending
+            .iter()
+            .filter(|entry| entry.resolved_at.is_none() && entry.client_id == client.client_id)
+            .count();
+        if waiting_for_client >= MAX_PENDING_PER_CLIENT {
+            return Err(OAuthError::InvalidRequest(format!(
+                "this client already has {MAX_PENDING_PER_CLIENT} sign-in requests waiting; answer or deny one in h4rn"
+            )));
+        }
         let pending = PendingRecord {
             id: format!("h4rn_auth_{}", random_hex()),
             client_id: client.client_id,
@@ -453,9 +498,8 @@ impl OAuthStore {
             resource: resource.map(str::to_owned),
             created_at: now,
             expires_at: now + PENDING_TTL,
-            resolution: None,
+            resolved_at: None,
         };
-        guard.file.pending.retain(|entry| entry.expires_at > now);
         guard.file.pending.push(pending.clone());
         self.persist_locked(&guard.file)?;
         Ok(pending)
@@ -468,7 +512,7 @@ impl OAuthStore {
             .file
             .pending
             .iter()
-            .find(|entry| entry.id == id && entry.expires_at > now)
+            .find(|entry| entry.id == id && entry.expires_at > now && entry.resolved_at.is_none())
             .cloned()
     }
 
@@ -480,7 +524,7 @@ impl OAuthStore {
             .file
             .pending
             .iter()
-            .filter(|entry| entry.resolution.is_none() && entry.expires_at > now)
+            .filter(|entry| entry.resolved_at.is_none() && entry.expires_at > now)
             .map(|entry| OutsideAgentSignIn {
                 request_id: entry.id.clone(),
                 client_name: Self::client_locked(&guard.file, &entry.client_id)
@@ -499,14 +543,20 @@ impl OAuthStore {
     /// The browser's next stop once the person answered, if they have.
     pub fn approval_outcome(&self, id: &str) -> Option<ApprovalOutcome> {
         let now = Utc::now();
-        let guard = self.lock();
-        let entry = guard
-            .file
-            .pending
-            .iter()
-            .find(|entry| entry.id == id && entry.expires_at > now)?;
-        let resolution = entry.resolution.as_ref()?;
-        Some(ApprovalOutcome {
+        {
+            let state = self.lock();
+            let entry = state
+                .file
+                .pending
+                .iter()
+                .find(|entry| entry.id == id && entry.expires_at > now)?;
+            entry.resolved_at?;
+        }
+        let resolutions = self
+            .resolutions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        resolutions.get(id).map(|resolution| ApprovalOutcome {
             location: resolution.location.clone(),
             decided_at: resolution.at,
         })
@@ -530,7 +580,7 @@ impl OAuthStore {
                 "this approval request is no longer open; start the sign-in again".into(),
             ));
         };
-        if guard.file.pending[index].resolution.is_some() {
+        if guard.file.pending[index].resolved_at.is_some() {
             return Err(OAuthError::NotFound(
                 "this approval was already answered; start the sign-in again".into(),
             ));
@@ -555,11 +605,11 @@ impl OAuthStore {
             &[("code", code.as_str())],
             pending.state.as_deref(),
         )?;
-        guard.file.pending[index].resolution = Some(PendingResolution {
-            location: location.clone(),
-            at: now,
-        });
+        guard.file.pending[index].resolved_at = Some(now);
         self.persist_locked(&guard.file)?;
+        // The answer is remembered in memory only: the redirect carries the
+        // one-time code, and the store on disk must never hold it.
+        self.remember_resolution(&guard.file, &pending.id, location.clone(), now);
         Ok(ApprovalRedirect { location })
     }
 
@@ -577,7 +627,7 @@ impl OAuthStore {
                 "this approval request is no longer open; start the sign-in again".into(),
             ));
         };
-        if guard.file.pending[index].resolution.is_some() {
+        if guard.file.pending[index].resolved_at.is_some() {
             return Err(OAuthError::NotFound(
                 "this approval was already answered; start the sign-in again".into(),
             ));
@@ -588,12 +638,33 @@ impl OAuthStore {
             &[("error", "access_denied")],
             pending.state.as_deref(),
         )?;
-        guard.file.pending[index].resolution = Some(PendingResolution {
-            location: location.clone(),
-            at: now,
-        });
+        guard.file.pending[index].resolved_at = Some(now);
         self.persist_locked(&guard.file)?;
+        self.remember_resolution(&guard.file, &pending.id, location.clone(), now);
         Ok(ApprovalRedirect { location })
+    }
+
+    /// Remembers an answered request for the waiting page, in memory only.
+    ///
+    /// The same pass forgets answers whose request has expired, so a daemon
+    /// that has been up for days does not accumulate them.
+    fn remember_resolution(
+        &self,
+        file: &StoreFile,
+        id: &str,
+        location: String,
+        now: DateTime<Utc>,
+    ) {
+        let mut resolutions = self
+            .resolutions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        resolutions.insert(id.to_owned(), PendingResolution { location, at: now });
+        resolutions.retain(|key, _| {
+            file.pending
+                .iter()
+                .any(|entry| &entry.id == key && entry.expires_at > now)
+        });
     }
 
     /// Exchanges an authorization code for a token pair.
@@ -601,12 +672,17 @@ impl OAuthStore {
     /// OAuth 2.1 no longer requires `redirect_uri` at the token endpoint: PKCE
     /// binds the request. When the client does send it, it must match the
     /// authorization request exactly.
+    ///
+    /// RFC 8707 is checked here too: a `resource` named at the token endpoint
+    /// must be the one the code was approved for, and a grant that was bound to
+    /// no resource cannot be widened by naming one now.
     pub fn exchange_code(
         &self,
         code: &str,
         verifier: &str,
         client_id: &str,
         redirect_uri: Option<&str>,
+        resource: Option<&str>,
     ) -> Result<TokenPair, OAuthError> {
         if !url::valid_verifier(verifier) {
             return Err(OAuthError::InvalidGrant(
@@ -649,6 +725,15 @@ impl OAuthStore {
         {
             return Err(OAuthError::InvalidGrant(
                 "redirect_uri does not match the authorization request".into(),
+            ));
+        }
+        if let Some(requested) = resource
+            && record.resource.as_deref() != Some(requested)
+        {
+            // The code is not spent: the client can retry the exchange with the
+            // resource it was actually approved for (or none at all).
+            return Err(OAuthError::InvalidTarget(
+                "`resource` does not match the one this code was approved for".into(),
             ));
         }
         if !url::challenge_matches(verifier, &record.challenge) {
@@ -802,29 +887,34 @@ impl OAuthStore {
     pub fn revoke_client(&self, client_id: &str) -> Result<(), OAuthError> {
         let now = Utc::now();
         let mut guard = self.lock();
-        let mut found = false;
+        let Some(client) = Self::client_locked(&guard.file, client_id).cloned() else {
+            return Err(OAuthError::NotFound(
+                "no outside agent has that client id".into(),
+            ));
+        };
         for entry in guard
             .file
             .tokens
             .iter_mut()
-            .filter(|entry| entry.client_id == client_id)
+            .filter(|entry| entry.client_id == client.client_id)
         {
             entry.revoked_at = Some(now);
-            found = true;
         }
         guard
             .file
             .codes
-            .retain(|entry| entry.client_id != client_id);
+            .retain(|entry| entry.client_id != client.client_id);
         guard
             .file
             .pending
-            .retain(|entry| entry.client_id != client_id);
-        if !found && Self::client_locked(&guard.file, client_id).is_none() {
-            return Err(OAuthError::NotFound(
-                "no outside agent has that client id".into(),
-            ));
-        }
+            .retain(|entry| entry.client_id != client.client_id);
+        // Revoking frees the registration slot too. The cap counts registered
+        // clients, and "revoke one in h4rn" has to make room for the next
+        // agent; keeping a dead record would make that advice false.
+        guard
+            .file
+            .clients
+            .retain(|entry| entry.client_id != client.client_id);
         self.persist_locked(&guard.file)
     }
 
@@ -934,7 +1024,7 @@ fn prune_clients(file: &mut StoreFile, now: DateTime<Utc>) {
 fn client_is_used(file: &StoreFile, client_id: &str, now: DateTime<Utc>) -> bool {
     file.tokens
         .iter()
-        .any(|token| token.client_id == client_id && token.expires_at > now)
+        .any(|token| token.client_id == client_id && token.live(now))
         || file
             .codes
             .iter()
@@ -1079,7 +1169,7 @@ mod tests {
         let (verifier, _) = challenge();
         let code = approved_code(store, client_id, level);
         store
-            .exchange_code(&code, &verifier, client_id, None)
+            .exchange_code(&code, &verifier, client_id, None, None)
             .expect("exchange")
     }
 
@@ -1120,7 +1210,7 @@ mod tests {
             .map(|(_, value)| value.to_string())
             .expect("code");
         let pair = store
-            .exchange_code(&code, &verifier, &client.client_id, None)
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
             .expect("exchange");
         assert_eq!(pair.level, OutsideAgentLevel::Supervised);
         let grant = store
@@ -1139,12 +1229,12 @@ mod tests {
         let (verifier, _) = challenge();
         let code = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
         let pair = store
-            .exchange_code(&code, &verifier, &client.client_id, None)
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
             .expect("first use");
         assert!(store.verify_access(&pair.access_token, None).is_some());
         assert!(
             store
-                .exchange_code(&code, &verifier, &client.client_id, None)
+                .exchange_code(&code, &verifier, &client.client_id, None, None)
                 .is_err()
         );
         // The replay is treated as a stolen code: the pair it issued is dead.
@@ -1212,7 +1302,7 @@ mod tests {
             .1
             .to_string();
         let pair = store
-            .exchange_code(&code, &verifier, &client.client_id, None)
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
             .expect("exchange");
         assert!(
             store
@@ -1237,11 +1327,11 @@ mod tests {
         let wrong = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         assert!(
             store
-                .exchange_code(&code, wrong, &client.client_id, None)
+                .exchange_code(&code, wrong, &client.client_id, None, None)
                 .is_err()
         );
         store
-            .exchange_code(&code, &verifier, &client.client_id, None)
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
             .expect("right verifier still works");
     }
 
@@ -1259,7 +1349,8 @@ mod tests {
                     &code,
                     &verifier,
                     &client.client_id,
-                    Some("http://localhost:1/x")
+                    Some("http://localhost:1/x"),
+                    None,
                 )
                 .is_err()
         );
@@ -1269,6 +1360,7 @@ mod tests {
                 &verifier,
                 &client.client_id,
                 Some("http://localhost:1455/cb"),
+                None,
             )
             .expect("the exact redirect still works");
     }
@@ -1444,5 +1536,271 @@ mod tests {
             })
             .collect();
         assert_eq!(quarantined.len(), 1, "the bad file must be kept aside");
+    }
+
+    /// The code out of an approval redirect.
+    fn code_of(location: &str) -> String {
+        Url::parse(location)
+            .expect("url")
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.to_string())
+            .expect("code")
+    }
+
+    /// A token request's `resource` must be the one its code was approved for.
+    ///
+    /// RFC 8707 binding is worthless if the token endpoint lets the caller name
+    /// a different resource, or widen a grant that had none.
+    #[test]
+    fn a_token_request_must_name_the_code_s_resource() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (verifier, challenge) = challenge();
+        let mcp = "http://127.0.0.1:47800/mcp";
+
+        // A code approved for the daemon's MCP endpoint.
+        let pending = store
+            .begin_authorization(
+                &client.client_id,
+                "http://localhost:1455/cb",
+                None,
+                &challenge,
+                Some(mcp),
+            )
+            .expect("begin");
+        let redirect = store
+            .approve(&pending.id, OutsideAgentLevel::ReadOnly)
+            .expect("approve");
+        let code = code_of(&redirect.location);
+
+        let error = store
+            .exchange_code(
+                &code,
+                &verifier,
+                &client.client_id,
+                None,
+                Some("https://elsewhere.example/mcp"),
+            )
+            .expect_err("a different resource must be refused");
+        assert_eq!(error.code(), "invalid_target");
+
+        // The refused request did not spend the code.
+        let pair = store
+            .exchange_code(&code, &verifier, &client.client_id, None, Some(mcp))
+            .expect("the matching resource still works");
+        assert_eq!(pair.resource.as_deref(), Some(mcp));
+
+        // A code approved without a resource cannot be widened by naming one.
+        let unbound = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        let error = store
+            .exchange_code(&unbound, &verifier, &client.client_id, None, Some(mcp))
+            .expect_err("an unbound grant must not adopt a resource");
+        assert_eq!(error.code(), "invalid_target");
+        assert!(
+            store
+                .exchange_code(&unbound, &verifier, &client.client_id, None, None)
+                .is_ok(),
+            "the refused request spent the unbound code"
+        );
+    }
+
+    /// Revoking an agent frees the registration slot it occupied.
+    #[test]
+    fn revoking_a_client_frees_its_registration_slot() {
+        let (_dir, store) = store();
+        let mut ids = Vec::new();
+        for index in 0..MAX_CLIENTS {
+            let client = store
+                .register_client(
+                    Some(&format!("client {index}")),
+                    &["http://localhost:1455/cb".into()],
+                )
+                .expect("register");
+            ids.push(client.client_id);
+        }
+        assert!(
+            store
+                .register_client(None, &["http://localhost:1455/cb".into()])
+                .is_err(),
+            "the cap must be reached first"
+        );
+        store.revoke_client(&ids[0]).expect("revoke one");
+        assert_eq!(store.client_count(), MAX_CLIENTS - 1);
+        store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("the freed slot accepts a new registration");
+        assert_eq!(store.client_count(), MAX_CLIENTS);
+    }
+
+    /// The approval's redirect (and so its live code) never reaches the disk.
+    #[test]
+    fn an_approval_never_writes_the_code_to_disk() {
+        let (dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (_, challenge) = challenge();
+        let pending = store
+            .begin_authorization(
+                &client.client_id,
+                "http://localhost:1455/cb",
+                None,
+                &challenge,
+                None,
+            )
+            .expect("begin");
+        let redirect = store
+            .approve(&pending.id, OutsideAgentLevel::ReadOnly)
+            .expect("approve");
+        assert!(redirect.location.contains("h4rn_code_"));
+        // The waiting page can still follow the answer while the daemon runs.
+        let outcome = store.approval_outcome(&pending.id).expect("outcome");
+        assert_eq!(outcome.location, redirect.location);
+
+        let raw = std::fs::read_to_string(dir.path().join(FILE)).expect("file");
+        assert!(
+            !raw.contains("h4rn_code_"),
+            "the store wrote a live authorization code"
+        );
+
+        // A restart forgets the answer: the browser is asked to sign in again
+        // rather than being handed a code the restarted daemon cannot vouch for.
+        drop(store);
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        assert!(reopened.approval_outcome(&pending.id).is_none());
+        assert!(
+            reopened.pending(&pending.id).is_none(),
+            "an answered request must not wait for the person again"
+        );
+    }
+
+    /// Waiting sign-ins are bounded per client and in total.
+    #[test]
+    fn waiting_sign_ins_are_capped_per_client_and_in_total() {
+        let (_dir, store) = store();
+        let redirect = "http://localhost:1455/cb";
+        // Enough clients to fill the total at the per-client cap each.
+        let clients: Vec<_> = (0..6)
+            .map(|index| {
+                store
+                    .register_client(Some(&format!("client {index}")), &[redirect.into()])
+                    .expect("register")
+            })
+            .collect();
+        let (_, challenge) = challenge();
+        let begin = |client_id: &str| {
+            store.begin_authorization(client_id, redirect, None, &challenge, None)
+        };
+
+        for _ in 0..MAX_PENDING_PER_CLIENT {
+            begin(&clients[0].client_id).expect("begin");
+        }
+        let error =
+            begin(&clients[0].client_id).expect_err("the client's own requests must be capped");
+        assert!(matches!(error, OAuthError::InvalidRequest(_)), "{error:?}");
+
+        // Other clients are not blocked by this one's requests, until the
+        // total is reached.
+        let mut waiting = MAX_PENDING_PER_CLIENT;
+        for client in clients.iter().skip(1) {
+            let take = (MAX_PENDING - waiting).min(MAX_PENDING_PER_CLIENT);
+            for _ in 0..take {
+                begin(&client.client_id).expect("begin");
+                waiting += 1;
+            }
+            if waiting == MAX_PENDING {
+                break;
+            }
+        }
+        assert_eq!(store.pending_sign_ins().len(), MAX_PENDING);
+        let last = clients.last().expect("a client");
+        let error = begin(&last.client_id).expect_err("the total must be capped");
+        assert!(matches!(error, OAuthError::InvalidRequest(_)), "{error:?}");
+        assert_eq!(store.pending_sign_ins().len(), MAX_PENDING);
+    }
+
+    /// A revocation wins a race with a last-used write.
+    ///
+    /// The store used to take a snapshot of its state and write it after
+    /// releasing the lock; a use landing in that window could put a live token
+    /// back on disk after the person revoked it. Use and revocation now share
+    /// one lock, so the token stays revoked and no older last-used value
+    /// returns with it.
+    #[test]
+    fn a_revocation_wins_a_race_with_a_last_used_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = std::sync::Arc::new(OAuthStore::open(dir.path()).expect("store"));
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        store
+            .verify_access(&pair.access_token, None)
+            .expect("the first use arms the lazy write");
+
+        let token = pair.access_token.clone();
+        let reader = std::sync::Arc::clone(&store);
+        let reader_token = token.clone();
+        let uses = std::thread::spawn(move || {
+            for _ in 0..120 {
+                // Keep the lazy last-used write due on every pass, so a writer
+                // that snapshots and persists outside the lock has the widest
+                // window to put its stale copy back.
+                {
+                    let mut state = reader.lock();
+                    state.last_use_write =
+                        Instant::now() - LAST_USE_INTERVAL - Duration::from_secs(1);
+                }
+                let _ = reader.verify_access(&reader_token, None);
+            }
+        });
+        std::thread::sleep(Duration::from_millis(2));
+        store.revoke_client(&client.client_id).expect("revoke");
+        uses.join().expect("the use loop");
+
+        // In memory the token is dead and its last-used value is final.
+        assert!(store.verify_access(&token, None).is_none());
+        let hash = digest(&token);
+        let recorded = {
+            let state = store.lock();
+            let row = state
+                .file
+                .tokens
+                .iter()
+                .find(|entry| entry.hash == hash)
+                .expect("the token row");
+            assert!(
+                row.revoked_at.is_some(),
+                "the revocation was lost in memory"
+            );
+            row.last_used_at
+        };
+        drop(store);
+
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        assert!(
+            reopened.verify_access(&token, None).is_none(),
+            "a use that raced the revocation resurrected the token"
+        );
+        assert_eq!(reopened.client_count(), 0, "the revoked client came back");
+        let state = reopened.lock();
+        let row = state
+            .file
+            .tokens
+            .iter()
+            .find(|entry| entry.hash == hash)
+            .expect("the token row survived");
+        assert!(
+            row.revoked_at.is_some(),
+            "the reopened store saved a live copy of a revoked token"
+        );
+        assert!(
+            row.last_used_at >= recorded,
+            "a stale last-used value came back: {:?} < {recorded:?}",
+            row.last_used_at
+        );
     }
 }

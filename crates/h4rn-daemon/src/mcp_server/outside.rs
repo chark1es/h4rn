@@ -496,7 +496,7 @@ impl OutsideAgents {
                                 format!(
                                     "{} — {} [{:?}] {:?} · {}",
                                     thread.thread_id,
-                                    thread.title,
+                                    self.redact(&thread.title),
                                     thread.agent_state,
                                     thread.harness,
                                     thread.workspace_path
@@ -506,7 +506,7 @@ impl OutsideAgents {
                             .join("\n")
                     },
                     json!({
-                        "threads": summaries.iter().map(thread_brief).collect::<Vec<_>>(),
+                        "threads": summaries.iter().map(|thread| self.thread_brief(thread)).collect::<Vec<_>>(),
                     }),
                 ))
             }
@@ -552,7 +552,7 @@ impl OutsideAgents {
                 Ok(structured(
                     text,
                     json!({
-                        "thread": thread_brief(&summary),
+                        "thread": self.thread_brief(&summary),
                         "messages": messages,
                         "next_seq": snapshot.next_seq,
                     }),
@@ -708,7 +708,7 @@ impl OutsideAgents {
                         "thread_id": created.thread_id,
                         "turn_id": created.turn_id,
                         "runtime_mode": mode,
-                        "thread": thread_brief(&created.summary),
+                        "thread": self.thread_brief(&created.summary),
                     }),
                 ))
             }
@@ -778,6 +778,28 @@ impl OutsideAgents {
         }
         let output = redact_h4rn_tokens(&output);
         h4rn_forge::redact(&output)
+    }
+
+    /// One thread as an outside tool returns it.
+    ///
+    /// The title is the first characters of the person's first prompt, so it can
+    /// hold anything they pasted — including a credential. Redacting here covers
+    /// every output form: the structured brief, the listing text and a newly
+    /// started thread all come through this one function.
+    fn thread_brief(&self, summary: &ThreadSummary) -> Value {
+        json!({
+            "thread_id": summary.thread_id,
+            "title": self.redact(&summary.title),
+            "state": summary.agent_state,
+            "tab": summary.tab,
+            "harness": summary.harness,
+            "model": summary.model,
+            "runtime_mode": summary.runtime_mode,
+            "workspace_path": summary.workspace_path,
+            "last_activity": summary.last_activity,
+            "needs_attention": summary.needs_attention,
+            "unread": summary.unread,
+        })
     }
 }
 
@@ -876,22 +898,6 @@ fn clamp_mode(level: OutsideAgentLevel, requested: RuntimeMode) -> RuntimeMode {
         OutsideAgentLevel::Supervised => RuntimeMode::ApprovalRequired,
         OutsideAgentLevel::FullAccess => requested,
     }
-}
-
-fn thread_brief(summary: &ThreadSummary) -> Value {
-    json!({
-        "thread_id": summary.thread_id,
-        "title": summary.title,
-        "state": summary.agent_state,
-        "tab": summary.tab,
-        "harness": summary.harness,
-        "model": summary.model,
-        "runtime_mode": summary.runtime_mode,
-        "workspace_path": summary.workspace_path,
-        "last_activity": summary.last_activity,
-        "needs_attention": summary.needs_attention,
-        "unread": summary.unread,
-    })
 }
 
 #[derive(Clone, serde::Serialize)]
