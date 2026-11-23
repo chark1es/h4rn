@@ -899,6 +899,64 @@ the restoration releases the turn instead of leaving it pending. The tests that 
 the fake harness's session/send notifications, a start gate and a held clock, and the storage-failure
 and restart paths run on a journal and ledger that are deliberately broken or reopened.
 
+**Addendum: a reply in the pipe survives the exit, and a promoted turn waits for the exit report or
+is handed back to its pause.** A message queued behind a turn is the daemon's own next step, not the
+person's Send, so it is marked as promoted when the settlement moves it out of the queue. A real ACP
+peer answers `end_turn` with an ordinary newline-terminated frame and then exits at once, so the
+process can be reaped while the reply is still in the pipe. The supervisor therefore waits, bounded,
+for the stdout reader to reach EOF before it fails anything still pending: the reader resolves every
+reply the agent wrote, and only requests with no answer are failed with the exit report. The adapter
+also publishes a turn's settlement through the reader's own event queue, so it lands behind every
+update the reader had already taken, and the bridge drops a `session/update` that arrives after a
+settlement until the next prompt starts: a finished turn's text can no longer be applied to the turn
+that follows it, and it can no longer make a turn that never ran look as if it produced output. Two
+rules keep the pause authoritative. A death observed between turns (the close arrives while no turn
+is active) opens the bounded exit-report window, and the queue's promotion waits for it: it does not
+start an agent, and the publish path advances the queue once the verdict is in. In the ordering the
+fixture forces, the completion is published while the transport is still open, so that wait does not
+apply; the promoted write fails on the dead pipe instead, and the turn is handed back to the queue
+rather than failed. Its prompt never reached the provider, so nothing it collected can be its own,
+and the armed schedule names it and delivers it after the reset. Only the write-failure path may
+requeue without the quiet check for that reason; a promoted turn whose own completion failed on a
+closed transport must still have produced nothing to go back, and a prompt the person sent into a
+dying session stays their failure to see. A paused prompt with no schedule that can be armed (no
+usage meter, or a ledger that refuses it) is failed honestly instead of being parked with no
+delivery owner. The `agy-fixture` peer keeps its replies ordinary (a newline terminator, as a real
+peer writes them): `H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers and exits at once with the reset on
+stderr, and `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the promoted
+prompt reaches it, so the promotion-before-the-limit order is fixed by the test, not by the machine.
+
+**Addendum: work already done is never replayed, and a pause always owns its prompt.** Three rules
+refine the requeue. First, "produced nothing" is read from a turn-long marker, not from the running
+tool map: a *completed* tool call leaves that map empty, and it is the strongest proof the prompt
+reached the provider's work, so such a turn settles as limited with its tool card and output and is
+never written again. Second, ownership of a stream is established before a delta is published. The
+ACP adapter tags every `session/update` with the prompt generation it follows and the bridge only
+applies updates for the running generation. The daemon also holds a promoted turn's text, tools,
+plan and usage from the moment its prompt goes on the wire (`on_the_wire`) until that write returns
+`Ok`, and drops them when it fails: an adapter that has not accepted the prompt yet can still be
+draining the finished turn's output, so those events are neither published nor journaled under a
+turn whose write can fail and send the prompt back to the queue. Releasing in the adapter's order on
+success keeps the turn's own first words. ACP carries no turn id, so text a peer writes after it has
+read the new prompt is still indistinguishable from the new turn's own output; the hold covers
+exactly everything up to the acceptance. Third, a pause and its prompt are one record. The schedule
+binds to a turn only through `parked_turn_to_keep`, and the prompt is saved on the thread row only
+when the ledger really armed the schedule, in the same step, so a limit landing between promotion
+and claim survives a restart. A ledger that refuses the schedule leaves no prompt on the row for a
+restart to deliver again. A claim re-checks pause ownership under the record lock and refuses to
+write a prompt the pause now owns. A requeue keeps the dead session's exit status and stderr row
+instead of clearing it, and the published `auto_resume` flag is derived from the schedule that was
+actually armed: a limit that no meter or ledger could schedule reads as rate-limited, never as
+`Scheduled`. Reply resolution is independent of event delivery for the same "never lose the
+person's answer" reason: the reader publishes into its own queue drained by one forwarder, so a full
+session queue can no longer park it before the reply behind those updates. That queue is bounded at
+four session queues; when it overflows the newest ordinary update is dropped and counted. A
+permission request, a transport close, stdout's close and the exit report take a reserved queue:
+once more than one session queue of updates is waiting they get the next slot, so a flood cannot
+delay the event that decides what a request means or that the agent is gone. While the consumer
+keeps up the reader's order is kept, so a close never overtakes the words read before it. A
+settlement stays in the ordinary order, behind the updates the reader had already taken.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

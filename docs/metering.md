@@ -96,7 +96,23 @@ policy, and `ListResets` returns schedules and history.
 An agent may also answer `end_turn` and only then exit, with the provider's
 reset on the exit report. The completion sees a closed transport, waits
 briefly for that report, and applies its limit before the turn settles, so the
-schedule is armed and the message queued behind the turn stays paused. The
+schedule is armed and the message queued behind the turn stays paused. A real
+peer answers with an ordinary newline-terminated frame, so the completion can be
+classified before the reader observes the end of stdout; the message queued
+behind the turn may then already be promoted. While a dead session's report is
+pending, the queue's promotion waits for its verdict instead of starting an
+agent, and a turn that was promoted onto the dead transport before that is
+handed back to the pause rather than failed: its prompt never reached the
+provider, so the armed schedule delivers it after the reset. Only a promoted
+turn that produced nothing goes back: a completed tool call counts as proof the
+prompt reached the provider's work, so a message the person sent into a dying
+session, or a promoted turn that did anything, keeps its own failure instead of
+being run again. A limit can also land between a promotion and the prompt's
+claim; the pause then saves that prompt on the thread row and a claim that finds
+it parked does not write it, so a restart still delivers the person's message
+once after the reset. The published `auto_resume` flag comes from the schedule
+that was armed, so a limit the ledger or a meterless daemon could not schedule
+reads as rate-limited instead of promising a resume with no owner. The
 reset a turn already applied is kept on the turn, not only on the live
 schedule, so an exit report that repeats it cannot arm a new schedule after the
 person cancelled the resume during the wait; a newer reset still arms one. The

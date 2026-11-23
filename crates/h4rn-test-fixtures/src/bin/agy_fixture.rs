@@ -15,11 +15,15 @@
 //! Two more orderings cover a rate limit that only the exit report carries
 //! after the turn already ended: an answer, a closed stdout and only then the
 //! exit (`H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN`), and an idle close followed by
-//! the exit (`H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS`). A mid-turn exit with no
-//! stderr at all (`H4RN_FIXTURE_SILENT_EXIT`) proves the exit status still names
-//! the row when there is no stderr to outrank it. An idle death with no EOF at
-//! all (`H4RN_FIXTURE_IDLE_EXIT_ONLY`) holds stdout open from a keeper process,
-//! so only the exit report can announce it.
+//! the exit (`H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS`). The first answers with
+//! an ordinary newline-terminated frame, exactly as a real peer does, and
+//! `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the
+//! prompt queued behind the turn reaches it, so a test can force the ordering
+//! where the queue was promoted before the exit-only limit landed. A mid-turn
+//! exit with no stderr at all (`H4RN_FIXTURE_SILENT_EXIT`) proves the exit
+//! status still names the row when there is no stderr to outrank it. An idle
+//! death with no EOF at all (`H4RN_FIXTURE_IDLE_EXIT_ONLY`) holds stdout open
+//! from a keeper process, so only the exit report can announce it.
 
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
@@ -395,14 +399,9 @@ fn main() {
                 }
                 if text.contains("H4RN_FIXTURE_CLOSE_STDOUT") {
                     // Close stdout first, then leave the only diagnostic on
-                    // stderr and exit. The daemon wakes on the EOF before the
-                    // process is reaped, so its failure row can carry the line
-                    // only through the exit report.
+                    // stderr and exit. The daemon wakes on the EOF and waits a
+                    // bounded window for this report, which carries the line.
                     close_stdout();
-                    // Leave the daemon's reader to wake on the EOF first: the
-                    // diagnostic is written after a pause, so only the exit
-                    // report can carry it.
-                    std::thread::sleep(std::time::Duration::from_millis(150));
                     eprintln!("agy-fixture: the session died after stdout closed");
                     std::process::exit(7);
                 }
@@ -411,19 +410,33 @@ fn main() {
                     // only name the exit status, which must beat the generic
                     // stdout-close notice.
                     close_stdout();
-                    std::thread::sleep(std::time::Duration::from_millis(150));
                     std::process::exit(7);
                 }
                 if text.contains("H4RN_FIXTURE_RATE_LIMITED") {
                     // The same ordering with a rate-limit reset in the exit
                     // report, so the daemon's auto-resume path must still run.
                     close_stdout();
-                    std::thread::sleep(std::time::Duration::from_millis(150));
                     eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }
                 let closing_stdin = text.contains("H4RN_FIXTURE_CLOSE_STDIN");
                 let limited_stdin = text.contains("H4RN_FIXTURE_STDIN_RATE_LIMITED");
+                // Both exit-after-turn orderings hold their answer until the
+                // test opens a prompt gate: a message queued behind this turn
+                // must be queued while this turn is still active, whatever the
+                // machine's scheduling.
+                if text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN") {
+                    wait_for_gate(
+                        ".agy-fixture-limit-after-turn-prompt-waiting",
+                        ".agy-fixture-limit-after-turn-prompt-gate",
+                    );
+                }
+                if text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE") {
+                    wait_for_gate(
+                        ".agy-fixture-limit-after-queue-prompt-waiting",
+                        ".agy-fixture-limit-after-queue-prompt-gate",
+                    );
+                }
                 let session_id = params
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -468,17 +481,31 @@ fn main() {
                     close_stdin_and_wait(None);
                 }
                 if text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN") {
-                    // Answer this turn, close stdout at once, and only then
-                    // leave the reset on stderr and exit. The turn's completion
-                    // sees a closed transport, and the limit arrives solely
-                    // through the exit report that follows. The gate marks that
-                    // the answer was written and stdout closed, so a test can
-                    // queue work behind the turn before the report lands.
-                    close_stdout();
+                    // Answer this turn with an ordinary newline-terminated
+                    // frame and then exit at once with the reset on stderr. A
+                    // real peer does not close stdout first and wait: its exit
+                    // closes the pipe, so the process can be reaped before the
+                    // reader has drained the reply that is already in it. The
+                    // reply must still be the turn's result, and the requeue of
+                    // anything the completion promoted is what keeps the pause
+                    // authoritative.
+                    eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
+                    std::process::exit(7);
+                }
+                if text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE") {
+                    // The same death, but the transport stays healthy until the
+                    // prompt queued behind this turn reaches it: this process
+                    // reads that promoted prompt (writing a marker so the test
+                    // knows it arrived) and only then closes stdout and exits
+                    // with the reset. That fixes the hard ordering: the daemon
+                    // promotes the queued turn while the transport is open, so
+                    // the exit-only limit lands after the promoted write.
+                    wait_for_more_prompts(".agy-fixture-limit-after-queue-second");
                     wait_for_gate(
-                        ".agy-fixture-limit-after-turn-waiting",
-                        ".agy-fixture-limit-after-turn-gate",
+                        ".agy-fixture-limit-after-queue-waiting",
+                        ".agy-fixture-limit-after-queue-gate",
                     );
+                    close_stdout();
                     eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }
@@ -491,7 +518,10 @@ fn main() {
                         ".agy-fixture-limit-idle-gate",
                     );
                     close_stdout();
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    // No pause here: the report follows the EOF at once, so the
+                    // pump's bounded wait for the death's specific account can
+                    // never expire before it lands. A pause would only make the
+                    // test depend on the loaded machine's scheduling.
                     eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }
@@ -575,6 +605,67 @@ fn main() {
 /// turn, and only then create the gate the process is waiting for.
 fn wait_for_exit_gate() {
     wait_for_gate(".agy-fixture-exit-waiting", ".agy-fixture-exit-gate");
+}
+
+/// Waits, bounded, for the next prompt to reach this process, then marks it.
+///
+/// The read loop is single-threaded (closing this process's stdin while another
+/// thread blocks in it would leave the pipe's read end open), so the handler
+/// polls stdin itself: the daemon writes the next prompt only after this turn's
+/// reply, which the main loop has already consumed, so no frame can be sitting
+/// in the reader's buffer. The marker is what proves the daemon delivered that
+/// prompt before the transport died.
+fn wait_for_more_prompts(marker: &str) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut buffered = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        let Some(chunk) = poll_stdin(left) else {
+            return;
+        };
+        buffered.extend_from_slice(&chunk);
+        while let Some(end) = buffered.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = buffered.drain(..=end).collect();
+            let Ok(frame) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            if frame.get("method").and_then(Value::as_str) == Some("session/prompt") {
+                let _ = std::fs::write(cwd.join(marker), b"");
+                return;
+            }
+        }
+    }
+}
+
+/// One bounded read from stdin, or `None` when it ended or waited too long.
+#[cfg(unix)]
+fn poll_stdin(timeout: std::time::Duration) -> Option<Vec<u8>> {
+    let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let mut fd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `fd` is one valid pollfd for this thread-owned stack slot, and
+    // fd 0 is this process's stdin.
+    if unsafe { libc::poll(&mut fd, 1, millis) } <= 0 {
+        return None;
+    }
+    let mut chunk = [0u8; 4096];
+    // SAFETY: `chunk` is a valid writable buffer of the given length.
+    let read = unsafe { libc::read(0, chunk.as_mut_ptr().cast(), chunk.len()) };
+    if read <= 0 {
+        return None;
+    }
+    Some(chunk[..read as usize].to_vec())
+}
+
+/// This ordering is unix-only; other platforms never run its test.
+#[cfg(not(unix))]
+fn poll_stdin(_: std::time::Duration) -> Option<Vec<u8>> {
+    None
 }
 
 /// Writes `waiting` in the session workspace, then waits until `gate` appears.
