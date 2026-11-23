@@ -677,6 +677,104 @@ describe("a superseded diff never shows under a newer choice", () => {
   });
 });
 
+describe("a tab switch follows the scope being loaded, not the one before it", () => {
+  it("re-lists Commits re-entered with a held commit list", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+    await act(async () => {
+      await latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "base");
+
+    // Back to Commits with a slow commit list: the commit and the Branch file
+    // list from before are still in state while it loads.
+    const releaseCommits = holdNext("fs_diff_commits");
+    await act(async () => {
+      void latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.commitsLoading === true);
+    expect(latest?.state.diffCommit).toBe("commit-1");
+    expect(latest?.state.diffFiles?.against.kind).toBe("base");
+
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await releaseHold(releaseCommits);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+
+    const fileLists = state.requests.filter((request) => request.type === "fs_diff_files");
+    expect(fileLists.at(-1)?.against).toEqual({ kind: "commit", sha: "commit-1" });
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "commit", sha: "commit-1" });
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-1" });
+    expect(latest?.state.commitsLoading).toBe(false);
+  });
+
+  it("keeps a newly chosen base when the tab changes while its list loads", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diffBase === "main" && latest?.state.diff !== null);
+
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffBase("feature");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    await releaseHold(releaseFiles);
+
+    expect(latest?.state.diffBase).toBe("feature");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "feature" });
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "base", base: "feature" });
+  });
+});
+
+describe("a new comparison takes the finished body off the screen", () => {
+  it("clears a loaded Branch diff when the base changes", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diff !== null && !latest?.state.diffLoading);
+
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffBase("feature");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(latest?.state.diff).toBeNull();
+    await releaseHold(releaseFiles);
+  });
+
+  it("clears a loaded commit diff when the commit changes", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff !== null && !latest?.state.diffLoading);
+
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffCommit("commit-2");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(latest?.state.diff).toBeNull();
+    await releaseHold(releaseFiles);
+  });
+});
+
 describe("a stale branch reply leaves its newer load alone", () => {
   it("keeps the newer spinner and paints only the newer list", async () => {
     await mount();

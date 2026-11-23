@@ -886,16 +886,33 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const followDiffTab = useCallback(
     async (path: string) => {
       const current = stateRef.current;
+      // The list on screen answers for the scope only when it was read for the
+      // current choice and nothing newer is still loading: `setDiffBase`,
+      // `selectDiffSource` and a refresh keep the previous scope's list up
+      // while the new one loads.
+      const against = current.diffFiles?.against;
       if (current.diffSource === "branch") {
-        const base = current.diffFiles?.base ?? current.diffBase;
-        if (current.diffFiles && !current.filesLoading) await openDiff(path, "branch", { base });
+        // The person's choice wins; the list's resolved base fills in only
+        // when no base has been named yet.
+        const base = current.diffBase ?? current.diffFiles?.base ?? null;
+        const listed =
+          against?.kind === "base" &&
+          (against.base === base || current.diffFiles?.base === base) &&
+          !current.filesLoading;
+        if (listed) await openDiff(path, "branch", { base });
         else await loadBranch(path, { base });
         return;
       }
       if (current.diffSource === "commit") {
         const base = current.diffBase;
         const commit = current.diffCommit;
-        if (commit && current.diffFiles && !current.filesLoading) {
+        const listed =
+          commit !== null &&
+          against?.kind === "commit" &&
+          against.sha === commit &&
+          !current.commitsLoading &&
+          !current.filesLoading;
+        if (listed) {
           await openDiff(path, "commit", { base, commit });
         } else {
           await loadCommit(path, { base, commit });
