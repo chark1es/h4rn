@@ -239,6 +239,16 @@ impl ScheduleService {
         clock: Arc<dyn Clock>,
     ) -> Result<Self, ScheduleServiceError> {
         let mut stored = journal.list_schedules().await?;
+        // The histories are read once: the upgrade check below needs the run a
+        // task was disarmed by, and the overlap check needs the last thread that
+        // actually ran, even when a later skip is the newest entry.
+        let mut histories = HashMap::new();
+        for task in &stored {
+            histories.insert(
+                task.task_id.clone(),
+                journal.schedule_runs(&task.task_id, HISTORY_LIMIT).await?,
+            );
+        }
         // A once slot that is already spent must not stay armed, even if a
         // daemon stopped between admitting it and recording its run. A marker
         // written before the zone joined the slot identity names only the
@@ -264,19 +274,19 @@ impl ScheduleService {
             // lost its slot was disarmed.
             let spent_once =
                 task.once_consumed && matches!(task.schedule, ScheduleSpec::Once { .. });
+            let runs = histories.get(&task.task_id);
             if task.enabled
                 && task.next_run_at.is_none()
                 && !task.schedule.is_webhook()
                 && !spent_once
-                // Only a task whose last recorded run is the disarm failure was
-                // disarmed by an older daemon. An enabled row whose stored slot
+                // Only a task whose last *clock* run is the disarm failure was
+                // disarmed by an older daemon. A manual **Run now** after the
+                // disarm is a newer history entry but never armed a slot, so it
+                // does not hide the disarm. An enabled row whose stored slot
                 // merely failed to decode never failed to run: pausing it would
                 // drop the timestamp the person's task still owns and free its
                 // checkout for no reason, so it is left exactly as stored.
-                && task
-                    .last_run
-                    .as_ref()
-                    .is_some_and(is_disarm_failure)
+                && runs.is_some_and(|runs| last_clock_run_disarmed(runs))
             {
                 // Only the pause changes; every other stored field stays.
                 task.enabled = false;
@@ -289,14 +299,14 @@ impl ScheduleService {
                 }
             }
         }
-        // The overlap check needs the last thread that actually ran, even when
-        // a later skip is the newest history entry.
         let mut started_threads = HashMap::new();
         for task in &stored {
-            let runs = journal.schedule_runs(&task.task_id, HISTORY_LIMIT).await?;
-            if let Some(thread_id) = runs
-                .iter()
-                .find(|run| run.outcome == ScheduleRunOutcome::Started)
+            if let Some(thread_id) = histories
+                .get(&task.task_id)
+                .and_then(|runs| {
+                    runs.iter()
+                        .find(|run| run.outcome == ScheduleRunOutcome::Started)
+                })
                 .and_then(|run| run.thread_id.clone())
             {
                 started_threads.insert(task.task_id.clone(), thread_id);
@@ -1198,7 +1208,9 @@ impl ScheduleService {
     ///
     /// The pause and the **Failed** run that explains it are one write,
     /// committed under the task's write lock: the failure is never lost while
-    /// the pause survives, and an edit the person makes first wins.
+    /// the pause survives. The write also rechecks the task's current settings,
+    /// so an edit the person makes first wins and the slot runs once instead of
+    /// being paused by the refusal that was produced before the edit.
     async fn record_uncomputable(
         &self,
         task_id: &ScheduleTaskId,
@@ -1337,12 +1349,19 @@ impl ScheduleService {
                 AfterRun::Pause => {
                     // The pause is part of the same write as the failure that
                     // explains it, and only lands while the task still holds
-                    // the slot that could not be advanced: an edit that moved
-                    // the clock on is the person's answer, and it wins.
-                    task.next_run_at = None;
-                    task.enabled = false;
-                    task.updated_at = now;
-                    pausing = true;
+                    // the slot that could not be advanced and its current
+                    // settings still cannot name a slot after it. The settings
+                    // are checked here, under the same write, because the
+                    // refusal was produced from an older read: a person who
+                    // corrected the schedule in between owns the task, so the
+                    // pause is dropped, the failure stays as history, and the
+                    // slot stays armed to run once.
+                    if self.pause_still_applies(&task, &run, now) {
+                        task.next_run_at = None;
+                        task.enabled = false;
+                        task.updated_at = now;
+                        pausing = true;
+                    }
                 }
             }
         }
@@ -1461,17 +1480,7 @@ impl ScheduleService {
                 lock(&self.inner.pending).remove(&task_id);
                 continue;
             };
-            if pause
-                && run.scheduled_for.is_some()
-                && task.next_run_at == run.scheduled_for
-                // The pause was staged because the stored settings could not
-                // name the slot after the failed one. Recompute that from the
-                // current row under this write: if the settings name a next
-                // slot now, the person has fixed the schedule, so the pause is
-                // stale. Discard it and leave the slot armed to run once; the
-                // Failed run below is still recorded.
-                && !matches!(self.advance(&task, now), Ok(Some(_)))
-            {
+            if pause && self.pause_still_applies(&task, &run, now) {
                 task.next_run_at = None;
                 task.enabled = false;
                 task.updated_at = now;
@@ -1609,6 +1618,25 @@ impl ScheduleService {
         next_after(&task.schedule, tz, task.created_at, now).map_err(|error| {
             ScheduleServiceError::Internal(format!("the schedule has no next run: {error}"))
         })
+    }
+
+    /// Whether the automatic pause staged for `run` still applies.
+    ///
+    /// The pause belongs to the run that could not name a slot after its own.
+    /// It only applies while the task still holds that run's slot and the task's
+    /// *current* settings still cannot name a slot after it. Both the first
+    /// attempt and its retry ask this, so the two cannot drift apart: a person
+    /// who corrects the schedule in between keeps the task enabled, the original
+    /// failure stays as history, and that same slot runs once.
+    fn pause_still_applies(
+        &self,
+        task: &ScheduleTask,
+        run: &ScheduleRun,
+        now: DateTime<Utc>,
+    ) -> bool {
+        run.scheduled_for.is_some()
+            && task.next_run_at == run.scheduled_for
+            && !matches!(self.advance(task, now), Ok(Some(_)))
     }
 
     /// Validates a draft and builds the stored task.
@@ -1849,6 +1877,19 @@ fn is_disarm_failure(run: &ScheduleRun) -> bool {
             .detail
             .as_deref()
             .is_some_and(|detail| detail.starts_with(DISARM_DETAIL_PREFIX))
+}
+
+/// Whether the newest run the clock produced is the disarm failure.
+///
+/// Runs are newest first. A manual **Run now** pressed after the disarm adds a
+/// newer entry but never armed a clock slot, so the search walks back to the
+/// newest run that has one; a scheduled run after the disarm would be that run
+/// instead, and the task was not left disarmed. Webhook runs have no slot
+/// either and are skipped the same way.
+fn last_clock_run_disarmed(runs: &[ScheduleRun]) -> bool {
+    runs.iter()
+        .find(|run| run.scheduled_for.is_some())
+        .is_some_and(is_disarm_failure)
 }
 
 /// Whether two task rows name the same destination thread identity.

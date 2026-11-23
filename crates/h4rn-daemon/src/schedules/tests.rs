@@ -1759,6 +1759,94 @@ async fn a_staged_pause_rechecks_the_settings_the_person_fixed() {
 }
 
 #[tokio::test]
+async fn the_first_disarm_attempt_rechecks_the_settings_the_person_fixed() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = a_task_that_cannot_name_its_next_slot(&fixture).await;
+    let slot = task
+        .next_run_at
+        .expect("the broken task is still armed for a slot");
+
+    // The runner admits the slot and finds the stored zone cannot name the slot
+    // after it, but its bookkeeping has not run yet.
+    let reason = match fixture
+        .service
+        .admit(&task.task_id, Trigger::Scheduled, Some(slot))
+        .await
+    {
+        Err(AdmissionError::Uncomputable(reason)) => reason,
+        Err(other) => panic!("a zone the schedule cannot read must be uncomputable: {other:?}"),
+        Ok(_) => panic!("a zone the schedule cannot read must be uncomputable, not admitted"),
+    };
+
+    // The person fixes the zone just before the slot the refusal was for, so the
+    // corrected settings name that very same slot again.
+    fixture.clock.advance(chrono::Duration::seconds(-2));
+    let waiting = fixture.service.task(&task.task_id).await.expect("task");
+    let mut edit = waiting.draft();
+    edit.timezone = "Europe/Berlin".into();
+    let edited = fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("edit");
+    assert!(edited.enabled);
+    assert_eq!(
+        edited.next_run_at,
+        Some(slot),
+        "the corrected settings name the slot the refusal was for"
+    );
+
+    // The bookkeeping of the first attempt runs now. It must make its decision
+    // from the settings the person saved, not the ones the refusal came from.
+    fixture
+        .service
+        .record_uncomputable(&task.task_id, slot, reason)
+        .await;
+    let live = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        live.enabled,
+        "the first disarm attempt must not pause a task the person just fixed"
+    );
+    assert_eq!(
+        live.next_run_at,
+        Some(slot),
+        "the corrected task keeps the slot the refusal was for"
+    );
+    assert_eq!(
+        live.last_run.as_ref().map(|run| run.outcome),
+        Some(ScheduleRunOutcome::Failed),
+        "the failure is still recorded"
+    );
+
+    // The corrected task runs that slot once.
+    fixture.clock.advance(chrono::Duration::seconds(32));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 2).await;
+    let started: Vec<&ScheduleRun> = runs
+        .iter()
+        .filter(|run| run.outcome == ScheduleRunOutcome::Started)
+        .collect();
+    assert_eq!(
+        started.len(),
+        1,
+        "the corrected task runs that slot exactly once: {runs:?}"
+    );
+    assert_eq!(started[0].scheduled_for, Some(slot));
+    assert_eq!(
+        runs.last().map(|run| run.outcome),
+        Some(ScheduleRunOutcome::Failed),
+        "the original failure stays in the history: {runs:?}"
+    );
+    let after = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(after.enabled);
+    assert!(
+        after.next_run_at.is_some_and(|at| at > slot),
+        "the task moves on to a later slot"
+    );
+}
+
+#[tokio::test]
 async fn a_row_disarmed_before_the_pause_existed_opens_paused() {
     let clock = Arc::new(ManualClock::at(Utc::now()));
     let fixture = fixture(FakeHarness::new(), clock).await;
@@ -1878,6 +1966,96 @@ async fn a_row_disarmed_before_the_pause_existed_opens_paused() {
     assert!(reopened_once.enabled, "a spent Once task keeps its state");
     assert!(reopened_once.once_consumed);
     assert!(reopened_once.next_run_at.is_none());
+}
+
+#[tokio::test]
+async fn a_legacy_disarm_with_a_later_manual_run_opens_paused() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::ContinueThread,
+        ))
+        .await
+        .expect("create");
+    let live = fixture.service.task(&task.task_id).await.expect("task");
+
+    // A row disarmed by the daemon before the pause existed: the schedule could
+    // not name a slot, so `next_run_at` was cleared, but `enabled` stayed on.
+    let mut legacy = live.clone();
+    legacy.enabled = true;
+    legacy.next_run_at = None;
+    fixture
+        .journal
+        .upsert_schedule(&legacy)
+        .await
+        .expect("write the legacy row");
+    let mut refusal = ScheduleRun {
+        run_id: 0,
+        task_id: task.task_id.clone(),
+        scheduled_for: live.next_run_at,
+        started_at: fixture.clock.now(),
+        thread_id: None,
+        outcome: ScheduleRunOutcome::Failed,
+        detail: Some(
+            "Its schedule has no next run: the task has an invalid time zone. Fix the schedule to run it again."
+                .into(),
+        ),
+    };
+    fixture
+        .journal
+        .append_schedule_run(&mut refusal, HISTORY_LIMIT)
+        .await
+        .expect("write the refusal");
+    // Before upgrading, the person pressed Run now. That manual run is the
+    // newest history entry, but it never armed a clock slot.
+    let mut manual = ScheduleRun {
+        run_id: 0,
+        task_id: task.task_id.clone(),
+        scheduled_for: None,
+        started_at: fixture.clock.now(),
+        thread_id: None,
+        outcome: ScheduleRunOutcome::Started,
+        detail: None,
+    };
+    fixture
+        .journal
+        .append_schedule_run(&mut manual, HISTORY_LIMIT)
+        .await
+        .expect("write the manual run");
+
+    let reopened = ScheduleService::open(
+        Arc::clone(&fixture.journal),
+        Arc::clone(&fixture.manager),
+        HostId::new("host_schedule_test"),
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("reopen");
+    let opened = reopened.task(&task.task_id).await.expect("task");
+    assert!(
+        !opened.enabled,
+        "a later manual run does not hide the disarm, so the task opens paused"
+    );
+    assert!(opened.next_run_at.is_none());
+    assert_eq!(
+        opened.last_run.as_ref().map(|run| run.outcome),
+        Some(ScheduleRunOutcome::Started),
+        "the manual run is still the newest history entry"
+    );
+    let stored = fixture
+        .journal
+        .schedule(&task.task_id)
+        .await
+        .expect("journal row")
+        .expect("task row");
+    assert!(!stored.enabled, "the normalized pause is saved");
+    assert_eq!(stored.name, legacy.name, "only the pause changes");
+    assert_eq!(stored.schedule, legacy.schedule, "only the pause changes");
+    assert_eq!(stored.timezone, legacy.timezone, "only the pause changes");
 }
 
 #[tokio::test]

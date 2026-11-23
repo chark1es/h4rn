@@ -67,10 +67,12 @@ All notable changes to h4rn are recorded here. The format follows
   disarmed and paused in the same write — it records the reason, offers
   **Resume** instead of **Pause**, and releases its thread's checkout — instead
   of starting a thread on every backoff; a failed write retries the pause with
-  its failure, and the retry checks the task's current settings first, so fixing
-  the schedule meanwhile keeps the task enabled and lets that slot run once while
-  the original failure stays in the history. On open, a task is paused only when
-  its newest run is that disarm failure; a row whose timestamp cannot be read and
+  its failure, and the pause checks the task's current settings under the same
+  write on the first attempt and on the retry, so fixing the schedule meanwhile
+  keeps the task enabled and lets that slot run once while the original failure
+  stays in the history. On open, a task is paused only when its newest
+  clock-scheduled run is that disarm failure — a **Run now** pressed after it
+  changes nothing; a row whose timestamp cannot be read and
   that never failed to run is left as stored, keeping its checkout protected.
   Daily and weekly times
   run only at the first occurrence in a fall-back hour, cron returns the
