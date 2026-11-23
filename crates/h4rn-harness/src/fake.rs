@@ -105,6 +105,24 @@ impl EventInjector {
         }
     }
 
+    /// Queues one event on the most recently started session's stream, waiting
+    /// for a bounded queue to have room.
+    ///
+    /// With a one-slot queue this returns only once the pump has taken the
+    /// previous event, which is how a test orders an injected update before a
+    /// later step without a wall-clock wait.
+    pub async fn send(&self, event: HarnessEvent) {
+        let sender = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last()
+            .map(|session| session.sink.clone());
+        if let Some(sender) = sender {
+            sender.send(event).await;
+        }
+    }
+
     /// Queues one event on the stream of the session started at `session`
     /// (oldest first).
     ///
@@ -152,6 +170,8 @@ pub struct FakeHarness {
     send_delay: Option<Duration>,
     /// A test-only latch before a turn's input is answered.
     send_gate: Option<Gate>,
+    /// Which send [`Self::send_gate`] starts holding, counting from one.
+    send_gate_after: usize,
     /// A test-only latch before a write directive's file appears.
     write_gate: Option<Gate>,
     /// A test-only count of prompts the session was asked to write.
@@ -521,6 +541,7 @@ impl Default for FakeHarness {
             session_scripts: None,
             send_delay: None,
             send_gate: None,
+            send_gate_after: 1,
             write_gate: None,
             send_count: None,
             interrupt_count: None,
@@ -621,6 +642,19 @@ impl FakeHarness {
     pub fn with_send_gate(mut self) -> (Self, Gate) {
         let gate = Gate::new();
         self.send_gate = Some(gate.clone());
+        self.send_gate_after = 1;
+        (self, gate)
+    }
+
+    /// Holds every `send` after the first `sends` until the gate is released.
+    ///
+    /// A test uses this to block one later prompt in its write while the turns
+    /// before it run normally: the daemon's first `send` primes the script, so
+    /// a gate after `2` holds the third prompt written to a session.
+    pub fn with_send_gate_after(mut self, sends: usize) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.send_gate = Some(gate.clone());
+        self.send_gate_after = sends;
         (self, gate)
     }
 
@@ -1105,7 +1139,10 @@ impl Harness for FakeHarness {
             switchable: self.switchable,
             primed,
             delay,
-            send_gate: self.send_gate.clone(),
+            send_gate: self
+                .send_gate
+                .clone()
+                .map(|gate| (self.send_gate_after, gate)),
             send_count: self.send_count.clone(),
             interrupt_count: self.interrupt_count.clone(),
             interrupt_failures: self.interrupt_failures.clone(),
@@ -1160,8 +1197,8 @@ pub struct FakeSession {
     primed: bool,
     /// Env-gated pause before an echo turn, for cancel-flow e2e tests.
     delay: Duration,
-    /// A test-controlled latch on a turn's input.
-    send_gate: Option<Gate>,
+    /// A test-controlled latch on a turn's input, from this send on.
+    send_gate: Option<(usize, Gate)>,
     /// A shared count of prompts this session was asked to write.
     send_count: Option<SendCount>,
     /// A shared count of cancels this session received.
@@ -1291,8 +1328,8 @@ impl HarnessSession for FakeSession {
             gate.wait().await;
             return Ok(());
         }
-        if let Some(gate) = &self.send_gate
-            && !first_send
+        if let Some((after, gate)) = &self.send_gate
+            && self.sends > *after
         {
             gate.wait().await;
         }

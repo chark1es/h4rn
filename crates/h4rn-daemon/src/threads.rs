@@ -363,6 +363,12 @@ struct Inner {
     /// retry must not restore the older ledger snapshot over it.
     #[cfg(test)]
     resync_pause: std::sync::Mutex<Option<Arc<ResyncPause>>>,
+    /// Signalled whenever a claim refuses a prompt a pause now owns.
+    ///
+    /// Test-only: a test that must observe the refusal without a wall-clock
+    /// wait listens here instead of sleeping and hoping the attempt landed.
+    #[cfg(test)]
+    claim_refused: tokio::sync::Notify,
 }
 
 /// A test's hold on the fire's claim-to-act window.
@@ -704,17 +710,33 @@ struct TurnDispatch {
     /// waiting" (start one fresh session for it). Without the distinction a
     /// harness whose sessions die at startup would be replaced forever.
     started_generation: AtomicU64,
-    /// Whether the prompt has been handed to the harness.
+    /// Whether the prompt is being handed to the harness.
     ///
     /// Claimed only means a writer took it; between that and the adapter's
     /// `send` nothing on the stream can belong to this turn, so a delta read in
     /// that window is the finished turn's late output: publishing it would put
     /// work on a turn that never ran (and would keep a promoted turn from going
-    /// back to the queue). Set immediately before `send`, never after it: an
-    /// adapter may emit the turn's first events while the write is still
-    /// running, and those are the turn's own. Reset whenever the prompt is put
-    /// back for another attempt.
+    /// back to the queue). Set immediately before `send`. Reset whenever the
+    /// prompt is put back for another attempt.
+    ///
+    /// A prompt can be *being* written without having been accepted: see
+    /// [`Self::write_attempt`]. A person's Send publishes what the adapter
+    /// reports meanwhile (it has no finished turn to confuse it with), but a
+    /// promoted turn's pump holds such output until the write returns `Ok`.
     on_the_wire: AtomicBool,
+    /// The write attempt that is handing the prompt to the harness, counting
+    /// from one, and the attempt the harness accepted.
+    ///
+    /// A promoted turn's text, tools, plan and usage are held while its write
+    /// is in flight, because an adapter that has not accepted the prompt yet
+    /// can still be draining the finished turn's output. The attempt number
+    /// keeps two writes of the same dispatch apart: events held for attempt N
+    /// are released only when N returns `Ok`, and are dropped when a later
+    /// attempt starts or the turn ends without accepting them.
+    write_attempt: AtomicU64,
+    accepted_attempt: AtomicU64,
+    /// Wakes the pump when a write attempt settles: accepted, or failed.
+    write_settled: tokio::sync::Notify,
     /// Pauses a failing write just before it decides what to do with the
     /// dispatch, so a test can land a Stop in that window.
     ///
@@ -737,6 +759,13 @@ struct RecoverPause {
 
 /// `started_generation` has no generation yet.
 const NO_GENERATION: u64 = 0;
+
+/// How many non-text events a pump holds for a promoted turn whose prompt is
+/// still being written. Text deltas are coalesced, so this bounds tools, plans,
+/// usage reports and anything read behind them; it is far more than an adapter
+/// produces in the time one write takes, and a hold that overflows drops the
+/// newest event rather than growing without limit.
+const HELD_PROMOTED_EVENTS: usize = 1024;
 
 /// Where a prompt goes after the session that claimed it was detached.
 enum DeliveryRetarget {
@@ -981,14 +1010,47 @@ impl TurnDispatch {
             state: std::sync::Mutex::new(DispatchState::Pending),
             started_generation: AtomicU64::new(NO_GENERATION),
             on_the_wire: AtomicBool::new(false),
+            write_attempt: AtomicU64::new(0),
+            accepted_attempt: AtomicU64::new(0),
+            write_settled: tokio::sync::Notify::new(),
             #[cfg(test)]
             recover_pause: std::sync::Mutex::new(None),
         }
     }
 
-    /// Records that the prompt is being handed to the harness.
-    fn mark_on_the_wire(&self) {
+    /// Records that the prompt is being handed to the harness and returns the
+    /// attempt number that owns this write.
+    fn begin_write(&self) -> u64 {
         self.on_the_wire.store(true, Ordering::SeqCst);
+        self.write_attempt.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Records that the harness accepted `attempt`'s prompt.
+    ///
+    /// Everything the adapter reported while that write was in flight is this
+    /// turn's own output from now on.
+    fn accept_write(&self, attempt: u64) {
+        self.accepted_attempt.store(attempt, Ordering::SeqCst);
+    }
+
+    /// Whether the current write attempt's prompt was accepted by the harness.
+    fn write_accepted(&self) -> bool {
+        let attempt = self.write_attempt.load(Ordering::SeqCst);
+        attempt != 0 && self.accepted_attempt.load(Ordering::SeqCst) == attempt
+    }
+
+    /// The number of the write attempt that is handing the prompt over now.
+    fn write_attempt(&self) -> u64 {
+        self.write_attempt.load(Ordering::SeqCst)
+    }
+
+    /// Wakes the pump that holds this attempt's output.
+    ///
+    /// `notify_one` keeps a permit when the pump is between two waits, so a
+    /// write that settles just before the pump arms its wait cannot leave the
+    /// held output sitting until the next event arrives.
+    fn note_write_settled(&self) {
+        self.write_settled.notify_one();
     }
 
     /// Whether the prompt has been handed to the harness.
@@ -1720,6 +1782,24 @@ impl ThreadRecord {
             .is_some_and(|active| !active.dispatch.is_on_the_wire())
     }
 
+    /// Whether the active turn is a promoted one whose prompt is still being
+    /// written.
+    ///
+    /// A promoted turn inherits the session that ran the turn before it, and
+    /// that session may still have output of the finished turn to drain. Until
+    /// `send` returns `Ok` the adapter has not accepted this prompt, so text,
+    /// tools, a plan or usage read in this window cannot be attributed. The
+    /// pump holds them and releases them when the write is accepted; a failed
+    /// write drops them. A person's Send is published as before: it has no
+    /// finished turn of the daemon's making to be confused with.
+    fn holds_promoted_write(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.promoted
+                && active.dispatch.state() == DispatchState::Claimed
+                && !active.dispatch.write_accepted()
+        })
+    }
+
     /// Whether an auto-resume schedule is armed for this thread right now.
     ///
     /// The published `auto_resume` flag is derived from this, never from the
@@ -1963,6 +2043,8 @@ impl ThreadManager {
                 fire_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 resync_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                claim_refused: tokio::sync::Notify::new(),
             }),
         };
         manager.inner.restore().await?;
@@ -4975,27 +5057,30 @@ impl Inner {
         // turn is still the active, pending dispatch, and a pump-end advance
         // must not deliver it into the provider this newer reset named.
         let parked_turn = record.parked_turn_to_keep();
-        // Whenever the schedule is bound to a turn, that prompt is saved on the
-        // thread row too. The binding can happen between a promotion and the
-        // prompt's claim, before any failed write had a chance to park it; a
-        // restart then has to restore the dispatch and deliver this prompt
-        // instead of the policy's "continue".
-        if let Some(turn_id) = parked_turn.as_ref()
-            && let Some(active) = record.active.as_ref()
-            && record
-                .meta
-                .parked
-                .as_ref()
-                .is_none_or(|parked| &parked.turn_id != turn_id)
-        {
-            let input = active.dispatch.input();
-            record.meta.parked = Some(ParkedPrompt::of(turn_id, &input));
-        }
         match meter
             .arm_schedule(&thread_id, reset_at, prompt, None, now)
             .await
         {
             Ok(schedule) => {
+                // Only a schedule that was really armed owns a prompt. Saving
+                // it on the row here, in the same step, is what lets a restart
+                // restore and deliver it. The binding can happen between a
+                // promotion and the prompt's claim, before any failed write had
+                // a chance to park it. When the ledger refuses the schedule
+                // there is no delivery owner, so the row must keep no prompt:
+                // leaving it there would redeliver the prompt after a restart
+                // with nothing to wait for.
+                if let Some(turn_id) = parked_turn.as_ref()
+                    && let Some(active) = record.active.as_ref()
+                    && record
+                        .meta
+                        .parked
+                        .as_ref()
+                        .is_none_or(|parked| &parked.turn_id != turn_id)
+                {
+                    let input = active.dispatch.input();
+                    record.meta.parked = Some(ParkedPrompt::of(turn_id, &input));
+                }
                 record.resume_at = Some(schedule.resume_at);
                 record.scheduled_limit = Some(ScheduledLimit {
                     reset_at,
@@ -5178,13 +5263,26 @@ impl Inner {
                 // overwritten by a later requeue.
                 match dispatch.recover_lost_session().await {
                     RecoveryOutcome::Stopped => {
-                        let settled = self
-                            .settle_turn_locked(
-                                &mut record,
-                                turn_id,
-                                TurnEnd::new(TurnStatus::Interrupted, Usage::default()),
-                            )
-                            .await;
+                        // The turn's own partial answer is part of the trace it
+                        // presents to the person, exactly as a completion read
+                        // on the pump journals its text. The Stop ends the turn
+                        // interrupted; it must not also take the output back.
+                        let mut end = TurnEnd::new(TurnStatus::Interrupted, Usage::default());
+                        if let Some(active) = record.active.as_ref()
+                            && !active.text.is_empty()
+                        {
+                            end.wire.push(Event::ItemCompleted {
+                                thread_id: record.meta.thread_id.clone(),
+                                turn_id: active.turn_id.clone(),
+                                item: Item::Message {
+                                    item_id: active.item_id.clone(),
+                                    role: MessageRole::Assistant,
+                                    text: active.text.clone(),
+                                    attachments: Vec::new(),
+                                },
+                            });
+                        }
+                        let settled = self.settle_turn_locked(&mut record, turn_id, end).await;
                         drop(record);
                         if settled {
                             // The settlement may have promoted the next queued
@@ -5195,6 +5293,23 @@ impl Inner {
                     }
                     RecoveryOutcome::Settled => return,
                     RecoveryOutcome::Requeue => {
+                        // The requeue is certain, so this is the one place the
+                        // turn's collected evidence may be cleared. A promoted
+                        // turn never reached the provider before this write was
+                        // accepted, so nothing it holds can be its own: the
+                        // pump already dropped what it read while the write was
+                        // in flight, and this clears anything applied before it.
+                        // Clearing only now is what keeps a Stop's refusal (it
+                        // settled the turn above) from erasing the trace it
+                        // presents.
+                        if record.promoted_turn_is(turn_id)
+                            && let Some(active) = record.active.as_mut()
+                        {
+                            active.text.clear();
+                            active.tools.clear();
+                            active.saw_work = false;
+                            active.usage = Usage::default();
+                        }
                         // The failed write can still carry the adapter's typed
                         // limit even though its prompt goes back for a retry.
                         // Apply it here, under the same lock that decided the
@@ -5422,27 +5537,41 @@ impl Inner {
         let turn_id = dispatch.turn_id.clone();
         // From here on the adapter may emit this turn's own events, including
         // while the write is still running; before this, the pump treats them
-        // as the finished turn's late output.
-        dispatch.mark_on_the_wire();
+        // as the finished turn's late output. A promoted turn's pump holds them
+        // until the write returns `Ok`, because until then the adapter could
+        // still be draining the finished turn's output into this stream.
+        let attempt = dispatch.begin_write();
         let sent = guard.send(dispatch.input()).await;
         drop(guard);
-        if let Err(error) = sent {
-            // Only the adapter's typed limit may arm a resume: an arbitrary
-            // transport text that happens to mention a limit (an HTTP 413
-            // payload limit, say) is an ordinary failed turn.
-            let limit = error.limit().cloned();
-            // The generation this write claimed is captured now: a later
-            // detach empties the slot, and a limit on the failed write still
-            // belongs to the session that reported it.
-            self.fail_prompt_write(
-                handle,
-                &turn_id,
-                generation,
-                &session,
-                error.to_string(),
-                limit,
-            )
-            .await;
+        match sent {
+            Ok(()) => {
+                // The harness took the prompt: everything it reported during the
+                // write belongs to this turn and is released in order.
+                dispatch.accept_write(attempt);
+                dispatch.note_write_settled();
+            }
+            Err(error) => {
+                // Only the adapter's typed limit may arm a resume: an arbitrary
+                // transport text that happens to mention a limit (an HTTP 413
+                // payload limit, say) is an ordinary failed turn.
+                let limit = error.limit().cloned();
+                // The generation this write claimed is captured now: a later
+                // detach empties the slot, and a limit on the failed write still
+                // belongs to the session that reported it.
+                self.fail_prompt_write(
+                    handle,
+                    &turn_id,
+                    generation,
+                    &session,
+                    error.to_string(),
+                    limit,
+                )
+                .await;
+                // Whatever the adapter reported before this failure cannot be
+                // this turn's own output; the pump drops it now that the
+                // dispatch has left `Claimed`.
+                dispatch.note_write_settled();
+            }
         }
     }
 
@@ -5473,6 +5602,8 @@ impl Inner {
             // and this claim. The armed schedule owns the next attempt, so
             // writing it now would run the queued message into the provider the
             // pause is waiting on.
+            #[cfg(test)]
+            self.claim_refused.notify_waiters();
             return None;
         }
         let generation = record.session.generation()?;
@@ -5614,7 +5745,42 @@ impl Inner {
         // provider's reset; every event that belongs to a turn goes to the
         // fresh session a Send started in the meantime.
         let mut dying = false;
+        // A promoted turn's output read while its prompt is still being written,
+        // in the order it arrived, with the write attempt it belongs to. It is
+        // released only when that attempt returns `Ok`; a failed write, a newer
+        // attempt, or the turn ending drops it. Held output is never published
+        // or journaled, so a finished turn's late text can never be kept as a
+        // turn that the write then fails.
+        let mut held: VecDeque<HarnessEvent> = VecDeque::new();
+        let mut held_owner: Option<(Arc<TurnDispatch>, u64)> = None;
         loop {
+            // Settle held output before anything read after it, so releasing it
+            // keeps the adapter's order. A dispatch that left `Claimed` (the
+            // write failed, the turn was stopped or settled) never accepted
+            // this attempt: drop what it held. A current attempt that was
+            // accepted gives its events back to the queue to apply in order.
+            if let Some((dispatch, attempt)) = held_owner.as_ref()
+                && !held.is_empty()
+            {
+                let holding = dispatch.state() == DispatchState::Claimed
+                    && dispatch.write_attempt() == *attempt;
+                let active = {
+                    let record = handle.lock().await;
+                    record
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| Arc::ptr_eq(&active.dispatch, dispatch))
+                };
+                if !holding || !active {
+                    held.clear();
+                    held_owner = None;
+                } else if dispatch.write_accepted() {
+                    // The held events were read after anything already in
+                    // `pending`, so they belong behind it, in their own order.
+                    pending.extend(held.drain(..));
+                    held_owner = None;
+                }
+            }
             // `stream.next()` is cancel-safe (the adapter's stream is a channel
             // receiver), so arming the deadline cannot lose an event that is
             // already queued: an event always wins the race.
@@ -5643,7 +5809,21 @@ impl Inner {
                             }
                         }
                     }
-                    None => stream.next().await,
+                    // While output is held, wake on the write settling instead
+                    // of waiting for the next event: the held text is what the
+                    // person is waiting to see.
+                    None => match held_owner.as_ref() {
+                        Some((dispatch, _)) if !held.is_empty() => {
+                            let settled = dispatch.write_settled.notified();
+                            tokio::pin!(settled);
+                            settled.as_mut().enable();
+                            tokio::select! {
+                                event = stream.next() => event,
+                                _ = &mut settled => continue,
+                            }
+                        }
+                        _ => stream.next().await,
+                    },
                 }
             };
             let Some(event) = event else {
@@ -5730,6 +5910,56 @@ impl Inner {
                 );
                 drop(record);
                 break;
+            }
+            // A promoted turn's prompt may still be on its way to the harness.
+            // Until `send` returns `Ok` the adapter has not accepted it, so
+            // text, a tool update, a plan or usage read in this window is the
+            // finished turn's late output: applying it would put that turn's
+            // work on this one, count it as work done, and journal it under a
+            // turn whose write may fail and send the prompt back to the queue.
+            // Hold those events, and everything already read behind them so the
+            // order is kept, until the write is accepted (the top of the loop
+            // releases them) or fails (it drops them). Consecutive text is
+            // coalesced so a chatty agent cannot grow the *number* of held
+            // events without bound; tools, plans and usage are rare and are
+            // held one for one. The hold lasts only as long as one write.
+            if record.holds_promoted_write() {
+                let content = matches!(
+                    &event,
+                    HarnessEvent::TextDelta { .. }
+                        | HarnessEvent::ToolCall { .. }
+                        | HarnessEvent::Plan { .. }
+                        | HarnessEvent::Usage { .. }
+                );
+                if content || !held.is_empty() {
+                    let (dispatch, attempt) = {
+                        let active = record.active.as_ref().expect("a held write");
+                        (
+                            Arc::clone(&active.dispatch),
+                            active.dispatch.write_attempt(),
+                        )
+                    };
+                    drop(record);
+                    let mut coalesced = false;
+                    if let HarnessEvent::TextDelta { text } = &event
+                        && let Some(HarnessEvent::TextDelta { text: last }) = held.back_mut()
+                    {
+                        last.push_str(text);
+                        coalesced = true;
+                    }
+                    if !coalesced {
+                        if held.len() < HELD_PROMOTED_EVENTS {
+                            held.push_back(event);
+                        } else {
+                            tracing::debug!(
+                                generation,
+                                "dropped a promoted turn's update the hold could not fit"
+                            );
+                        }
+                    }
+                    held_owner = Some((dispatch, attempt));
+                    continue;
+                }
             }
             // A turn whose prompt is not on the wire yet cannot own this
             // output. The ACP bridge publishes a turn's settlement behind the
@@ -17903,6 +18133,395 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A promoted turn whose write is still in flight keeps none of the
+    /// finished turn's output.
+    ///
+    /// Until `send` returns `Ok` the adapter has not accepted the prompt, so a
+    /// delta that arrives meanwhile can still be the finished turn's late
+    /// output. It used to be applied and journaled at once; when the write then
+    /// failed and the prompt went back to the queue, the stale delta stayed
+    /// under a turn that never ran. The pump now holds a promoted turn's text,
+    /// tools, plan and usage until the write is accepted, and drops them when it
+    /// fails. Text a peer writes after it has read the next prompt still cannot
+    /// be attributed: ACP carries no turn id, so the hold covers exactly
+    /// everything up to the acceptance.
+    #[tokio::test]
+    async fn a_promoted_write_in_flight_never_keeps_the_finished_turns_text() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let (harness, injector) = FakeHarness::new().with_event_injector();
+        let (harness, completion) = harness.with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, write) = harness.with_send_gate_after(2);
+        // The write blocks on a one-slot queue through 8 events, so a test can
+        // prove the pump took an injected update by the order of its sends.
+        let harness = harness.with_bounded_event_queue(8);
+        let harness = harness.with_closed_limit_after(
+            2,
+            "provider usage limit reached, resets at 2099-12-01T00:00:00Z",
+            Some(reset_at),
+        );
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // Turn 2 holds its completion; the message queued behind it is what the
+        // completion promotes.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+        completion.release();
+        let (finished, status) = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnCompleted {
+                turn_id, status, ..
+            } = wire.event
+            {
+                break (turn_id, status);
+            }
+        };
+        assert_eq!(status, TurnStatus::Completed);
+        let promoted = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnStarted { turn_id, .. } = wire.event {
+                break turn_id;
+            }
+        };
+        assert_ne!(finished, promoted, "the promotion starts a new turn");
+
+        // Its write is in flight now: the fake holds the third prompt before it
+        // fails with the closed transport's limit.
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        // The finished turn's last output arrives while that write is running.
+        // The sentinels behind it are back-pressured by the one-slot queue, so
+        // the pump has taken the delta (and finished applying it, if it were
+        // going to) before the write is released.
+        injector
+            .send(HarnessEvent::TextDelta {
+                text: "late words".into(),
+            })
+            .await;
+        for index in 0..10 {
+            injector
+                .send(HarnessEvent::SessionStarted {
+                    session_id: format!("sentinel-{index}"),
+                })
+                .await;
+        }
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        write.release();
+        let mut late_deltas = 0;
+        loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::MessageDelta { turn_id, text, .. } if turn_id == promoted => {
+                    if text.contains("late words") {
+                        late_deltas += 1;
+                    }
+                }
+                Event::UsageLimitHit { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            late_deltas, 0,
+            "the finished turn's late update was published under the promoted turn"
+        );
+
+        // Neither the journal nor the record kept it.
+        let stored = journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("the journal");
+        let journaled: Vec<String> = stored
+            .iter()
+            .filter_map(|event| match &event.event {
+                Event::MessageDelta { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            journaled.iter().all(|text| !text.contains("late words")),
+            "the finished turn's late update was journaled: {journaled:?}"
+        );
+        let record = handle.lock().await;
+        let active = record
+            .active
+            .as_ref()
+            .expect("the promoted turn is parked, not failed");
+        assert_eq!(active.turn_id, promoted);
+        assert!(
+            active.text.is_empty(),
+            "the finished turn's late update became the promoted turn's text"
+        );
+        assert!(
+            record.pending_turn(),
+            "the failed write put the prompt back"
+        );
+        drop(record);
+
+        manager.shutdown().await;
+    }
+
+    /// A promoted turn whose write is accepted releases what it held.
+    ///
+    /// The hold must not lose the turn's own first updates: once `send` returns
+    /// `Ok` the held text belongs to this turn and is published, in the adapter's
+    /// order, exactly once.
+    #[tokio::test]
+    async fn a_promoted_write_that_is_accepted_publishes_what_it_held() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, injector) = FakeHarness::new().with_event_injector();
+        let (harness, completion) = harness.with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, write) = harness.with_send_gate_after(2);
+        let harness = harness.with_bounded_event_queue(8);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+        completion.release();
+        let (second_turn, status) = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnCompleted {
+                turn_id, status, ..
+            } = wire.event
+            {
+                break (turn_id, status);
+            }
+        };
+        assert_eq!(status, TurnStatus::Completed);
+        let promoted = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnStarted { turn_id, .. } = wire.event
+                && turn_id != second_turn
+            {
+                break turn_id;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        injector
+            .send(HarnessEvent::TextDelta {
+                text: "held words".into(),
+            })
+            .await;
+        for index in 0..10 {
+            injector
+                .send(HarnessEvent::SessionStarted {
+                    session_id: format!("sentinel-{index}"),
+                })
+                .await;
+        }
+        write.release();
+
+        let mut text = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta {
+                        turn_id,
+                        text: delta,
+                        ..
+                    } if turn_id == promoted => text.push_str(&delta),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the promoted turn completed");
+        assert_eq!(turn, promoted);
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(
+            text.contains("held words"),
+            "the accepted write dropped the turn's own first text: {text:?}"
+        );
+
+        manager.shutdown().await;
+    }
+
+    /// A promoted turn keeps its trace when a Stop refuses its requeue.
+    ///
+    /// The failed-write recovery decides requeue-or-interrupt in one dispatch
+    /// lock, but the trace it may clear belongs to the turn. A Stop that lands
+    /// in that window must leave the tool card and text alone: the turn ends
+    /// `Interrupted` with what it had, instead of being erased by a clear that
+    /// ran before the decision. The trace is stood up directly because output a
+    /// promoted turn reports while its write is in flight is exactly what the
+    /// pump holds and drops (tested above); this test is about the recovery.
+    #[tokio::test]
+    async fn a_stop_inside_a_promoted_writes_recovery_window_keeps_its_trace() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_send_gate_after(2);
+        let (harness, completion) = harness.with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let harness = harness.with_send_failure_after(2, "the harness rejected the message");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+        completion.release();
+        let (second_turn, status) = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnCompleted {
+                turn_id, status, ..
+            } = wire.event
+            {
+                break (turn_id, status);
+            }
+        };
+        assert_eq!(status, TurnStatus::Completed);
+        let promoted = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnStarted { turn_id, .. } = wire.event
+                && turn_id != second_turn
+            {
+                break turn_id;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        let dispatch = {
+            let record = handle.lock().await;
+            record
+                .dispatch_for(&promoted)
+                .expect("the promoted turn's dispatch")
+        };
+        {
+            // The tool card and text the turn presents to the person.
+            let mut record = handle.lock().await;
+            let active = record.active.as_mut().expect("the promoted turn");
+            active.text.push_str("half an answer");
+            active.tools.insert("tool-1".into(), true);
+            active.saw_work = true;
+        }
+        // The session detaches under the claimed turn, so its failed write takes
+        // the recovery path a Stop can land in.
+        let detached = {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live generation");
+            record.detach_session(generation)
+        };
+        assert!(detached.is_some(), "the writing session was detached");
+        let pause = Arc::new(RecoverPause::default());
+        dispatch.pause_recovery_at(Arc::clone(&pause));
+        gate.release();
+        pause.inspected.notified().await;
+
+        // The Stop lands inside that window: the requeue must refuse, and the
+        // turn ends interrupted with the trace it had.
+        assert!(
+            matches!(dispatch.stop(), StopOutcome::AlreadySent),
+            "the Stop lands on the claimed turn"
+        );
+        pause.resume.notify_one();
+        let mut kept = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::ItemCompleted {
+                        item:
+                            Item::Message {
+                                role: MessageRole::Assistant,
+                                text,
+                                ..
+                            },
+                        ..
+                    } => kept.push_str(&text),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the stopped turn settled");
+        assert_eq!(turn, promoted);
+        assert_eq!(status, TurnStatus::Interrupted);
+        assert_eq!(
+            kept, "half an answer",
+            "the refused requeue took the turn's trace with it"
+        );
+        assert_eq!(sends.get(), 3, "the stopped prompt was never written again");
+        assert!(
+            handle.lock().await.active.is_none(),
+            "the stopped turn ended instead of staying Working"
+        );
+
+        manager.shutdown().await;
+    }
+
     /// A promoted turn that already did work is never run again.
     ///
     /// The peer performed an edit and reported the tool call complete, then
@@ -18264,13 +18883,22 @@ mod tests {
         );
 
         // The claim now refuses: the schedule owns this prompt's next attempt.
-        *manager
-            .inner
-            .deliver_pause
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        pause.resume.notify_one();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The refusal itself is the signal, so no wall-clock guess can pass for
+        // it: register first, then release the held delivery.
+        {
+            let refused = manager.inner.claim_refused.notified();
+            tokio::pin!(refused);
+            refused.as_mut().enable();
+            *manager
+                .inner
+                .deliver_pause
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            pause.resume.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), &mut refused)
+                .await
+                .expect("the claim was never refused by the pause");
+        }
         assert_eq!(
             sends.get(),
             2,
@@ -18339,6 +18967,166 @@ mod tests {
             "the prompt was delivered exactly once"
         );
 
+        manager.shutdown().await;
+    }
+
+    /// A pause the ledger refuses owns no prompt.
+    ///
+    /// The schedule and the prompt saved on the thread row used to be written
+    /// in one step taken before the ledger answered. When the ledger refused,
+    /// the row kept a prompt that no schedule would ever deliver: the claim was
+    /// the only thing parking it, so the prompt still ran, and a restart
+    /// restored and delivered it a second time. Only a schedule that was really
+    /// armed saves its prompt now.
+    #[tokio::test]
+    async fn a_prompt_the_ledger_refuses_to_schedule_runs_and_is_not_redelivered() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let (harness, injector) = FakeHarness::new().with_event_injector();
+        let (harness, completion) = harness.with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+
+        // Hold the promoted delivery before its claim, so the limit lands while
+        // the prompt is pending and nothing has written it.
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        completion.release();
+        let promoted = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnStarted { turn_id, .. } = wire.event
+                && turn_id != created.turn_id
+                && turn_id != second.turn_id
+            {
+                break turn_id;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), pause.checked.notified())
+            .await
+            .expect("the promoted delivery reached its claim");
+
+        // The ledger refuses the schedule: arming reads it back first.
+        meter.store().fail_next_schedule_reads_for_tests(1);
+        injector.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        });
+        let failed_to_schedule = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::Error { message, .. } = wire.event
+                    && message.contains("could not schedule the automatic resume")
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            failed_to_schedule.is_ok(),
+            "the refused schedule was never reported"
+        );
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        {
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_none(),
+                "the ledger refused the schedule but the record armed a pause"
+            );
+            assert!(
+                record.meta.parked.is_none(),
+                "the refused schedule left a prompt on the row with no owner"
+            );
+            assert!(record.pending_turn(), "the prompt is still waiting");
+        }
+
+        // With no pause parking it, the claim writes the prompt and it runs.
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        pause.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the prompt the ledger refused to park never ran");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the refused prompt's turn completed");
+        assert_eq!(turn, promoted);
+        assert_eq!(status, TurnStatus::Completed);
+
+        // A restart restores nothing to redeliver: no schedule and no prompt.
+        manager.shutdown().await;
+        drop(manager);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, restarted_sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        manager.set_meter(Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        ));
+        manager.resync_meter_state().await;
+        let meta = manager
+            .thread_meta(&created.thread_id)
+            .await
+            .expect("thread meta");
+        assert!(
+            meta.parked.is_none(),
+            "the restart found a parked prompt no schedule owns"
+        );
+        assert_eq!(
+            restarted_sends.get(),
+            0,
+            "the restart redelivered a prompt that already ran"
+        );
         manager.shutdown().await;
     }
 
