@@ -804,8 +804,12 @@ impl Session {
         // Hang up first and wait, so the shell can run its hangup path and
         // its jobs hear SIGHUP; only then fall back to TERM and KILL for the
         // shell's group.
-        let hung_up = hangup_pid(self.shell_pid, self.process_group)
-            .is_some_and(|pid| self.signals.hangup(pid));
+        //
+        // A shell the reader thread has already reaped gets no SIGHUP by pid:
+        // that pid may belong to another process by now.
+        let hung_up = !self.shell_confirmed_reaped()
+            && hangup_pid(self.shell_pid, self.process_group)
+                .is_some_and(|pid| self.signals.hangup(pid));
         if hung_up {
             self.wait_for_shell_exit(HANGUP_GRACE).await;
         }
@@ -856,6 +860,20 @@ impl Session {
         // lets `finish` report the exit. On Unix it releases a blocked master
         // read after the kill.
         self.close_pty();
+    }
+
+    /// Whether the shell is already known to have exited, before the close
+    /// sends anything to its pid.
+    ///
+    /// `finish` publishing the exit after the reader thread reaped the shell,
+    /// or a status captured by an earlier wait, is proof. Nothing else is: the
+    /// child is not polled here, because a live shell must still get the
+    /// hangup. Each lock is taken on its own.
+    fn shell_confirmed_reaped(&self) -> bool {
+        if lock(&self.exit).is_some() {
+            return true;
+        }
+        lock(&self.reaped_status).is_some()
     }
 
     /// Whether the shell is confirmed reaped, reaping it now if it has exited.
@@ -3341,6 +3359,60 @@ mod tests {
             lock(&signals.pids).is_empty(),
             "a reaped shell must not get a pid SIGKILL"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shell_reaped_before_the_close_gets_no_hangup_by_pid() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
+        let mut session = Session::new(
+            TerminalId::new("term_reaped_before_close"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(ReapThenRecordKillChild {
+                pid: 4_000_004,
+                kills: Arc::clone(&kills),
+            }),
+            writer,
+        );
+        let signals = Arc::new(RecordedSignals::default());
+        session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
+        // The reader thread has finished: `finish` reaped the shell and
+        // published its exit, but the cached pid is still set, so a careless
+        // close would hang up that pid.
+        session.shell_pid = Some(4_000_004);
+        session.process_group = None;
+        session.alive.store(false, Ordering::SeqCst);
+        *lock(&session.exit) = Some(TerminalExit {
+            status: 0,
+            signal: None,
+            at: Utc::now(),
+        });
+        let session = Arc::new(session);
+
+        session.kill_with_grace().await;
+
+        assert!(
+            lock(&signals.hangups).is_empty(),
+            "a reaped shell's pid must not get the opening SIGHUP"
+        );
+        assert_eq!(kills.load(Ordering::SeqCst), 0);
+        assert!(lock(&signals.pids).is_empty());
     }
 
     #[tokio::test]

@@ -159,9 +159,11 @@ duplicated process handle — so the close path can end the shell through that h
 reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
 the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
 falls back to the same cloned killer, so the shell still ends without the child lock. Once the
-shell is confirmed reaped, no signal is sent to the shell's own pid: `child.kill()`, which sends
-SIGHUP to the child's pid on Unix, and the pid fallbacks are skipped, because SIGHUP and SIGKILL by
-pid could reach a process that reused it. Confirmed means either the close wait stored the exit
+shell is confirmed reaped, no pid-targeted signal is sent: the opening hangup, `child.kill()`
+(which sends SIGHUP to the child's pid on Unix) and the pid fallbacks are all skipped, because
+SIGHUP and SIGKILL by pid could reach a process that reused it. The process-group TERM and KILL
+still go out on purpose to end the shell's jobs; the group id is often the shell's own pid, so
+they carry the same small reuse risk, accepted because jobs can outlive the shell. Confirmed means either the close wait stored the exit
 status, or the child handle reports the exit while the close path holds the child lock; the
 session's `alive` flag is not enough, because the reader thread clears it before it takes that lock,
 and a shell that ignored the hangup would otherwise be mistaken for a reaped one and left running. A
