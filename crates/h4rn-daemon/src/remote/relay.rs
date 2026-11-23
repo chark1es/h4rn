@@ -408,6 +408,72 @@ async fn handle_event(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&frame.conn_id);
             }
+            RelayFrameKind::GuestHttp => {
+                let request: h4rn_protocol::GuestHttpRequest =
+                    match serde_json::from_slice(&frame.payload) {
+                        Ok(request) => request,
+                        Err(_) => {
+                            tracing::warn!("relay sent a guest HTTP frame that is not JSON");
+                            return Ok(());
+                        }
+                    };
+                let request_id = request.request_id.clone();
+                let method = if request.method.eq_ignore_ascii_case("post") {
+                    crate::guest::Method::Post
+                } else {
+                    crate::guest::Method::Get
+                };
+                let mut headers = axum::http::HeaderMap::new();
+                for (name, value) in request.headers {
+                    if let (Ok(name), Ok(value)) = (
+                        axum::http::HeaderName::try_from(name),
+                        axum::http::HeaderValue::try_from(value),
+                    ) {
+                        headers.insert(name, value);
+                    }
+                }
+                let response = crate::server::guest_exchange(
+                    state,
+                    method,
+                    request.path,
+                    &headers,
+                    request.body,
+                )
+                .await;
+                let (parts, body) = response.into_parts();
+                let bytes = axum::body::to_bytes(body, 20 * 1024 * 1024)
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .unwrap_or_default();
+                let response_headers = parts
+                    .headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .to_str()
+                            .ok()
+                            .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                    })
+                    .collect();
+                let reply = h4rn_protocol::GuestHttpResponse {
+                    request_id,
+                    status: parts.status.as_u16(),
+                    headers: response_headers,
+                    body: bytes,
+                };
+                match serde_json::to_vec(&reply) {
+                    Ok(payload) => {
+                        let _ = out_tx
+                            .send(RelayFrame {
+                                conn_id: frame.conn_id,
+                                kind: RelayFrameKind::GuestHttp,
+                                payload,
+                            })
+                            .await;
+                    }
+                    Err(error) => tracing::warn!(%error, "could not serialise a guest answer"),
+                }
+            }
             RelayFrameKind::Ping => {}
         },
         RelayServerEvent::Snapshot { devices, .. } => {

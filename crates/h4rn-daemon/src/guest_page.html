@@ -1,0 +1,951 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Shared thread · h4rn</title>
+    <style>
+      :root {
+        --bg: oklch(0.995 0.0015 260);
+        --bg-raised: #fff;
+        --bg-sunk: oklch(0.978 0.002 260);
+        --fill: oklch(0.955 0.003 260);
+        --line: oklch(0.915 0.003 260);
+        --fg: oklch(0.21 0.006 260);
+        --fg-2: oklch(0.44 0.007 260);
+        --fg-3: oklch(0.51 0.007 260);
+        --accent: oklch(0.54 0.18 258);
+        --accent-tx: oklch(0.5 0.17 258);
+        --danger: oklch(0.52 0.19 27);
+        --ok: oklch(0.49 0.12 150);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: oklch(0.19 0.004 260);
+          --bg-raised: oklch(0.232 0.005 260);
+          --bg-sunk: oklch(0.172 0.004 260);
+          --fill: oklch(0.24 0.005 260);
+          --line: oklch(0.268 0.005 260);
+          --fg: oklch(0.945 0.003 260);
+          --fg-2: oklch(0.76 0.005 260);
+          --fg-3: oklch(0.64 0.006 260);
+          --accent: oklch(0.56 0.17 258);
+          --accent-tx: oklch(0.76 0.12 258);
+          --danger: oklch(0.73 0.15 25);
+          --ok: oklch(0.78 0.13 150);
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 14px;
+        line-height: 22px;
+        -webkit-font-smoothing: antialiased;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        min-height: 100dvh;
+      }
+      button,
+      textarea {
+        font: inherit;
+        color: inherit;
+      }
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .shell {
+        width: 100%;
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 0 16px;
+        flex: 1;
+      }
+      header {
+        padding: 20px 0 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: var(--fg-2);
+      }
+      .brand .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--accent);
+      }
+      h1 {
+        margin: 10px 0 2px;
+        font-size: 20px;
+        line-height: 26px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+        overflow-wrap: anywhere;
+      }
+      .provenance {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        color: var(--fg-3);
+        font-size: 12px;
+      }
+      .provenance .mono {
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+      }
+      #timeline {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 20px 0 24px;
+      }
+      .turn {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .turn-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--fg-3);
+        font-size: 11.5px;
+      }
+      .prose {
+        margin: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .user-row {
+        display: flex;
+        justify-content: flex-end;
+      }
+      .bubble {
+        max-width: 85%;
+        padding: 8px 12px;
+        border-radius: 12px;
+        background: var(--fill);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .attachments {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 6px;
+      }
+      .attachment {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--bg-raised);
+        color: var(--fg-2);
+        font-size: 12px;
+        text-decoration: none;
+        max-width: 100%;
+      }
+      .attachment span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .attachment img {
+        display: block;
+        max-width: 100%;
+        max-height: 240px;
+        border-radius: 6px;
+        margin-top: 4px;
+      }
+      .image-attachment {
+        display: block;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 4px;
+        background: var(--bg-raised);
+      }
+      details.tool {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg-raised);
+      }
+      details.tool summary {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        padding: 6px 10px;
+        cursor: pointer;
+        list-style: none;
+      }
+      details.tool summary::-webkit-details-marker {
+        display: none;
+      }
+      .tool-verb {
+        font-weight: 500;
+      }
+      .tool-target {
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        color: var(--fg-2);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tool-state {
+        margin-left: auto;
+        color: var(--fg-3);
+        font-size: 11px;
+      }
+      .tool-failed {
+        color: var(--danger);
+      }
+      .tool-output {
+        margin: 0;
+        padding: 10px;
+        border-top: 1px solid var(--line);
+        background: var(--bg-sunk);
+        border-radius: 0 0 7px 7px;
+        overflow: auto;
+        max-height: 320px;
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        line-height: 19px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .plan {
+        margin: 0;
+        padding-left: 22px;
+        color: var(--fg-2);
+      }
+      .quiet {
+        margin: 0;
+        color: var(--fg-3);
+        font-size: 12px;
+      }
+      .guest-card {
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--bg-raised);
+      }
+      .guest-card .tag {
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--accent-tx);
+      }
+      .waiting {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--fg-3);
+        font-size: 12px;
+      }
+      .waiting .pulse {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--accent);
+      }
+      .error {
+        color: var(--danger);
+        font-size: 12.5px;
+      }
+      .notice {
+        margin: 28px 0;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--bg-raised);
+      }
+      .notice h2 {
+        margin: 0 0 6px;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .notice p {
+        margin: 0;
+        color: var(--fg-2);
+      }
+      .composer {
+        position: sticky;
+        bottom: 0;
+        padding: 12px 0 max(12px, env(safe-area-inset-bottom));
+        background: linear-gradient(to bottom, transparent, var(--bg) 14px);
+      }
+      .composer-shell {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--bg-raised);
+        padding: 8px;
+      }
+      textarea {
+        display: block;
+        width: 100%;
+        min-height: 48px;
+        max-height: 40dvh;
+        resize: vertical;
+        padding: 6px;
+        border: 0;
+        background: transparent;
+        outline: none;
+        line-height: 22px;
+      }
+      .composer-foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding: 4px 6px 0;
+      }
+      .composer-foot .model {
+        color: var(--fg-3);
+        font-size: 11.5px;
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin-right: auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 32px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--bg-raised);
+        color: var(--fg);
+        font-size: 12.5px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .btn.primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fff;
+      }
+      .btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+      .attach {
+        position: relative;
+        overflow: hidden;
+      }
+      .attach input {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        cursor: pointer;
+      }
+      .files {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 6px 6px 0;
+      }
+      .file {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 8px;
+        border-radius: 6px;
+        background: var(--fill);
+        font-size: 11.5px;
+        color: var(--fg-2);
+        max-width: 100%;
+      }
+      .file button {
+        border: 0;
+        background: transparent;
+        color: var(--fg-3);
+        cursor: pointer;
+        padding: 0 2px;
+        line-height: 1;
+      }
+      .composer-note {
+        margin: 6px 6px 0;
+        color: var(--fg-3);
+        font-size: 11.5px;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      @media (max-width: 520px) {
+        body {
+          font-size: 16px;
+          line-height: 24px;
+        }
+        .shell {
+          padding: 0 12px;
+        }
+        h1 {
+          font-size: 22px;
+          line-height: 28px;
+        }
+        .bubble {
+          max-width: 92%;
+        }
+        .btn {
+          min-height: 44px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body data-state="__STATE__">
+    <main class="shell">
+      <header>
+        <div class="brand"><span class="dot" aria-hidden="true"></span>h4rn · shared thread</div>
+        <h1 id="title">Loading…</h1>
+        <div class="provenance" id="provenance"></div>
+      </header>
+      <div id="notice" class="notice" hidden>
+        <h2 id="notice-title">This link no longer works</h2>
+        <p id="notice-body"></p>
+      </div>
+      <section id="timeline" aria-live="polite" aria-label="Thread"></section>
+    </main>
+    <div class="shell" id="composer-wrap">
+      <form class="composer" id="composer" autocomplete="off">
+        <div class="composer-shell">
+          <label class="sr-only" for="message">Message</label>
+          <textarea
+            id="message"
+            name="message"
+            rows="2"
+            placeholder="Write a message for the owner to send…"
+          ></textarea>
+          <div class="files" id="files" aria-live="polite"></div>
+          <div class="composer-foot">
+            <span class="model" id="model">Model</span>
+            <label class="btn attach">
+              Attach files
+              <input
+                id="file-input"
+                type="file"
+                multiple
+                accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,.txt,.md,.json,.csv,.log"
+              />
+            </label>
+            <button class="btn primary" id="send" type="submit" disabled>Send</button>
+          </div>
+          <p class="composer-note" id="composer-note">
+            Your message waits for the owner to send it. It does not run on its own.
+          </p>
+        </div>
+      </form>
+    </div>
+    <script>
+      (() => {
+        "use strict";
+        const MAX_FILES = 4;
+        const MAX_MESSAGE = 10 * 1024 * 1024;
+        const POLL_MS = 2000;
+        const base = window.location.pathname.replace(/\/+$/, "");
+        const els = {
+          body: document.body,
+          title: document.getElementById("title"),
+          provenance: document.getElementById("provenance"),
+          timeline: document.getElementById("timeline"),
+          notice: document.getElementById("notice"),
+          noticeTitle: document.getElementById("notice-title"),
+          noticeBody: document.getElementById("notice-body"),
+          composer: document.getElementById("composer"),
+          composerWrap: document.getElementById("composer-wrap"),
+          message: document.getElementById("message"),
+          files: document.getElementById("files"),
+          fileInput: document.getElementById("file-input"),
+          model: document.getElementById("model"),
+          send: document.getElementById("send"),
+          note: document.getElementById("composer-note"),
+        };
+        let lastSeq = 0;
+        let state = "active";
+        let threadModel = "";
+        let threadTitle = "";
+        let streaming = null;
+        let turn = null;
+        let files = [];
+        let busy = false;
+
+        function el(tag, className, text) {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined) node.textContent = text;
+          return node;
+        }
+
+        function timeText(iso) {
+          if (!iso) return "";
+          const date = new Date(iso);
+          if (Number.isNaN(date.getTime())) return "";
+          return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        }
+
+        function fmtSize(bytes) {
+          if (bytes < 1024) return `${bytes} B`;
+          if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+          return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        }
+
+        function startTurn(startedAt) {
+          turn = el("section", "turn");
+          const head = el("div", "turn-head");
+          head.append(el("span", "", "Agent"));
+          head.append(el("span", "q-sep", "·"));
+          head.append(el("span", "", timeText(startedAt) || "now"));
+          turn.append(head);
+          els.timeline.append(turn);
+          streaming = null;
+        }
+
+        function ensureTurn(event) {
+          if (!turn) startTurn(event.started_at || event.at || new Date().toISOString());
+          return turn;
+        }
+
+        function attachmentEl(attachment) {
+          const isImage = (attachment.mime || "").startsWith("image/");
+          if (isImage) {
+            const link = el("a", "image-attachment");
+            link.href = `${base}/blob/${encodeURIComponent(attachment.id)}`;
+            link.target = "_blank";
+            link.rel = "noreferrer noopener";
+            const img = el("img");
+            img.loading = "lazy";
+            img.alt = attachment.name || "Image from the thread";
+            img.src = `${base}/blob/${encodeURIComponent(attachment.id)}?thumbnail=0`;
+            link.append(img);
+            return link;
+          }
+          const link = el("a", "attachment");
+          link.href = `${base}/blob/${encodeURIComponent(attachment.id)}`;
+          link.target = "_blank";
+          link.rel = "noreferrer noopener";
+          link.append(el("span", "", attachment.name || "Attachment"));
+          link.append(el("span", "", fmtSize(attachment.size || 0)));
+          return link;
+        }
+
+        function messageEl(item) {
+          if (item.role === "user") {
+            const row = el("div", "user-row");
+            const bubble = el("div", "bubble");
+            if (item.text) bubble.append(el("span", "", item.text));
+            if (item.attachments && item.attachments.length) {
+              const list = el("div", "attachments");
+              item.attachments.forEach((attachment) => list.append(attachmentEl(attachment)));
+              bubble.append(list);
+            }
+            row.append(bubble);
+            return row;
+          }
+          const wrap = el("div");
+          if (item.text) wrap.append(el("p", "prose", item.text));
+          if (item.attachments && item.attachments.length) {
+            const list = el("div", "attachments");
+            item.attachments.forEach((attachment) => list.append(attachmentEl(attachment)));
+            wrap.append(list);
+          }
+          return wrap;
+        }
+
+        function toolEl(call, streamed) {
+          const details = el("details", "tool");
+          const summary = el("summary");
+          summary.append(el("span", "tool-verb", call.name || "Tool"));
+          summary.append(el("span", "tool-target", call.summary || ""));
+          const statusText =
+            call.status === "failed"
+              ? "Failed"
+              : call.status === "running"
+                ? "Running"
+                : call.status === "completed"
+                  ? "Done"
+                  : call.status || "";
+          summary.append(
+            el(
+              "span",
+              `tool-state${call.status === "failed" ? " tool-failed" : ""}`,
+              statusText,
+            ),
+          );
+          details.append(summary);
+          if (call.output) details.append(el("pre", "tool-output", call.output));
+          if (streamed) {
+            // A running call updates in place; keep one row per tool id.
+            details.dataset.toolId = call.tool_call_id;
+          }
+          return details;
+        }
+
+        function applyEvent(event) {
+          switch (event.type) {
+            case "turn_started":
+              startTurn(event.started_at);
+              break;
+            case "item_completed": {
+              const item = event.item;
+              const host = ensureTurn(event);
+              if (item.kind === "message") {
+                streaming = null;
+                host.append(messageEl(item));
+              } else if (item.kind === "tool_call") {
+                streaming = null;
+                host.append(toolEl(item.tool_call));
+              } else if (item.kind === "delegated") {
+                streaming = null;
+                const card = el("div", "guest-card");
+                card.append(el("div", "tag", "Subagent"));
+                card.append(el("p", "prose", item.task || "Delegated work"));
+                host.append(card);
+              }
+              break;
+            }
+            case "message_delta": {
+              const host = ensureTurn(event);
+              if (!streaming) {
+                streaming = el("p", "prose");
+                host.append(streaming);
+              }
+              streaming.textContent += event.text || "";
+              break;
+            }
+            case "tool_call": {
+              const host = ensureTurn(event);
+              const call = event.tool_call;
+              const existing = host.querySelector(
+                `[data-tool-id="${CSS.escape(call.tool_call_id)}"]`,
+              );
+              const node = toolEl(call, true);
+              if (existing) existing.replaceWith(node);
+              else host.append(node);
+              break;
+            }
+            case "plan": {
+              const host = ensureTurn(event);
+              const list = el("ol", "plan");
+              (event.entries || []).forEach((entry, index) => {
+                const item = el(
+                  "li",
+                  "",
+                  entry.title || entry.step || entry.text || `Step ${index + 1}`,
+                );
+                list.append(item);
+              });
+              host.append(list);
+              break;
+            }
+            case "approval_requested": {
+              const host = ensureTurn(event);
+              host.append(el("p", "waiting", "The owner needs to answer a question."));
+              break;
+            }
+            case "approval_resolved": {
+              const host = ensureTurn(event);
+              host.append(el("p", "quiet", "Answered by the owner."));
+              break;
+            }
+            case "turn_completed": {
+              const host = ensureTurn(event);
+              streaming = null;
+              const label =
+                event.status === "completed"
+                  ? "Turn finished"
+                  : event.status === "failed"
+                    ? "Turn failed"
+                    : `Turn ${event.status}`;
+              host.append(el("p", event.status === "failed" ? "error" : "quiet", label));
+              turn = null;
+              break;
+            }
+            case "error": {
+              const host = ensureTurn(event);
+              streaming = null;
+              host.append(el("p", "error", event.message || "Something went wrong."));
+              break;
+            }
+            case "guest_requested": {
+              const request = event.request;
+              if (!request) break;
+              const card = el("div", "guest-card");
+              card.append(el("div", "tag", "Your message · waiting for the owner"));
+              if (request.text) card.append(el("p", "prose", request.text));
+              if (request.attachments && request.attachments.length) {
+                const list = el("div", "attachments");
+                request.attachments.forEach((attachment) => {
+                  list.append(
+                    el("span", "attachment", `${attachment.name} · ${fmtSize(attachment.size)}`),
+                  );
+                });
+                card.append(list);
+              }
+              els.timeline.append(card);
+              break;
+            }
+            case "guest_request_resolved": {
+              const cards = els.timeline.querySelectorAll(".guest-card");
+              if (cards.length) cards[cards.length - 1].remove();
+              break;
+            }
+            default:
+              break;
+          }
+        }
+
+        function showNotice(title, body) {
+          els.noticeTitle.textContent = title;
+          els.noticeBody.textContent = body;
+          els.notice.hidden = false;
+        }
+
+        function setState(next, notice) {
+          state = next;
+          const active = next === "active";
+          els.composerWrap.hidden = !active;
+          if (!active) {
+            showNotice(
+              next === "expired"
+                ? "This link expired"
+                : next === "revoked"
+                  ? "Sharing stopped"
+                  : next === "unbound"
+                    ? "Open this link in the browser that first used it"
+                    : "Guest links are off",
+              notice || "Ask the owner for a new link.",
+            );
+          }
+        }
+
+        function merge(snapshot) {
+          if (snapshot.thread) {
+            threadModel = snapshot.thread.model || "";
+            threadTitle = snapshot.thread.title || "";
+            els.title.textContent = threadTitle;
+            els.model.textContent = threadModel || "Model";
+            els.provenance.replaceChildren();
+            if (snapshot.thread.harness) {
+              els.provenance.append(el("span", "", snapshot.thread.harness.replace(/_/g, " ")));
+              els.provenance.append(el("span", "q-sep", "·"));
+            }
+            els.provenance.append(el("span", "mono", threadModel || ""));
+            els.provenance.append(el("span", "q-sep", "·"));
+            els.provenance.append(el("span", "", "read-only"));
+          }
+          if (snapshot.state !== "active") {
+            setState(snapshot.state, snapshot.notice);
+            return;
+          }
+          setState("active");
+          const events = snapshot.events || [];
+          if (events.length) {
+            const empty = els.timeline.querySelector(".guest-empty");
+            if (empty) empty.remove();
+          }
+          events.forEach(applyEvent);
+          if (snapshot.next_seq && snapshot.next_seq > lastSeq) lastSeq = snapshot.next_seq;
+          if (els.timeline.children.length === 0) {
+            els.timeline.append(
+              el(
+                "p",
+                "quiet guest-empty",
+                "No messages yet. The thread will appear here as it runs.",
+              ),
+            );
+          }
+        }
+
+        async function poll() {
+          if (busy) return;
+          busy = true;
+          try {
+            const url = lastSeq ? `${base}/state/${lastSeq}` : `${base}/state`;
+            const response = await fetch(url, {
+              credentials: "same-origin",
+              cache: "no-store",
+              headers: { accept: "application/json" },
+            });
+            if (response.status === 410) {
+              setState("revoked", "The owner stopped sharing this thread.");
+              return;
+            }
+            if (!response.ok) throw new Error(await response.text());
+            merge(await response.json());
+            if (state === "active") window.setTimeout(poll, POLL_MS);
+          } catch (error) {
+            if (state === "active") {
+              showNotice(
+                "Waiting for the connection",
+                "This page keeps trying. If the message repeats, the machine may be offline.",
+              );
+              els.notice.hidden = true;
+              window.setTimeout(poll, POLL_MS * 2);
+            }
+          } finally {
+            busy = false;
+          }
+        }
+
+        function allowedImage(file) {
+          if (!file.type || !file.type.startsWith("image/")) return true;
+          return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type);
+        }
+
+        function renderFiles() {
+          els.files.replaceChildren();
+          files.forEach((entry, index) => {
+            const chip = el("span", "file");
+            chip.append(el("span", "", entry.name));
+            const remove = el("button", "", "×");
+            remove.type = "button";
+            remove.setAttribute("aria-label", `Remove ${entry.name}`);
+            remove.addEventListener("click", () => {
+              files.splice(index, 1);
+              renderFiles();
+            });
+            chip.append(remove);
+            els.files.append(chip);
+          });
+          els.send.disabled =
+            state !== "active" ||
+            (!els.message.value.trim() && files.length === 0) ||
+            els.composer.dataset.sending === "true";
+        }
+
+        async function addFiles(list) {
+          for (const file of Array.from(list || [])) {
+            if (files.length >= MAX_FILES) {
+              els.note.textContent = `A message holds at most ${MAX_FILES} files.`;
+              break;
+            }
+            if (!allowedImage(file)) {
+              els.note.textContent = "Images must be PNG, JPEG, GIF or WebP.";
+              continue;
+            }
+            const total = files.reduce((sum, entry) => sum + entry.size, 0) + file.size;
+            if (total > MAX_MESSAGE) {
+              els.note.textContent = "A message holds at most 10 MB of files.";
+              break;
+            }
+            const data = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ""));
+              reader.onerror = () => reject(reader.error);
+              reader.readAsDataURL(file);
+            });
+            files.push({
+              name: file.name,
+              mime: file.type || "application/octet-stream",
+              size: file.size,
+              data,
+            });
+          }
+          renderFiles();
+        }
+
+        els.fileInput.addEventListener("change", async (event) => {
+          await addFiles(event.target.files);
+          event.target.value = "";
+        });
+        els.message.addEventListener("input", renderFiles);
+        els.message.addEventListener("paste", (event) => {
+          const items = event.clipboardData && event.clipboardData.files;
+          if (items && items.length) {
+            event.preventDefault();
+            void addFiles(items);
+          }
+        });
+        els.composer.addEventListener("dragover", (event) => {
+          event.preventDefault();
+        });
+        els.composer.addEventListener("drop", (event) => {
+          event.preventDefault();
+          if (event.dataTransfer) void addFiles(event.dataTransfer.files);
+        });
+        els.message.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            els.composer.requestSubmit();
+          }
+        });
+
+        els.composer.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (state !== "active" || els.composer.dataset.sending === "true") return;
+          const text = els.message.value.trim();
+          if (!text && files.length === 0) return;
+          els.composer.dataset.sending = "true";
+          els.send.disabled = true;
+          els.note.textContent = "Sending to the owner…";
+          try {
+            const body = {
+              text,
+              attachments: files.map((entry) => ({
+                name: entry.name,
+                mime: entry.mime,
+                data: entry.data.includes(",") ? entry.data.slice(entry.data.indexOf(",") + 1) : entry.data,
+              })),
+            };
+            const response = await fetch(`${base}/messages`, {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            if (!response.ok) throw new Error(await response.text());
+            els.message.value = "";
+            files = [];
+            renderFiles();
+            els.note.textContent = "Waiting for the owner to send it.";
+          } catch (error) {
+            els.note.textContent =
+              error instanceof Error ? error.message : "The message could not be sent.";
+          } finally {
+            delete els.composer.dataset.sending;
+            renderFiles();
+          }
+        });
+
+        renderFiles();
+        void poll();
+      })();
+    </script>
+  </body>
+</html>

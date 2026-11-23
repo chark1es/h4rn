@@ -341,6 +341,7 @@ impl h4rn_transport::relay::RelayLink for ConnectRelayLink {
                     }
                     h4rn_protocol::RelayFrameKind::Ping => continue,
                     h4rn_protocol::RelayFrameKind::Open => continue,
+                    h4rn_protocol::RelayFrameKind::GuestHttp => continue,
                 },
                 h4rn_protocol::RelayServerEvent::Error { conn_id, .. }
                     if conn_id.as_deref().is_some_and(|id| id != self.conn_id) =>

@@ -237,6 +237,9 @@ impl DaemonBuilder {
                     .map_err(|error| anyhow::anyhow!("open event journal: {error}"))?,
             ),
         };
+        // Guest links share the journal database, so take its pool before the
+        // manager owns the trait object (ADR-044).
+        let guest_pool = journal.sql_pool().cloned();
 
         let mut inventory = HostInventory::detect(Arc::clone(&catalog));
         if let Some((id, name)) = self.local_host {
@@ -285,6 +288,17 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open CLIProxyAPI profiles: {error}"))?,
         );
         manager.set_proxy(Arc::clone(&proxy));
+
+        let guest = Arc::new(
+            crate::guest::GuestService::open(
+                &self.config.data_dir,
+                guest_pool.as_ref(),
+                Arc::clone(&manager),
+                Arc::clone(&blobs),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open guest links: {error}"))?,
+        );
 
         // Titles can come from an installed coding agent or a configured text
         // generator; the service decides per thread from its saved settings.
@@ -535,6 +549,7 @@ impl DaemonBuilder {
             meter,
             network_access_enabled,
             text_generation,
+            guest,
         })
     }
 }
@@ -566,6 +581,7 @@ pub struct Daemon {
     acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     projects: Arc<crate::projects::ProjectService>,
     text_generation: Arc<crate::text_generation::TextGenerationService>,
+    guest: Arc<crate::guest::GuestService>,
     /// The network-listener setting resolved at build time.
     network_access_enabled: bool,
 }
@@ -717,6 +733,7 @@ impl Daemon {
             acp_agents: Arc::clone(&self.acp_agents),
             projects: Arc::clone(&self.projects),
             text_generation: Arc::clone(&self.text_generation),
+            guest: Arc::clone(&self.guest),
         };
 
         // The network listener serves a restricted router: liveness and the
@@ -729,6 +746,23 @@ impl Daemon {
                 network_commands,
             )
             .await;
+
+        // A guest link without the relay names this machine directly. Prefer
+        // the LAN/tailnet listener, because loopback is useless to a guest;
+        // fall back to loopback only when no other address is known, and the
+        // docs say plainly that the guest needs a route to that address.
+        let guest_base = match network.snapshot().addresses.first() {
+            Some(address) => format!("http://{address}/guest"),
+            None => {
+                let address = addrs[0];
+                if address.ip().is_loopback() {
+                    format!("http://127.0.0.1:{}/guest", address.port())
+                } else {
+                    format!("http://{address}/guest")
+                }
+            }
+        };
+        self.guest.set_local_base(guest_base);
 
         let mut remote_tasks = Vec::new();
         // A failed peer admission retries on its own backoff timer instead of
@@ -788,6 +822,7 @@ impl Daemon {
             forge: self.forge,
             pr_links: self.pr_links,
             mcp: self.mcp,
+            guest: self.guest,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
             remote_tasks,
@@ -809,6 +844,7 @@ pub struct BoundDaemon {
     forge: Arc<ForgeService>,
     pr_links: Arc<crate::pr_links::PrLinkService>,
     mcp: Arc<McpService>,
+    guest: Arc<crate::guest::GuestService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
     remote_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -850,6 +886,16 @@ impl BoundDaemon {
         Arc::clone(&self.mcp)
     }
 
+    /// Guest links service for in-process tests and diagnostics.
+    pub fn guest(&self) -> Arc<crate::guest::GuestService> {
+        Arc::clone(&self.guest)
+    }
+
+    /// Data directory, for tests that inspect the durable journal.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     /// Serves until `shutdown` resolves, then interrupts turns and kills
     /// registered harness process groups (ADR-021).
     pub async fn serve(
@@ -868,6 +914,7 @@ impl BoundDaemon {
             forge,
             pr_links,
             mcp,
+            guest: _guest,
             supervisor,
             data_dir,
             remote_tasks,

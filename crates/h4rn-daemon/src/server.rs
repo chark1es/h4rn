@@ -22,10 +22,10 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::SEC_WEBSOCKET_PROTOCOL};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Router, serve};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use h4rn_protocol::{
@@ -106,6 +106,8 @@ pub struct AppState {
     pub projects: Arc<crate::projects::ProjectService>,
     /// Title generation: coding-agent CLI or a configured text generator.
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
+    /// Guest links and messages waiting for the owner (ADR-044).
+    pub guest: Arc<crate::guest::GuestService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -116,6 +118,7 @@ pub struct AppState {
 /// response instead of a 404, while plain WebSocket access stays loopback-only
 /// (ADR-009).
 pub fn router(state: AppState) -> Router {
+    let guest = guest_router();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
@@ -127,20 +130,48 @@ pub fn router(state: AppState) -> Router {
                 .post(mcp_http_post)
                 .delete(mcp_http_delete),
         )
+        .merge(guest)
         .with_state(state)
 }
 
-/// Router for the network listener: liveness plus the encrypted routes only.
+/// Router for the network listener: liveness, the encrypted routes and guest
+/// links.
 ///
 /// Plaintext `/ws` is deliberately absent, so a device on the LAN cannot open
 /// an unencrypted session even if it learns the access token. `/mcp` is absent
 /// too: the hub endpoint carries a bearer token and stays loopback-only.
+///
+/// Guest routes are the one unauthenticated surface on this listener. They
+/// carry their own bearer token, are rate-limited by nothing but the token, and
+/// never expose a thread to a browser that does not hold it.
 pub fn network_router(state: AppState) -> Router {
+    let guest = guest_router();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/secure", get(secure_handler))
         .route("/secure-mcp", get(secure_mcp_handler))
+        .merge(guest)
         .with_state(state)
+}
+
+/// Capacity of a guest message body, including base64 overhead.
+const GUEST_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Routes the guest page reads.
+///
+/// A message carries up to 10 MB of files, which is about 13.4 MB as base64 in
+/// JSON, so these routes raise axum's default body limit for themselves.
+fn guest_router() -> Router<AppState> {
+    Router::new()
+        .route("/guest/{token}", get(guest_page_handler))
+        .route("/guest/{token}/state", get(guest_state_handler))
+        .route(
+            "/guest/{token}/state/{since}",
+            get(guest_state_since_handler),
+        )
+        .route("/guest/{token}/messages", post(guest_message_handler))
+        .route("/guest/{token}/blob/{id}", get(guest_blob_handler))
+        .layer(DefaultBodyLimit::max(GUEST_BODY_LIMIT))
 }
 
 /// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
@@ -154,6 +185,157 @@ async fn mcp_http_get(State(state): State<AppState>) -> Response {
 
 async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
     crate::mcp::http_delete(state.mcp.http_state(), headers).await
+}
+
+// ---------------------------------------------------------------------------
+// Guest links (ADR-044)
+// ---------------------------------------------------------------------------
+
+/// The guest page for one link token.
+async fn guest_page_handler(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}"),
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// The guest snapshot, with history from the start.
+async fn guest_state_handler(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}/state"),
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// The guest snapshot after one sequence.
+async fn guest_state_since_handler(
+    State(state): State<AppState>,
+    Path((token, since)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}/state/{since}"),
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// One guest message with its files.
+async fn guest_message_handler(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    guest_exchange(
+        &state,
+        crate::guest::Method::Post,
+        format!("/guest/{token}/messages"),
+        &headers,
+        body.to_vec(),
+    )
+    .await
+}
+
+/// One attachment the thread shows.
+async fn guest_blob_handler(
+    State(state): State<AppState>,
+    Path((token, id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let suffix = if query.contains_key("thumbnail") {
+        "?thumbnail=1"
+    } else {
+        ""
+    };
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}/blob/{id}{suffix}"),
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Runs one exchange through the guest surface and renders its answer.
+pub(crate) async fn guest_exchange(
+    state: &AppState,
+    method: crate::guest::Method,
+    path: String,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+) -> Response {
+    let cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(guest_cookie);
+    let output = state
+        .guest
+        .handle(crate::guest::GuestHttpInput {
+            method,
+            path,
+            cookie,
+            body,
+        })
+        .await;
+    guest_output(output)
+}
+
+/// Extracts the guest cookie from a `Cookie` header.
+pub(crate) fn guest_cookie(header: &str) -> Option<String> {
+    header.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == h4rn_protocol::GUEST_COOKIE).then(|| value.to_owned())
+    })
+}
+
+/// Turns a guest answer into an HTTP response.
+pub(crate) fn guest_output(output: crate::guest::GuestHttpOutput) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(output.content_type),
+    );
+    for (name, value) in output.headers {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(name),
+            axum::http::HeaderValue::try_from(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+    if let Some(cookie) = output.set_cookie
+        && let Ok(value) = axum::http::HeaderValue::try_from(cookie)
+    {
+        headers.insert(axum::http::header::SET_COOKIE, value);
+    }
+    (
+        StatusCode::from_u16(output.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        headers,
+        output.body,
+    )
+        .into_response()
 }
 
 /// Owner half of cross-machine MCP sharing (ADR-006).
@@ -967,13 +1149,23 @@ impl Connection {
                     thread_id,
                     tab,
                     pinned,
-                } => self
-                    .state
-                    .manager
-                    .set_thread_tab(&thread_id, tab, pinned)
-                    .await
-                    .map(|_| ResponseBody::Ack)
-                    .map_err(crate::threads::ManagerError::into_proto),
+                } => {
+                    let result = self
+                        .state
+                        .manager
+                        .set_thread_tab(&thread_id, tab, pinned)
+                        .await
+                        .map(|_| ResponseBody::Ack)
+                        .map_err(crate::threads::ManagerError::into_proto);
+                    // Settling is h4rn's archive: the guest link ends and its
+                    // waiting files go with it (ADR-044).
+                    if result.is_ok() && tab == h4rn_protocol::ThreadTab::Settled {
+                        if let Err(error) = self.state.guest.thread_settled(&thread_id).await {
+                            tracing::warn!(%error, thread = %thread_id.as_ref(), "could not end the guest link on settle");
+                        }
+                    }
+                    result
+                }
                 ClientRequest::SetThreadRuntimeMode { thread_id, mode } => self
                     .state
                     .manager
@@ -2025,6 +2217,7 @@ mod tests {
             context_window: None,
             context_fill_percent: None,
             needs_attention: false,
+            pending_guest_requests: 0,
             unread: false,
             resume_at: None,
             limit: None,
