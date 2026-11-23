@@ -1162,7 +1162,17 @@ async function runThreadAction(
   label: string,
   body: Extract<
     ClientRequest,
-    { type: "set_thread_tab" | "snooze" | "interrupt" | "rename_thread" }
+    {
+      type:
+        | "set_thread_tab"
+        | "set_thread_runtime_mode"
+        | "set_thread_model"
+        | "set_thread_reasoning_effort"
+        | "set_thread_fast"
+        | "snooze"
+        | "interrupt"
+        | "rename_thread";
+    }
   >,
 ): Promise<boolean> {
   const placement = body.type === "set_thread_tab" && isPlacementMove(body.tab);
@@ -1251,6 +1261,48 @@ export async function snoozeThread(threadId: ThreadId, until: string | null): Pr
 
 export async function interruptThread(threadId: ThreadId): Promise<void> {
   await runThreadAction(threadId, "Interrupting", { type: "interrupt", thread_id: threadId });
+}
+
+/** Changes a thread's permission mode; the daemon applies it in place or next turn. */
+export async function setThreadRuntimeMode(
+  threadId: ThreadId,
+  mode: RuntimeMode,
+): Promise<boolean> {
+  return runThreadAction(threadId, "Changing the mode", {
+    type: "set_thread_runtime_mode",
+    thread_id: threadId,
+    mode,
+  });
+}
+
+/** Changes a thread's model; the conversation is kept. */
+export async function setThreadModel(threadId: ThreadId, model: string): Promise<boolean> {
+  return runThreadAction(threadId, "Changing the model", {
+    type: "set_thread_model",
+    thread_id: threadId,
+    model,
+  });
+}
+
+/** Changes a thread's reasoning effort; `null` returns to the harness default. */
+export async function setThreadReasoningEffort(
+  threadId: ThreadId,
+  effort: string | null,
+): Promise<boolean> {
+  return runThreadAction(threadId, "Changing the effort", {
+    type: "set_thread_reasoning_effort",
+    thread_id: threadId,
+    effort,
+  });
+}
+
+/** Turns a thread's fast tier on or off. */
+export async function setThreadFast(threadId: ThreadId, fast: boolean): Promise<boolean> {
+  return runThreadAction(threadId, fast ? "Turning on fast mode" : "Turning off fast mode", {
+    type: "set_thread_fast",
+    thread_id: threadId,
+    fast,
+  });
 }
 
 /** Renames a thread by hand. The daemon never replaces a name you typed. */
@@ -1417,6 +1469,10 @@ export type CreateThreadInput = {
   prompt: string;
   attachments?: Attachment[];
   runtimeMode?: RuntimeMode;
+  /** Reasoning effort in the harness's vocabulary, when it has one. */
+  reasoningEffort?: string | null;
+  /** Ask for a harness's fast tier (Codex). */
+  fast?: boolean;
   worktree?: WorktreeRequest | null;
 };
 
@@ -1475,6 +1531,11 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     title,
     workspace_path: input.workspacePath,
     model: input.model,
+    runtime_mode: input.runtimeMode ?? "approval_required",
+    reasoning_efforts: [],
+    models: [],
+    ...(input.reasoningEffort ? { reasoning_effort: input.reasoningEffort } : {}),
+    fast: input.fast ?? false,
     tab: "working",
     placed_by_user: false,
     pinned: false,
@@ -1518,6 +1579,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       prompt: input.prompt,
       attachments: (input.attachments ?? []).map((attachment) => attachment.id),
       runtime_mode: input.runtimeMode ?? "approval_required",
+      reasoning_effort: input.reasoningEffort ?? null,
+      fast: input.fast ?? false,
       worktree: input.worktree ?? null,
     });
     if (response.type === "thread_created") {

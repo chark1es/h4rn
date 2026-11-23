@@ -159,6 +159,8 @@ async fn a_settled_subagent_worktree_is_listed_and_cleared_over_the_wire() {
             prompt: "parent thread".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -322,6 +324,8 @@ async fn clearing_a_worktree_while_its_child_still_works_skips_it() {
             prompt: "parent thread".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
@@ -497,6 +501,8 @@ async fn a_thread_in_a_linked_checkout_of_a_bare_repository_is_tracked_and_its_s
             prompt: "parent thread".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

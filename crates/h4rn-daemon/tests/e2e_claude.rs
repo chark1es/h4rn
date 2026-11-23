@@ -171,6 +171,8 @@ async fn real_claude_daemon_round_trip_and_resume() {
             prompt: PROMPT.into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

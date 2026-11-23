@@ -30,6 +30,10 @@ after: string | null,
  */
 binary: boolean, 
 /**
+ * True when a side is over the read limit and was not loaded.
+ */
+too_large: boolean, 
+/**
  * Why one side is missing, when that is not self-evident.
  */
 note: string | null, };

@@ -158,6 +158,22 @@ pub struct FakeHarness {
     completion_gate_first_send: bool,
     /// A test-only count of sessions this harness has started.
     session_count: Option<SessionCount>,
+    /// The settings each session started with, and every live switch applied.
+    session_settings: Option<SessionSettings>,
+    /// Model ids the fake session advertises, when a test asks for a catalogue.
+    advertised_models: Option<Vec<String>>,
+    /// The model a session reports it is running, when a test models an agent
+    /// that restored its own model on resume.
+    restored_model: Option<String>,
+    /// Model ids that mean the agent's own default to the fake session.
+    default_models: Vec<String>,
+    /// Effects each model offers, so a model switch changes the catalogue.
+    model_efforts: Option<BTreeMap<String, Vec<String>>>,
+    /// A configured ACP agent id this fake harness accepts, when a test creates
+    /// an ACP thread.
+    instance: Option<String>,
+    /// Whether a live session accepts in-place setting changes.
+    switchable: bool,
     /// A test-only count of sessions this harness shut down.
     shutdown_count: Option<ShutdownCount>,
     /// A test-only switch: prompts after the first `n` fail as a dead transport.
@@ -335,6 +351,54 @@ impl SessionModels {
     }
 }
 
+/// One setting change a fake thread went through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettingChange {
+    /// A session started with these thread settings.
+    Started {
+        /// Model the session was started on.
+        model: String,
+        /// Permission mode the session was started on.
+        runtime_mode: h4rn_protocol::RuntimeMode,
+        /// Reasoning effort the session was started on.
+        reasoning_effort: Option<String>,
+        /// Whether the session was asked for the fast tier.
+        fast: bool,
+    },
+    /// The live session was switched to a permission mode.
+    Mode(h4rn_protocol::RuntimeMode),
+    /// The live session was switched to a model.
+    Model(String),
+    /// The live session was switched to an effort (`None` is the default).
+    Effort(Option<String>),
+    /// The live session was switched on (or off) the fast tier.
+    Fast(bool),
+}
+
+/// Every setting a fake thread started with, and every live switch it applied.
+///
+/// A test reads this to prove whether a change reached the live session or was
+/// kept for the next start.
+#[derive(Clone, Debug, Default)]
+pub struct SessionSettings(Arc<Mutex<Vec<SettingChange>>>);
+
+impl SessionSettings {
+    /// Every recorded change, in the order the fake saw it.
+    pub fn get(&self) -> Vec<SettingChange> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn note(&self, change: SettingChange) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(change);
+    }
+}
+
 /// A shared count of cancels a fake session was asked to send.
 ///
 /// A test reads it to prove a Stop either dropped the prompt or cancelled one
@@ -440,6 +504,13 @@ impl Default for FakeHarness {
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
+            session_settings: None,
+            advertised_models: None,
+            restored_model: None,
+            default_models: Vec::new(),
+            model_efforts: None,
+            instance: None,
+            switchable: true,
             completion_gate: None,
             completion_gate_first_send: true,
             session_count: None,
@@ -607,6 +678,76 @@ impl FakeHarness {
         let models = SessionModels::default();
         self.session_models = Some(models.clone());
         (self, models)
+    }
+
+    /// Records each session's starting settings and every live switch it
+    /// applies.
+    pub fn with_session_settings(mut self) -> (Self, SessionSettings) {
+        let settings = SessionSettings::default();
+        self.session_settings = Some(settings.clone());
+        (self, settings)
+    }
+
+    /// A live session that refuses in-place setting changes.
+    ///
+    /// The daemon must then keep the change for the next session start, which
+    /// the settings log proves.
+    pub fn with_unswitchable_settings(mut self) -> Self {
+        self.switchable = false;
+        self
+    }
+
+    /// Advertises a model catalogue from every fake session.
+    ///
+    /// A test uses this to prove the daemon validates a model change against
+    /// what the live session actually offers.
+    pub fn with_advertised_models(mut self, models: impl IntoIterator<Item = String>) -> Self {
+        self.advertised_models = Some(models.into_iter().collect());
+        self
+    }
+
+    /// Treats `alias` as the agent's own default model.
+    ///
+    /// A test uses this to prove a non-model change on a thread created on the
+    /// alias is not refused as an unknown model. An ACP or Antigravity fake
+    /// also answers an in-place switch to the alias with
+    /// [`HarnessError::Deferred`], the way the real adapters do: only a fresh
+    /// session can start on the agent's default.
+    pub fn with_default_model(mut self, alias: impl Into<String>) -> Self {
+        self.default_models.push(alias.into());
+        self
+    }
+
+    /// Reports `model` as the one every session is running.
+    ///
+    /// A resumed agent keeps the model the conversation was using, which may
+    /// not be the id the thread asked for. A test uses this to prove the daemon
+    /// shows what the session really runs instead of the stale request.
+    pub fn with_restored_model(mut self, model: impl Into<String>) -> Self {
+        self.restored_model = Some(model.into());
+        self
+    }
+
+    /// Gives each model its own reasoning-effort catalogue.
+    ///
+    /// The fake advertises these model ids, and a live model switch changes the
+    /// efforts the session reports, so a test can prove the summary
+    /// re-advertises them.
+    pub fn with_model_efforts(
+        mut self,
+        efforts: impl IntoIterator<Item = (String, Vec<String>)>,
+    ) -> Self {
+        self.model_efforts = Some(efforts.into_iter().collect());
+        self
+    }
+
+    /// Accepts `id` as a configured ACP agent.
+    ///
+    /// The daemon refuses an ACP thread that names no configured instance, so a
+    /// test that creates one against this fake asks for this id.
+    pub fn with_instance(mut self, id: impl Into<String>) -> Self {
+        self.instance = Some(id.into());
+        self
     }
 
     /// Ends the session's event stream once the returned gate is released.
@@ -793,6 +934,10 @@ impl Harness for FakeHarness {
         self.install.clone()
     }
 
+    fn has_instance(&self, instance: &str) -> bool {
+        self.instance.as_deref() == Some(instance)
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -809,6 +954,14 @@ impl Harness for FakeHarness {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(spec.model.clone());
+        }
+        if let Some(settings) = &self.session_settings {
+            settings.note(SettingChange::Started {
+                model: spec.model.clone(),
+                runtime_mode: spec.runtime_mode,
+                reasoning_effort: spec.reasoning_effort.clone(),
+                fast: spec.fast,
+            });
         }
         let starts_seen = self.starts_seen.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = &self.start_gate
@@ -886,6 +1039,13 @@ impl Harness for FakeHarness {
             receiver: Some(receiver),
             script: self.script.clone(),
             session_scripts,
+            settings: self.session_settings.clone(),
+            advertised_models: self.advertised_models.clone(),
+            restored_model: self.restored_model.clone(),
+            default_models: self.default_models.clone(),
+            model_efforts: self.model_efforts.clone(),
+            current_model: spec.model.clone(),
+            switchable: self.switchable,
             primed,
             delay,
             send_gate: self.send_gate.clone(),
@@ -924,6 +1084,20 @@ pub struct FakeSession {
     receiver: Option<BoxStream<'static, HarnessEvent>>,
     script: Option<Vec<HarnessEvent>>,
     session_scripts: Option<Arc<SessionScripts>>,
+    /// Where setting changes are recorded, when a test asked for them.
+    settings: Option<SessionSettings>,
+    /// Model ids this session advertises, when a test asked for a catalogue.
+    advertised_models: Option<Vec<String>>,
+    /// The model the agent restored on resume, when a test asked for one.
+    restored_model: Option<String>,
+    /// Model ids that mean the agent's own default to this session.
+    default_models: Vec<String>,
+    /// Efforts each model offers, when a test asked for per-model catalogues.
+    model_efforts: Option<BTreeMap<String, Vec<String>>>,
+    /// The model this session runs, so its effort catalogue can follow it.
+    current_model: String,
+    /// Whether this session accepts in-place setting changes.
+    switchable: bool,
     /// The daemon's first `send` is the input that started the scripted turn.
     primed: bool,
     /// Env-gated pause before an echo turn, for cancel-flow e2e tests.
@@ -979,6 +1153,41 @@ pub struct FakeSession {
 
 #[async_trait]
 impl HarnessSession for FakeSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    fn controls(&self) -> Option<crate::SessionControls> {
+        // The fake advertises its harness kind's catalogue, so a test can ask
+        // for the same modes, efforts and fast tier the real adapter offers.
+        // It switches all of them in place unless the test asked otherwise.
+        let base = crate::thread_controls(self.kind);
+        let models = self.advertised_models.clone().or_else(|| {
+            self.model_efforts
+                .as_ref()
+                .map(|efforts| efforts.keys().cloned().collect())
+        });
+        let efforts = self
+            .model_efforts
+            .as_ref()
+            .and_then(|efforts| efforts.get(&self.current_model).cloned())
+            .unwrap_or(base.efforts);
+        Some(crate::SessionControls {
+            modes: base.modes,
+            models,
+            // The fake runs the model it was started with; a test can ask for
+            // an agent-restored one to model a resumed session.
+            current_model: self.restored_model.clone(),
+            default_models: self.default_models.clone(),
+            efforts,
+            fast: base.fast,
+            switch_mode: self.switchable,
+            switch_model: self.switchable,
+            switch_effort: self.switchable,
+            switch_fast: self.switchable,
+        })
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed {
             return Err(HarnessError::Transport {
@@ -1330,6 +1539,77 @@ impl HarnessSession for FakeSession {
         Ok(())
     }
 
+    async fn set_runtime_mode(
+        &mut self,
+        mode: h4rn_protocol::RuntimeMode,
+    ) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching the permission mode on a live session".into(),
+            });
+        }
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Mode(mode));
+        }
+        Ok(())
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching the model on a live session".into(),
+            });
+        }
+        // An ACP agent cannot go back to its own default alias in place (there
+        // is no "reset to default" method), but a fresh session starts on that
+        // default. The fake answers the same way so a daemon test exercises the
+        // deferral the real adapter produces.
+        if matches!(self.kind, HarnessKind::Acp | HarnessKind::Antigravity)
+            && self
+                .default_models
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(model))
+        {
+            return Err(HarnessError::Deferred {
+                harness: self.kind,
+                feature: "the agent's default model".into(),
+            });
+        }
+        self.current_model = model.to_string();
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Model(model.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn set_reasoning_effort(&mut self, effort: Option<&str>) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching reasoning effort on a live session".into(),
+            });
+        }
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Effort(effort.map(str::to_string)));
+        }
+        Ok(())
+    }
+
+    async fn set_fast(&mut self, fast: bool) -> Result<(), HarnessError> {
+        if !self.switchable {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "switching the fast tier on a live session".into(),
+            });
+        }
+        if let Some(settings) = &self.settings {
+            settings.note(SettingChange::Fast(fast));
+        }
+        Ok(())
+    }
+
     fn stderr_tail(&self) -> String {
         self.stderr.clone()
     }
@@ -1389,6 +1669,8 @@ pub fn test_spec() -> SessionSpec {
         workspace: PathBuf::from("/tmp/h4rn-workspace"),
         model: "test-model".into(),
         runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+        reasoning_effort: None,
+        fast: false,
         resume_id: None,
         mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
         env_overrides: BTreeMap::new(),

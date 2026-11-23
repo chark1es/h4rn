@@ -46,7 +46,7 @@
 //! child is spawned into its own process group so `Bash` tools die with it
 //! (ADR-021).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -71,7 +71,10 @@ mod protocol;
 
 pub use limit::{LimitSignal, detect_limit, parse_reset_time};
 pub use process::StderrRing;
-pub use protocol::{ClaudeStreamParser, TurnReport, state_for_tool, tool_paths, tool_summary};
+pub use protocol::{
+    ClaudeStreamParser, ControlReply, TurnReport, parse_control_response, state_for_tool,
+    tool_paths, tool_summary,
+};
 
 use process::{GroupSignal, signal_group};
 
@@ -103,6 +106,12 @@ const EVENT_CHANNEL_CAPACITY: usize = 512;
 const STDIN_CHANNEL_CAPACITY: usize = 64;
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a control request may take before the CLI is treated as mute.
+///
+/// A refused switch is reported by the CLI in a `control_response`; waiting
+/// forever would hang the request that asked for it, and assuming success
+/// would report a setting the session never took.
+const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Environment variables a nested Claude Code must not inherit.
 ///
@@ -211,26 +220,10 @@ impl Harness for ClaudeCodeHarness {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        if !spec.model.trim().is_empty() && spec.model != "default" {
-            command.args(["--model", spec.model.trim()]);
-        }
-        if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
-            command.args(["--resume", resume_id]);
-        }
-        if let Some(config) = &mcp_config {
-            command.arg("--mcp-config").arg(config.path());
-            command.arg("--strict-mcp-config");
-        }
-        if let Some(mode) = permission_mode(&spec.env_overrides, spec.runtime_mode) {
-            command.args(["--permission-mode", &mode]);
-        }
-        if let Some(tool) = spec
-            .env_overrides
-            .get(ENV_PERMISSION_PROMPT_TOOL)
-            .filter(|tool| !tool.trim().is_empty())
-        {
-            command.args(["--permission-prompt-tool", tool.trim()]);
-        }
+        command.args(session_args(
+            &spec,
+            mcp_config.as_ref().map(|config| config.path()),
+        ));
 
         for key in SCRUBBED_ENV {
             command.env_remove(key);
@@ -310,6 +303,7 @@ impl Harness for ClaudeCodeHarness {
             first_send: true,
             closed: false,
             control_seq: 0,
+            fixed_permission_mode: spec.env_overrides.contains_key(ENV_PERMISSION_MODE),
         }))
     }
 }
@@ -333,6 +327,9 @@ pub struct ClaudeCodeSession {
     first_send: bool,
     closed: bool,
     control_seq: u64,
+    /// The mode is pinned by an explicit environment override, so the thread
+    /// control cannot change it.
+    fixed_permission_mode: bool,
 }
 
 /// State the session exposes from the parser running on the stdout task.
@@ -344,6 +341,17 @@ struct SharedState {
     state: AgentState,
     last_turn: Option<TurnReport>,
     touched_paths: Vec<String>,
+    /// Control requests waiting for the CLI's `control_response`.
+    ///
+    /// The stdout task resolves one on the parsed frame; a request that is
+    /// never answered times out in [`ClaudeCodeSession::send_control_request`].
+    pending_controls: HashMap<String, tokio::sync::oneshot::Sender<ControlReply>>,
+    /// Whether the stdout reader has ended, so no reply can ever arrive.
+    ///
+    /// Set and read under the same lock as `pending_controls`: a request that
+    /// arrives after the CLI is gone fails at once instead of waiting out its
+    /// timeout.
+    control_closed: bool,
 }
 
 impl SharedState {
@@ -355,6 +363,8 @@ impl SharedState {
             state: AgentState::Idle,
             last_turn: None,
             touched_paths: Vec::new(),
+            pending_controls: HashMap::new(),
+            control_closed: false,
         }
     }
 }
@@ -426,10 +436,93 @@ impl ClaudeCodeSession {
         self.control_seq = self.control_seq.wrapping_add(1);
         format!("h4rn-{}", self.control_seq)
     }
+
+    /// Sends one `control_request` and waits for the CLI's answer.
+    ///
+    /// Claude Code replies with a `control_response` carrying the same
+    /// `request_id`: a `success` means the CLI applied the switch, an `error`
+    /// carries its own refusal message (for example a model the provider does
+    /// not know). Reporting a setting the CLI refused would put a value in the
+    /// thread summary the next turn never uses, so the refusal is returned as
+    /// [`HarnessError::Unsupported`] and a CLI that does not answer in
+    /// [`CONTROL_TIMEOUT`] is a transport failure.
+    async fn send_control_request(
+        &mut self,
+        request: serde_json::Value,
+    ) -> Result<(), HarnessError> {
+        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: "session is shut down".into(),
+            });
+        }
+        let request_id = self.next_request_id();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut state = lock(&self.shared);
+            if state.control_closed {
+                // The CLI's stdout already ended, so nothing will ever answer.
+                // Failing here is the same answer every other waiting request
+                // gets when the reader notices the end.
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: "claude closed before answering a control request".into(),
+                });
+            }
+            state.pending_controls.insert(request_id.clone(), reply_tx);
+        }
+        let frame = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": request,
+        });
+        let bytes = match encode_frame(&frame) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                lock(&self.shared).pending_controls.remove(&request_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.write_frame(bytes).await {
+            lock(&self.shared).pending_controls.remove(&request_id);
+            return Err(error);
+        }
+
+        let reply = match tokio::time::timeout(CONTROL_TIMEOUT, reply_rx).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => {
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: "claude closed before answering a control request".into(),
+                });
+            }
+            Err(_) => {
+                lock(&self.shared).pending_controls.remove(&request_id);
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: format!(
+                        "claude did not answer a control request within {}s",
+                        CONTROL_TIMEOUT.as_secs()
+                    ),
+                });
+            }
+        };
+        match reply.error {
+            None => Ok(()),
+            Some(message) => Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: message,
+            }),
+        }
+    }
 }
 
 #[async_trait]
 impl HarnessSession for ClaudeCodeSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {
@@ -526,6 +619,41 @@ impl HarnessSession for ClaudeCodeSession {
         ClaudeCodeSession::stderr_tail(self)
     }
 
+    async fn set_runtime_mode(&mut self, mode: RuntimeMode) -> Result<(), HarnessError> {
+        if self.fixed_permission_mode {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: format!(
+                    "changing the permission mode; {ENV_PERMISSION_MODE} pins it for this thread"
+                ),
+            });
+        }
+        self.send_control_request(json!({
+            "subtype": "set_permission_mode",
+            "mode": mode_for_runtime(mode),
+        }))
+        .await
+    }
+
+    async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "an empty model".into(),
+            });
+        }
+        // `default` is the CLI's own alias and really switches back to the
+        // model the CLI would pick (verified against 2.1.329: the reply names
+        // the resulting model). Skipping the request would leave the live
+        // session on the old model while the summary claimed the default.
+        self.send_control_request(json!({
+            "subtype": "set_model",
+            "model": model,
+        }))
+        .await
+    }
+
     async fn shutdown(&mut self) -> Result<(), HarnessError> {
         if self.closed {
             return Ok(());
@@ -586,10 +714,10 @@ fn spawn_stdout_reader(
     tokio::spawn(async move {
         let mut parser = ClaudeStreamParser::new();
         let mut lines = BufReader::new(stdout).lines();
-        loop {
+        'read: loop {
             let line = match lines.next_line().await {
                 Ok(Some(line)) => line,
-                Ok(None) => break,
+                Ok(None) => break 'read,
                 Err(error) => {
                     let _ = events_tx
                         .send(HarnessEvent::Error {
@@ -597,11 +725,18 @@ fn spawn_stdout_reader(
                             retryable: false,
                         })
                         .await;
-                    break;
+                    break 'read;
                 }
             };
 
             let mut events = parser.push_line(&line);
+            // A control reply is not a turn event; it answers the request that
+            // is waiting in `send_control_request`.
+            if let Some(reply) = parse_control_response(&line)
+                && let Some(sender) = lock(&shared).pending_controls.remove(&reply.request_id)
+            {
+                let _ = sender.send(reply);
+            }
             {
                 let mut state = lock(&shared);
                 state.session_id = parser.session_id().map(str::to_string);
@@ -627,9 +762,20 @@ fn spawn_stdout_reader(
 
             for event in events {
                 if events_tx.send(event).await.is_err() {
-                    return;
+                    // Nobody is left to carry these events, but the control
+                    // waiters still need the end reported.
+                    break 'read;
                 }
             }
+        }
+
+        // The CLI is gone (stdout ended or the read failed): every control
+        // request still waiting can never be answered. Dropping their senders
+        // fails them all at once instead of leaving each to its timeout.
+        {
+            let mut state = lock(&shared);
+            state.control_closed = true;
+            state.pending_controls.clear();
         }
     })
 }
@@ -784,6 +930,49 @@ fn encode_frame(frame: &serde_json::Value) -> Result<Vec<u8>, HarnessError> {
     Ok(bytes)
 }
 
+/// The optional CLI arguments one thread's Claude Code session is started with.
+///
+/// Kept separate from the spawn so a test can prove the real flag each thread
+/// setting turns into.
+fn session_args(spec: &SessionSpec, mcp_config: Option<&Path>) -> Vec<String> {
+    let mut args = Vec::new();
+    if !spec.model.trim().is_empty() && spec.model != "default" {
+        args.push("--model".into());
+        args.push(spec.model.trim().to_string());
+    }
+    if let Some(effort) = spec
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+    {
+        args.push("--effort".into());
+        args.push(effort.to_string());
+    }
+    if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
+        args.push("--resume".into());
+        args.push(resume_id.to_string());
+    }
+    if let Some(config) = mcp_config {
+        args.push("--mcp-config".into());
+        args.push(config.display().to_string());
+        args.push("--strict-mcp-config".into());
+    }
+    if let Some(mode) = permission_mode(&spec.env_overrides, spec.runtime_mode) {
+        args.push("--permission-mode".into());
+        args.push(mode);
+    }
+    if let Some(tool) = spec
+        .env_overrides
+        .get(ENV_PERMISSION_PROMPT_TOOL)
+        .filter(|tool| !tool.trim().is_empty())
+    {
+        args.push("--permission-prompt-tool".into());
+        args.push(tool.trim().to_string());
+    }
+    args
+}
+
 fn permission_mode(env: &BTreeMap<String, String>, runtime_mode: RuntimeMode) -> Option<String> {
     let requested = match env.get(ENV_PERMISSION_MODE) {
         Some(requested) => requested,
@@ -800,6 +989,7 @@ fn mode_for_runtime(runtime_mode: RuntimeMode) -> &'static str {
     match runtime_mode {
         RuntimeMode::ApprovalRequired => "default",
         RuntimeMode::AutoAcceptEdits => "acceptEdits",
+        RuntimeMode::Plan => "plan",
         RuntimeMode::FullAccess => "bypassPermissions",
     }
 }
@@ -1091,5 +1281,180 @@ mod tests {
             permission_mode(&env, RuntimeMode::FullAccess).as_deref(),
             Some("bypassPermissions")
         );
+        assert_eq!(
+            permission_mode(&env, RuntimeMode::Plan).as_deref(),
+            Some("plan")
+        );
+    }
+
+    fn spec(workspace: &Path) -> SessionSpec {
+        SessionSpec {
+            workspace: workspace.to_path_buf(),
+            model: "claude-sonnet-5-5".into(),
+            runtime_mode: RuntimeMode::Plan,
+            reasoning_effort: Some("xhigh".into()),
+            fast: false,
+            resume_id: Some("sess-1".into()),
+            mcp_endpoint: None,
+            env_overrides: BTreeMap::new(),
+            attachments: Vec::new(),
+            agent_id: None,
+        }
+    }
+
+    #[test]
+    fn a_thread_starts_claude_with_its_model_effort_and_plan_mode() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let args = session_args(&spec(workspace.path()), None);
+        let pair = |flag: &str| {
+            args.iter()
+                .position(|arg| arg == flag)
+                .and_then(|index| args.get(index + 1))
+                .map(String::as_str)
+        };
+        assert_eq!(pair("--model"), Some("claude-sonnet-5-5"));
+        assert_eq!(pair("--effort"), Some("xhigh"));
+        assert_eq!(pair("--permission-mode"), Some("plan"));
+        assert_eq!(pair("--resume"), Some("sess-1"));
+    }
+
+    #[test]
+    fn a_default_model_and_effort_add_no_empty_flags() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut spec = spec(workspace.path());
+        spec.model = "default".into();
+        spec.reasoning_effort = None;
+        let args = session_args(&spec, None);
+        assert!(!args.iter().any(|arg| arg == "--model"));
+        assert!(!args.iter().any(|arg| arg == "--effort"));
+    }
+
+    /// A fake CLI that logs every frame it receives and answers a control
+    /// request with `reply`.
+    #[cfg(unix)]
+    fn fake_cli(directory: &Path, reply: &str) -> (HarnessInstall, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let log = directory.join("control.log");
+        let path = directory.join("claude");
+        let script = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$H4RN_TEST_CONTROL_LOG"
+  case "$line" in
+    *'"type":"control_request"'*)
+      rid=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+{r}
+      ;;
+  esac
+done
+"#,
+            r = reply
+        );
+        std::fs::write(&path, script).expect("write the fake cli");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (
+            HarnessInstall {
+                path,
+                version: "2.1.329".into(),
+            },
+            log,
+        )
+    }
+
+    #[cfg(unix)]
+    fn control_log(log: &Path) -> Vec<serde_json::Value> {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|value: &serde_json::Value| value["type"] == "control_request")
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_model_switch_is_an_error_with_the_cli_message() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (install, log) = fake_cli(
+            workspace.path(),
+            "      printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"%s\",\"error\":\"API error: 400 unknown provider for model nope \\u00b7 model not changed\",\"error_code\":\"check_rejected\"}}\\n' \"$rid\"",
+        );
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        let error = session
+            .set_model("nope")
+            .await
+            .expect_err("a refused switch is not success");
+        match error {
+            HarnessError::Unsupported { feature, .. } => {
+                assert!(
+                    feature.contains("model not changed"),
+                    "the CLI's own message is reported: {feature}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        let requests = control_log(&log);
+        assert_eq!(requests.len(), 1, "the switch was really sent");
+        assert_eq!(requests[0]["request"]["subtype"], "set_model");
+        assert_eq!(requests[0]["request"]["model"], "nope");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_that_exits_mid_request_fails_the_control_at_once() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // The fake logs the request and exits without answering it.
+        let (install, log) = fake_cli(workspace.path(), "      exit 0");
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(2), session.set_model("m2"))
+                .await
+                .expect("the request must not wait out its 10s timeout")
+                .expect_err("a CLI that exited cannot apply the switch");
+        match error {
+            HarnessError::Transport { message, .. } => assert!(
+                message.contains("closed before answering"),
+                "the failure explains the exit: {message}"
+            ),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        assert_eq!(control_log(&log).len(), 1, "the switch was really sent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_default_model_switch_is_really_sent_to_the_cli() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (install, log) = fake_cli(
+            workspace.path(),
+            "      printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"model\":\"claude-opus-5-5\"}}}\\n' \"$rid\"",
+        );
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        session
+            .set_model("default")
+            .await
+            .expect("the CLI's default is a real switch");
+        let requests = control_log(&log);
+        assert_eq!(requests.len(), 1, "default was not treated as a no-op");
+        assert_eq!(requests[0]["request"]["subtype"], "set_model");
+        assert_eq!(requests[0]["request"]["model"], "default");
+        session.shutdown().await.expect("shutdown");
     }
 }

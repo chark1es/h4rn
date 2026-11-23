@@ -34,10 +34,11 @@ pure views over a single Rust daemon and one typed WebSocket protocol.
 | `deploy/` | `h4rn-connect` container image and compose file. |
 
 Architecture decisions live in [docs/decisions.md](docs/decisions.md); product intent is in
-[PRODUCT.md](PRODUCT.md) and the design system in [DESIGN.md](DESIGN.md). Packaging and the
-tag-driven release process are in [docs/release.md](docs/release.md); relay deployment is in
-[docs/self-hosting.md](docs/self-hosting.md). Thread titles written by a model are described in
-[docs/text-generation.md](docs/text-generation.md).
+[PRODUCT.md](PRODUCT.md) and the design system in [DESIGN.md](DESIGN.md). Diff review scopes and
+line comments are in [docs/diffs.md](docs/diffs.md); thread titles written by a model are described
+in [docs/text-generation.md](docs/text-generation.md). Packaging and the tag-driven release process
+are in [docs/release.md](docs/release.md); relay deployment is in
+[docs/self-hosting.md](docs/self-hosting.md).
 
 ## Known limits
 

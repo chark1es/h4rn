@@ -1,5 +1,5 @@
 import { CircleCheckIcon, KeyRoundIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
@@ -665,7 +665,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
 }
 
 /** Settings → Threads. */
-export function ThreadSettings() {
+export function ThreadSettings({ children }: { children?: ReactNode }) {
   const connection = useApp((state) => state.connection.status);
   const settings = useTextGeneration((state) => state.settings);
   const loading = useTextGeneration((state) => state.settingsLoading);
@@ -682,9 +682,11 @@ export function ThreadSettings() {
     <div className="q-form">
       <h1>Threads</h1>
       <p className="lead">
-        How h4rn names new threads, and where that title comes from. The first prompt is always
-        accepted before any title is written.
+        Defaults for threads started from this device: their permission mode, and how h4rn names
+        them. A thread keeps its own settings once it exists.
       </p>
+      {children}
+      <h2>Titles</h2>
       {settings ? (
         <TitleDraftForm saved={settings} />
       ) : loading ? (

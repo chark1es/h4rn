@@ -106,6 +106,14 @@ attachments: Array<AttachmentId>,
  */
 runtime_mode: RuntimeMode, 
 /**
+ * Reasoning effort in the harness's own vocabulary, when it has one.
+ */
+reasoning_effort: string | null, 
+/**
+ * Ask for the harness's fast tier, where one exists (Codex).
+ */
+fast: boolean, 
+/**
  * Run in an isolated git worktree, optionally naming the branch.
  */
 worktree: WorktreeRequest | null, } | { "type": "send_message", 
@@ -140,7 +148,40 @@ decision: ApprovalDecision,
 /**
  * Selected [`crate::ApprovalOption`] id, when answering a question.
  */
-option_id: string | null, } | { "type": "set_thread_tab", 
+option_id: string | null, } | { "type": "set_thread_runtime_mode", 
+/**
+ * Thread to change.
+ */
+thread_id: ThreadId, 
+/**
+ * New permission autonomy.
+ */
+mode: RuntimeMode, } | { "type": "set_thread_model", 
+/**
+ * Thread to change.
+ */
+thread_id: ThreadId, 
+/**
+ * New model slug.
+ */
+model: string, } | { "type": "set_thread_reasoning_effort", 
+/**
+ * Thread to change.
+ */
+thread_id: ThreadId, 
+/**
+ * New effort value in the harness's vocabulary, or `None` for its
+ * default.
+ */
+effort: string | null, } | { "type": "set_thread_fast", 
+/**
+ * Thread to change.
+ */
+thread_id: ThreadId, 
+/**
+ * Whether to use the fast tier.
+ */
+fast: boolean, } | { "type": "set_thread_tab", 
 /**
  * Thread to move.
  */
@@ -485,7 +526,39 @@ thread_id: ThreadId,
 /**
  * Turn whose pre-turn snapshots are the base.
  */
-turn_id: TurnId, } | { "type": "mcp_list" } | { "type": "mcp_upsert", 
+turn_id: TurnId, } | { "type": "fs_diff_files", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Scope to list; only `base` and `commit` are valid here.
+ */
+against: DiffAgainst, } | { "type": "fs_diff_commits", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Branch to compare against, or `None` for the repository default.
+ */
+base: string | null, } | { "type": "fs_branches", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, } | { "type": "mcp_list" } | { "type": "mcp_upsert", 
 /**
  * Full configuration, including any new secret values.
  */

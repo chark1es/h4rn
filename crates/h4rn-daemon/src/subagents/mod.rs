@@ -770,6 +770,8 @@ impl Inner {
                 prompt,
                 attachments: Vec::new(),
                 runtime_mode: parent.runtime_mode,
+                reasoning_effort: parent.reasoning_effort,
+                fast: parent.fast,
                 worktree: None,
             })
             .await;

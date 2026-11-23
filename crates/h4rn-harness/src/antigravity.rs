@@ -298,7 +298,7 @@ fn stream_mode(spec: &SessionSpec) -> String {
     match spec.runtime_mode {
         // No client-side approval path exists here, so the safest fallback is
         // plan mode rather than silently auto-approving actions.
-        RuntimeMode::ApprovalRequired => "plan",
+        RuntimeMode::ApprovalRequired | RuntimeMode::Plan => "plan",
         RuntimeMode::AutoAcceptEdits => "accept-edits",
         RuntimeMode::FullAccess => "auto",
     }
@@ -390,6 +390,8 @@ mod tests {
             workspace: workspace.to_path_buf(),
             model: "default".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             resume_id: None,
             mcp_endpoint: None,
             env_overrides: std::collections::BTreeMap::new(),

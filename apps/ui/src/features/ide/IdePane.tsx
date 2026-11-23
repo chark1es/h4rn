@@ -9,10 +9,11 @@ import {
   WifiOffIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { EmptyState } from "@/components/common/EmptyState";
 import { MOD, SHIFT } from "@/components/common/Kbd";
 import { SidebarReveal } from "@/components/shell/Sidebar";
@@ -31,6 +32,7 @@ import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForAgentState, glyphForThread } from "@/lib/agent";
 import { toProtoError } from "@/lib/client/errors";
+import { readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 import { machineSeed } from "@/lib/entities";
 import { monogram } from "@/lib/grouping";
 import { titleWithShortcut } from "@/lib/keybindings";
@@ -51,7 +53,15 @@ import { cn } from "@/lib/utils";
 import { CodeEditor, type CursorPosition } from "./CodeEditor";
 import { DiffView } from "./DiffView";
 import { computeDiff } from "./diff";
+import { deleteReviewComment, type ReviewComment, sendCommentsToDraft } from "./reviewComments";
 import { SearchPanel } from "./SearchPanel";
+import {
+  baseOptions,
+  commitLabel,
+  DIFF_SOURCES,
+  type DiffSource,
+  sourceDescription,
+} from "./sources";
 import { TabStrip } from "./TabStrip";
 import type { IdeTab } from "./tabs";
 import { languageLabel, useIdeSession, type WorkspaceOption } from "./useIdeSession";
@@ -116,6 +126,31 @@ export function IdePane() {
   const [closing, setClosing] = useState(false);
   const [resolving, setResolving] = useState(false);
 
+  // The diff pane follows the editor tab, not the diff. A file picked inside
+  // the pane (the phone Turn and Branch pickers, a Branch or Commits file row)
+  // is the person's choice and must stay until they pick another one or switch
+  // tabs, so only a change of the active tab path re-opens the diff.
+  const diffTabPath = active?.path ?? null;
+  const diffSource = state.diffSource;
+  const openDiffSession = session.openDiff;
+  const diffPathRef = useRef(state.diffPath);
+  useEffect(() => {
+    diffPathRef.current = state.diffPath;
+  }, [state.diffPath]);
+  const followedTabRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (panel !== "diff" || (diffSource !== "head" && diffSource !== "agent") || !diffTabPath) {
+      followedTabRef.current = null;
+      return;
+    }
+    if (followedTabRef.current === diffTabPath) return;
+    followedTabRef.current = diffTabPath;
+    // Entering the pane (or switching the source) already asked for the tab's
+    // file; only a tab that disagrees with what is shown needs a read.
+    if (diffPathRef.current === diffTabPath) return;
+    void openDiffSession(diffTabPath, diffSource);
+  }, [panel, diffTabPath, diffSource, openDiffSession]);
+
   useEffect(() => {
     setCursor({ line: 1, column: 1 });
   }, []);
@@ -164,11 +199,31 @@ export function IdePane() {
   }, [pendingClose, session.saveTab, session.confirmClose, toastError]);
 
   const openDiff = useCallback(
-    (path: string, mode: "head" | "agent") => {
+    (path: string, source: DiffSource) => {
       setPanel("diff");
-      void session.openDiff(path, mode);
+      void session.openDiff(path, source);
     },
     [session.openDiff],
+  );
+
+  /** Adds every pending comment to the thread's draft; sending stays manual. */
+  const sendReviewComments = useCallback(
+    (comments: ReviewComment[]) => {
+      if (!workspace?.threadId || comments.length === 0) return;
+      sendCommentsToDraft({
+        host: workspace.host,
+        threadId: workspace.threadId,
+        comments,
+        read: readThreadDraft,
+        write: writeThreadDraft,
+        remove: deleteReviewComment,
+      });
+      pushToast({
+        title: `${comments.length} review ${comments.length === 1 ? "comment" : "comments"} added to the draft`,
+        description: "They send when you press Send in the composer.",
+      });
+    },
+    [workspace],
   );
 
   useEffect(() => {
@@ -337,6 +392,9 @@ export function IdePane() {
   })();
 
   const showDiff = panel === "diff";
+  const shownPath = showDiff
+    ? (state.diffPath ?? active?.path ?? workspace.path)
+    : (active?.path ?? workspace.path);
   const projectName = workspaceName(workspace.path);
   const glyph = thread
     ? glyphForThread(thread, hosts[thread.host]?.online ?? false)
@@ -414,6 +472,9 @@ export function IdePane() {
         <div className="q-ebar">
           <span
             className="q-mono"
+            // The bar names what the main area shows: the diff's file while the
+            // diff is open (it can outlive its tab), the editor's file otherwise.
+            title={shownPath}
             style={{
               fontSize: 12,
               color: "var(--fg)",
@@ -423,7 +484,7 @@ export function IdePane() {
               whiteSpace: "nowrap",
             }}
           >
-            {active?.path ?? workspace.path}
+            {shownPath}
           </span>
           <span className="grow" />
           <div className="q-seg inline" role="tablist" aria-label="Editor mode">
@@ -438,22 +499,73 @@ export function IdePane() {
             <button
               type="button"
               role="tab"
-              aria-selected={showDiff && state.diffMode === "head"}
-              disabled={!active}
-              onClick={() => active && openDiff(active.path, "head")}
+              aria-selected={showDiff}
+              disabled={!active && !state.diffPath}
+              onClick={() => {
+                setPanel("diff");
+                void session.selectDiffSource(state.diffSource);
+              }}
             >
-              vs HEAD
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={showDiff && state.diffMode === "agent"}
-              disabled={!active}
-              onClick={() => active && openDiff(active.path, "agent")}
-            >
-              vs agent
+              Diff
             </button>
           </div>
+          <ChipSelect<DiffSource>
+            label="Diff source"
+            value={state.diffSource}
+            options={DIFF_SOURCES.map((entry) => ({
+              value: entry.value,
+              label: entry.label,
+              hint: entry.hint,
+            }))}
+            onChange={(value) => {
+              setPanel("diff");
+              void session.selectDiffSource(value);
+            }}
+          />
+          {showDiff && state.diffSource === "branch" ? (
+            <ChipSelect
+              label="Base branch"
+              value={state.diffBase ?? state.diffFiles?.base ?? ""}
+              placeholder={
+                state.branchesLoading
+                  ? "Loading branches…"
+                  : state.branchesError
+                    ? "Branches unavailable"
+                    : state.diffFiles?.base
+                      ? `vs ${state.diffFiles.base}`
+                      : "Default base"
+              }
+              options={baseOptions(
+                state.diffBranches?.branches ?? [],
+                state.diffBase ?? state.diffFiles?.base ?? null,
+              ).map((option) => ({
+                value: option.value,
+                label: option.label,
+                ...(option.hint ? { hint: option.hint } : {}),
+              }))}
+              onChange={(value) => void session.setDiffBase(value)}
+            />
+          ) : null}
+          {showDiff && state.diffSource === "commit" ? (
+            <ChipSelect
+              label="Commit"
+              value={state.diffCommit ?? ""}
+              placeholder={
+                state.commitsLoading
+                  ? "Loading commits…"
+                  : state.commitsError
+                    ? "Commits unavailable"
+                    : "Choose a commit"
+              }
+              options={(state.diffCommits?.commits ?? []).map((commit) => ({
+                value: commit.sha,
+                label: commitLabel(commit),
+                hint: `${commit.author} · ${commit.short_sha}`,
+              }))}
+              disabled={state.commitsLoading || !state.diffCommits}
+              onChange={(value) => void session.setDiffCommit(value)}
+            />
+          ) : null}
           {active ? (
             <button
               type="button"
@@ -518,23 +630,35 @@ export function IdePane() {
             {showDiff ? (
               <DiffView
                 path={state.diffPath ?? active?.path ?? null}
-                mode={state.diffMode}
+                source={state.diffSource}
                 diff={state.diff}
                 loading={state.diffLoading}
                 error={state.diffError}
                 changes={state.agentChanges}
+                files={state.diffFiles}
+                filesLoading={state.filesLoading}
+                filesError={state.filesError}
+                commits={state.diffCommits}
                 host={workspace.host}
                 harness={workspace.harness}
+                threadId={workspace.threadId}
+                sourceLabel={sourceDescription(
+                  state.diffSource,
+                  state.diff?.label ?? state.diffFiles?.label ?? null,
+                )}
                 changeTitle={workspace.threadTitle}
                 changeAt={
                   workspace.threadId ? (threads[workspace.threadId]?.last_activity ?? null) : null
                 }
-                onSelectFile={(path) => void session.openDiff(path, state.diffMode)}
+                onSelectFile={(path) => void session.openDiff(path, state.diffSource)}
                 onOpenFile={(path) => {
                   session.openFile(path);
                   setPanel(null);
                 }}
                 onRevert={(path, content) => void session.revertTo(path, content)}
+                onSendComments={sendReviewComments}
+                onCompareHead={() => void session.selectDiffSource("head")}
+                onRefresh={() => void session.refreshDiffLists()}
               />
             ) : (
               <div

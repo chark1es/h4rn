@@ -877,6 +877,8 @@ impl Connection {
                     prompt,
                     attachments,
                     runtime_mode,
+                    reasoning_effort,
+                    fast,
                     worktree,
                 } => {
                     let request = crate::threads::NewThread {
@@ -891,6 +893,8 @@ impl Connection {
                         prompt,
                         attachments,
                         runtime_mode,
+                        reasoning_effort,
+                        fast,
                         worktree,
                     };
                     match self.state.manager.create_thread(request).await {
@@ -967,6 +971,34 @@ impl Connection {
                     .state
                     .manager
                     .set_thread_tab(&thread_id, tab, pinned)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadRuntimeMode { thread_id, mode } => self
+                    .state
+                    .manager
+                    .set_thread_runtime_mode(&thread_id, mode)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadModel { thread_id, model } => self
+                    .state
+                    .manager
+                    .set_thread_model(&thread_id, model)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadReasoningEffort { thread_id, effort } => self
+                    .state
+                    .manager
+                    .set_thread_reasoning_effort(&thread_id, effort)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadFast { thread_id, fast } => self
+                    .state
+                    .manager
+                    .set_thread_fast(&thread_id, fast)
                     .await
                     .map(|_| ResponseBody::Ack)
                     .map_err(crate::threads::ManagerError::into_proto),
@@ -1451,6 +1483,41 @@ impl Connection {
                     })
                     .await
                     .map(|changes| ResponseBody::FsTurnChanges { changes })
+                }
+                ClientRequest::FsDiffFiles {
+                    host,
+                    workspace,
+                    against,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.diff_files(&workspace, &against))
+                        .await
+                        .map(|files| ResponseBody::FsDiffFiles { files })
+                }
+                ClientRequest::FsDiffCommits {
+                    host,
+                    workspace,
+                    base,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.diff_commits(&workspace, base.as_deref()))
+                        .await
+                        .map(|commits| ResponseBody::FsDiffCommits { commits })
+                }
+                ClientRequest::FsBranches { host, workspace } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.branches(&workspace))
+                        .await
+                        .map(|branches| ResponseBody::FsBranches { branches })
                 }
                 ClientRequest::BeginUpload {
                     name,
@@ -1942,6 +2009,11 @@ mod tests {
             workspace_path: "/tmp/work".into(),
             branch: None,
             model: "test-model".into(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
+            models: Vec::new(),
+            fast: false,
             tab: ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

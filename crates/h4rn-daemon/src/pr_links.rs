@@ -2635,6 +2635,8 @@ mod tests {
                 prompt: "first".into(),
                 attachments: Vec::new(),
                 runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+                reasoning_effort: None,
+                fast: false,
                 worktree: None,
             })
             .await

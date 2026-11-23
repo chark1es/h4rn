@@ -218,6 +218,8 @@ async fn start_thread(threads: &ThreadManager, workspace: &Path, prompt: &str) -
             prompt: prompt.to_owned(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await

@@ -264,6 +264,8 @@ async fn real_harness_calls_h4rn_echo(harness: HarnessKind) {
             prompt,
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::FullAccess,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
         })
         .await
