@@ -1449,19 +1449,38 @@ A link names exactly one thread. The client never sends a thread id, so a
 malicious page cannot ask for another thread; every read, submission and blob
 fetch resolves the token first and then uses the link's thread. The surface has
 four routes: the page, a snapshot of events after a sequence, a message
-submission, and one attachment from a message in that thread. `ThreadUpserted`
-is filtered from the snapshot (it carries the workspace path), turn changes are
-stripped so diffs never appear, and attachment `local_path` values are cleared.
+submission, and one attachment from a message in that thread. Events pass through
+an explicit allow-list projection: the workspace path (`ThreadUpserted`),
+approvals, filesystem events, subagent threads and MCP administration are absent;
+turn changes are stripped and attachment `local_path` values are cleared. Tool
+calls lose their raw arguments, and a file-editing tool loses its output too, so
+a Codex file change's structured diff or an `apply_patch` body never appears.
+
+Loading the page does not claim the link. The page offers a short-lived unclaimed
+cookie and the first state read or submission that presents it binds the browser
+atomically. A link-preview crawler that only fetches the URL therefore cannot
+take the link, and a cookie-less second fetch changes nothing. A submission must
+be a same-origin JSON POST, and its token and binding are checked from the
+headers before the body is read.
 
 A guest message is not a turn. It is a row in the journal and an event,
 `GuestRequested`, which raises a hand in the lifecycle and renders as a Request
 at the end of the thread; `SendGuestRequest` uploads its files, calls the normal
 `SendMessage` path with the thread's current permission mode, and
-`DismissGuestRequest` deletes the files. Settling a thread, stopping sharing or
-creating a new link ends the link and deletes its waiting files; the 24-hour
-expiry does the same on the first request after the deadline. The Labs switch
-disables every link without deleting it, and turning it back on revives the
-ones that have not expired.
+`DismissGuestRequest` deletes the files. The submission reserves the pending
+budget (8 messages, 20 MB of text and files) and inserts the request in one
+transaction whose guard requires the link to still exist and the Labs switch to
+still be on; a racing Stop sharing, new link, archive or switch-off therefore
+leaves no request and no files. Send and Dismiss claim a request with one
+conditional update, so two actions can never run the same message twice.
+
+Ending access and deleting files are separate steps. Ending a link deletes its
+row first and removes its page-load cookies, then settles waiting messages; a
+disk error never leaves a token live. A periodic sweep (also run at startup)
+removes expired links, discards their files, and retries cleanup for requests
+whose link or turn is already gone. Settling a thread, stopping sharing,
+creating a new link, the 24-hour expiry and turning the Labs switch off all end
+a link; turning the switch back on does not revive one.
 
 The guest scope (`PairScope::Guest`) exists as the narrow server-side statement
 of what the surface may do: one thread's events and a waiting message. A device
@@ -1469,13 +1488,24 @@ pairing never offers it, because a device has an identity and the guest surface
 has none.
 
 When the machine is linked to Connect, the link names
-`<connect>/guest/<machine>/<token>`. Connect forwards each HTTP exchange to the
-daemon over its existing authenticated relay socket as a `GuestHttp` frame,
-correlates the answer by request id and returns it; it never stores the path or
-body. The payload is plaintext at that hop, as the rest of the relay path is
-TLS to Connect plus Noise only for device sessions; a guest has no Noise key.
-Without Connect the link names the daemon's own listener and the person sharing
-must make sure the guest can reach it.
+`<connect>/guest/<machine>/<token>`. Connect serves the guest page itself, from a
+fixed document admitted by a hash-based CSP; it never relays daemon HTML onto its
+own origin. Each exchange travels to the daemon over its existing authenticated
+relay socket and is answered by that daemon only: a waiter is bound to the
+selected daemon's device id, and a reply from any other device is ignored.
+Bodies are split into bounded frames, so a 10 MB upload never grows a shared
+WebSocket frame; Connect refuses an exchange over the guest limit before it
+reaches the socket, and rebuilds every response header, including the binding
+cookie's path, which must name the public `/guest/<machine>/<token>` prefix.
+Guest routes are traced by template, never by raw URI. The payload is plaintext
+at that hop, as the rest of the relay path is TLS to Connect plus Noise only for
+device sessions; a guest has no Noise key.
+
+Without Connect the daemon names its own loopback listener. A direct link is a
+bearer token and the daemon has no TLS listener, so it is not offered over a LAN
+address; the share dialog says the link works only on this machine and points to
+Connect for a teammate elsewhere. Only the owner or an admin-scoped device may
+copy the URL; a view device gets the link metadata with `url: null`.
 
 The guest page polls its snapshot every couple of seconds rather than opening a
 second long-lived socket. That keeps one transport (HTTP) working through both

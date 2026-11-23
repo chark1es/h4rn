@@ -59,6 +59,12 @@ pub enum RelayFrameKind {
     /// the envelope enough to correlate the answer with the waiting browser
     /// request; it still never stores or logs a body.
     GuestHttp,
+    /// One slice of a guest HTTP body (ADR-044).
+    ///
+    /// Large uploads and attachment downloads are split into frames so no
+    /// single WebSocket message approaches the transport's frame limit. The
+    /// payload is a JSON [`GuestHttpChunk`].
+    GuestHttpChunk,
     /// Tear the session down. The payload is optional and opaque to the relay.
     Close,
     /// Round-trip probe. The relay echoes it back to the sender.
@@ -76,12 +82,21 @@ pub struct GuestHttpRequest {
     pub request_id: String,
     /// HTTP method: `GET` or `POST`.
     pub method: String,
-    /// Path and query, beginning with `/guest/`.
+    /// Path and query, beginning with `/guest/<token>/`.
     pub path: String,
+    /// The public path the browser used, when the relay fronts the daemon.
+    ///
+    /// The daemon scopes the binding cookie to this path instead of its own
+    /// internal one, so a relay-prefixed link works in the browser.
+    #[serde(default)]
+    pub public_prefix: Option<String>,
+    /// Whether the body follows in [`GuestHttpChunk`] frames.
+    #[serde(default)]
+    pub chunked: bool,
     /// Request headers worth forwarding.
     #[serde(default)]
     pub headers: Vec<(String, String)>,
-    /// Request body.
+    /// Request body. Empty when `chunked` is set.
     #[serde(with = "relay_base64")]
     #[ts(type = "string")]
     pub body: Vec<u8>,
@@ -94,10 +109,29 @@ pub struct GuestHttpResponse {
     pub request_id: String,
     /// HTTP status code.
     pub status: u16,
+    /// Whether the body follows in [`GuestHttpChunk`] frames.
+    #[serde(default)]
+    pub chunked: bool,
     /// Response headers worth returning.
     #[serde(default)]
     pub headers: Vec<(String, String)>,
-    /// Response body.
+    /// Response body. Empty when `chunked` is set.
+    #[serde(with = "relay_base64")]
+    #[ts(type = "string")]
+    pub body: Vec<u8>,
+}
+
+/// One slice of a guest HTTP body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GuestHttpChunk {
+    /// The exchange this slice belongs to.
+    pub request_id: String,
+    /// Zero-based slice number, in order.
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// True on the last slice.
+    pub last: bool,
+    /// Raw bytes of the body.
     #[serde(with = "relay_base64")]
     #[ts(type = "string")]
     pub body: Vec<u8>,

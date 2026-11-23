@@ -13,7 +13,6 @@
 //! - files are limited by count, size and image type, and deleted on dismiss,
 //!   revoke, a new link and settling the thread.
 
-use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,9 +22,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Duration, Utc};
 use h4rn_protocol::{
     AttachmentId, Event, GUEST_COOKIE, GUEST_LINK_TTL_HOURS, GUEST_MAX_FILES,
-    GUEST_MAX_MESSAGE_BYTES, GUEST_MAX_PENDING_BYTES, GuestAttachment, GuestLink, GuestLinkState,
-    GuestMessageInput, GuestRequest, GuestSettings, GuestSharing, GuestSnapshot, GuestThreadView,
-    Item, ThreadId, ThreadSummary,
+    GUEST_MAX_MESSAGE_BYTES, GUEST_MAX_PENDING_BYTES, GUEST_MAX_PENDING_REQUESTS,
+    GUEST_MAX_TEXT_BYTES, GuestAttachment, GuestLink, GuestLinkState, GuestMessageInput,
+    GuestRequest, GuestSettings, GuestSharing, GuestSnapshot, GuestThreadView, Item, ThreadId,
+    ThreadSummary, guest_page_csp, guest_page_html,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -41,6 +41,16 @@ const GUEST_DIR: &str = "guest";
 /// Most history a first page load asks for.
 const RECENT_EVENTS: usize = 200;
 
+/// How long a page-load cookie may be presented before it expires unclaimed.
+const PENDING_BINDING_MINUTES: i64 = 15;
+
+/// Most unclaimed page-load cookies one link keeps at once.
+const MAX_PENDING_BINDINGS: i64 = 8;
+
+/// How often an access decision that failed on I/O is retried before the
+/// request is left for the periodic sweep.
+const CLEANUP_ATTEMPTS: usize = 3;
+
 /// Methods a guest may use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -55,10 +65,23 @@ pub enum Method {
 pub struct GuestHttpInput {
     /// HTTP method.
     pub method: Method,
-    /// Path the client asked for, beginning with `/guest/`.
+    /// Path the client asked for on this daemon, beginning with `/guest/`.
     pub path: String,
+    /// Public path the browser used, when a relay fronts the daemon.
+    ///
+    /// The binding cookie is scoped to this path, so a relay-prefixed link
+    /// (`/guest/<machine>/<token>`) keeps its cookie.
+    pub public_prefix: Option<String>,
     /// Value of the `h4rn_guest` cookie, when the browser sent one.
     pub cookie: Option<String>,
+    /// `Content-Type`, for the JSON requirement on submissions.
+    pub content_type: Option<String>,
+    /// `Origin`, for the same-origin requirement on submissions.
+    pub origin: Option<String>,
+    /// `Host` (or its forwarded equivalent), for the same-origin check.
+    pub host: Option<String>,
+    /// `Sec-Fetch-Site`, when a browser sent a fetch-metadata hint.
+    pub fetch_site: Option<String>,
     /// Request body (JSON for a message submission).
     pub body: Vec<u8>,
 }
@@ -75,27 +98,29 @@ pub struct GuestHttpOutput {
     /// `Set-Cookie` value, when this response binds the browser.
     pub set_cookie: Option<String>,
     /// Extra headers a client should send (security headers, no-store).
-    pub headers: Vec<(&'static str, &'static str)>,
+    pub headers: Vec<(String, String)>,
 }
 
 impl GuestHttpOutput {
-    fn json(status: u16, body: &impl Serialize) -> Self {
+    /// A JSON answer with `no-store`.
+    pub fn json(status: u16, body: &impl Serialize) -> Self {
         Self {
             status,
             content_type: "application/json",
             body: serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec()),
             set_cookie: None,
-            headers: vec![("cache-control", "no-store")],
+            headers: vec![("cache-control".to_owned(), "no-store".to_owned())],
         }
     }
 
-    fn text(status: u16, message: &str) -> Self {
+    /// A plain-text answer with `no-store`.
+    pub fn text(status: u16, message: &str) -> Self {
         Self {
             status,
             content_type: "text/plain; charset=utf-8",
             body: message.as_bytes().to_vec(),
             set_cookie: None,
-            headers: vec![("cache-control", "no-store")],
+            headers: vec![("cache-control".to_owned(), "no-store".to_owned())],
         }
     }
 }
@@ -109,6 +134,9 @@ pub enum GuestError {
     /// The request is malformed or over a limit.
     #[error("{0}")]
     Invalid(String),
+    /// A submission was not a same-origin JSON POST.
+    #[error("{0}")]
+    Forbidden(String),
     /// The thread is gone.
     #[error("{0}")]
     NotFound(String),
@@ -126,6 +154,7 @@ impl GuestError {
             Self::Link(_) => 410,
             Self::NotFound(_) => 404,
             Self::Invalid(_) => 400,
+            Self::Forbidden(_) => 403,
             Self::Database(_) | Self::Io(_) => 500,
         }
     }
@@ -135,7 +164,7 @@ impl GuestError {
 struct Resolved {
     link: LinkRow,
     state: GuestLinkState,
-    /// The browser must be given this cookie.
+    /// The browser must be given this cookie (an unclaimed page load).
     bind_cookie: Option<String>,
 }
 
@@ -159,6 +188,7 @@ struct StoredAttachment {
 #[derive(Clone, Debug)]
 struct RequestRow {
     request_id: String,
+    link_id: String,
     thread_id: ThreadId,
     text: String,
     attachments: Vec<StoredAttachment>,
@@ -245,6 +275,9 @@ impl GuestService {
         };
         service.ensure_schema().await?;
         std::fs::create_dir_all(service.guest_root())?;
+        // A link that expired while the daemon was off must not keep its files
+        // waiting forever.
+        service.sweep_expired().await?;
         Ok(service)
     }
 
@@ -283,6 +316,26 @@ impl GuestService {
         )
         .execute(&self.pool)
         .await?;
+        // Databases created before the binding was deferred to the first state
+        // request need the extra column; the error when it exists is expected.
+        let _ = sqlx::query("ALTER TABLE guest_links ADD COLUMN pending_hash TEXT")
+            .execute(&self.pool)
+            .await;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS guest_bindings (
+                link_id       TEXT NOT NULL,
+                pending_hash  TEXT NOT NULL UNIQUE,
+                created_at    TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_guest_bindings_link
+             ON guest_bindings (link_id)",
+        )
+        .execute(&self.pool)
+        .await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS guest_settings (
                 id      INTEGER PRIMARY KEY CHECK (id = 1),
@@ -298,18 +351,89 @@ impl GuestService {
                 thread_id    TEXT NOT NULL,
                 text         TEXT NOT NULL,
                 attachments_json TEXT NOT NULL,
+                size_bytes   INTEGER NOT NULL DEFAULT 0,
                 created_at   TEXT NOT NULL,
                 status       TEXT NOT NULL
             )",
         )
         .execute(&self.pool)
         .await?;
+        let _ = sqlx::query(
+            "ALTER TABLE guest_requests ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_guest_requests_thread
              ON guest_requests (thread_id, status)",
         )
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Removes links whose 24 hours passed, and the files waiting for them.
+    ///
+    /// Runs at startup and periodically, so an expired link and its attachments
+    /// do not outlive the link just because nobody opened the page again.
+    pub async fn sweep_expired(&self) -> Result<usize, GuestError> {
+        let rows = sqlx::query(
+            "SELECT link_id, thread_id, binding_hash, created_at, expires_at
+             FROM guest_links WHERE expires_at <= ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut removed = 0;
+        for row in rows {
+            let link = row_to_link(row);
+            self.end_link(&link).await?;
+            removed += 1;
+        }
+        self.sweep_finished_requests().await?;
+        Ok(removed)
+    }
+
+    /// Deletes files for requests whose link is gone or whose turn settled.
+    ///
+    /// Access revocation and file cleanup are deliberately separate: ending a
+    /// link deletes its row first, so a failing disk never keeps a link alive.
+    /// This pass retries the cleanup later.
+    async fn sweep_finished_requests(&self) -> Result<(), GuestError> {
+        let rows = sqlx::query(
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
+             FROM guest_requests",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in rows {
+            let request = row_to_request(row)?;
+            let linked: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM guest_links WHERE link_id = ?")
+                    .bind(&request.link_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+            if request.status == "pending" && linked > 0 {
+                continue;
+            }
+            // The request is no longer visible to anyone: remove its files,
+            // then the row. A failed delete leaves both for the next sweep.
+            match self.delete_request_files(&request) {
+                Ok(()) => {
+                    sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
+                        .bind(&request.request_id)
+                        .execute(&self.pool)
+                        .await?;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "guest cleanup is waiting for the next sweep"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -327,8 +451,11 @@ impl GuestService {
             .unwrap_or(false))
     }
 
-    /// Turns guest links on or off. Off disables every link at once without
-    /// deleting them; on makes unexpired links work again.
+    /// Turns guest links on or off.
+    ///
+    /// Turning the Labs switch off *ends* every link: the token stops working,
+    /// waiting messages are discarded and their files are deleted. Turning it
+    /// back on does not revive them; the owner shares again.
     pub async fn set_enabled(&self, enabled: bool) -> Result<GuestSettings, GuestError> {
         sqlx::query(
             "INSERT INTO guest_settings (id, enabled) VALUES (1, ?)
@@ -337,14 +464,31 @@ impl GuestService {
         .bind(i64::from(enabled))
         .execute(&self.pool)
         .await?;
+        if !enabled {
+            let rows = sqlx::query(
+                "SELECT link_id, thread_id, binding_hash, created_at, expires_at
+                 FROM guest_links",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            for row in rows {
+                self.end_link(&row_to_link(row)).await?;
+            }
+            self.sweep_finished_requests().await?;
+        }
         Ok(GuestSettings { enabled })
     }
 
     /// Sharing state for one thread.
+    ///
+    /// `include_url` is false for a device without the admin scope: the link's
+    /// existence and expiry are metadata, but the bearer URL is a credential
+    /// only an admin may read.
     pub async fn sharing(
         &self,
         thread_id: &ThreadId,
         base: &str,
+        include_url: bool,
     ) -> Result<GuestSharing, GuestError> {
         let enabled = self.enabled().await?;
         let Some(row) = self.link_for_thread(thread_id).await? else {
@@ -364,7 +508,9 @@ impl GuestService {
             thread_id: thread_id.clone(),
             links_enabled: enabled,
             link: Some(GuestLink {
-                url: raw.map(|token| self.url_for(base, &token)),
+                url: raw
+                    .filter(|_| include_url)
+                    .map(|token| self.url_for(base, &token)),
                 expires_at: row.expires_at,
                 bound: row.binding_hash.is_some(),
             }),
@@ -381,6 +527,12 @@ impl GuestService {
         if !self.enabled().await? {
             return Err(GuestError::Invalid(
                 "Guest links are off. Turn them on in Settings → Labs → Guest links.".into(),
+            ));
+        }
+        if !guest_base_allowed(base) {
+            return Err(GuestError::Invalid(
+                "A direct guest link needs HTTPS. Link this machine to Connect to share with a teammate on another machine."
+                    .into(),
             ));
         }
         // The thread must exist before a link can point at it.
@@ -435,9 +587,17 @@ impl GuestService {
         self.end_link(&link).await
     }
 
+    /// Ends a link, revoking access first and cleaning files second.
+    ///
+    /// The row is deleted before any file work: a disk error must never leave a
+    /// token live. Waiting messages are settled afterwards, and anything that
+    /// could not be removed is retried by the periodic sweep.
     async fn end_link(&self, link: &LinkRow) -> Result<(), GuestError> {
-        self.discard_pending(link).await?;
         sqlx::query("DELETE FROM guest_links WHERE link_id = ?")
+            .bind(&link.link_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM guest_bindings WHERE link_id = ?")
             .bind(&link.link_id)
             .execute(&self.pool)
             .await?;
@@ -445,26 +605,60 @@ impl GuestService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&link.link_id);
+        self.discard_pending(link).await;
         Ok(())
     }
 
-    /// Deletes every waiting message and file for a link, leaving the link
-    /// row itself in place. Used by Stop sharing, a new link, settling and the
-    /// first request after the 24 hours pass.
-    async fn discard_pending(&self, link: &LinkRow) -> Result<(), GuestError> {
-        let pending = self.pending_requests(&link.link_id).await?;
+    /// Settles every waiting message for a link: files first, then the row,
+    /// then the event that removes its card.
+    ///
+    /// A failed file delete leaves the row for [`Self::sweep_finished_requests`]
+    /// instead of failing the revocation that already happened.
+    async fn discard_pending(&self, link: &LinkRow) {
+        let pending = match self.pending_requests(&link.link_id).await {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "could not list waiting guest messages");
+                return;
+            }
+        };
         for request in &pending {
-            self.delete_request_files(request)?;
-            sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
+            let mut deleted = false;
+            for attempt in 0..CLEANUP_ATTEMPTS {
+                match self.delete_request_files(request) {
+                    Ok(()) => {
+                        deleted = true;
+                        break;
+                    }
+                    Err(error) if attempt + 1 == CLEANUP_ATTEMPTS => {
+                        tracing::warn!(
+                            request = %request.request_id,
+                            %error,
+                            "guest files could not be deleted; the sweep will retry"
+                        );
+                    }
+                    Err(_) => {}
+                }
+            }
+            if !deleted {
+                // Keep the row so the sweep knows there is still work to do.
+                let _ = sqlx::query(
+                    "UPDATE guest_requests SET status = 'dismissed' WHERE request_id = ?",
+                )
                 .bind(&request.request_id)
                 .execute(&self.pool)
-                .await?;
+                .await;
+                continue;
+            }
+            let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
+                .bind(&request.request_id)
+                .execute(&self.pool)
+                .await;
             let _ = self
                 .manager
                 .emit_guest_request_resolved(&link.thread_id, &request.request_id, false)
                 .await;
         }
-        Ok(())
     }
 
     /// Settling (archiving) a thread ends its link.
@@ -518,7 +712,7 @@ impl GuestService {
         &self,
         token: &str,
         cookie: Option<&str>,
-        bind_allowed: bool,
+        offer_pending: bool,
     ) -> Result<Resolved, GuestError> {
         if !self.enabled().await? {
             return Ok(Resolved {
@@ -540,79 +734,158 @@ impl GuestService {
         if link.expires_at <= Utc::now() {
             // The link is over: its waiting files must not outlive it. The
             // row stays so the page can still say "expired" instead of
-            // "revoked".
-            let _ = self.discard_pending(&link).await;
+            // "revoked" until the sweep removes it.
+            self.discard_pending(&link).await;
             return Ok(Resolved {
                 link,
                 state: GuestLinkState::Expired,
                 bind_cookie: None,
             });
         }
-        match (&link.binding_hash, cookie) {
-            (None, _) if bind_allowed => {
-                let binding = random_secret();
-                let hash = hash_secret(&binding);
-                // Two first opens race; only the first wins the NULL slot.
-                let updated = sqlx::query(
-                    "UPDATE guest_links SET binding_hash = ?
-                     WHERE link_id = ? AND binding_hash IS NULL",
-                )
-                .bind(&hash)
-                .bind(&link.link_id)
-                .execute(&self.pool)
-                .await?;
-                if updated.rows_affected() == 0 {
-                    // A different browser claimed it first.
-                    let fresh = self.link_for_token(token).await?;
-                    let bound = fresh.as_ref().is_some_and(|row| row.binding_hash.is_some());
-                    return Ok(Resolved {
-                        link,
-                        state: if bound {
-                            GuestLinkState::Unbound
-                        } else {
-                            GuestLinkState::Active
-                        },
-                        bind_cookie: None,
-                    });
-                }
-                Ok(Resolved {
+        let link = match &link.binding_hash {
+            Some(stored) => {
+                let active = cookie.is_some_and(|value| {
+                    bool::from(stored.as_bytes().ct_eq(hash_secret(value).as_bytes()))
+                });
+                return Ok(Resolved {
                     link,
-                    state: GuestLinkState::Active,
-                    bind_cookie: Some(binding),
-                })
+                    state: if active {
+                        GuestLinkState::Active
+                    } else {
+                        GuestLinkState::Unbound
+                    },
+                    bind_cookie: None,
+                });
             }
-            (None, _) => Ok(Resolved {
+            None => link,
+        };
+
+        // An unbound link: a cookie that matches an unclaimed page load binds
+        // the browser now, while the page GET itself only offers one.
+        if let Some(value) = cookie
+            && self.claim_pending_binding(&link, value).await?
+        {
+            return Ok(Resolved {
                 link,
-                state: GuestLinkState::Unbound,
+                state: GuestLinkState::Active,
                 bind_cookie: None,
-            }),
-            (Some(stored), Some(value)) => {
-                let given = hash_secret(value);
-                if bool::from(stored.as_bytes().ct_eq(given.as_bytes())) {
-                    Ok(Resolved {
-                        link,
-                        state: GuestLinkState::Active,
-                        bind_cookie: None,
-                    })
-                } else {
-                    Ok(Resolved {
-                        link,
-                        state: GuestLinkState::Unbound,
-                        bind_cookie: None,
-                    })
-                }
-            }
-            (Some(_), None) => Ok(Resolved {
-                link,
-                state: GuestLinkState::Unbound,
-                bind_cookie: None,
-            }),
+            });
         }
+        if offer_pending {
+            let pending = random_secret();
+            self.offer_pending_binding(&link, &pending).await?;
+            return Ok(Resolved {
+                link,
+                state: GuestLinkState::Active,
+                bind_cookie: Some(pending),
+            });
+        }
+        Ok(Resolved {
+            link,
+            state: GuestLinkState::Unbound,
+            bind_cookie: None,
+        })
+    }
+
+    /// Records one page-load cookie without claiming the link.
+    ///
+    /// A link-preview crawler loads the page but never presents the cookie, so
+    /// the link stays unclaimed until a browser asks for its state.
+    async fn offer_pending_binding(&self, link: &LinkRow, pending: &str) -> Result<(), GuestError> {
+        let now = Utc::now();
+        sqlx::query("DELETE FROM guest_bindings WHERE link_id = ? AND created_at < ?")
+            .bind(&link.link_id)
+            .bind((now - Duration::minutes(PENDING_BINDING_MINUTES)).to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM guest_bindings WHERE link_id = ?")
+                .bind(&link.link_id)
+                .fetch_one(&self.pool)
+                .await?;
+        if count >= MAX_PENDING_BINDINGS {
+            sqlx::query(
+                "DELETE FROM guest_bindings WHERE pending_hash IN (
+                    SELECT pending_hash FROM guest_bindings
+                    WHERE link_id = ? ORDER BY created_at ASC LIMIT ?
+                )",
+            )
+            .bind(&link.link_id)
+            .bind(count - MAX_PENDING_BINDINGS + 1)
+            .execute(&self.pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO guest_bindings (link_id, pending_hash, created_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&link.link_id)
+        .bind(hash_secret(pending))
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Binds an unclaimed link to the browser that presents a page-load cookie.
+    async fn claim_pending_binding(
+        &self,
+        link: &LinkRow,
+        cookie: &str,
+    ) -> Result<bool, GuestError> {
+        let hash = hash_secret(cookie);
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM guest_bindings WHERE link_id = ? AND pending_hash = ?",
+        )
+        .bind(&link.link_id)
+        .bind(&hash)
+        .fetch_one(&self.pool)
+        .await?;
+        if pending == 0 {
+            return Ok(false);
+        }
+        let updated = sqlx::query(
+            "UPDATE guest_links SET binding_hash = ?
+             WHERE link_id = ? AND binding_hash IS NULL",
+        )
+        .bind(&hash)
+        .bind(&link.link_id)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM guest_bindings WHERE link_id = ?")
+            .bind(&link.link_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(true)
     }
 
     // ------------------------------------------------------------------
     // HTTP surface
     // ------------------------------------------------------------------
+
+    /// Checks a submission before its body is read.
+    ///
+    /// The full submission checks again; this one exists so an upload from an
+    /// unknown browser, or a cross-site form, is refused without buffering its
+    /// bytes.
+    pub async fn check_submission(&self, input: &GuestHttpInput) -> Result<(), GuestHttpOutput> {
+        if let Err(error) = same_origin(input) {
+            return Err(self.error(error));
+        }
+        match self
+            .resolve(guest_token(&input.path), input.cookie.as_deref(), false)
+            .await
+        {
+            Ok(resolved) if resolved.state == GuestLinkState::Active => Ok(()),
+            Ok(resolved) => {
+                Err(self.error(GuestError::Link(notice_for(resolved.state).to_owned())))
+            }
+            Err(error) => Err(self.error(error)),
+        }
+    }
 
     /// Answers one guest request.
     pub async fn handle(&self, input: GuestHttpInput) -> GuestHttpOutput {
@@ -628,10 +901,14 @@ impl GuestService {
         let cookie = input.cookie.as_deref();
         let queried_thumbnail = input.path.contains("thumbnail=1");
         match (input.method, rest.as_slice()) {
-            (Method::Get, []) => match self.resolve(token, cookie, true).await {
-                Ok(resolved) => self.page(resolved, path),
-                Err(error) => self.error(error),
-            },
+            (Method::Get, []) => {
+                // A page load never claims the link; a preview crawler cannot
+                // bind it just by fetching the URL.
+                match self.resolve(token, cookie, true).await {
+                    Ok(resolved) => self.page(resolved, path, input.public_prefix.as_deref()),
+                    Err(error) => self.error(error),
+                }
+            }
             (Method::Get, ["state"]) => match self.resolve(token, cookie, false).await {
                 Ok(resolved) => match self.snapshot(&resolved, 0).await {
                     Ok(snapshot) => GuestHttpOutput::json(200, &snapshot),
@@ -650,6 +927,9 @@ impl GuestService {
                 }
             }
             (Method::Post, ["messages"]) => {
+                if let Err(error) = same_origin(&input) {
+                    return self.error(error);
+                }
                 let input: GuestMessageInput = match serde_json::from_slice(&input.body) {
                     Ok(input) => input,
                     Err(error) => {
@@ -674,7 +954,10 @@ impl GuestService {
                         content_type: mime,
                         body: bytes,
                         set_cookie: None,
-                        headers: vec![("cache-control", "private, max-age=3600")],
+                        headers: vec![(
+                            "cache-control".to_owned(),
+                            "private, max-age=3600".to_owned(),
+                        )],
                     },
                     Err(error) => self.error(error),
                 },
@@ -688,13 +971,17 @@ impl GuestService {
         GuestHttpOutput::text(error.status(), &error.to_string())
     }
 
-    fn page(&self, resolved: Resolved, path: &str) -> GuestHttpOutput {
-        // Scope the cookie to this one link, so two guest links opened in the
-        // same browser do not overwrite each other's binding.
-        let cookie_path = path.trim_end_matches('/');
+    fn page(&self, resolved: Resolved, path: &str, public_prefix: Option<&str>) -> GuestHttpOutput {
+        // Scope the cookie to the path the browser used (a relay adds its
+        // machine segment), so a relay-backed link can present its cookie.
+        let cookie_path = public_prefix
+            .map(|prefix| prefix.trim_end_matches('/'))
+            .filter(|prefix| prefix.starts_with("/guest/"))
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.trim_end_matches('/').to_owned());
         let cookie = resolved.bind_cookie.map(|binding| {
             format!(
-                "{GUEST_COOKIE}={binding}; HttpOnly; SameSite=Lax; Path={cookie_path}; Max-Age={}",
+                "{GUEST_COOKIE}={binding}; HttpOnly; Secure; SameSite=Strict; Path={cookie_path}; Max-Age={}",
                 GUEST_LINK_TTL_HOURS * 3600
             )
         });
@@ -708,16 +995,13 @@ impl GuestService {
         GuestHttpOutput {
             status: 200,
             content_type: "text/html; charset=utf-8",
-            body: guest_page(state).into_bytes(),
+            body: guest_page_html(state).into_bytes(),
             set_cookie: cookie,
             headers: vec![
-                ("cache-control", "no-store"),
-                (
-                    "content-security-policy",
-                    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-                ),
-                ("referrer-policy", "no-referrer"),
-                ("x-content-type-options", "nosniff"),
+                ("cache-control".to_owned(), "no-store".to_owned()),
+                ("content-security-policy".to_owned(), guest_page_csp()),
+                ("referrer-policy".to_owned(), "no-referrer".to_owned()),
+                ("x-content-type-options".to_owned(), "nosniff".to_owned()),
             ],
         }
     }
@@ -748,10 +1032,9 @@ impl GuestService {
             thread: Some(guest_view(&snapshot.summary)),
             events: events
                 .into_iter()
-                .filter(|event| !matches!(event.event, Event::ThreadUpserted(_)))
-                .map(|event| h4rn_protocol::SeqEvent {
-                    seq: event.seq,
-                    event: sanitise(event.event),
+                .filter_map(|entry| {
+                    let seq = entry.seq;
+                    guest_event(entry.event).map(|event| h4rn_protocol::SeqEvent { seq, event })
                 })
                 .collect(),
             next_seq,
@@ -760,6 +1043,11 @@ impl GuestService {
     }
 
     /// Stores one guest message and queues it for the owner.
+    ///
+    /// The submission is one atomic decision: the link must still be live and
+    /// enabled, the pending budget must have room, and the row and its quota
+    /// are written together. Files are written before the row exists, so a
+    /// racing Stop sharing can never observe a half-written request.
     async fn submit(
         &self,
         resolved: &Resolved,
@@ -770,6 +1058,12 @@ impl GuestService {
             other => return Err(GuestError::Link(notice_for(other).to_owned())),
         }
         let text = input.text.trim().to_owned();
+        if text.len() > GUEST_MAX_TEXT_BYTES {
+            return Err(GuestError::Invalid(format!(
+                "A message holds at most {} KB of text.",
+                GUEST_MAX_TEXT_BYTES / 1024
+            )));
+        }
         if text.is_empty() && input.attachments.is_empty() {
             return Err(GuestError::Invalid(
                 "Write a message or attach a file.".into(),
@@ -779,17 +1073,6 @@ impl GuestService {
             return Err(GuestError::Invalid(format!(
                 "A message holds at most {GUEST_MAX_FILES} files."
             )));
-        }
-
-        let mut pending = 0u64;
-        for request in self.pending_requests(&resolved.link.link_id).await? {
-            pending = pending.saturating_add(
-                request
-                    .attachments
-                    .iter()
-                    .map(|attachment| attachment.size)
-                    .sum::<u64>(),
-            );
         }
 
         let mut decoded = Vec::new();
@@ -809,9 +1092,10 @@ impl GuestService {
                 .map_err(|_| GuestError::Invalid("A file name is not valid.".into()))?;
             decoded.push((name, mime, bytes));
         }
-        if pending.saturating_add(total) > GUEST_MAX_PENDING_BYTES {
+        // Text is delivered with the files and shares their budget.
+        if total.saturating_add(text.len() as u64) > GUEST_MAX_PENDING_BYTES {
             return Err(GuestError::Invalid(
-                "20 MB of files is already waiting for the owner. Send or dismiss some first."
+                "20 MB of messages is already waiting for the owner. Send or dismiss some first."
                     .into(),
             ));
         }
@@ -820,49 +1104,108 @@ impl GuestService {
         let directory = self.guest_root().join(&request_id);
         std::fs::create_dir_all(&directory)?;
         let mut stored = Vec::new();
-        for (index, (name, mime, bytes)) in decoded.into_iter().enumerate() {
-            let file = format!("{index}-{name}");
-            let path = directory.join(&file);
-            let mut handle = std::fs::File::create(&path)?;
-            handle.write_all(&bytes)?;
-            handle.sync_all()?;
-            stored.push(StoredAttachment {
-                name,
-                mime,
-                size: bytes.len() as u64,
-                file,
-            });
+        let write = (|| -> Result<(), GuestError> {
+            for (index, (name, mime, bytes)) in decoded.iter().enumerate() {
+                let file = format!("{index}-{name}");
+                let path = directory.join(&file);
+                let mut handle = std::fs::File::create(&path)?;
+                handle.write_all(bytes)?;
+                handle.sync_all()?;
+                stored.push(StoredAttachment {
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    size: bytes.len() as u64,
+                    file,
+                });
+            }
+            Ok(())
+        })();
+        if let Err(error) = write {
+            // A failed write must not leave a half-written request behind.
+            let _ = std::fs::remove_dir_all(&directory);
+            return Err(error);
         }
 
         let created_at = Utc::now();
         let attachments_json = serde_json::to_string(&stored)
             .map_err(|error| GuestError::Invalid(error.to_string()))?;
-        sqlx::query(
+        let size_bytes = total.saturating_add(text.len() as u64);
+
+        // Reserve quota and insert in one transaction. The link guard makes a
+        // racing Stop sharing, a new link, an archive or the Labs switch fail
+        // the insert instead of leaving an orphan request.
+        let mut transaction = self.pool.begin().await?;
+        let pending: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM guest_requests
+             WHERE link_id = ? AND status = 'pending'",
+        )
+        .bind(&resolved.link.link_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if pending.0 >= GUEST_MAX_PENDING_REQUESTS as i64
+            || pending.1.saturating_add(size_bytes as i64) > GUEST_MAX_PENDING_BYTES as i64
+        {
+            transaction.rollback().await?;
+            let _ = std::fs::remove_dir_all(&directory);
+            return Err(GuestError::Invalid(
+                "Too many messages are already waiting for the owner. Send or dismiss some first."
+                    .into(),
+            ));
+        }
+        let inserted = sqlx::query(
             "INSERT INTO guest_requests
-                (request_id, link_id, thread_id, text, attachments_json, created_at, status)
-             VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                (request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status)
+             SELECT ?, ?, ?, ?, ?, ?, ?, 'pending'
+             WHERE EXISTS (
+                 SELECT 1 FROM guest_links
+                 WHERE link_id = ? AND expires_at > ?
+             ) AND EXISTS (
+                 SELECT 1 FROM guest_settings WHERE id = 1 AND enabled = 1
+             )",
         )
         .bind(&request_id)
         .bind(&resolved.link.link_id)
         .bind(resolved.link.thread_id.as_str())
         .bind(&text)
         .bind(&attachments_json)
+        .bind(size_bytes as i64)
         .bind(created_at.to_rfc3339())
-        .execute(&self.pool)
+        .bind(&resolved.link.link_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *transaction)
         .await?;
+        if inserted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            let _ = std::fs::remove_dir_all(&directory);
+            return Err(GuestError::Link(
+                "The owner stopped sharing this thread.".into(),
+            ));
+        }
+        transaction.commit().await?;
 
         let row = RequestRow {
             request_id,
+            link_id: resolved.link.link_id.clone(),
             thread_id: resolved.link.thread_id.clone(),
             text,
             attachments: stored,
             created_at,
             status: "pending".into(),
         };
-        self.manager
+        if let Err(error) = self
+            .manager
             .emit_guest_request(&row.thread_id, row.to_proto())
             .await
-            .map_err(|error| GuestError::NotFound(error.to_string()))?;
+        {
+            // The thread disappeared between the guard and the event; the
+            // request must not outlive the thread it names.
+            let _ = std::fs::remove_dir_all(&directory);
+            let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
+                .bind(&row.request_id)
+                .execute(&self.pool)
+                .await;
+            return Err(GuestError::NotFound(error.to_string()));
+        }
         Ok(row.to_proto())
     }
 
@@ -920,7 +1263,7 @@ impl GuestService {
 
     async fn pending_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, created_at, status
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
              FROM guest_requests WHERE link_id = ? AND status = 'pending'
              ORDER BY created_at ASC",
         )
@@ -932,7 +1275,7 @@ impl GuestService {
 
     async fn request_by_id(&self, request_id: &str) -> Result<Option<RequestRow>, GuestError> {
         let row = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, created_at, status
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
              FROM guest_requests WHERE request_id = ?",
         )
         .bind(request_id)
@@ -942,69 +1285,131 @@ impl GuestService {
     }
 
     /// Sends one waiting guest message as a normal turn.
+    ///
+    /// The claim is one conditional update, so a concurrent Send or Dismiss
+    /// cannot run the message twice: exactly one caller moves it out of
+    /// `pending`, and the rest see "no longer exists".
     pub async fn send_request(
         &self,
         thread_id: &ThreadId,
         request_id: &str,
     ) -> Result<(), GuestError> {
+        let claimed = sqlx::query(
+            "UPDATE guest_requests SET status = 'sending'
+             WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
+        )
+        .bind(request_id)
+        .bind(thread_id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            return Err(GuestError::NotFound(
+                "That request no longer exists.".into(),
+            ));
+        }
         let Some(request) = self.request_by_id(request_id).await? else {
             return Err(GuestError::NotFound(
                 "That request no longer exists.".into(),
             ));
         };
-        if &request.thread_id != thread_id || request.status != "pending" {
-            return Err(GuestError::NotFound(
-                "That request no longer exists.".into(),
-            ));
+        let result = async {
+            let mut ids = Vec::new();
+            for attachment in &request.attachments {
+                ids.push(
+                    self.upload_attachment(&request.request_id, attachment)
+                        .await?,
+                );
+            }
+            self.manager
+                .send_message(thread_id, request.text.clone(), ids)
+                .await
+                .map_err(|error| match error {
+                    ManagerError::NotFound(message) => GuestError::NotFound(message),
+                    other => GuestError::Invalid(other.to_string()),
+                })?;
+            Ok::<(), GuestError>(())
         }
-        let mut ids = Vec::new();
-        for attachment in &request.attachments {
-            ids.push(
-                self.upload_attachment(&request.request_id, attachment)
-                    .await?,
-            );
+        .await;
+        match result {
+            Ok(()) => {
+                self.delete_request_files_best_effort(&request);
+                sqlx::query("UPDATE guest_requests SET status = 'sent' WHERE request_id = ?")
+                    .bind(&request.request_id)
+                    .execute(&self.pool)
+                    .await?;
+                let _ = self
+                    .manager
+                    .emit_guest_request_resolved(&request.thread_id, &request.request_id, true)
+                    .await;
+                Ok(())
+            }
+            Err(error) => {
+                // The turn did not start: give the owner the chance to retry.
+                let _ = sqlx::query(
+                    "UPDATE guest_requests SET status = 'pending' WHERE request_id = ?",
+                )
+                .bind(&request.request_id)
+                .execute(&self.pool)
+                .await;
+                Err(error)
+            }
         }
-        self.manager
-            .send_message(thread_id, request.text.clone(), ids)
-            .await
-            .map_err(|error| match error {
-                ManagerError::NotFound(message) => GuestError::NotFound(message),
-                other => GuestError::Invalid(other.to_string()),
-            })?;
-        self.finish_request(&request, true).await
     }
 
     /// Discards one waiting guest message and its files.
+    ///
+    /// Dismiss claims the request with the same conditional update as Send, so
+    /// a request can never be both sent and dismissed.
     pub async fn dismiss_request(
         &self,
         thread_id: &ThreadId,
         request_id: &str,
     ) -> Result<(), GuestError> {
+        let claimed = sqlx::query(
+            "UPDATE guest_requests SET status = 'dismissed'
+             WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
+        )
+        .bind(request_id)
+        .bind(thread_id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            return Err(GuestError::NotFound(
+                "That request no longer exists.".into(),
+            ));
+        }
         let Some(request) = self.request_by_id(request_id).await? else {
             return Err(GuestError::NotFound(
                 "That request no longer exists.".into(),
             ));
         };
-        if &request.thread_id != thread_id || request.status != "pending" {
-            return Err(GuestError::NotFound(
-                "That request no longer exists.".into(),
-            ));
-        }
-        self.finish_request(&request, false).await
-    }
-
-    async fn finish_request(&self, request: &RequestRow, sent: bool) -> Result<(), GuestError> {
-        self.delete_request_files(request)?;
-        sqlx::query("UPDATE guest_requests SET status = ? WHERE request_id = ?")
-            .bind(if sent { "sent" } else { "dismissed" })
-            .bind(&request.request_id)
-            .execute(&self.pool)
-            .await?;
+        self.delete_request_files_best_effort(&request);
         let _ = self
             .manager
-            .emit_guest_request_resolved(&request.thread_id, &request.request_id, sent)
+            .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
             .await;
         Ok(())
+    }
+
+    /// Deletes a request's files, leaving the row for the sweep if the disk
+    /// refuses. Access has already been decided by the caller.
+    fn delete_request_files_best_effort(&self, request: &RequestRow) {
+        for attempt in 0..CLEANUP_ATTEMPTS {
+            match self.delete_request_files(request) {
+                Ok(()) => {
+                    let _ = request;
+                    return;
+                }
+                Err(error) if attempt + 1 == CLEANUP_ATTEMPTS => {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "guest files could not be deleted; the sweep will retry"
+                    );
+                }
+                Err(_) => {}
+            }
+        }
     }
 
     async fn upload_attachment(
@@ -1084,6 +1489,7 @@ fn row_to_request(row: sqlx::sqlite::SqliteRow) -> Result<RequestRow, GuestError
         .unwrap_or_default();
     Ok(RequestRow {
         request_id: row.try_get("request_id")?,
+        link_id: row.try_get("link_id")?,
         thread_id: ThreadId::new(row.try_get::<String, _>("thread_id")?),
         text: row.try_get("text")?,
         attachments,
@@ -1104,53 +1510,219 @@ fn guest_view(summary: &ThreadSummary) -> GuestThreadView {
     }
 }
 
-/// Removes what a guest must not see from one event.
-fn sanitise(event: Event) -> Event {
+/// Projects one thread event for a guest.
+///
+/// This is an allow-list: a new event variant stays invisible until it is
+/// deliberately added here. The guest sees the conversation of one thread,
+/// never the workspace, approvals, subagent threads, filesystem events or MCP
+/// administration.
+fn guest_event(event: Event) -> Option<Event> {
     match event {
+        Event::TurnStarted {
+            thread_id,
+            turn_id,
+            started_at,
+        } => Some(Event::TurnStarted {
+            thread_id,
+            turn_id,
+            started_at,
+        }),
+        Event::MessageDelta {
+            thread_id,
+            turn_id,
+            item_id,
+            text,
+        } => Some(Event::MessageDelta {
+            thread_id,
+            turn_id,
+            item_id,
+            text,
+        }),
+        Event::ItemCompleted {
+            thread_id,
+            turn_id,
+            item,
+        } => Some(Event::ItemCompleted {
+            thread_id,
+            turn_id,
+            item: guest_item(item)?,
+        }),
+        Event::ToolCall {
+            thread_id,
+            turn_id,
+            tool_call,
+        } => Some(Event::ToolCall {
+            thread_id,
+            turn_id,
+            tool_call: guest_tool_call(tool_call),
+        }),
+        Event::Plan {
+            thread_id,
+            turn_id,
+            entries,
+        } => Some(Event::Plan {
+            thread_id,
+            turn_id,
+            entries,
+        }),
+        Event::AgentStateChanged { thread_id, state } => {
+            Some(Event::AgentStateChanged { thread_id, state })
+        }
         Event::TurnCompleted {
             thread_id,
             turn_id,
             usage,
             status,
             ..
-        } => Event::TurnCompleted {
+        } => Some(Event::TurnCompleted {
             thread_id,
             turn_id,
             usage,
             status,
             changes: None,
-        },
-        Event::ItemCompleted {
+        }),
+        Event::GuestRequested { thread_id, request } => {
+            Some(Event::GuestRequested { thread_id, request })
+        }
+        Event::GuestRequestResolved {
             thread_id,
-            turn_id,
-            item:
-                Item::Message {
-                    item_id,
-                    role,
-                    text,
-                    mut attachments,
-                },
+            request_id,
+            sent,
+        } => Some(Event::GuestRequestResolved {
+            thread_id,
+            request_id,
+            sent,
+        }),
+        Event::Error {
+            thread_id,
+            message,
+            hint,
+            retryable,
+        } => Some(Event::Error {
+            thread_id,
+            message,
+            hint,
+            retryable,
+        }),
+        _ => None,
+    }
+}
+
+/// Projects one completed item, dropping a child thread's row.
+fn guest_item(item: Item) -> Option<Item> {
+    match item {
+        Item::Message {
+            item_id,
+            role,
+            text,
+            mut attachments,
         } => {
             for attachment in &mut attachments {
                 // The daemon-host path is not part of the conversation.
                 attachment.local_path.clear();
             }
-            Event::ItemCompleted {
-                thread_id,
-                turn_id,
-                item: Item::Message {
-                    item_id,
-                    role,
-                    text,
-                    attachments,
-                },
-            }
+            Some(Item::Message {
+                item_id,
+                role,
+                text,
+                attachments,
+            })
         }
-        other => other,
+        Item::ToolCall { item_id, tool_call } => Some(Item::ToolCall {
+            item_id,
+            tool_call: guest_tool_call(tool_call),
+        }),
+        // A delegated row names and follows another thread, which a guest
+        // may not see.
+        Item::Delegated { .. } => None,
     }
 }
 
-/// Whether the bytes of an image are one of the four allowed formats, or
+/// Projects a tool call so structured file changes never reach a guest.
+///
+/// Raw arguments are always dropped: an edit's arguments hold the file's
+/// content, and Codex's `apply_patch` puts a unified diff in them. Output from
+/// a file-editing tool, or output that is itself a diff, is dropped too; the
+/// one-line summary and the added/removed counts stay.
+fn guest_tool_call(mut call: h4rn_protocol::ToolCall) -> h4rn_protocol::ToolCall {
+    call.input = None;
+    if edits_files(&call.name) || call.output.as_deref().is_some_and(looks_like_diff) {
+        call.output = None;
+    }
+    call
+}
+
+/// Whether a tool name changes files and may therefore return file content.
+fn edits_files(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "edit",
+        "write",
+        "patch",
+        "create_file",
+        "delete_file",
+        "notebook",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+}
+
+/// Whether a tool result is a unified diff rather than ordinary output.
+fn looks_like_diff(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.starts_with("diff --git")
+            || line.starts_with("*** Begin Patch")
+            || line.starts_with("@@ ")
+            || line.starts_with("+++ ")
+            || line.starts_with("--- ")
+    })
+}
+
+/// The link token from an internal guest path (`/guest/<token>/...`).
+fn guest_token(path: &str) -> &str {
+    path.trim_start_matches('/').split('/').nth(1).unwrap_or("")
+}
+
+/// Whether a submission is a same-origin JSON POST.
+///
+/// A guest submission changes state, so it must never be reachable from another
+/// site's page. Browsers send `Origin` on cross-origin POSTs, and a JSON body
+/// forces a preflight that the guest surface never answers; this closes both
+/// doors and rejects form posts that would not carry JSON.
+fn same_origin(input: &GuestHttpInput) -> Result<(), GuestError> {
+    let json = input.content_type.as_deref().is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+    });
+    if !json {
+        return Err(GuestError::Forbidden(
+            "Send the message as JSON from the guest page.".into(),
+        ));
+    }
+    if input.fetch_site.as_deref() == Some("cross-site") {
+        return Err(GuestError::Forbidden(
+            "A guest message must come from the guest page itself.".into(),
+        ));
+    }
+    if let Some(origin) = input.origin.as_deref() {
+        let authority = origin
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(origin)
+            .trim_end_matches('/');
+        let host = input.host.as_deref().unwrap_or("");
+        if host.is_empty() || !authority.eq_ignore_ascii_case(host) {
+            return Err(GuestError::Forbidden(
+                "A guest message must come from the guest page itself.".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether bytes of an image are one of the four allowed formats, or
 /// whether a non-image file may pass.
 fn sniff_guest_mime(hint: &str, bytes: &[u8]) -> Result<String, GuestError> {
     let sniffed = infer::get(bytes).map(|kind| kind.mime_type().to_owned());
@@ -1166,9 +1738,12 @@ fn sniff_guest_mime(hint: &str, bytes: &[u8]) -> Result<String, GuestError> {
             .unwrap_or_else(|| "application/octet-stream".to_owned());
         return Ok(mime);
     }
-    let mime = sniffed.unwrap_or_else(|| hint.to_owned());
-    match mime.as_str() {
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp" => Ok(mime.to_owned()),
+    // A claimed image is only accepted when the bytes themselves are one of
+    // the four formats. The client's MIME type is never enough.
+    match sniffed.as_deref() {
+        Some(mime @ ("image/png" | "image/jpeg" | "image/gif" | "image/webp")) => {
+            Ok(mime.to_owned())
+        }
         _ => Err(GuestError::Invalid(
             "Images must be PNG, JPEG, GIF or WebP.".into(),
         )),
@@ -1205,37 +1780,23 @@ fn hash_secret(secret: &str) -> String {
     blake3::hash(secret.as_bytes()).to_hex().to_string()
 }
 
-/// The guest page: no framework, no external asset, no fake row.
+/// Whether a guest link may name this base address.
 ///
-/// The state word is rendered from the server's answer; the timeline and the
-/// composer are filled only by the thread's own events.
-fn guest_page(state: &str) -> String {
-    GUEST_PAGE.replace("__STATE__", state)
-}
-
-const GUEST_PAGE: &str = include_str!("guest_page.html");
-
-/// Returns the attachment ids a guest page may display for one thread.
-///
-/// Kept public for tests: the guest blob route and this set must agree.
-pub async fn visible_attachment_ids(
-    manager: &ThreadManager,
-    thread_id: &ThreadId,
-) -> Result<BTreeSet<String>, ManagerError> {
-    let snapshot = manager.get_thread(thread_id, 0).await?;
-    let mut ids = BTreeSet::new();
-    for event in snapshot.events {
-        if let Event::ItemCompleted {
-            item: Item::Message { attachments, .. },
-            ..
-        } = event.event
-        {
-            for attachment in attachments {
-                ids.insert(attachment.id.as_str().to_owned());
-            }
-        }
+/// A direct link is a bearer token over plain HTTP if it names a LAN address,
+/// so only HTTPS and loopback qualify. Loopback links are honest about being
+/// usable only on the machine that created them; the share dialog says so.
+fn guest_base_allowed(base: &str) -> bool {
+    let base = base.trim().to_ascii_lowercase();
+    if base.starts_with("https://") {
+        return true;
     }
-    Ok(ids)
+    let Some(rest) = base.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    authority.starts_with("127.0.0.1")
+        || authority.starts_with("localhost")
+        || authority.starts_with("[::1]")
 }
 
 impl From<JournalError> for GuestError {
@@ -1280,15 +1841,181 @@ mod tests {
 
     #[test]
     fn the_page_never_contains_a_token() {
-        let page = guest_page("active");
+        let page = guest_page_html("active");
         assert!(page.contains("__STATE__") || page.contains("active"));
         assert!(!page.contains("h4rn_guest="));
+    }
+
+    fn file_change_tool() -> h4rn_protocol::ToolCall {
+        h4rn_protocol::ToolCall {
+            tool_call_id: "tc_patch".into(),
+            name: "apply_patch".into(),
+            status: h4rn_protocol::ToolCallStatus::Completed,
+            summary: "src/main.rs".into(),
+            input: Some(serde_json::json!({
+                "changes": [{ "path": "src/main.rs", "diff": "@@ -1 +1 @@\n-old\n+new" }]
+            })),
+            output: Some("@@ -1 +1 @@\n-old\n+new".into()),
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            stats: None,
+        }
+    }
+
+    #[test]
+    fn a_file_change_tool_call_loses_its_structured_diff() {
+        let thread_id = ThreadId::new("th_guest");
+        let turn_id = h4rn_protocol::TurnId::new("turn_guest");
+        for event in [
+            Event::ToolCall {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                tool_call: file_change_tool(),
+            },
+            Event::ItemCompleted {
+                thread_id,
+                turn_id,
+                item: Item::ToolCall {
+                    item_id: "tc_patch".into(),
+                    tool_call: file_change_tool(),
+                },
+            },
+        ] {
+            let projected = guest_event(event).expect("a tool call is shown");
+            let json = serde_json::to_string(&projected).expect("serialise");
+            assert!(!json.contains("\"diff\""), "{json}");
+            assert!(!json.contains("-old"), "{json}");
+            assert!(!json.contains("@@ -1 +1 @@"), "{json}");
+            assert!(json.contains("apply_patch"), "the row still names the tool");
+        }
+    }
+
+    #[test]
+    fn an_edit_tools_plain_output_is_also_dropped() {
+        let mut call = file_change_tool();
+        call.name = "Edit".into();
+        call.input = None;
+        call.output = Some("new file content".into());
+        let projected = guest_tool_call(call);
+        assert!(projected.output.is_none());
+        // A read tool keeps its output: the guest sees tool output, just not
+        // file content from an editing tool.
+        let mut read = file_change_tool();
+        read.name = "Read".into();
+        read.output = Some("hello".into());
+        assert_eq!(guest_tool_call(read).output.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_guest_projection_drops_workspace_and_approval_events() {
+        let summary = ThreadSummary {
+            thread_id: ThreadId::new("th_guest"),
+            parent_thread_id: None,
+            host: h4rn_protocol::HostId::new("host"),
+            harness: h4rn_protocol::HarnessKind::ClaudeCode,
+            agent_id: None,
+            title: "shared".into(),
+            workspace_path: "/home/secret/work".into(),
+            branch: None,
+            model: "fake-model".into(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
+            models: Vec::new(),
+            fast: false,
+            tab: h4rn_protocol::ThreadTab::Working,
+            placed_by_user: false,
+            pinned: false,
+            snoozed_until: None,
+            last_activity: Utc::now(),
+            agent_state: h4rn_protocol::AgentState::Idle,
+            usage: h4rn_protocol::Usage::default(),
+            ttft_ms: None,
+            context_window: None,
+            context_fill_percent: None,
+            needs_attention: false,
+            pending_guest_requests: 0,
+            unread: false,
+            resume_at: None,
+            limit: None,
+        };
+        assert!(guest_event(Event::ThreadUpserted(summary)).is_none());
+        assert!(
+            guest_event(Event::ApprovalRequested {
+                thread_id: ThreadId::new("th_guest"),
+                turn_id: h4rn_protocol::TurnId::new("turn"),
+                approval_id: "a1".into(),
+                subagent_id: None,
+                kind: h4rn_protocol::ApprovalKind::FileChange,
+                prompt: "allow?".into(),
+                options: Vec::new(),
+            })
+            .is_none()
+        );
+        assert!(
+            guest_event(Event::FsChanged {
+                workspace: "/home/secret/work".into(),
+                path: "src/main.rs".into(),
+                change: h4rn_protocol::FsChangeKind::Modified,
+                at: Utc::now(),
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_direct_link_is_https_or_loopback_only() {
+        assert!(guest_base_allowed("https://h4rn.example/guest"));
+        assert!(guest_base_allowed("http://127.0.0.1:47810/guest"));
+        assert!(guest_base_allowed("http://[::1]:47810/guest"));
+        assert!(!guest_base_allowed("http://192.168.1.9:47810/guest"));
+        assert!(!guest_base_allowed("http://h4rn.example/guest"));
+    }
+
+    fn post_input(origin: Option<&str>, host: Option<&str>, json: bool) -> GuestHttpInput {
+        GuestHttpInput {
+            method: Method::Post,
+            path: "/guest/tok/messages".into(),
+            public_prefix: None,
+            cookie: None,
+            content_type: Some(if json {
+                "application/json".into()
+            } else {
+                "text/plain".into()
+            }),
+            origin: origin.map(str::to_owned),
+            host: host.map(str::to_owned),
+            fetch_site: None,
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_guest_post_must_be_same_origin_and_json() {
+        assert!(same_origin(&post_input(None, None, true)).is_ok());
+        assert!(
+            same_origin(&post_input(
+                Some("http://127.0.0.1:9"),
+                Some("127.0.0.1:9"),
+                true
+            ))
+            .is_ok()
+        );
+        assert!(
+            same_origin(&post_input(
+                Some("https://evil.example"),
+                Some("h4rn.test"),
+                true
+            ))
+            .is_err()
+        );
+        assert!(same_origin(&post_input(None, None, false)).is_err());
     }
 
     #[test]
     fn the_page_renders_every_link_state() {
         for state in ["active", "expired", "revoked", "disabled", "unbound"] {
-            let page = guest_page(state);
+            let page = guest_page_html(state);
             assert!(
                 page.contains(&format!("data-state=\"{state}\"")),
                 "missing {state}"

@@ -52,6 +52,30 @@ describe("foldEvent", () => {
     expect(log.guestRequests).toHaveLength(0);
   });
 
+  it("removes only the guest card whose request resolved", () => {
+    let log = createThreadLog();
+    for (const id of ["greq_a", "greq_b"]) {
+      log = foldEvent(log, {
+        type: "guest_requested",
+        thread_id: "t1",
+        request: {
+          request_id: id,
+          thread_id: "t1",
+          text: id,
+          attachments: [],
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+      });
+    }
+    log = foldEvent(log, {
+      type: "guest_request_resolved",
+      thread_id: "t1",
+      request_id: "greq_b",
+      sent: false,
+    });
+    expect(log.guestRequests.map((request) => request.request_id)).toEqual(["greq_a"]);
+  });
+
   it("accumulates message deltas into a running turn", () => {
     let log = createThreadLog();
     log = foldEvent(log, {

@@ -186,6 +186,7 @@ impl Client {
 }
 
 /// One browser talking to the guest surface.
+#[derive(Clone)]
 struct Browser {
     client: reqwest::Client,
     base: String,
@@ -827,4 +828,698 @@ async fn an_oversized_message_is_refused() {
     let (status, body) = browser.post("/messages", &big).await;
     assert_eq!(status, 400, "{}", String::from_utf8_lossy(&body));
     daemon.stop().await;
+}
+
+/// A successful guest message flow leaves one real attachment in the thread.
+async fn shared_guest_message_with_file(
+    owner: &mut Client,
+    guest: &h4rn_daemon::guest::GuestService,
+    base: &str,
+    thread_id: &ThreadId,
+) -> String {
+    let link = enable_and_share(owner, guest, thread_id, base).await;
+    let prefix = link.strip_prefix(base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "here is a file".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "photo.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"a real attachment from another thread"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    owner
+        .request(ClientRequest::SendGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id,
+        })
+        .await;
+    browser.base
+}
+
+#[tokio::test]
+async fn a_page_load_never_claims_the_link() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "unclaimed").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let token = link.rsplit('/').next().unwrap().to_owned();
+    let url = format!("{base}/guest/{token}");
+
+    // Two cookie-less page loads both succeed, but neither browser is bound:
+    // a link-preview crawler cannot steal the link by fetching it.
+    for _ in 0..2 {
+        let (status, cookie, body) = Browser::new(url.clone()).get("").await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert!(cookie.is_some(), "the page still offers a pending cookie");
+        assert!(String::from_utf8_lossy(&body).contains("data-state=\"active\""));
+    }
+    let sharing = daemon
+        .guest
+        .sharing(&thread_id, &format!("{base}/guest"), true)
+        .await
+        .expect("sharing");
+    assert!(!sharing.link.expect("link").bound, "a GET claimed the link");
+    let state = Browser::new(url.clone()).state(0).await;
+    assert_eq!(
+        state.state,
+        GuestLinkState::Unbound,
+        "a cookieless state read"
+    );
+
+    // The browser that presents a page-load cookie claims the link on state.
+    let (_, cookie, _) = Browser::new(url.clone()).get("").await;
+    let mut browser = Browser::new(url);
+    browser.cookie = cookie;
+    let snapshot = browser.state(0).await;
+    assert_eq!(snapshot.state, GuestLinkState::Active);
+    let sharing = daemon
+        .guest
+        .sharing(&thread_id, &format!("{base}/guest"), true)
+        .await
+        .expect("sharing");
+    assert!(sharing.link.expect("link").bound);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_cross_origin_or_form_post_is_refused() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "origins").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let _ = browser.state(0).await;
+
+    let message = GuestMessageInput {
+        text: "cross site?".into(),
+        attachments: Vec::new(),
+    };
+    let cross = browser
+        .client
+        .post(format!("{}{prefix}/messages", base))
+        .header("origin", "https://evil.example")
+        .header(
+            "cookie",
+            format!("h4rn_guest={}", browser.cookie.clone().unwrap()),
+        )
+        .json(&message)
+        .send()
+        .await
+        .expect("cross-origin POST");
+    assert_eq!(cross.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let form = browser
+        .client
+        .post(format!("{}{prefix}/messages", base))
+        .header(
+            "cookie",
+            format!("h4rn_guest={}", browser.cookie.clone().unwrap()),
+        )
+        .form(&[("text", "a form")])
+        .send()
+        .await
+        .expect("form POST");
+    assert_eq!(form.status(), reqwest::StatusCode::FORBIDDEN);
+
+    assert_eq!(
+        pending_requests(&daemon, &thread_id).await,
+        0,
+        "a refused post still queued a request"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn turning_the_labs_switch_off_ends_every_link_and_discards_files() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "labs switch").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let (status, _) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "waiting".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "waiting.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"discard me"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.is_dir());
+
+    owner
+        .request(ClientRequest::SetGuestSettings { enabled: false })
+        .await;
+    // The old token no longer names a link: with guest links off the page says
+    // so, and after turning them back on the link is still gone.
+    let (status, _, body) = browser.get("").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("data-state=\"disabled\""));
+    assert!(!directory.exists(), "turning guest links off left a file");
+    assert_eq!(
+        pending_requests(&daemon, &thread_id).await,
+        0,
+        "guest links off left a waiting request"
+    );
+    let sharing = daemon
+        .guest
+        .sharing(&thread_id, &format!("{base}/guest"), true)
+        .await
+        .expect("sharing");
+    assert!(
+        sharing.link.is_none(),
+        "turning guest links off kept a link"
+    );
+
+    // Turning it back on does not revive the link.
+    owner
+        .request(ClientRequest::SetGuestSettings { enabled: true })
+        .await;
+    let (status, _, _) = browser.get("").await;
+    assert_eq!(status, reqwest::StatusCode::GONE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_sweep_removes_an_expired_link_and_its_files() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "sweep").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let (status, _) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "sweep me".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "sweep.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"sweep me"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.is_dir());
+
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("UPDATE guest_links SET expires_at = ? WHERE thread_id = ?")
+        .bind((chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339())
+        .bind(thread_id.as_str())
+        .execute(&pool)
+        .await
+        .expect("expire link");
+    pool.close().await;
+
+    let removed = daemon.guest.sweep_expired().await.expect("sweep");
+    assert_eq!(removed, 1);
+    assert!(!directory.exists(), "the sweep left an expired link's file");
+    let (status, _, _) = browser.get("").await;
+    assert_eq!(status, reqwest::StatusCode::GONE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_submit_racing_stop_sharing_leaves_no_request_and_no_files() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "race").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let _ = browser.state(0).await;
+
+    let mut submitting = Vec::new();
+    for index in 0..8 {
+        let browser = browser.clone();
+        submitting.push(tokio::spawn(async move {
+            browser
+                .post(
+                    "/messages",
+                    &GuestMessageInput {
+                        text: format!("racer {index}"),
+                        attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                            name: format!("race-{index}.txt"),
+                            mime: "text/plain".into(),
+                            data: base64_encode(format!("racer {index}").as_bytes()),
+                        }],
+                    },
+                )
+                .await
+        }));
+    }
+    owner
+        .request(ClientRequest::StopGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    for task in submitting {
+        let _ = task.await;
+    }
+
+    let pool = journal_pool(&daemon).await;
+    let requests: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests")
+        .fetch_one(&pool)
+        .await
+        .expect("count requests");
+    let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_links")
+        .fetch_one(&pool)
+        .await
+        .expect("count links");
+    pool.close().await;
+    assert_eq!(links, 0);
+    assert_eq!(requests, 0, "a submit outlived Stop sharing");
+    let leftovers: Vec<_> = std::fs::read_dir(daemon.dir.path().join("guest"))
+        .expect("guest dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "files without a request: {leftovers:?}"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn send_and_dismiss_claim_a_request_exactly_once() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "claim").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let (status, _) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "once".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    let send_guest = Arc::clone(&daemon.guest);
+    let dismiss_guest = Arc::clone(&daemon.guest);
+    let send_thread = thread_id.clone();
+    let send_id = request_id.clone();
+    let dismiss_thread = thread_id.clone();
+    let dismiss_id = request_id.clone();
+    let (send, dismiss) = tokio::join!(
+        async move { send_guest.send_request(&send_thread, &send_id).await },
+        async move {
+            dismiss_guest
+                .dismiss_request(&dismiss_thread, &dismiss_id)
+                .await
+        }
+    );
+    let wins = usize::from(send.is_ok()) + usize::from(dismiss.is_ok());
+    assert_eq!(wins, 1, "exactly one action may claim the request");
+
+    // Two concurrent Sends cannot run the same message twice either.
+    let second = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let second_prefix = second.strip_prefix(&base).expect("local base").to_owned();
+    let browser2 = Browser::new(format!("{base}{second_prefix}"));
+    let (_, cookie, _) = browser2.get("").await;
+    let browser2 = Browser {
+        client: browser2.client,
+        base: browser2.base,
+        cookie,
+    };
+    let (status, _) = browser2
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "send twice".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser2).await;
+    let first_guest = Arc::clone(&daemon.guest);
+    let second_guest = Arc::clone(&daemon.guest);
+    let thread_a = thread_id.clone();
+    let id_a = request_id.clone();
+    let thread_b = thread_id.clone();
+    let id_b = request_id;
+    let (first, second_send) = tokio::join!(
+        async move { first_guest.send_request(&thread_a, &id_a).await },
+        async move { second_guest.send_request(&thread_b, &id_b).await }
+    );
+    assert_eq!(
+        usize::from(first.is_ok()) + usize::from(second_send.is_ok()),
+        1
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn text_pending_count_and_budget_are_capped() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "caps").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let _ = browser.state(0).await;
+
+    let long = GuestMessageInput {
+        text: "x".repeat(h4rn_protocol::GUEST_MAX_TEXT_BYTES + 1),
+        attachments: Vec::new(),
+    };
+    let (status, _) = browser.post("/messages", &long).await;
+    assert_eq!(status, 400);
+
+    // A file that claims to be a PNG but is text is sniffed and refused.
+    let fake_image = GuestMessageInput {
+        text: String::new(),
+        attachments: vec![h4rn_protocol::GuestAttachmentInput {
+            name: "fake.png".into(),
+            mime: "image/png".into(),
+            data: base64_encode(b"not a png at all"),
+        }],
+    };
+    let (status, _) = browser.post("/messages", &fake_image).await;
+    assert_eq!(status, 400);
+
+    for index in 0..h4rn_protocol::GUEST_MAX_PENDING_REQUESTS {
+        let (status, body) = browser
+            .post(
+                "/messages",
+                &GuestMessageInput {
+                    text: format!("waiting {index}"),
+                    attachments: Vec::new(),
+                },
+            )
+            .await;
+        assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    }
+    let (status, _) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "one too many".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert_eq!(status, 400, "the pending count is not capped");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_pending_byte_budget_is_capped() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "budget").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let _ = browser.state(0).await;
+    let file = |size: usize| h4rn_protocol::GuestAttachmentInput {
+        name: "budget.txt".into(),
+        mime: "text/plain".into(),
+        data: base64_encode(&vec![b'a'; size]),
+    };
+    // Two 9 MB messages fill 18 of the 20 MB.
+    for _ in 0..2 {
+        let (status, body) = browser
+            .post(
+                "/messages",
+                &GuestMessageInput {
+                    text: String::new(),
+                    attachments: vec![file(9 * 1024 * 1024)],
+                },
+            )
+            .await;
+        assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    }
+    let (status, _) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: String::new(),
+                attachments: vec![file(3 * 1024 * 1024)],
+            },
+        )
+        .await;
+    assert_eq!(status, 400, "the pending byte budget is not enforced");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_real_attachment_from_another_thread_is_refused() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let shared = create_thread(&mut owner, daemon.dir.path(), "shared thread").await;
+    let other = create_thread(&mut owner, daemon.dir.path(), "other thread").await;
+
+    // A real attachment lands in `other` through a guest message the owner
+    // sends, so it is a genuine blob rather than a fabricated id.
+    shared_guest_message_with_file(&mut owner, &daemon.guest, &base, &other).await;
+    let response = owner
+        .request(ClientRequest::GetThread {
+            thread_id: other.clone(),
+            since_seq: 0,
+        })
+        .await;
+    let attachment_id = match response {
+        ResponseBody::Thread { events, .. } => events
+            .into_iter()
+            .find_map(|event| match event.event {
+                Event::ItemCompleted {
+                    item: h4rn_protocol::Item::Message { attachments, .. },
+                    ..
+                } => attachments
+                    .first()
+                    .map(|attachment| attachment.id.as_str().to_owned()),
+                _ => None,
+            })
+            .expect("the sent message's attachment"),
+        other => panic!("unexpected thread response: {other:?}"),
+    };
+
+    let link = enable_and_share(&mut owner, &daemon.guest, &shared, &base).await;
+    let prefix = link.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (_, cookie, _) = browser.get("").await;
+    let browser = Browser {
+        client: browser.client,
+        base: browser.base,
+        cookie,
+    };
+    let _ = browser.state(0).await;
+    let (status, _, _) = browser.get(&format!("/blob/{attachment_id}")).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::NOT_FOUND,
+        "a guest read another thread's attachment"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_unauthenticated_oversized_post_is_refused_before_its_body() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let response = reqwest::Client::new()
+        .post(format!("{base}/guest/not-a-real-token/messages"))
+        .header("content-type", "application/json")
+        .body(vec![b'a'; 17 * 1024 * 1024])
+        .send()
+        .await
+        .expect("POST");
+    // Without the fix the body limit answered first (413); the token is
+    // checked before a single byte is buffered.
+    assert_eq!(response.status(), reqwest::StatusCode::GONE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_relay_prefix_scopes_the_cookie_and_works_twice() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "relay path").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let token = link.rsplit('/').next().unwrap().to_owned();
+    let public_prefix = format!("/guest/machine_1/{token}");
+
+    let page = daemon
+        .guest
+        .handle(h4rn_daemon::guest::GuestHttpInput {
+            method: h4rn_daemon::guest::Method::Get,
+            path: format!("/guest/{token}"),
+            public_prefix: Some(public_prefix.clone()),
+            cookie: None,
+            content_type: None,
+            origin: None,
+            host: None,
+            fetch_site: None,
+            body: Vec::new(),
+        })
+        .await;
+    let cookie = page.set_cookie.expect("binding cookie");
+    // The browser's path is the public one, not the daemon's internal path.
+    assert!(
+        cookie.contains(&format!("Path={public_prefix}")),
+        "{cookie}"
+    );
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(cookie.contains("Secure"), "{cookie}");
+    let value = cookie
+        .strip_prefix("h4rn_guest=")
+        .and_then(|rest| rest.split(';').next())
+        .expect("cookie value")
+        .to_owned();
+
+    for _ in 0..2 {
+        let state = daemon
+            .guest
+            .handle(h4rn_daemon::guest::GuestHttpInput {
+                method: h4rn_daemon::guest::Method::Get,
+                path: format!("/guest/{token}/state"),
+                public_prefix: Some(public_prefix.clone()),
+                cookie: Some(value.clone()),
+                content_type: None,
+                origin: None,
+                host: None,
+                fetch_site: None,
+                body: Vec::new(),
+            })
+            .await;
+        assert_eq!(state.status, 200);
+        let snapshot: GuestSnapshot = serde_json::from_slice(&state.body).expect("snapshot");
+        assert_eq!(snapshot.state, GuestLinkState::Active);
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn sharing_hides_the_url_from_a_non_admin_reader() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "admin url").await;
+    let _link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let admin = daemon
+        .guest
+        .sharing(&thread_id, &format!("{base}/guest"), true)
+        .await
+        .expect("admin sharing");
+    assert!(admin.link.expect("link").url.is_some());
+    let view = daemon
+        .guest
+        .sharing(&thread_id, &format!("{base}/guest"), false)
+        .await
+        .expect("view sharing");
+    let view_link = view.link.expect("link metadata");
+    assert!(
+        view_link.url.is_none(),
+        "a view-only device got the bearer URL"
+    );
+    assert!(view_link.expires_at > chrono::Utc::now());
+    daemon.stop().await;
+}
+
+async fn pending_requests(daemon: &TestDaemon, thread_id: &ThreadId) -> i64 {
+    let pool = journal_pool(daemon).await;
+    let count = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM guest_requests WHERE thread_id = ? AND status = 'pending'",
+    )
+    .bind(thread_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .expect("count pending requests");
+    pool.close().await;
+    count
+}
+
+async fn journal_pool(daemon: &TestDaemon) -> sqlx::SqlitePool {
+    sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        daemon.dir.path().join("events.db").display()
+    ))
+    .await
+    .expect("open journal")
 }

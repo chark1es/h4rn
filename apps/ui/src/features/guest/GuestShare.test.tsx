@@ -127,7 +127,7 @@ describe("GuestShareDialog", () => {
     expect(harness.stop).toHaveBeenCalledWith("th_1");
   });
 
-  it("says the URL cannot be shown again after a restart", () => {
+  it("says only an admin device may show the URL", () => {
     harness.state.sharing = {
       th_1: {
         thread_id: "th_1",
@@ -140,7 +140,7 @@ describe("GuestShareDialog", () => {
       },
     };
     render(<GuestShareDialog />);
-    expect(screen.getByText(/cannot show the URL again/i)).toBeTruthy();
+    expect(screen.getByText(/only an admin device can copy it/i)).toBeTruthy();
   });
 
   it("closes on Escape without losing the thread", () => {

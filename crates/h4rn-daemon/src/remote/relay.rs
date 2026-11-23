@@ -47,6 +47,20 @@ enum RelayInbound {
     Error(String),
 }
 
+/// Guest exchanges whose body is still arriving in chunks.
+#[derive(Default)]
+struct GuestExchanges {
+    pending: HashMap<String, PendingGuest>,
+    /// Requests refused before their body was read; later chunks are dropped.
+    rejected: std::collections::HashSet<String>,
+}
+
+struct PendingGuest {
+    request: h4rn_protocol::GuestHttpRequest,
+    body: Vec<u8>,
+    next_seq: u64,
+}
+
 /// In-flight relay connections, keyed by `conn_id`. It holds both sessions
 /// this daemon serves (inbound) and sessions it dialled through the same
 /// authenticated relay socket (outbound).
@@ -277,6 +291,7 @@ async fn run_once(
     dialer.attach(out_tx.clone(), Arc::clone(&connections));
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut guests = GuestExchanges::default();
 
     let outcome = loop {
         let step: anyhow::Result<bool> = async {
@@ -299,7 +314,7 @@ async fn run_once(
                                     return Ok(true);
                                 }
                             };
-                            handle_event(event, state, service, client, registry, &connections, &out_tx).await?;
+                            handle_event(event, state, service, client, registry, &connections, &out_tx, &mut guests).await?;
                         }
                         Ok(Message::Close(_)) | Err(_) => return Ok(false),
                         // Control frames are handled by the WebSocket layer.
@@ -340,6 +355,7 @@ async fn handle_event(
     registry: &Arc<DeviceRegistry>,
     connections: &Connections,
     out_tx: &mpsc::Sender<RelayFrame>,
+    guests: &mut GuestExchanges,
 ) -> anyhow::Result<()> {
     match event {
         RelayServerEvent::Frame { frame } => match frame.kind {
@@ -418,61 +434,107 @@ async fn handle_event(
                         }
                     };
                 let request_id = request.request_id.clone();
-                let method = if request.method.eq_ignore_ascii_case("post") {
-                    crate::guest::Method::Post
-                } else {
-                    crate::guest::Method::Get
-                };
-                let mut headers = axum::http::HeaderMap::new();
-                for (name, value) in request.headers {
-                    if let (Ok(name), Ok(value)) = (
-                        axum::http::HeaderName::try_from(name),
-                        axum::http::HeaderValue::try_from(value),
-                    ) {
-                        headers.insert(name, value);
-                    }
+                if guests.rejected.contains(&request_id) {
+                    return Ok(());
                 }
-                let response = crate::server::guest_exchange(
+                if request.chunked {
+                    // Check the link before any chunk of the body arrives, so
+                    // an unknown token never makes the daemon buffer a file.
+                    let method = guest_method(&request.method);
+                    if method == crate::guest::Method::Post {
+                        let input = crate::server::guest_input(
+                            method,
+                            request.path.clone(),
+                            request.public_prefix.clone(),
+                            &guest_headers(&request),
+                            Vec::new(),
+                        );
+                        if let Err(output) = state.guest.check_submission(&input).await {
+                            guests.rejected.insert(request_id.clone());
+                            send_guest_answer(out_tx, &frame.conn_id, &request_id, output).await;
+                            return Ok(());
+                        }
+                    }
+                    guests.pending.insert(
+                        request_id,
+                        PendingGuest {
+                            request,
+                            body: Vec::new(),
+                            next_seq: 0,
+                        },
+                    );
+                    return Ok(());
+                }
+                let (status, headers, body) = guest_answer(
                     state,
-                    method,
-                    request.path,
-                    &headers,
+                    &request.method,
+                    request.path.clone(),
+                    request.public_prefix.clone(),
+                    &guest_headers(&request),
                     request.body,
                 )
                 .await;
-                let (parts, body) = response.into_parts();
-                let bytes = axum::body::to_bytes(body, 20 * 1024 * 1024)
-                    .await
-                    .map(|bytes| bytes.to_vec())
-                    .unwrap_or_default();
-                let response_headers = parts
-                    .headers
-                    .iter()
-                    .filter_map(|(name, value)| {
-                        value
-                            .to_str()
-                            .ok()
-                            .map(|value| (name.as_str().to_owned(), value.to_owned()))
-                    })
-                    .collect();
-                let reply = h4rn_protocol::GuestHttpResponse {
-                    request_id,
-                    status: parts.status.as_u16(),
-                    headers: response_headers,
-                    body: bytes,
-                };
-                match serde_json::to_vec(&reply) {
-                    Ok(payload) => {
-                        let _ = out_tx
-                            .send(RelayFrame {
-                                conn_id: frame.conn_id,
-                                kind: RelayFrameKind::GuestHttp,
-                                payload,
-                            })
-                            .await;
+                send_guest_reply(out_tx, &frame.conn_id, &request_id, status, headers, body).await;
+            }
+            RelayFrameKind::GuestHttpChunk => {
+                let chunk: h4rn_protocol::GuestHttpChunk =
+                    match serde_json::from_slice(&frame.payload) {
+                        Ok(chunk) => chunk,
+                        Err(_) => {
+                            tracing::warn!("relay sent a guest chunk that is not JSON");
+                            return Ok(());
+                        }
+                    };
+                if guests.rejected.contains(&chunk.request_id) {
+                    if chunk.last {
+                        guests.rejected.remove(&chunk.request_id);
                     }
-                    Err(error) => tracing::warn!(%error, "could not serialise a guest answer"),
+                    return Ok(());
                 }
+                let Some(pending) = guests.pending.get_mut(&chunk.request_id) else {
+                    return Ok(());
+                };
+                if chunk.seq != pending.next_seq {
+                    tracing::warn!("relay sent a guest body out of order");
+                    guests.pending.remove(&chunk.request_id);
+                    return Ok(());
+                }
+                pending.next_seq += 1;
+                if pending.body.len().saturating_add(chunk.body.len())
+                    > h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES
+                {
+                    let request_id = chunk.request_id.clone();
+                    guests.pending.remove(&request_id);
+                    guests.rejected.insert(request_id.clone());
+                    let output = crate::guest::GuestHttpOutput::text(
+                        413,
+                        "That message is over the 20 MB guest limit.",
+                    );
+                    send_guest_answer(out_tx, &frame.conn_id, &request_id, output).await;
+                    return Ok(());
+                }
+                pending.body.extend_from_slice(&chunk.body);
+                if !chunk.last {
+                    return Ok(());
+                }
+                let Some(pending) = guests.pending.remove(&chunk.request_id) else {
+                    return Ok(());
+                };
+                let method = pending.request.method.clone();
+                let headers = guest_headers(&pending.request);
+                let path = pending.request.path;
+                let public_prefix = pending.request.public_prefix;
+                let (status, headers, body) =
+                    guest_answer(state, &method, path, public_prefix, &headers, pending.body).await;
+                send_guest_reply(
+                    out_tx,
+                    &frame.conn_id,
+                    &chunk.request_id,
+                    status,
+                    headers,
+                    body,
+                )
+                .await;
             }
             RelayFrameKind::Ping => {}
         },
@@ -530,6 +592,138 @@ async fn handle_event(
         }
     }
     Ok(())
+}
+
+/// Maps the wire method to the guest surface's method.
+fn guest_method(method: &str) -> crate::guest::Method {
+    if method.eq_ignore_ascii_case("post") {
+        crate::guest::Method::Post
+    } else {
+        crate::guest::Method::Get
+    }
+}
+
+/// Rebuilds the forwarded request headers for the guest surface.
+fn guest_headers(request: &h4rn_protocol::GuestHttpRequest) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    for (name, value) in &request.headers {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(name.as_str()),
+            axum::http::HeaderValue::try_from(value.as_str()),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+    headers
+}
+
+/// Runs one guest exchange and returns its parts.
+async fn guest_answer(
+    state: &AppState,
+    method: &str,
+    path: String,
+    public_prefix: Option<String>,
+    headers: &axum::http::HeaderMap,
+    body: Vec<u8>,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    let response = crate::server::guest_exchange(
+        state,
+        guest_method(method),
+        path,
+        public_prefix,
+        headers,
+        body,
+    )
+    .await;
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES)
+        .await
+        .map(|bytes| bytes.to_vec())
+        .unwrap_or_default();
+    let response_headers = parts
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+        })
+        .collect();
+    (parts.status.as_u16(), response_headers, bytes)
+}
+
+/// Sends a pre-built guest error answer as one frame.
+async fn send_guest_answer(
+    out_tx: &mpsc::Sender<RelayFrame>,
+    conn_id: &str,
+    request_id: &str,
+    output: crate::guest::GuestHttpOutput,
+) {
+    let mut headers = vec![("content-type".to_owned(), output.content_type.to_owned())];
+    headers.extend(output.headers);
+    send_guest_reply(
+        out_tx,
+        conn_id,
+        request_id,
+        output.status,
+        headers,
+        output.body,
+    )
+    .await;
+}
+
+/// Sends one guest answer, chunked when the body is large.
+async fn send_guest_reply(
+    out_tx: &mpsc::Sender<RelayFrame>,
+    conn_id: &str,
+    request_id: &str,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) {
+    let chunked = body.len() > h4rn_protocol::GUEST_CHUNK_BYTES;
+    let reply = h4rn_protocol::GuestHttpResponse {
+        request_id: request_id.to_owned(),
+        status,
+        chunked,
+        headers,
+        body: if chunked { Vec::new() } else { body.clone() },
+    };
+    let Ok(payload) = serde_json::to_vec(&reply) else {
+        tracing::warn!("could not serialise a guest answer");
+        return;
+    };
+    let _ = out_tx
+        .send(RelayFrame {
+            conn_id: conn_id.to_owned(),
+            kind: RelayFrameKind::GuestHttp,
+            payload,
+        })
+        .await;
+    if !chunked {
+        return;
+    }
+    let chunks: Vec<&[u8]> = body.chunks(h4rn_protocol::GUEST_CHUNK_BYTES).collect();
+    let total = chunks.len();
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let frame = h4rn_protocol::GuestHttpChunk {
+            request_id: request_id.to_owned(),
+            seq: index as u64,
+            last: index + 1 == total,
+            body: chunk.to_vec(),
+        };
+        let Ok(payload) = serde_json::to_vec(&frame) else {
+            continue;
+        };
+        let _ = out_tx
+            .send(RelayFrame {
+                conn_id: conn_id.to_owned(),
+                kind: RelayFrameKind::GuestHttpChunk,
+                payload,
+            })
+            .await;
+    }
 }
 
 /// Makes a connect snapshot authoritative for connect-managed devices.

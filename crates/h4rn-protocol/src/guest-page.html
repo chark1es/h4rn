@@ -707,6 +707,7 @@
               const request = event.request;
               if (!request) break;
               const card = el("div", "guest-card");
+              card.dataset.requestId = request.request_id;
               card.append(el("div", "tag", "Your message · waiting for the owner"));
               if (request.text) card.append(el("p", "prose", request.text));
               if (request.attachments && request.attachments.length) {
@@ -722,8 +723,12 @@
               break;
             }
             case "guest_request_resolved": {
+              // Cards are keyed by request id, so sending one message never
+              // removes another guest's waiting card.
               const cards = els.timeline.querySelectorAll(".guest-card");
-              if (cards.length) cards[cards.length - 1].remove();
+              for (const card of cards) {
+                if (card.dataset.requestId === event.request_id) card.remove();
+              }
               break;
             }
             default:

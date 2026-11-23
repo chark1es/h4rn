@@ -1075,3 +1075,279 @@ async fn machine_list_can_be_limited_to_this_devices_links() {
     assert_eq!(status, StatusCode::OK, "{linked}");
     assert!(linked.as_array().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Guest links over the real relay
+// ---------------------------------------------------------------------------
+
+/// Answers one non-chunked guest request as a daemon would.
+fn fake_guest_answer(
+    request: h4rn_protocol::GuestHttpRequest,
+    token: &str,
+    binding: &str,
+) -> h4rn_protocol::GuestHttpResponse {
+    let request_id = request.request_id.clone();
+    let cookie = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == "cookie")
+        .map(|(_, value)| value.clone());
+    let bound = cookie.as_deref() == Some(format!("h4rn_guest={binding}").as_str());
+    let (status, headers, body) = if request.path == format!("/guest/{token}") {
+        // The daemon's page is only asked for its page-load cookie; Connect
+        // must never return this HTML.
+        (
+            200,
+            vec![
+                ("content-type".to_string(), "text/html".to_string()),
+                (
+                    "set-cookie".to_string(),
+                    format!("h4rn_guest={binding}; Path=/guest/{token}; HttpOnly"),
+                ),
+            ],
+            b"<html>daemon page</html>".to_vec(),
+        )
+    } else if request.path.ends_with("/state") {
+        if bound {
+            (
+                200,
+                vec![("content-type".to_string(), "application/json".to_string())],
+                br#"{"state":"active","events":[],"next_seq":0}"#.to_vec(),
+            )
+        } else {
+            (
+                200,
+                vec![
+                    ("content-type".to_string(), "application/json".to_string()),
+                    // The daemon's own path is internal; Connect must rebuild it.
+                    (
+                        "set-cookie".to_string(),
+                        format!("h4rn_guest={binding}; Path=/guest/{token}; HttpOnly"),
+                    ),
+                    (
+                        "content-security-policy".to_string(),
+                        "default-src *".to_string(),
+                    ),
+                ],
+                br#"{"state":"unbound","events":[],"next_seq":0}"#.to_vec(),
+            )
+        }
+    } else {
+        (
+            404,
+            vec![("content-type".to_string(), "text/plain".to_string())],
+            b"not found".to_vec(),
+        )
+    };
+    h4rn_protocol::GuestHttpResponse {
+        request_id,
+        status,
+        chunked: false,
+        headers,
+        body,
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-machine")).await;
+    let machine = state
+        .store
+        .machines(daemon.user.id, &std::collections::HashSet::new())
+        .await
+        .expect("machines")
+        .into_iter()
+        .find(|machine| machine.name == "guest-machine")
+        .expect("the daemon's machine");
+    let machine_id = Uuid::parse_str(&machine.id).expect("machine id");
+    let token = "guest_token_for_the_relay_test";
+    let binding = "guest_binding_value";
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_string(),
+            tx,
+        })
+        .await;
+
+    let pages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task_state = state.clone();
+    let task_device = daemon.device.id;
+    let task_pages = pages.clone();
+    let task_token = token.to_string();
+    let task_binding = binding.to_string();
+    let fake = tokio::spawn(async move {
+        let mut bodies: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        while let Some(event) = rx.recv().await {
+            let h4rn_protocol::RelayServerEvent::Frame { frame } = event else {
+                continue;
+            };
+            match frame.kind {
+                h4rn_protocol::RelayFrameKind::GuestHttp => {
+                    let Ok(request) =
+                        serde_json::from_slice::<h4rn_protocol::GuestHttpRequest>(&frame.payload)
+                    else {
+                        continue;
+                    };
+                    if request.path == format!("/guest/{task_token}") {
+                        task_pages.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if request.chunked {
+                        bodies.insert(request.request_id.clone(), Vec::new());
+                        continue;
+                    }
+                    let response = fake_guest_answer(request, &task_token, &task_binding);
+                    task_state.relay.complete_guest(task_device, response).await;
+                }
+                h4rn_protocol::RelayFrameKind::GuestHttpChunk => {
+                    let Ok(chunk) =
+                        serde_json::from_slice::<h4rn_protocol::GuestHttpChunk>(&frame.payload)
+                    else {
+                        continue;
+                    };
+                    let Some(body) = bodies.get_mut(&chunk.request_id) else {
+                        continue;
+                    };
+                    body.extend_from_slice(&chunk.body);
+                    if chunk.last {
+                        let body = bodies.remove(&chunk.request_id).expect("body");
+                        task_state
+                            .relay
+                            .complete_guest(
+                                task_device,
+                                h4rn_protocol::GuestHttpResponse {
+                                    request_id: chunk.request_id,
+                                    status: 202,
+                                    chunked: false,
+                                    headers: vec![(
+                                        "content-type".to_string(),
+                                        "application/json".to_string(),
+                                    )],
+                                    body: format!("{{\"received\":{}}}", body.len()).into_bytes(),
+                                },
+                            )
+                            .await;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let app = router(state.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve");
+    });
+
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("client with a cookie jar");
+    let base = format!("http://{addr}");
+
+    // The page is Connect's own, not the daemon's HTML.
+    let page = client
+        .get(format!("{base}/guest/{machine_id}/{token}"))
+        .send()
+        .await
+        .expect("page");
+    assert_eq!(page.status(), StatusCode::OK);
+    let csp = page
+        .headers()
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .expect("CSP")
+        .to_string();
+    assert!(csp.contains("sha256"), "{csp}");
+    assert!(!csp.contains("default-src *"), "{csp}");
+    let html = page.text().await.expect("html");
+    assert!(html.contains("data-state"));
+    assert!(
+        !html.contains("daemon page"),
+        "Connect returned the daemon's HTML"
+    );
+    assert_eq!(
+        pages.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the daemon was asked for its page-load cookie exactly once"
+    );
+
+    // The page-load cookie must reach the browser on the public path and come
+    // back on both state reads. Before the cookie-path fix the jar dropped it,
+    // so the daemon answered "unbound" every time.
+    let first: serde_json::Value = client
+        .get(format!("{base}/guest/{machine_id}/{token}/state"))
+        .send()
+        .await
+        .expect("first state")
+        .json()
+        .await
+        .expect("first body");
+    assert_eq!(
+        first["state"], "active",
+        "the page-load cookie did not survive the relay path"
+    );
+    let second: serde_json::Value = client
+        .get(format!("{base}/guest/{machine_id}/{token}/state"))
+        .send()
+        .await
+        .expect("second state")
+        .json()
+        .await
+        .expect("second body");
+    assert_eq!(
+        second["state"], "active",
+        "the browser did not present its binding cookie"
+    );
+
+    // A full 10 MB upload crosses in bounded frames and arrives whole.
+    let big = vec![b'a'; 10 * 1024 * 1024];
+    let upload = client
+        .post(format!("{base}/guest/{machine_id}/{token}/messages"))
+        .header("content-type", "application/json")
+        .body(big)
+        .send()
+        .await
+        .expect("upload");
+    assert_eq!(upload.status(), StatusCode::ACCEPTED);
+    let received: serde_json::Value = upload.json().await.expect("upload body");
+    assert_eq!(received["received"], 10 * 1024 * 1024);
+
+    // An exchange over the limit is refused before it reaches the socket, and
+    // the daemon's session still answers the next request.
+    let oversized = vec![b'a'; h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES + 1024];
+    let refused = client
+        .post(format!("{base}/guest/{machine_id}/{token}/messages"))
+        .header("content-type", "application/json")
+        .body(oversized)
+        .send()
+        .await
+        .expect("oversized upload");
+    assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let after = client
+        .get(format!("{base}/guest/{machine_id}/{token}/state"))
+        .send()
+        .await
+        .expect("state after refusal");
+    assert_eq!(after.status(), StatusCode::OK);
+
+    server.abort();
+    fake.abort();
+}

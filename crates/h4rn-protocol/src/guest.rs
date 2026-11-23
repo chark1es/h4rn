@@ -29,8 +29,93 @@ pub const GUEST_MAX_MESSAGE_BYTES: u64 = 10 * 1024 * 1024;
 /// Largest total size of every file waiting for the owner, in bytes.
 pub const GUEST_MAX_PENDING_BYTES: u64 = 20 * 1024 * 1024;
 
+/// Largest message text a guest may submit, in bytes.
+///
+/// Text is stored in the journal and shown to the owner, so it shares the same
+/// 20 MB pending budget as the files rather than being unbounded.
+pub const GUEST_MAX_TEXT_BYTES: usize = 32 * 1024;
+
+/// Most messages one guest link may have waiting for the owner at once.
+pub const GUEST_MAX_PENDING_REQUESTS: usize = 8;
+
+/// Largest guest HTTP exchange the relay carries, in raw bytes.
+///
+/// A relayed body is split into [`GUEST_CHUNK_BYTES`] frames so one large
+/// upload cannot grow a shared WebSocket frame past the transport's limit.
+pub const GUEST_MAX_EXCHANGE_BYTES: usize = GUEST_MAX_PENDING_BYTES as usize + 1024 * 1024;
+
+/// Raw bytes per relayed guest chunk. Base64 and JSON keep each frame far
+/// below the relay's frame limit.
+pub const GUEST_CHUNK_BYTES: usize = 256 * 1024;
+
 /// Name of the cookie that binds a link to its first browser.
 pub const GUEST_COOKIE: &str = "h4rn_guest";
+
+/// The fixed guest page.
+///
+/// Connect serves this page from its own origin and the daemon serves it from
+/// its listener, so one tested page is used in both places. It contains no
+/// token and fetches only JSON from the path it was served from.
+pub const GUEST_PAGE_HTML: &str = include_str!("guest-page.html");
+
+/// Renders the page with its initial link state.
+pub fn guest_page_html(state: &str) -> String {
+    GUEST_PAGE_HTML.replace("__STATE__", state)
+}
+
+/// A content-security policy that admits only the page's own inline style and
+/// script by hash.
+///
+/// The page is fixed and trusted, but hashing it means an injected string can
+/// never become script: the browser runs only these exact bytes.
+pub fn guest_page_csp() -> String {
+    let script = csp_hash("script");
+    let style = csp_hash("style");
+    format!(
+        "default-src 'none'; style-src {style}; script-src {script}; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+}
+
+/// SHA-256 of the one inline `<script>` or `<style>` block, as a CSP source.
+fn csp_hash(tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let body = GUEST_PAGE_HTML
+        .split_once(&open)
+        .and_then(|(_, rest)| rest.split_once(&close))
+        .map(|(body, _)| body)
+        .unwrap_or("");
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(body.as_bytes());
+    format!(
+        "'sha256-{}'",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, digest)
+    )
+}
+
+/// The route template for a guest path, safe to log.
+///
+/// Guest paths carry a bearer token in the path, so tracing must name a fixed
+/// template and never the raw URI. A relay path (`/guest/<machine>/<token>/…`)
+/// and a direct path are both reported as guest templates; the exact shape is
+/// not worth leaking a machine id for.
+pub fn redact_guest_path(path: &str) -> String {
+    let segments: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    match segments.as_slice() {
+        ["guest"] => "/guest".to_owned(),
+        ["guest", _] => "/guest/{token}".to_owned(),
+        ["guest", _, _] => "/guest/{token}/{…}".to_owned(),
+        ["guest", _, _, "state"] => "/guest/{token}/state".to_owned(),
+        ["guest", _, _, "messages"] => "/guest/{token}/messages".to_owned(),
+        ["guest", _, _, "blob", _] => "/guest/{token}/blob/{id}".to_owned(),
+        ["guest", ..] => "/guest/{token}/…".to_owned(),
+        _ => path.to_owned(),
+    }
+}
 
 /// One live link the owner created for a thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -158,4 +243,53 @@ pub struct GuestSnapshot {
     /// A plain sentence for a link that no longer works.
     #[serde(default)]
     pub notice: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_csp_admits_only_the_pages_own_script_and_style_by_hash() {
+        let csp = guest_page_csp();
+        assert!(csp.contains("script-src 'sha256-"), "{csp}");
+        assert!(csp.contains("style-src 'sha256-"), "{csp}");
+        assert!(!csp.contains("unsafe-inline"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("connect-src 'self'"));
+        // The two hashes are the script's and the style's, not the same one.
+        assert_ne!(
+            csp.split("script-src")
+                .nth(1)
+                .and_then(|rest| rest.split(';').next()),
+            csp.split("style-src")
+                .nth(1)
+                .and_then(|rest| rest.split(';').next())
+        );
+    }
+
+    #[test]
+    fn the_page_is_static_and_carries_no_token_placeholder() {
+        let page = guest_page_html("active");
+        assert!(page.contains("data-state=\"active\""));
+        assert!(!page.contains("__STATE__"));
+        assert!(!page.contains("h4rn_guest="));
+    }
+
+    #[test]
+    fn a_logged_guest_route_never_contains_the_token() {
+        for path in [
+            "/guest/tok_123",
+            "/guest/tok_123/state",
+            "/guest/tok_123/state/7",
+            "/guest/tok_123/messages",
+            "/guest/tok_123/blob/abc",
+            "/guest/machine_1/tok_123/state/7",
+        ] {
+            let redacted = redact_guest_path(path);
+            assert!(!redacted.contains("tok_123"), "{path} -> {redacted}");
+            assert!(redacted.starts_with("/guest"), "{path} -> {redacted}");
+        }
+        assert_eq!(redact_guest_path("/healthz"), "/healthz");
+    }
 }

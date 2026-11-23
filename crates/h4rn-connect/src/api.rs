@@ -160,14 +160,38 @@ pub fn router(state: AppState) -> Router {
         .route("/relay", get(relay_upgrade))
         .merge(
             Router::new()
+                // Connect serves the fixed guest page itself; only JSON and
+                // media ever come back from a daemon, so daemon HTML never
+                // runs on Connect's origin.
+                .route("/guest/{machine_id}/{token}", get(guest_page))
                 .route(
-                    "/guest/{machine_id}/{*rest}",
-                    get(guest_proxy).post(guest_proxy),
+                    "/guest/{machine_id}/{token}/state",
+                    get(guest_state_proxy),
+                )
+                .route(
+                    "/guest/{machine_id}/{token}/state/{since}",
+                    get(guest_state_since_proxy),
+                )
+                .route(
+                    "/guest/{machine_id}/{token}/messages",
+                    post(guest_message_proxy),
+                )
+                .route(
+                    "/guest/{machine_id}/{token}/blob/{id}",
+                    get(guest_blob_proxy),
                 )
                 .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .merge(api)
-        .layer(TraceLayer::new_for_http());
+        // A guest path carries a bearer token, so the span names the route
+        // template instead of the raw URI.
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &Request| {
+            tracing::info_span!(
+                "request",
+                method = %request.method(),
+                path = %route_template(request.uri().path()),
+            )
+        }));
 
     if let Some(dir) = &state.config.web_dir {
         let index = dir.join("index.html");
@@ -1886,20 +1910,237 @@ async fn usage_aggregate(
 // Guest links (ADR-044)
 // ---------------------------------------------------------------------------
 
-/// Forwards one guest HTTP exchange to the machine's daemon.
+/// The fixed guest page, served from Connect's own origin.
 ///
-/// This route is unauthenticated: the guest token in the path is the only
-/// credential, and only the daemon can check it. The relay never stores the
-/// path or body; it keeps one waiter per request so the answer can come back
-/// on the daemon's existing socket.
-async fn guest_proxy(
+/// Connect never relays a daemon's HTML: the page here is static, admitted by
+/// a hash-based CSP, and fetches only JSON through the relayed routes below.
+async fn guest_page(
     State(state): State<AppState>,
     client: ClientIp,
-    Path((machine_id, rest)): Path<(String, String)>,
+    Path((machine_id, token)): Path<(String, String)>,
+) -> Result<Response> {
+    let Ok(machine_id) = Uuid::parse_str(&machine_id) else {
+        return Ok((StatusCode::NOT_FOUND, "Not found.").into_response());
+    };
+    if token.is_empty()
+        || token.len() > 256
+        || !token.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return Ok((StatusCode::NOT_FOUND, "Not found.").into_response());
+    }
+    state.rate.check(
+        "guest_page",
+        &client.0,
+        state.config.rate_limits.per_ip_per_minute,
+        Duration::from_secs(60),
+    )?;
+    // Ask the daemon for the short-lived page-load cookie and discard its
+    // HTML. A crawler that fetches the page only creates an unclaimed cookie;
+    // it never binds the link.
+    let cookie = pending_binding_cookie(&state, machine_id, &token).await;
+    Ok(guest_page_response(cookie))
+}
+
+/// Fetches the page-load binding cookie from a machine's daemon.
+///
+/// Only the daemon knows which cookie is pending; Connect keeps the Set-Cookie
+/// value and rebuilds it for its own path, never returning the daemon's HTML.
+async fn pending_binding_cookie(state: &AppState, machine_id: Uuid, token: &str) -> Option<String> {
+    let machine = state.store.machine(machine_id).await.ok()?;
+    let daemon = machine.daemon_device_id?;
+    if !state.relay.online(daemon).await {
+        return None;
+    }
+    let request_id = Uuid::now_v7().to_string();
+    let public_prefix = format!("/guest/{machine_id}/{token}");
+    let request = GuestHttpRequest {
+        request_id: request_id.clone(),
+        method: "GET".to_string(),
+        path: format!("/guest/{token}"),
+        public_prefix: Some(public_prefix.clone()),
+        chunked: false,
+        headers: vec![("accept".to_string(), "text/html".to_string())],
+        body: Vec::new(),
+    };
+    let payload = serde_json::to_vec(&request).ok()?;
+    let waiter = state.relay.expect_guest(&request_id, daemon).await;
+    let frame = RelayFrame {
+        conn_id: format!("guest-{request_id}"),
+        kind: RelayFrameKind::GuestHttp,
+        payload,
+    };
+    if state
+        .relay
+        .send(daemon, RelayServerEvent::Frame { frame })
+        .await
+        .is_err()
+    {
+        state.relay.forget_guest(&request_id).await;
+        return None;
+    }
+    let answer = match tokio::time::timeout(Duration::from_secs(10), waiter).await {
+        Ok(Ok(answer)) => answer,
+        _ => {
+            state.relay.forget_guest(&request_id).await;
+            return None;
+        }
+    };
+    let cookie = answer
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+        .map(|(_, value)| value.clone())?;
+    rebuild_guest_cookie(
+        &cookie,
+        &public_prefix,
+        state.config.public_base_url.starts_with("https://"),
+    )
+}
+
+/// The fixed page response, with its hash-based CSP.
+fn guest_page_response(cookie: Option<String>) -> Response {
+    let mut response = Response::new(axum::body::Body::from(h4rn_protocol::guest_page_html(
+        "active",
+    )));
+    let headers = response.headers_mut();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_str(&h4rn_protocol::guest_page_csp())
+            .unwrap_or_else(|_| HeaderValue::from_static("default-src 'none'")),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    if let Some(cookie) = cookie
+        && let Ok(value) = HeaderValue::from_str(&cookie)
+    {
+        headers.insert(axum::http::header::SET_COOKIE, value);
+    }
+    response
+}
+
+/// Forwards one guest HTTP exchange to the machine's daemon.
+///
+/// The route is unauthenticated: the guest token in the path is the only
+/// credential and only the daemon can check it. Connect streams the body in
+/// bounded chunks and rebuilds the answer's headers, so neither a large upload
+/// nor a daemon header can reach the browser or the shared relay socket
+/// unchecked.
+async fn guest_state_proxy(
+    State(state): State<AppState>,
+    client: ClientIp,
+    Path((machine_id, token)): Path<(String, String)>,
     method: axum::http::Method,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+) -> Result<Response> {
+    guest_proxy(
+        state,
+        client,
+        machine_id,
+        token,
+        "state".to_owned(),
+        method,
+        uri,
+        headers,
+        axum::body::Body::empty(),
+    )
+    .await
+}
+
+async fn guest_state_since_proxy(
+    State(state): State<AppState>,
+    client: ClientIp,
+    Path((machine_id, token, since)): Path<(String, String, String)>,
+    method: axum::http::Method,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    headers: HeaderMap,
+) -> Result<Response> {
+    guest_proxy(
+        state,
+        client,
+        machine_id,
+        token,
+        format!("state/{since}"),
+        method,
+        uri,
+        headers,
+        axum::body::Body::empty(),
+    )
+    .await
+}
+
+async fn guest_message_proxy(
+    State(state): State<AppState>,
+    client: ClientIp,
+    Path((machine_id, token)): Path<(String, String)>,
+    method: axum::http::Method,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Result<Response> {
+    guest_proxy(
+        state,
+        client,
+        machine_id,
+        token,
+        "messages".to_owned(),
+        method,
+        uri,
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn guest_blob_proxy(
+    State(state): State<AppState>,
+    client: ClientIp,
+    Path((machine_id, token, id)): Path<(String, String, String)>,
+    method: axum::http::Method,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    headers: HeaderMap,
+) -> Result<Response> {
+    guest_proxy(
+        state,
+        client,
+        machine_id,
+        token,
+        format!("blob/{id}"),
+        method,
+        uri,
+        headers,
+        axum::body::Body::empty(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn guest_proxy(
+    state: AppState,
+    client: ClientIp,
+    machine_id: String,
+    token: String,
+    rest: String,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: axum::body::Body,
 ) -> Result<Response> {
     state.rate.check(
         "guest_http",
@@ -1909,6 +2150,32 @@ async fn guest_proxy(
     )?;
     let machine_id = Uuid::parse_str(&machine_id)
         .map_err(|_| AppError::bad_request("machine_invalid", "machine_id is not a UUID"))?;
+    if token.is_empty()
+        || !token.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return Err(AppError::bad_request(
+            "guest_token_invalid",
+            "the guest token is not valid",
+        ));
+    }
+    if method == axum::http::Method::POST {
+        same_origin_guest_post(&headers, state.config.trust_forwarded_for)?;
+        if headers
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES)
+        {
+            return Err(AppError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guest_body_too_large",
+                "that message is over the guest limit",
+                None,
+            ));
+        }
+    }
     let machine = state.store.machine(machine_id).await?;
     let daemon = machine
         .daemon_device_id
@@ -1920,38 +2187,45 @@ async fn guest_proxy(
         ));
     }
 
-    let request_id = Uuid::now_v7().to_string();
-    let mut forwarded = Vec::new();
-    for name in ["cookie", "accept", "content-type"] {
-        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
-            forwarded.push((name.to_owned(), value.to_owned()));
-        }
+    let mut path = format!("/guest/{token}");
+    if !rest.is_empty() {
+        path.push('/');
+        path.push_str(&rest);
     }
-    let query = uri
-        .query()
-        .map(|query| format!("?{query}"))
-        .unwrap_or_default();
+    if let Some(query) = uri.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    let public_prefix = format!("/guest/{machine_id}/{token}");
+    let request_id = Uuid::now_v7().to_string();
+    let chunked = method == axum::http::Method::POST;
     let request = GuestHttpRequest {
         request_id: request_id.clone(),
         method: method.as_str().to_owned(),
-        path: format!("/guest/{rest}{query}"),
-        headers: forwarded,
-        body: body.to_vec(),
+        path,
+        public_prefix: Some(public_prefix.clone()),
+        chunked,
+        headers: forwarded_guest_headers(&headers),
+        body: Vec::new(),
     };
     let payload = serde_json::to_vec(&request)
         .map_err(|_| AppError::internal("serialise the guest request"))?;
-
-    let waiter = state.relay.expect_guest(&request_id).await;
+    let waiter = state.relay.expect_guest(&request_id, daemon).await;
     let frame = RelayFrame {
         conn_id: format!("guest-{request_id}"),
         kind: RelayFrameKind::GuestHttp,
         payload,
     };
-    let _ = state
+    state
         .relay
         .send(daemon, RelayServerEvent::Frame { frame })
-        .await;
-    let answer = match tokio::time::timeout(Duration::from_secs(60), waiter).await {
+        .await?;
+
+    if chunked {
+        stream_guest_body(&state, daemon, &request_id, body).await?;
+    }
+
+    let answer = match tokio::time::timeout(Duration::from_secs(120), waiter).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(_)) => {
             state.relay.forget_guest(&request_id).await;
@@ -1968,23 +2242,270 @@ async fn guest_proxy(
             ));
         }
     };
+    guest_answer_response(&state, answer, &public_prefix)
+}
 
-    let mut response = Response::builder()
-        .status(StatusCode::from_u16(answer.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
-    for (name, value) in answer.headers {
-        if matches!(
-            name.to_ascii_lowercase().as_str(),
-            "content-length" | "transfer-encoding" | "connection"
-        ) {
-            continue;
+/// Streams a guest upload to its daemon in frames that stay small.
+async fn stream_guest_body(
+    state: &AppState,
+    daemon: Uuid,
+    request_id: &str,
+    body: axum::body::Body,
+) -> Result<()> {
+    use futures::StreamExt as _;
+    let mut stream = body.into_data_stream();
+    let mut seq = 0u64;
+    let mut total = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| {
+            AppError::bad_request("guest_body", "the guest request body could not be read")
+        })?;
+        total = total.saturating_add(chunk.len());
+        if total > h4rn_protocol::GUEST_MAX_EXCHANGE_BYTES {
+            state.relay.forget_guest(request_id).await;
+            return Err(AppError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "guest_body_too_large",
+                "that message is over the guest limit",
+                None,
+            ));
         }
-        if let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) {
-            response = response.header(name, value);
+        for slice in chunk.chunks(h4rn_protocol::GUEST_CHUNK_BYTES) {
+            send_guest_chunk(state, daemon, request_id, seq, false, slice.to_vec()).await?;
+            seq += 1;
         }
     }
-    response
+    // An empty last frame terminates a body that ended on a slice boundary.
+    send_guest_chunk(state, daemon, request_id, seq, true, Vec::new()).await
+}
+
+/// Sends one body slice to the daemon.
+async fn send_guest_chunk(
+    state: &AppState,
+    daemon: Uuid,
+    request_id: &str,
+    seq: u64,
+    last: bool,
+    body: Vec<u8>,
+) -> Result<()> {
+    let chunk = h4rn_protocol::GuestHttpChunk {
+        request_id: request_id.to_owned(),
+        seq,
+        last,
+        body,
+    };
+    let payload = serde_json::to_vec(&chunk)
+        .map_err(|_| AppError::internal("serialise a guest body slice"))?;
+    state
+        .relay
+        .send(
+            daemon,
+            RelayServerEvent::Frame {
+                frame: RelayFrame {
+                    conn_id: format!("guest-{request_id}"),
+                    kind: RelayFrameKind::GuestHttpChunk,
+                    payload,
+                },
+            },
+        )
+        .await
+}
+
+/// Rebuilds the daemon's answer as a browser response.
+///
+/// Only an allow-listed content type and a few safe headers cross back. The
+/// daemon's CSP, cookies and framing headers are never passed through; the
+/// binding cookie is rebuilt for the public path Connect knows.
+fn guest_answer_response(
+    state: &AppState,
+    answer: h4rn_protocol::GuestHttpResponse,
+    public_prefix: &str,
+) -> Result<Response> {
+    build_guest_response(
+        answer,
+        public_prefix,
+        state.config.public_base_url.starts_with("https://"),
+    )
+}
+
+/// Rebuilds a relayed answer for a browser with a known transport security.
+fn build_guest_response(
+    answer: h4rn_protocol::GuestHttpResponse,
+    public_prefix: &str,
+    secure: bool,
+) -> Result<Response> {
+    let content_type = answer
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let Some(content_type) = allowed_guest_content_type(&content_type) else {
+        return Err(AppError::upstream(
+            "guest_content_type",
+            "the machine answered with a type a guest page may not show",
+        ));
+    };
+    let mut builder = Response::builder()
+        .status(StatusCode::from_u16(answer.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+        .header(CONTENT_TYPE, content_type)
+        .header(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        )
+        .header(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        );
+    for (name, value) in &answer.headers {
+        match name.to_ascii_lowercase().as_str() {
+            "cache-control" if value == "no-store" || value == "private, max-age=3600" => {
+                builder = builder.header(axum::http::header::CACHE_CONTROL, value);
+            }
+            "set-cookie" => {
+                if let Some(cookie) = rebuild_guest_cookie(value, public_prefix, secure) {
+                    builder = builder.header(axum::http::header::SET_COOKIE, cookie);
+                }
+            }
+            _ => {}
+        }
+    }
+    builder
         .body(axum::body::Body::from(answer.body))
         .map_err(|_| AppError::internal("build the guest response"))
+}
+
+/// Whether a relayed answer may be shown to a guest browser.
+fn allowed_guest_content_type(value: &str) -> Option<&'static str> {
+    let mime = value.split(';').next().unwrap_or("").trim();
+    match mime {
+        "application/json" => Some("application/json"),
+        "application/pdf" => Some("application/pdf"),
+        "image/png" => Some("image/png"),
+        "image/jpeg" => Some("image/jpeg"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "text/plain" => Some("text/plain; charset=utf-8"),
+        "application/octet-stream" => Some("application/octet-stream"),
+        _ => None,
+    }
+}
+
+/// Rebuilds the daemon's binding cookie for Connect's public path.
+///
+/// The daemon's own `Path` names its internal route and cannot be used here.
+/// Only the guest cookie name and its opaque value are accepted.
+fn rebuild_guest_cookie(value: &str, public_prefix: &str, secure: bool) -> Option<String> {
+    let (name, rest) = value.split_once('=')?;
+    if name.trim() != h4rn_protocol::GUEST_COOKIE {
+        return None;
+    }
+    let token = rest.split(';').next()?.trim();
+    if token.is_empty()
+        || token.len() > 128
+        || !token.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return None;
+    }
+    let secure = if secure { "; Secure" } else { "" };
+    Some(format!(
+        "{}={token}; Path={public_prefix}; HttpOnly; SameSite=Strict{secure}; Max-Age={}",
+        h4rn_protocol::GUEST_COOKIE,
+        h4rn_protocol::GUEST_LINK_TTL_HOURS * 3600
+    ))
+}
+
+/// Keeps only the guest cookie and the headers the daemon needs.
+///
+/// Connect's own session cookies must never reach a daemon because a guest
+/// loaded the page from Connect's origin.
+fn forwarded_guest_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    let mut forwarded = Vec::new();
+    if let Some(cookie) = guest_only_cookie(headers) {
+        forwarded.push(("cookie".to_owned(), cookie));
+    }
+    for name in ["accept", "content-type", "origin", "host", "sec-fetch-site"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            forwarded.push((name.to_owned(), value.to_owned()));
+        }
+    }
+    forwarded
+}
+
+/// The `h4rn_guest` cookie from a request, ignoring every other cookie.
+fn guest_only_cookie(headers: &HeaderMap) -> Option<String> {
+    let header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    let value = header.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == h4rn_protocol::GUEST_COOKIE).then_some(value)
+    })?;
+    Some(format!("{}={value}", h4rn_protocol::GUEST_COOKIE))
+}
+
+/// Requires a guest submission to be a same-origin JSON POST.
+fn same_origin_guest_post(headers: &HeaderMap, trust_forwarded_for: bool) -> Result<()> {
+    let json = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+        });
+    if !json {
+        return Err(AppError::forbidden(
+            "guest_origin",
+            "a guest message must be a JSON POST from the guest page",
+        ));
+    }
+    if headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        == Some("cross-site")
+    {
+        return Err(AppError::forbidden(
+            "guest_origin",
+            "a guest message must come from the guest page itself",
+        ));
+    }
+    if let Some(origin) = headers.get(ORIGIN).and_then(|value| value.to_str().ok()) {
+        let authority = origin
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(origin)
+            .trim_end_matches('/');
+        let host = if trust_forwarded_for {
+            headers
+                .get("x-forwarded-host")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        } else {
+            None
+        }
+        .or_else(|| {
+            headers
+                .get(axum::http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        });
+        if !host.is_some_and(|host| authority.eq_ignore_ascii_case(&host)) {
+            return Err(AppError::forbidden(
+                "guest_origin",
+                "a guest message must come from the guest page itself",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A path with guest tokens removed, for tracing.
+fn route_template(path: &str) -> String {
+    h4rn_protocol::redact_guest_path(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -2021,5 +2542,164 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("linked")
         );
+    }
+
+    #[test]
+    fn a_guest_answer_crosses_back_only_as_an_allowed_type() {
+        let json = h4rn_protocol::GuestHttpResponse {
+            request_id: "g1".into(),
+            status: 200,
+            chunked: false,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: b"{}".to_vec(),
+        };
+        let response = build_guest_response(json, "/guest/m/t", true).expect("json answer");
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+
+        // A daemon that tries to return HTML never reaches the guest browser.
+        let html = h4rn_protocol::GuestHttpResponse {
+            request_id: "g2".into(),
+            status: 200,
+            chunked: false,
+            headers: vec![("content-type".into(), "text/html".into())],
+            body: b"<script>alert(1)</script>".to_vec(),
+        };
+        assert!(build_guest_response(html, "/guest/m/t", true).is_err());
+    }
+
+    #[test]
+    fn a_daemons_headers_are_rebuilt_not_passed_through() {
+        let answer = h4rn_protocol::GuestHttpResponse {
+            request_id: "g1".into(),
+            status: 200,
+            chunked: false,
+            headers: vec![
+                ("content-type".into(), "application/json".into()),
+                ("content-security-policy".into(), "default-src *".into()),
+                ("x-frame-options".into(), "ALLOWALL".into()),
+                (
+                    "set-cookie".into(),
+                    "h4rn_guest=binding_1; Path=/guest/token; HttpOnly".into(),
+                ),
+            ],
+            body: b"{}".to_vec(),
+        };
+        let response =
+            build_guest_response(answer, "/guest/machine_1/token", true).expect("answer");
+        // The daemon's CSP and framing headers are gone.
+        assert!(response.headers().get("content-security-policy").is_none());
+        assert!(response.headers().get("x-frame-options").is_none());
+        assert_eq!(
+            response
+                .headers()
+                .get("x-content-type-options")
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        let cookie = response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("binding cookie");
+        // The cookie is scoped to the public path Connect serves, not the
+        // daemon's internal one, or the browser would never send it back.
+        assert!(cookie.contains("Path=/guest/machine_1/token"), "{cookie}");
+        assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+        assert!(cookie.contains("Secure"), "{cookie}");
+    }
+
+    #[test]
+    fn connect_cookies_are_never_forwarded_to_a_daemon() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("h4rn_session=secret; h4rn_guest=guest_1"),
+        );
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let forwarded = forwarded_guest_headers(&headers);
+        assert_eq!(
+            forwarded
+                .iter()
+                .find(|(name, _)| name == "cookie")
+                .map(|(_, value)| value.as_str()),
+            Some("h4rn_guest=guest_1")
+        );
+        assert!(
+            forwarded.iter().all(|(_, value)| !value.contains("secret")),
+            "{forwarded:?}"
+        );
+    }
+
+    #[test]
+    fn a_connect_guest_post_must_be_same_origin_json() {
+        let json = |origin: Option<&str>, host: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            if let Some(origin) = origin {
+                headers.insert(ORIGIN, HeaderValue::from_str(origin).unwrap());
+            }
+            if let Some(host) = host {
+                headers.insert(
+                    axum::http::header::HOST,
+                    HeaderValue::from_str(host).unwrap(),
+                );
+            }
+            headers
+        };
+        assert!(same_origin_guest_post(&json(None, None), false).is_ok());
+        assert!(
+            same_origin_guest_post(&json(Some("https://relay.test"), Some("relay.test")), false)
+                .is_ok()
+        );
+        // A cross-site form or fetch cannot submit a guest message.
+        assert!(
+            same_origin_guest_post(&json(Some("https://evil.test"), Some("relay.test")), false)
+                .is_err()
+        );
+        let mut form = HeaderMap::new();
+        form.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        assert!(same_origin_guest_post(&form, false).is_err());
+    }
+
+    #[test]
+    fn a_guest_route_is_traced_by_its_template() {
+        assert_eq!(
+            route_template("/guest/machine_1/token_abc/state"),
+            "/guest/{token}/state"
+        );
+        assert!(!route_template("/guest/machine_1/token_abc/state").contains("token_abc"));
+        assert_eq!(route_template("/healthz"), "/healthz");
+    }
+
+    #[test]
+    fn the_guest_page_is_connect_s_own_static_page() {
+        let response = guest_page_response(None);
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .expect("CSP");
+        assert!(csp.contains("'sha256-"), "{csp}");
+        assert!(!csp.contains("unsafe-inline"), "{csp}");
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(content_type, Some("text/html; charset=utf-8"));
     }
 }

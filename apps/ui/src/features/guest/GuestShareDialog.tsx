@@ -166,9 +166,9 @@ export function GuestShareDialog() {
                     </div>
                   ) : (
                     <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
-                      This link is still valid for the guest, but the daemon restarted since it was
-                      created, so it cannot show the URL again. Create a new link to copy it; the
-                      old one stops working.
+                      The link is still valid for the guest, but this device cannot show its URL.
+                      Only an admin device can copy it; after a daemon restart, create a new link to
+                      copy it again. The old one stops working.
                     </p>
                   )}
                   <div className="q-faint" style={{ fontSize: 11.5 }}>
@@ -180,8 +180,9 @@ export function GuestShareDialog() {
                     link.url.startsWith("http://localhost") ||
                     link.url.startsWith("http://[::1]")) ? (
                     <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12 }}>
-                      This link only works on this machine. Turn on Connect, or Network access in
-                      Settings, so a guest can reach the daemon.
+                      This link only works on this machine. Turn on Connect and share again to send
+                      a link to a teammate on another machine. A direct link is never sent over a
+                      plain network connection.
                     </p>
                   ) : null}
                 </div>

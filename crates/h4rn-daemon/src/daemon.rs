@@ -747,24 +747,35 @@ impl Daemon {
             )
             .await;
 
-        // A guest link without the relay names this machine directly. Prefer
-        // the LAN/tailnet listener, because loopback is useless to a guest;
-        // fall back to loopback only when no other address is known, and the
-        // docs say plainly that the guest needs a route to that address.
-        let guest_base = match network.snapshot().addresses.first() {
-            Some(address) => format!("http://{address}/guest"),
-            None => {
-                let address = addrs[0];
-                if address.ip().is_loopback() {
-                    format!("http://127.0.0.1:{}/guest", address.port())
-                } else {
-                    format!("http://{address}/guest")
-                }
-            }
-        };
-        self.guest.set_local_base(guest_base);
+        // A guest link without the relay names this machine directly. The
+        // daemon has no TLS listener, so a direct link is loopback only: the
+        // bearer token must never cross a LAN in plaintext. The share dialog
+        // says the link works only on this machine, and Connect is the way to
+        // share with a teammate elsewhere.
+        let loopback_port = addrs
+            .iter()
+            .find(|address| address.ip().is_loopback())
+            .map(|address| address.port())
+            .unwrap_or_else(|| network.snapshot().port);
+        self.guest
+            .set_local_base(format!("http://127.0.0.1:{loopback_port}/guest"));
 
         let mut remote_tasks = Vec::new();
+        // Guest links expire after 24 hours. Sweeping keeps their waiting
+        // files from outliving them even when nobody opens the page again.
+        remote_tasks.push(tokio::spawn({
+            let guest = Arc::clone(&self.guest);
+            async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(600));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    if let Err(error) = guest.sweep_expired().await {
+                        tracing::warn!(%error, "could not sweep expired guest links");
+                    }
+                }
+            }
+        }));
         // A failed peer admission retries on its own backoff timer instead of
         // waiting for the next topology report, which may never come while the
         // peer set is stable.

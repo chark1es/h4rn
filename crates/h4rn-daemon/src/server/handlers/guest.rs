@@ -36,7 +36,7 @@ pub(super) async fn handle(
             let sharing = conn
                 .state
                 .guest
-                .sharing(&thread_id, &base)
+                .sharing(&thread_id, &base, may_read_link_url(conn))
                 .await
                 .map_err(internal)?;
             Ok(ResponseBody::GuestSharing { sharing })
@@ -161,8 +161,9 @@ pub(super) fn spawn(_conn: &Connection) -> JoinHandle<()> {
 /// Where a guest link points.
 ///
 /// A linked machine advertises the relay address, so the guest reaches it the
-/// same way a paired device does. Without Connect the daemon names its own
-/// listener, and the person sharing knows the guest needs a route to it.
+/// same way a paired device does. Without Connect a direct link is loopback
+/// only: the daemon has no TLS listener, and a plaintext LAN URL would put the
+/// bearer token on the network. The share dialog says it works only here.
 fn share_base(conn: &Connection) -> String {
     if let Some(remote) = &conn.state.remote
         && let Some(client) = remote.client()
@@ -172,10 +173,34 @@ fn share_base(conn: &Connection) -> String {
     {
         return format!("{}/guest/{machine}", base.trim_end_matches('/'));
     }
-    conn.state
-        .guest
-        .local_base()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", conn.state.network.snapshot().port))
+    conn.state.guest.local_base().unwrap_or_else(|| {
+        format!(
+            "http://127.0.0.1:{}/guest",
+            conn.state.network.snapshot().port
+        )
+    })
+}
+
+/// Whether this session may read a guest link's bearer URL.
+///
+/// The URL is the credential itself. A view-only device may learn that a link
+/// exists and when it expires, but only the machine's owner (loopback) or an
+/// admin device may copy it.
+fn may_read_link_url(conn: &Connection) -> bool {
+    let scopes = conn
+        .origin
+        .device_key
+        .as_ref()
+        .and_then(|key| conn.state.devices.scopes_for_key(key));
+    url_visible_to(conn.origin.is_remote(), scopes.as_deref())
+}
+
+/// Whether a session may see a link's bearer URL.
+///
+/// Loopback is the machine's owner. A remote device needs the admin scope: the
+/// URL is the credential, and a view device may not copy it.
+fn url_visible_to(is_remote: bool, scopes: Option<&[h4rn_protocol::PairScope]>) -> bool {
+    !is_remote || scopes.is_some_and(|scopes| scopes.contains(&h4rn_protocol::PairScope::Admin))
 }
 
 fn internal(error: crate::guest::GuestError) -> ProtoError {
@@ -199,5 +224,25 @@ fn guest_error(error: crate::guest::GuestError) -> ProtoError {
             "Check the thread and try again",
         ),
         other => internal(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use h4rn_protocol::PairScope;
+
+    #[test]
+    fn only_an_admin_device_may_read_a_guest_url() {
+        assert!(url_visible_to(false, None), "the owner is on this machine");
+        assert!(url_visible_to(
+            true,
+            Some(&[PairScope::View, PairScope::Admin])
+        ));
+        assert!(!url_visible_to(
+            true,
+            Some(&[PairScope::View, PairScope::Approve])
+        ));
+        assert!(!url_visible_to(true, None));
     }
 }

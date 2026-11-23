@@ -80,9 +80,11 @@ pub use git_actions::{
     GitChangeSet, GitCommitResult, GitOperation, GitPushResult, GitThreadStatus, MAX_GIT_PATHS,
 };
 pub use guest::{
-    GUEST_COOKIE, GUEST_LINK_TTL_HOURS, GUEST_MAX_FILES, GUEST_MAX_MESSAGE_BYTES,
-    GUEST_MAX_PENDING_BYTES, GuestAttachment, GuestAttachmentInput, GuestLink, GuestLinkState,
-    GuestMessageInput, GuestRequest, GuestSettings, GuestSharing, GuestSnapshot, GuestThreadView,
+    GUEST_CHUNK_BYTES, GUEST_COOKIE, GUEST_LINK_TTL_HOURS, GUEST_MAX_EXCHANGE_BYTES,
+    GUEST_MAX_FILES, GUEST_MAX_MESSAGE_BYTES, GUEST_MAX_PENDING_BYTES, GUEST_MAX_PENDING_REQUESTS,
+    GUEST_MAX_TEXT_BYTES, GUEST_PAGE_HTML, GuestAttachment, GuestAttachmentInput, GuestLink,
+    GuestLinkState, GuestMessageInput, GuestRequest, GuestSettings, GuestSharing, GuestSnapshot,
+    GuestThreadView, guest_page_csp, guest_page_html, redact_guest_path,
 };
 pub use harness::{
     HarnessOutputStream, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo,

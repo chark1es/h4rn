@@ -201,6 +201,7 @@ async fn guest_page_handler(
         &state,
         crate::guest::Method::Get,
         format!("/guest/{token}"),
+        None,
         &headers,
         Vec::new(),
     )
@@ -217,6 +218,7 @@ async fn guest_state_handler(
         &state,
         crate::guest::Method::Get,
         format!("/guest/{token}/state"),
+        None,
         &headers,
         Vec::new(),
     )
@@ -233,6 +235,7 @@ async fn guest_state_since_handler(
         &state,
         crate::guest::Method::Get,
         format!("/guest/{token}/state/{since}"),
+        None,
         &headers,
         Vec::new(),
     )
@@ -240,18 +243,36 @@ async fn guest_state_since_handler(
 }
 
 /// One guest message with its files.
+///
+/// The link and its browser binding are checked from the headers *before* the
+/// body is read: an unauthenticated upload is refused without buffering it.
 async fn guest_message_handler(
     State(state): State<AppState>,
     Path(token): Path<String>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Response {
+    let input = guest_input(
+        crate::guest::Method::Post,
+        format!("/guest/{token}/messages"),
+        None,
+        &headers,
+        Vec::new(),
+    );
+    if let Err(output) = state.guest.check_submission(&input).await {
+        return guest_output(output);
+    }
+    let body = match read_guest_body(body, GUEST_BODY_LIMIT).await {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     guest_exchange(
         &state,
         crate::guest::Method::Post,
         format!("/guest/{token}/messages"),
+        None,
         &headers,
-        body.to_vec(),
+        body,
     )
     .await
 }
@@ -272,6 +293,7 @@ async fn guest_blob_handler(
         &state,
         crate::guest::Method::Get,
         format!("/guest/{token}/blob/{id}{suffix}"),
+        None,
         &headers,
         Vec::new(),
     )
@@ -283,23 +305,69 @@ pub(crate) async fn guest_exchange(
     state: &AppState,
     method: crate::guest::Method,
     path: String,
+    public_prefix: Option<String>,
     headers: &HeaderMap,
     body: Vec<u8>,
 ) -> Response {
+    let output = state
+        .guest
+        .handle(guest_input(method, path, public_prefix, headers, body))
+        .await;
+    guest_output(output)
+}
+
+/// Builds the guest surface's input from request headers.
+pub(crate) fn guest_input(
+    method: crate::guest::Method,
+    path: String,
+    public_prefix: Option<String>,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+) -> crate::guest::GuestHttpInput {
     let cookie = headers
         .get(axum::http::header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .and_then(guest_cookie);
-    let output = state
-        .guest
-        .handle(crate::guest::GuestHttpInput {
-            method,
-            path,
-            cookie,
-            body,
-        })
-        .await;
-    guest_output(output)
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    crate::guest::GuestHttpInput {
+        method,
+        path,
+        public_prefix,
+        cookie,
+        content_type: header("content-type"),
+        origin: header("origin"),
+        host: header("host"),
+        fetch_site: header("sec-fetch-site"),
+        body,
+    }
+}
+
+/// Reads a guest request body, refusing it as soon as it passes the limit.
+async fn read_guest_body(body: axum::body::Body, limit: usize) -> Result<Vec<u8>, Box<Response>> {
+    use futures::StreamExt as _;
+    let mut stream = body.into_data_stream();
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return Err(Box::new(guest_output(crate::guest::GuestHttpOutput::text(
+                400,
+                "The message body could not be read.",
+            ))));
+        };
+        if buffer.len().saturating_add(chunk.len()) > limit {
+            return Err(Box::new(guest_output(crate::guest::GuestHttpOutput::text(
+                413,
+                "A message holds at most 10 MB of files.",
+            ))));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
 }
 
 /// Extracts the guest cookie from a `Cookie` header.
