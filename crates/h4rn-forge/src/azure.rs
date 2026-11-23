@@ -921,6 +921,7 @@ impl Forge for AzureDevOpsClient {
                     "targetRefName": format!("refs/heads/{}", request.base),
                     "title": request.title,
                     "description": request.body,
+                    "isDraft": request.draft,
                 }),
             )
             .await?;

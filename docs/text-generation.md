@@ -25,7 +25,31 @@ The setting lives on the daemon, not in the app, so every device sees the same c
 are written even when no app is open. Removing the generator a title setting points at turns the
 setting **Off**; it never falls back to a coding agent the person did not choose.
 
-## What is sent
+## Commit and pull request messages
+
+A separate setting, **Settings → Source control → Commit & PR messages**, writes commit messages
+and pull request text: **Off** (the default), **Coding agent** or **Text generator**, with optional
+custom instructions. It uses the same backends, the same isolation flags and the same generator
+list as titles. Off starts nothing: **Generate** leaves the field empty and no job runs. With
+**Follow the thread's agent**, Claude Code threads run Claude Code; every other harness has no
+supported coding agent for messages, so it needs a configured text generator — without one,
+**Generate** leaves the field empty and nothing runs. Saving the title model from an app built
+before this setting exists keeps the message mode as it is instead of turning it off.
+
+Only the request's own data is sent:
+
+- **Commit message**: the diff that would be committed (12,000-character cap) and up to 20 recent
+  commit subjects. Binary files are named by git, never read. With *Include unstaged* on, the diff
+  is against `HEAD` and untracked files are listed by name; their contents are not sent.
+- **Pull request**: the commit subjects and bodies against the base branch (8,000-character cap)
+  and `git diff --stat` for the same range (4,000-character cap).
+
+Both are wrapped once in `<untrusted_request>` tags with the closing tag escaped, exactly as a
+title prompt is. Custom instructions are trusted text appended to the instruction, never spliced
+into the repository data. A failure is shown in the panel and leaves the field as it was; nothing
+is committed, pushed or opened by generation. See [git-actions.md](git-actions.md).
+
+## What a title request sends
 
 Only two things:
 

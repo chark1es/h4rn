@@ -721,6 +721,26 @@ impl Connection {
             return None;
         }
 
+        // A commit hook, a remote or a model can take a while. Answer git
+        // actions from their own task so this socket keeps serving frames.
+        if handlers::Service::of(&body) == Some(handlers::Service::GitActions)
+            && handlers::git_actions::defers_reply(&body)
+        {
+            let state = self.state.clone();
+            let origin = self.origin.clone();
+            let tx = self.tx.clone();
+            let frame_limit = self.frame_limit();
+            tokio::spawn(async move {
+                let frame =
+                    match handlers::git_actions::handle_deferred(&state, &origin, body).await {
+                        Ok(body) => response_frame(id, body, frame_limit),
+                        Err(error) => error_frame(id, error),
+                    };
+                let _ = tx.send(Outbound::Text(frame)).await;
+            });
+            return None;
+        }
+
         let result: Result<ResponseBody, ProtoError> = match handlers::Service::of(&body) {
             // A probe starts a process and can take seconds. It answers from its
             // own task, so this socket keeps serving frames meanwhile.
@@ -1060,7 +1080,7 @@ impl Connection {
                     terminal_id,
                     cols,
                     rows,
-                    reply_positions,
+                    reply_positions_v2,
                 } => self
                     .state
                     .terminals
@@ -1070,7 +1090,7 @@ impl Connection {
                         self.tx.clone(),
                         cols,
                         rows,
-                        reply_positions,
+                        reply_positions_v2,
                     )
                     .map(|attached| {
                         let Attached {
@@ -1590,10 +1610,11 @@ impl Connection {
                 }
                 // `seq` is a flag word for input: bit 0 marks xterm's own
                 // answer to a terminal query, bits 1-32 name the output chunk
-                // that carried the query and bits 33-52 name the answer's
-                // ordinal within that chunk. An old client sends only bit 0;
-                // an old daemon ignored `seq` altogether and wrote the frame
-                // as ordinary input, which still works.
+                // that carried the query's first byte and bits 33-52 name the
+                // query's index among the queries that start there. An old
+                // client sends only bit 0; an old daemon ignored `seq`
+                // altogether and wrote the frame as ordinary input, which
+                // still works.
                 let reply = if frame.seq & h4rn_protocol::PTY_INPUT_REPLY == 0 {
                     QueryReply::No
                 } else {
@@ -1820,6 +1841,11 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::ForgeReply { .. } => "forge_reply",
         ClientRequest::ForgeComment { .. } => "forge_comment",
         ClientRequest::ForgeOpenPr { .. } => "forge_open_pr",
+        ClientRequest::GitStatus { .. } => "git_status",
+        ClientRequest::GitCommit { .. } => "git_commit",
+        ClientRequest::GitPush { .. } => "git_push",
+        ClientRequest::GenerateGitCommitMessage { .. } => "generate_git_commit_message",
+        ClientRequest::GeneratePullRequestText { .. } => "generate_pull_request_text",
         ClientRequest::ForgeHandPrToAgent { .. } => "forge_hand_pr_to_agent",
         ClientRequest::GetNetworkAccess => "get_network_access",
         ClientRequest::SetNetworkAccess { .. } => "set_network_access",

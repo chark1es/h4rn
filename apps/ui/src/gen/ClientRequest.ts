@@ -28,7 +28,7 @@ import type { SkillConflictResolution } from "./SkillConflictResolution";
 import type { SkillSource } from "./SkillSource";
 import type { SubagentRequest } from "./SubagentRequest";
 import type { TerminalId } from "./TerminalId";
-import type { TextGenerationSettings } from "./TextGenerationSettings";
+import type { TextGenerationSettingsUpdate } from "./TextGenerationSettingsUpdate";
 import type { TextGeneratorDraft } from "./TextGeneratorDraft";
 import type { TextGeneratorId } from "./TextGeneratorId";
 import type { TextGeneratorPatch } from "./TextGeneratorPatch";
@@ -254,13 +254,18 @@ cols: number | null,
  */
 rows: number | null, 
 /**
- * Whether this client names the output position on every marked reply.
+ * Whether this client names the output position on every marked reply
+ * with protocol 2 numbering: the chunk where the query **starts**.
  *
- * A client that omits it is an older build. While one is attached the
- * terminal keeps the legacy single-owner reply rule, because its
- * answers cannot be correlated with a query position.
+ * The field is new rather than reused because the first version of
+ * positioned replies numbered answers by the chunk where the query
+ * *ended*. An older client sends no such field (or only
+ * `reply_positions`), so it is treated as legacy and its answers are
+ * never correlated with a position; an older daemon ignores the field
+ * and applies its own single-owner rule. While one such viewer is
+ * attached the terminal keeps that legacy rule.
  */
-reply_positions: boolean, } | { "type": "terminal_list", 
+reply_positions_v2: boolean, } | { "type": "terminal_list", 
 /**
  * Filter to one thread, or every terminal when `None`.
  */
@@ -959,7 +964,61 @@ body: string,
 /**
  * Target branch.
  */
-base: string, } | { "type": "forge_hand_pr_to_agent", 
+base: string, 
+/**
+ * Open as a draft.
+ */
+draft: boolean, } | { "type": "git_status", 
+/**
+ * Thread whose workspace is read.
+ */
+thread_id: ThreadId, } | { "type": "git_commit", 
+/**
+ * Thread whose workspace is committed.
+ */
+thread_id: ThreadId, 
+/**
+ * Commit message, used verbatim.
+ */
+message: string, 
+/**
+ * Stage unstaged changes before committing.
+ */
+include_unstaged: boolean, 
+/**
+ * Workspace-relative paths to stage; `None` stages everything.
+ */
+paths: Array<string> | null, } | { "type": "git_push", 
+/**
+ * Thread whose branch is pushed.
+ */
+thread_id: ThreadId, 
+/**
+ * Create an upstream on `origin` when the branch has none.
+ */
+set_upstream: boolean, } | { "type": "generate_git_commit_message", 
+/**
+ * Thread whose workspace the diff comes from.
+ */
+thread_id: ThreadId, 
+/**
+ * Describe the diff that would be committed with unstaged changes
+ * included. Does not stage anything.
+ */
+include_unstaged: boolean, 
+/**
+ * Workspace-relative paths the commit would include.
+ */
+paths: Array<string> | null, } | { "type": "generate_pull_request_text", 
+/**
+ * Thread whose branch is summarised.
+ */
+thread_id: ThreadId, 
+/**
+ * Branch the pull request would target; `None` uses the detected
+ * default branch.
+ */
+base: string | null, } | { "type": "forge_hand_pr_to_agent", 
 /**
  * Account to use.
  */
@@ -1117,7 +1176,7 @@ model: string | null, } | { "type": "get_text_generation_settings" } | { "type":
 /**
  * New settings.
  */
-settings: TextGenerationSettings, } | { "type": "rename_thread", 
+settings: TextGenerationSettingsUpdate, } | { "type": "rename_thread", 
 /**
  * Thread to rename.
  */

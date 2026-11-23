@@ -10,7 +10,7 @@
 //! `8.8.8.8` route probe is kept only to *order* the list (the routing table's
 //! preferred address first), never to find addresses in the first place.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 
 use crate::config::Config;
 use crate::remote::TailscaleMode;
@@ -144,6 +144,7 @@ fn is_virtual_interface(name: &str) -> bool {
 #[cfg(unix)]
 fn enumerate_interfaces() -> Vec<(String, IpAddr)> {
     use std::ffi::CStr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     let mut out = Vec::new();
     // SAFETY: `getifaddrs` initialises the list head and `freeifaddrs` releases

@@ -19,6 +19,7 @@ import {
 import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { useRemote } from "@/features/remote/remoteStore";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
+import { SourceControlSettings } from "@/features/source-control/SourceControlSettings";
 import {
   TextGeneratorsSettings,
   ThreadSettings,
@@ -631,6 +632,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   worktrees: WorktreeSettings,
   resume: AutoResumeSettings,
   forges: ForgeSettings,
+  "source-control": SourceControlSettings,
   general: GeneralForm,
   appearance: AppearanceForm,
   notifications: NotificationsForm,

@@ -4,6 +4,7 @@
 //! connects a real `tokio-tungstenite` client and drives the wire protocol.
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,10 +25,10 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     AgentState, ApprovalDecision, AutoResumePolicy, ClientFrame, ClientRequest, DeviceId,
-    DeviceInfo, Event, HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode,
-    ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame, TextGenerationSettings,
-    ThreadFilter, ThreadId, ThreadTab, TitleModelMode, TitleModelSetting, ToolCallStatus, Topic,
-    TurnStatus, UsageGroupBy, UsageRange, UsageScope,
+    DeviceInfo, Event, ForgeCredentialSource, ForgeKind, HarnessKind, HostId, Item, MessageRole,
+    ProtoError, ProtoErrorCode, ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame,
+    TextGenerationSettings, ThreadFilter, ThreadId, ThreadTab, TitleModelMode, TitleModelSetting,
+    ToolCallStatus, Topic, TurnStatus, UsageGroupBy, UsageRange, UsageScope,
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -118,6 +119,16 @@ async fn boot_inner_with_text_generation(
     text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
 ) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
+    boot_in_dir(dir, options, harness, isolated, text_generation).await
+}
+
+async fn boot_in_dir(
+    dir: tempfile::TempDir,
+    options: ThreadManagerOptions,
+    harness: FakeHarness,
+    isolated: bool,
+    text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
+) -> TestDaemon {
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         bind: "127.0.0.1:0".parse().expect("bind"),
@@ -427,12 +438,24 @@ async fn create_with_model(
     harness: HarnessKind,
     model: &str,
 ) -> h4rn_protocol::ThreadSummary {
+    create_in_workspace(client, host, "/tmp/h4rn-workspace", prompt, harness, model).await
+}
+
+/// Creates a thread whose workspace is a real folder on this host.
+async fn create_in_workspace(
+    client: &mut Client,
+    host: HostId,
+    workspace: &str,
+    prompt: &str,
+    harness: HarnessKind,
+    model: &str,
+) -> h4rn_protocol::ThreadSummary {
     let result = client
         .request(ClientRequest::CreateThread {
             host,
             harness,
             agent_id: None,
-            workspace_path: "/tmp/h4rn-workspace".into(),
+            workspace_path: workspace.into(),
             model: model.into(),
             prompt: prompt.into(),
             attachments: Vec::new(),
@@ -445,6 +468,40 @@ async fn create_with_model(
         ResponseBody::ThreadCreated { summary, .. } => summary,
         other => panic!("unexpected CreateThread response: {other:?}"),
     }
+}
+
+/// Runs one git command and returns its trimmed stdout.
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A repository with one commit and two tracked files.
+fn git_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("repo");
+    git_in(dir.path(), &["init", "-b", "main"]);
+    git_in(dir.path(), &["config", "user.name", "h4rn test"]);
+    git_in(
+        dir.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git_in(dir.path(), &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.path().join("a.txt"), "one\n").expect("write");
+    std::fs::write(dir.path().join("b.txt"), "two\n").expect("write");
+    git_in(dir.path(), &["add", "a.txt", "b.txt"]);
+    git_in(dir.path(), &["commit", "-m", "Initial commit"]);
+    dir
 }
 
 #[tokio::test]
@@ -2929,6 +2986,7 @@ async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
                 generator_id: None,
                 model: None,
             },
+            source_control: Default::default(),
         })
         .await
         .expect("select the coding agent");
@@ -3072,6 +3130,7 @@ async fn a_codex_thread_keeps_its_first_line_and_never_starts_codex() {
     service
         .set_settings(TextGenerationSettings {
             title: TitleModelSetting::default(),
+            source_control: Default::default(),
         })
         .await
         .expect("coding agent mode");
@@ -3312,19 +3371,6 @@ async fn a_slow_acp_probe_does_not_block_the_connection() {
     daemon.stop().await;
 }
 
-fn git_in(dir: &std::path::Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 /// A workspace on `main` whose `origin` looks like GitHub and pushes to a
 /// local bare repository, so opening a PR never touches the network.
@@ -3538,6 +3584,255 @@ async fn opening_a_pr_from_a_thread_links_it() {
             assert!(pulls[0].summary.is_some());
         }
         other => panic!("unexpected ListThreadPullRequests response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+/// `git_status` and `git_commit` over a real connection, with a slow hook
+/// proving the socket keeps answering other requests while git works.
+#[cfg(unix)]
+#[tokio::test]
+async fn git_actions_answer_on_the_wire_and_never_block_the_socket() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let repo = git_repo();
+    std::fs::write(repo.path().join("a.txt"), "changed\n").expect("write");
+    git_in(repo.path(), &["add", "a.txt"]);
+
+    // The hook parks the commit long enough for another frame to be answered.
+    let hooks = repo.path().join(".git/hooks");
+    std::fs::create_dir_all(&hooks).expect("hooks dir");
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nsleep 5\n").expect("hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let summary = create_in_workspace(
+        &mut client,
+        host,
+        repo.path().to_str().unwrap(),
+        "Commit the change",
+        HarnessKind::ClaudeCode,
+        "fake-model",
+    )
+    .await;
+    client.wait_for_turn_completed().await;
+
+    let status = client
+        .request(ClientRequest::GitStatus {
+            thread_id: summary.thread_id.clone(),
+        })
+        .await
+        .expect("git status");
+    match status {
+        ResponseBody::GitStatus { status } => {
+            assert_eq!(status.branch.as_deref(), Some("main"));
+            assert_eq!(status.staged.count, 1);
+            assert_eq!(status.staged.paths, vec!["a.txt".to_owned()]);
+            assert_eq!(status.operation, None);
+        }
+        other => panic!("unexpected git status response: {other:?}"),
+    }
+
+    let commit_id = client
+        .send(ClientRequest::GitCommit {
+            thread_id: summary.thread_id.clone(),
+            message: "Change a".into(),
+            include_unstaged: false,
+            paths: None,
+        })
+        .await;
+    let hosts_id = client.send(ClientRequest::ListHosts).await;
+
+    // The first reply must be the later request: the commit is still in its
+    // hook, and the connection kept serving frames meanwhile.
+    let first_reply = loop {
+        if let ServerFrame::Response { id, .. } = client.read_frame().await {
+            break id;
+        }
+    };
+    assert_eq!(
+        first_reply, hosts_id,
+        "the socket must answer another request while the git action runs"
+    );
+
+    let committed = client.response(commit_id).await.expect("git commit");
+    match committed {
+        ResponseBody::GitCommitted { result } => {
+            assert_eq!(result.subject, "Change a");
+            assert_eq!(result.status.staged.count, 0);
+        }
+        other => panic!("unexpected git commit response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+/// A PR opened the way the Git actions dialog opens one is linked to its
+/// thread, so the header badge and the PR page find it afterwards.
+#[tokio::test]
+async fn a_pull_request_opened_from_the_git_actions_dialog_is_linked_to_its_thread() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "login": "alice",
+            "name": "Alice Example",
+        })))
+        .mount(&server)
+        .await;
+    let pr = serde_json::json!({
+        "number": 42,
+        "title": "Fix the widget",
+        "state": "open",
+        "draft": false,
+        "user": {"login": "alice"},
+        "head": {"ref": "main", "sha": "abc123"},
+        "base": {"ref": "main", "sha": "def456"},
+        "updated_at": "2024-05-01T12:00:00Z",
+        "created_at": "2024-05-01T09:00:00Z",
+        "html_url": "https://forge.test/acme/widget/pull/42",
+        "body": "Fixes the widget.",
+    });
+    Mock::given(method("POST"))
+        .and(path("/api/v3/repos/acme/widget/pulls"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(pr.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/pulls/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(pr))
+        .mount(&server)
+        .await;
+
+    // The workspace's remote names a host that maps to the local test forge.
+    let data = tempfile::tempdir().expect("data dir");
+    std::fs::write(
+        data.path().join("forge-hosts.json"),
+        serde_json::json!({
+            "hosts": [{"host": "forge.test", "forge": "github", "base_url": server.uri()}]
+        })
+        .to_string(),
+    )
+    .expect("forge hosts");
+    let daemon = boot_in_dir(
+        data,
+        ThreadManagerOptions {
+            settings: LifecycleSettings::default()
+                .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
+                .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+            tick_interval: Duration::from_millis(20),
+            clock: None,
+        },
+        FakeHarness::new(),
+        false,
+        None,
+    )
+    .await;
+
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let repo = git_repo();
+    let bare = tempfile::tempdir().expect("bare");
+    let output = std::process::Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .arg(bare.path())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("init bare");
+    assert!(output.status.success());
+    git_in(
+        repo.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://forge.test/acme/widget.git",
+        ],
+    );
+    let push_url = format!("file://{}", bare.path().to_str().unwrap());
+    // The fetch URL names the forge the daemon detects; the push URL is the
+    // local bare repository, so a push never leaves the machine.
+    git_in(
+        repo.path(),
+        &["remote", "set-url", "--push", "origin", &push_url],
+    );
+
+    let added = client
+        .request(ClientRequest::ForgeAddAccount {
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            token: "test-token".into(),
+            username: Some("alice".into()),
+            source: ForgeCredentialSource::Pat,
+            repository: None,
+        })
+        .await
+        .expect("add forge account");
+    assert!(
+        matches!(added, ResponseBody::ForgeAccount { .. }),
+        "{added:?}"
+    );
+
+    let summary = create_in_workspace(
+        &mut client,
+        host,
+        repo.path().to_str().unwrap(),
+        "Open the pull request",
+        HarnessKind::ClaudeCode,
+        "fake-model",
+    )
+    .await;
+    client.wait_for_turn_completed().await;
+
+    let opened = client
+        .request(ClientRequest::ForgeOpenPr {
+            thread_id: summary.thread_id.clone(),
+            repo: None,
+            title: "Fix the widget".into(),
+            body: "Fixes the widget.".into(),
+            base: "main".into(),
+            draft: false,
+        })
+        .await
+        .expect("open the pull request");
+    match opened {
+        ResponseBody::ForgePrOpened { pr } => assert_eq!(pr.summary.number, 42),
+        other => panic!("unexpected open PR response: {other:?}"),
+    }
+
+    let listed = client
+        .request(ClientRequest::ListThreadPullRequests {
+            thread_id: summary.thread_id.clone(),
+        })
+        .await
+        .expect("list links");
+    match listed {
+        ResponseBody::ThreadPullRequests { pulls, .. } => {
+            assert_eq!(pulls.len(), 1, "the opened PR is linked to its thread");
+            assert_eq!(pulls[0].number, 42);
+            assert_eq!(pulls[0].repo.owner, "acme");
+            assert_eq!(pulls[0].repo.repo, "widget");
+            assert_eq!(
+                pulls[0]
+                    .summary
+                    .as_ref()
+                    .map(|summary| summary.title.as_str()),
+                Some("Fix the widget")
+            );
+        }
+        other => panic!("unexpected thread pull requests response: {other:?}"),
     }
 
     daemon.stop().await;

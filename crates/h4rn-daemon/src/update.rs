@@ -1037,11 +1037,12 @@ fn replace_binary_with<P: ChecksumPublisher>(
         .parent()
         .context("the current executable has no parent directory")?;
     let staged = stage_binary(current, bytes)?;
-    let result = if cfg!(windows) {
-        replace_binary_windows(current, &staged, publisher)
-    } else {
-        replace_binary_unix(current, &staged, publisher)
-    };
+    // cfg! would compile both calls, and each replace function only exists on
+    // its own platform.
+    #[cfg(windows)]
+    let result = replace_binary_windows(current, &staged, publisher);
+    #[cfg(not(windows))]
+    let result = replace_binary_unix(current, &staged, publisher);
     if result.is_err() {
         let _ = std::fs::remove_file(&staged);
     }
@@ -1089,15 +1090,6 @@ fn replace_binary_windows<P: ChecksumPublisher>(
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn replace_binary_windows<P: ChecksumPublisher>(
-    _current: &Path,
-    _staged: &Path,
-    _publisher: &P,
-) -> Result<()> {
-    unreachable!("the Windows replace path is only compiled on Windows")
-}
-
 /// Swaps `h4rnd.previous` back in.
 pub fn rollback_binary(current: &Path) -> Result<()> {
     let previous = previous_binary_path(current);
@@ -1105,24 +1097,18 @@ pub fn rollback_binary(current: &Path) -> Result<()> {
     // a working installation.
     check_previous_binary(&previous)?;
     let parent = current.parent();
-    if cfg!(windows) {
-        rollback_binary_windows(current, &previous)?;
-    } else {
-        // One rename over the target: an interruption cannot leave the install
-        // path empty.
-        std::fs::rename(&previous, current)
-            .with_context(|| format!("restore {}", current.display()))?;
-    }
+    #[cfg(windows)]
+    rollback_binary_windows(current, &previous)?;
+    #[cfg(not(windows))]
+    // One rename over the target: an interruption cannot leave the install
+    // path empty.
+    std::fs::rename(&previous, current)
+        .with_context(|| format!("restore {}", current.display()))?;
     remove_backup_checksum(&previous);
     if let Some(parent) = parent {
         fsync_dir(parent);
     }
     Ok(())
-}
-
-#[cfg(not(windows))]
-fn rollback_binary_windows(_current: &Path, _previous: &Path) -> Result<()> {
-    unreachable!("the Windows rollback path is only compiled on Windows")
 }
 
 #[cfg(windows)]
@@ -1277,6 +1263,9 @@ fn copy_file_atomic(from: &Path, to: &Path) -> Result<()> {
     let parent = to
         .parent()
         .context("the install path has no parent directory")?;
+    // Only the Unix publication copies the source's executable bits. `open`
+    // below still reports a missing source on every platform.
+    #[cfg(unix)]
     let metadata = std::fs::metadata(from).with_context(|| format!("read {}", from.display()))?;
     let mut source =
         std::fs::File::open(from).with_context(|| format!("open {}", from.display()))?;
@@ -1400,10 +1389,12 @@ fn remove_staging_files(current: &Path) -> usize {
     removed
 }
 
-fn fsync_dir(path: &Path) {
+fn fsync_dir(_path: &Path) {
+    // Windows has no directory handle to fsync; the file itself is synced
+    // before it is renamed into place.
     #[cfg(unix)]
     {
-        if let Ok(directory) = std::fs::File::open(path) {
+        if let Ok(directory) = std::fs::File::open(_path) {
             let _ = directory.sync_all();
         }
     }

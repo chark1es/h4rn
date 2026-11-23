@@ -7,6 +7,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Threads can commit, push and open a pull request.** The thread menu's **Commit, push and
+  PR…** panel shows the workspace's real branch, upstream, ahead/behind counts and its staged,
+  unstaged and untracked paths, and whether a rebase, merge or cherry-pick is in progress. Commit
+  records the index, or stages tracked and new files first when **Include unstaged changes** is on;
+  it refuses a detached `HEAD`, an in-progress operation or an empty index, runs hooks (never
+  `--no-verify`) and reports a hook's output. Push creates an upstream on `origin` when asked and
+  is never forced: a non-fast-forward rejection or a bad credential is reported as exactly that.
+  **Create pull request…** offers title, body, base branch (the default branch is preselected) and
+  a draft flag; the daemon pushes first when the branch needs it and then opens the request.
+  **Generate** can fill the commit message or the pull request text from a model chosen under
+  Settings → Source control (Off by default, coding agent, or text generator, plus custom
+  instructions); it fills the field only and never commits, pushes or opens anything. Only the
+  staged diff (capped, binary files named), recent subjects, or the branch's commits and diff stat
+  are sent, wrapped as untrusted input. See [docs/git-actions.md](docs/git-actions.md).
 - **Threads remember the pull requests that belong to them, and can watch one for you.** Link a
   PR by pasting its URL or picking it from the repository's open PRs in the command palette
   (`Link pull request…`), or let opening a PR from h4rn link it automatically. Links are stored in
@@ -349,7 +363,21 @@ All notable changes to h4rn are recorded here. The format follows
   re-reads when the daemon's watch state can have changed — when a wake message
   is appended and when its panel opens — so a merged PR stops offering "Stop
   watching".
-
+- **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
+  Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
+  relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other
+  branches and a `+` refspec in config cannot force an update; "behind or ahead" is measured against
+  `origin/<branch>`, not whatever upstream a branch happens to track, and a fork layout pushes to the
+  fork. Opening a draft on Gitea or Forgejo now prefixes the title with `WIP:` because those APIs
+  have no draft field, and no forge gets a doubled `Draft:` or `WIP:` prefix. The pull request dialog
+  waits as long as the push may take and cannot submit twice. A commit that names paths records only
+  those paths and leaves other staged work staged. An older app that saves a title model no longer
+  turns the Commit & PR mode off. A rebase, merge or cherry-pick is named in the error before the
+  detached `HEAD` it causes, and a credential-shaped string in push output is redacted. The panel
+  keeps a typed message when generation is off, shows the live branch (a detached `HEAD` disables
+  push and the PR dialog with the reason), never guesses `main` as a base, and shows its busy state on
+  **Commit & push** for the whole commit-and-push. Settings → Source control describes the message
+  model in its footer and says plainly that non-Claude threads need a configured text generator.
 - **A PR watch hears every change since it started, exactly once.** The GitHub
   change probe is gone: the watch reads the PR detail conditionally, so a `304`
   is built from the body the account's shared cache returns rather than from the
@@ -852,37 +880,83 @@ All notable changes to h4rn are recorded here. The format follows
   reads it under the same lock order, so the exit report keeps that status instead of reporting
   `-1` from a second failed wait. Closing no longer waits on the child handle: the hangup wait only
   tries its lock, so a shell that hit PTY EOF first (and is being reaped by the reader thread) can
-  no longer hold the close past its two-second bound; TERM and KILL still go out on schedule, with
-  KILL addressed to the shell's pid when the handle is busy.
+  no longer hold the close past its two-second bound; TERM and KILL still go out on schedule, and
+  the session keeps a cloned child handle that terminates the shell even while the reader thread
+  holds the child in `wait()`, which is the only way a Windows console ends when its handle is
+  busy. A handle kill that fails falls back to the same cloned handle, so a console that refuses
+  the first termination still ends without the child lock. Once the close wait has reaped the shell,
+  the pid-based fallbacks are skipped: a failed handle kill no longer sends SIGHUP or SIGKILL to a
+  pid that may already belong to another process. The Windows handle kill still runs, because it
+  owns a duplicated process handle rather than a bare pid. The Windows close test now also waits for
+  the exit report, so a leaked blocked reader fails it instead of passing on the child handle alone.
+  The close path drops both PTY ends: a killed Windows ConPTY client leaves the pseudoconsole open,
+  which would keep the reader thread blocked and the session alive, so closing the master ends the
+  console, closing the writer releases its input pipe, and together they release the reader and let
+  the exit report run.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
-  replies. The UI now marks xterm's own answers to just-asked queries with the output position that
-  carried the query and the answer's ordinal within that chunk (one chunk can ask several questions
-  and xterm answers each separately), and the daemon writes each distinct answer once from any
-  viewer. Only exact duplicates and positions at or below the evicted high-water mark are dropped;
-  a reply for an older position that has not been answered yet is accepted, because it can only
-  rescue a pending query. A reply naming output the daemon never sent to that viewer is ignored, so
-  a bogus position cannot suppress a real answer, and acceptance and the PTY write happen under one
-  lock so accepted replies cannot reach the shell out of order. An answer's ordinal is counted per
-  chunk, so a viewer that attached mid-query numbers answers differently; the daemon records the
-  first output chunk each viewer was sent after its snapshot and drops a reply for a chunk whose
-  predecessor that viewer never parsed, leaving the answer to an earlier-attached viewer. That rule
-  exists only to keep two parsers from numbering one chunk differently, so it is relaxed when no
-  other attached viewer could answer the position: a sole viewer that attached at a snapshot, or
-  resynced after falling behind, still answers its first raw chunk. A viewer that is still taking
-  its attach snapshot, or whose output credit never reached the chunk, has not received the query
-  and does not count as another answerer. The client no longer drops a
-  reply below its own floor; it always sends and the daemon decides. A query
-  spanning more than two 64 KiB chunks is out of scope. The sent bound advances only when a frame
-  is really handed to the outbound channel, so a blocked send cannot let a reply name unseen output,
-  and an ack past that bound is clamped, so a stale or bogus acknowledgement cannot mark later
-  chunks free. Clients declare reply-position support when they attach; while any attached viewer
-  does not, every reply keeps the legacy single-owner rule, whichever client's reply arrives first.
-  The owner role and the answered-position record are only committed once the reply's bytes reach
-  the shell, so a failed write leaves neither behind, the answer can still be written by another
-  viewer, and a bogus positioned claim cannot suppress the old client's next valid answer.
-  Another legacy viewer attaching or detaching no longer resets the owner while a query is in
-  flight. A stalled or
+  replies. The UI now marks xterm's own answers to just-asked queries with the output chunk that
+  carried the query's first byte and the query's index among the queries that start in that chunk
+  (one chunk can ask several questions and xterm answers each separately), and the daemon writes
+  each distinct answer once from any viewer. Numbering by the starting chunk makes the identity a
+  property of the output stream: two viewers name the same answer the same way even when their
+  chunks arrive in a different order, and a viewer whose attach snapshot already contained the
+  query's first byte simply never saw the query. The scanner that reads a sequence across a chunk
+  boundary now follows xterm's own parser, so a parameterless DA1, DA2 or DECRQSS query keeps the
+  chunk its ESC came in instead of falling back to the chunk that finished it: an empty parameter
+  list is `[0]`, an empty sub-parameter is `-1`, values clamp the way xterm clamps them, ESC starts
+  a new escape in every state (abandoning a CSI, ending an OSC, DCS or string first), and CAN or
+  SUB cancels to ground, so a sequence xterm threw away is never matched against a later hook. The
+  C0 controls xterm executes inside escape, CSI and DCS entry/parameter states (0x00–0x17, 0x19 and
+  0x1c–0x1f) execute in place rather than becoming parameters, and DEL is ignored there. The scan
+  runs on decoded code points with one streaming UTF-8 decoder, so the C1 controls work as they do
+  in xterm (U+009B CSI, U+0090 DCS, U+009D OSC, U+0098/9E/9F strings, U+009C ST, and the rest back to
+  ground) and a 0x9c byte inside a multi-byte character is never mistaken for ST, even when the
+  character spans two chunks. A code point split inside its UTF-8 bytes is named by the chunk that
+  carried its lead byte, so a C1 opener sent as `C2` | `9B` belongs to the chunk with `C2` even
+  though xterm only decodes it when `9B` arrives, and invalid bytes are discarded exactly as xterm
+  discards them (a wrong continuation drops the sequence; no replacement character is invented), so
+  a malformed payload cannot stop a carried query from matching its hook. An OSC identifier counts
+  only when every character before the first `;` is an ASCII digit, as xterm's `OscParser` aborts
+  `10x`, ` 10` and `+10` at the first non-digit. `term.reset()` keeps xterm's escape parser and
+  UTF-8 decoder, so a resync snapshot continues a sequence or character that was open before it: a
+  chunk that ends inside `OSC 10;?` or `DCS $ q m` is completed by the snapshot's leading bytes and
+  keeps the chunk that carried its first byte, the same identity the viewer that saw that chunk raw
+  gives it. Only the record of queries from before the snapshot is cleared, and only when the
+  snapshot chunk really starts parsing: xterm's write buffer parses later, so an output chunk applied
+  just before the snapshot still names its answers by its own chunk, and ordinals for a chunk this
+  viewer already parsed survive so a query completed by the snapshot keeps its place. A viewer that
+  stalled before a
+  chunk and caught up
+  later therefore cannot write a second answer for a query another viewer answered in the meantime.
+  Only exact duplicates and positions at or below the evicted high-water mark are dropped; a reply
+  for an older position that has not been answered yet is accepted, because it can only rescue a
+  pending query. A reply naming output the daemon never sent to that viewer is ignored, so a bogus
+  position cannot suppress a real answer, and acceptance and the PTY write happen under one lock so
+  accepted replies cannot reach the shell out of order. A viewer may claim any position it was sent
+  as raw output, including a chunk it parsed raw before a later resync replaced it, and a position
+  only inside its snapshot when no other attached viewer received that position raw: the daemon
+  drops a claim only when it is snapshot-only for this viewer **and** another viewer has that
+  position's bytes, so that viewer's answer is the one written. When every viewer saw the query only
+  through a snapshot the claim still stands, because xterm completes it with the snapshot's bytes
+  and the answer record keeps the reply count at one; the shell is never left without an answer. The
+  byte-split fuzz also resyncs a lagging viewer mid-stream through a snapshot and checks that every
+  answer after it keeps the identity the viewer that kept up gave it. The old per-viewer
+  attach floor is gone, because there is no chunk-local numbering left for it to protect: a sole or
+  resynced viewer answers its first raw chunk, and so does a positioned viewer in mixed-version mode
+  after a resync. The sent bound advances only when a frame is really handed to the outbound
+  channel, so a blocked send cannot let a reply name unseen output, and an ack past that bound is
+  clamped, so a stale or bogus acknowledgement cannot mark later chunks free. Clients declare
+  reply-position
+  support when they attach with `reply_positions_v2`; the new field exists because the numbering
+  changed from the ending chunk to the starting chunk, so a client that only sends the old flag is
+  treated as legacy rather than having its numbers trusted. While any attached viewer does not
+  declare it, every reply keeps the legacy
+  single-owner rule, whichever client's reply arrives first. The owner role and the
+  answered-position record are only committed once the reply's bytes reach the shell, so a failed
+  write leaves neither behind, the answer can still be written by another viewer, and a bogus
+  positioned claim cannot suppress the old client's next valid answer. Another legacy viewer
+  attaching or detaching no longer resets the owner while a query is in flight. A stalled or
   backgrounded viewer no longer holds an owner role that blocks the others. The per-answer record
   keeps 64 recent chunks with 1024 answers each by design, and older chunks collapse to a high-water
   mark, so memory stays constant; a late reply for a chunk older than the whole window is the entry
