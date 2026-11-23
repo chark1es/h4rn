@@ -2425,7 +2425,9 @@ fn build_guest_response(
             "cache-control" if value == "no-store" || value == "private, max-age=3600" => {
                 builder = builder.header(axum::http::header::CACHE_CONTROL, value);
             }
-            "set-cookie" => {
+            // The frame's own field wins; the header form is for a daemon built
+            // before it existed, and never both at once.
+            "set-cookie" if answer.set_cookie.is_none() => {
                 if let Some(cookie) = rebuild_guest_cookie(value, public_prefix, secure) {
                     builder = builder.header(axum::http::header::SET_COOKIE, cookie);
                 }
@@ -2720,6 +2722,13 @@ mod tests {
                 ("content-type".into(), "application/json".into()),
                 ("content-security-policy".into(), "default-src *".into()),
                 ("x-frame-options".into(), "ALLOWALL".into()),
+                // A daemon built before the frame had its own field sends the
+                // cookie here; Connect must not emit both.
+                (
+                    "set-cookie".into(),
+                    "h4rn_guest=binding_1; HttpOnly; Secure; SameSite=Strict; Path=/guest/machine_1/token"
+                        .into(),
+                ),
             ],
             body: b"{}".to_vec(),
             // The daemon scopes its own cookie to the public prefix the relay
@@ -2731,6 +2740,15 @@ mod tests {
         };
         let response =
             build_guest_response(answer, "/guest/machine_1/token", true).expect("answer");
+        assert_eq!(
+            response
+                .headers()
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .count(),
+            1,
+            "Connect sent the binding cookie twice"
+        );
         // The daemon's CSP and framing headers are gone; Connect sets its own
         // sandbox policy instead of trusting the machine.
         assert_eq!(

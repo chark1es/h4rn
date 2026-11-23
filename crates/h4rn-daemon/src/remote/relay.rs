@@ -355,6 +355,11 @@ impl GuestRelay {
     ) {
         let mut headers = vec![("content-type".to_owned(), output.content_type.to_owned())];
         headers.extend(output.headers.clone());
+        // The cookie also rides as a header for a relay built before the reply
+        // frame had its own field; a new relay prefers the field.
+        if let Some(cookie) = &output.set_cookie {
+            headers.push(("set-cookie".to_owned(), cookie.clone()));
+        }
         self.queue_frames(
             conn_id,
             request_id,
