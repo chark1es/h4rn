@@ -57,13 +57,26 @@ export function useThreadPullRequests(
   // A watch wake arrives as a user message appended to the thread. It may
   // also be the last thing the watch ever says (a merge or close ends it), so
   // re-read rather than keep showing the pre-wake state and a stale
-  // "Stop watching". Replayed history is not a new wake: a reconnect must not
-  // cost one forge read per replayed message, and the popover re-reads when it
-  // opens anyway.
+  // "Stop watching".
+  //
+  // A reconnect replays the history the client missed. Those messages are not
+  // new wakes, so they must not each cost a forge read — but a PR that merged
+  // while the client was offline is only visible if the badge reads again.
+  // The whole replay arrives as one burst, so the first replayed event
+  // schedules one coalesced reload and the rest of the burst joins it.
   useEffect(() => {
     if (!threadId) return;
+    let replayReloadScheduled = false;
     return onAppEvent(({ event, replayed }) => {
-      if (replayed) return;
+      if (replayed) {
+        if (replayReloadScheduled) return;
+        replayReloadScheduled = true;
+        queueMicrotask(() => {
+          replayReloadScheduled = false;
+          reload();
+        });
+        return;
+      }
       if (event.type !== "item_completed") return;
       if (event.thread_id !== threadId) return;
       if (event.item.kind !== "message" || event.item.role !== "user") return;
