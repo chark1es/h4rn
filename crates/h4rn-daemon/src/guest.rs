@@ -641,13 +641,18 @@ impl GuestService {
                 }
             }
             if !deleted {
-                // Keep the row so the sweep knows there is still work to do.
+                // Keep the row so the sweep knows there is still work to do,
+                // but take the card away: the request is no longer actionable.
                 let _ = sqlx::query(
                     "UPDATE guest_requests SET status = 'dismissed' WHERE request_id = ?",
                 )
                 .bind(&request.request_id)
                 .execute(&self.pool)
                 .await;
+                let _ = self
+                    .manager
+                    .emit_guest_request_resolved(&link.thread_id, &request.request_id, false)
+                    .await;
                 continue;
             }
             let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
