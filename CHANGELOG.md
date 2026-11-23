@@ -365,6 +365,15 @@ All notable changes to h4rn are recorded here. The format follows
   when the daemon's watch state can have changed — when a wake message is
   appended and when its panel opens — so a merged PR stops offering "Stop
   watching", and messages replayed on reconnect do not each cost a forge read.
+- **A re-watched PR and a reconnected badge keep their promises.** Every watcher
+  generation now comes from one service-wide counter that never reuses a value,
+  so a poll that started before an unwatch and re-watch cannot hand its older
+  body to the watcher that replaced it. A delivered merge, close or
+  tenth-comment wake removes only the watcher it was computed for: if the
+  thread started watching again while that message was being delivered, the new
+  watch stays. After a reconnect the linked-PR badge re-reads once per replayed
+  burst, so a PR that merged while the client was offline stops showing "Open"
+  without waiting for the panel to open.
 - **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
   Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
   relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other
