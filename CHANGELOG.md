@@ -14,13 +14,17 @@ All notable changes to h4rn are recorded here. The format follows
   `list_forge_pull_requests`. They act on the calling thread and accept no thread id, so a token
   cannot reach another thread; Settings → Sharing & access turns them off per harness. Agents
   h4rn did not start — Claude Code or Codex in your terminal, ChatGPT, a bot — can connect to
-  `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). The
-  daemon's approval page names the client and offers **Read only**, **Supervised** (threads run
-  at approval-required) or **Full access**; tokens are scoped, expiring, revocable and stored
-  only as digests. The same page shows the MCP URL with a Copy button and lists connected agents
-  with Revoke. Redirects are admitted only to `https` or localhost, and the OAuth and MCP
-  endpoints are rate-limited. See [docs/outside-agents.md](docs/outside-agents.md) and
-  [ADR-044](docs/decisions.md).
+  `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). Only you can grant
+  one: the client's browser shows who is asking and where it would return, and the request is
+  approved in h4rn → Settings → Sharing & access, where you pick **Read only**, **Supervised**
+  (threads run at approval-required) or **Full access** with no preselected default. Tokens are
+  scoped, expiring, revocable and stored only as digests; a revocation is durable and a replayed
+  code or refresh token kills the grants it produced. A supervised message carries its ceiling, so
+  raising the thread's mode later cannot lift it. The OAuth and MCP routes exist only on the
+  loopback listener and refuse another site's page. The same page shows the MCP URL with a Copy
+  button and lists connected agents with Revoke. Redirects are admitted only to `https` or
+  localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client. See
+  [docs/outside-agents.md](docs/outside-agents.md) and [ADR-044](docs/decisions.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the

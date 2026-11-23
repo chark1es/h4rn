@@ -5,6 +5,7 @@ import type { HostId } from "./HostId";
 import type { McpConflictResolution } from "./McpConflictResolution";
 import type { McpServerInput } from "./McpServerInput";
 import type { McpSharePolicy } from "./McpSharePolicy";
+import type { OutsideAgentLevel } from "./OutsideAgentLevel";
 
 /**
  * One MCP operation from the UI.
@@ -124,4 +125,16 @@ harness: HarnessKind,
 /**
  * New value.
  */
-enabled: boolean, };
+enabled: boolean, } | { "type": "list_outside_agent_sign_ins" } | { "type": "respond_outside_agent_sign_in", 
+/**
+ * `request_id` from [`OutsideAgentSignIn`].
+ */
+request_id: string, 
+/**
+ * Approve or deny.
+ */
+decision: ApprovalDecision, 
+/**
+ * Level to grant, when approving.
+ */
+level: OutsideAgentLevel | null, };

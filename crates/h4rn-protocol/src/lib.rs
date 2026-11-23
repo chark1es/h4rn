@@ -89,7 +89,7 @@ pub use mcp::{
     McpImportCandidate, McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest,
     McpSecretInput, McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval,
     McpSharePolicy, McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput,
-    McpTransportView, OutsideAgentLevel, OutsideAgentView,
+    McpTransportView, OutsideAgentLevel, OutsideAgentSignIn, OutsideAgentView,
 };
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;

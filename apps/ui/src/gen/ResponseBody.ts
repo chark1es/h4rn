@@ -46,6 +46,7 @@ import type { McpServerView } from "./McpServerView";
 import type { McpShareApproval } from "./McpShareApproval";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
+import type { OutsideAgentSignIn } from "./OutsideAgentSignIn";
 import type { OutsideAgentView } from "./OutsideAgentView";
 import type { PairScope } from "./PairScope";
 import type { PairingConfirmation } from "./PairingConfirmation";
@@ -475,7 +476,11 @@ mcp_url: string, } | { "type": "agent_tools",
 /**
  * Current settings.
  */
-settings: AgentToolSettings, } | { "type": "usage_report", 
+settings: AgentToolSettings, } | { "type": "outside_agent_sign_ins", 
+/**
+ * Waiting sign-ins, oldest first.
+ */
+sign_ins: Array<OutsideAgentSignIn>, } | { "type": "usage_report", 
 /**
  * The report.
  */

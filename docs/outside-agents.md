@@ -42,7 +42,9 @@ http://127.0.0.1:<port>/mcp
 
 The URL is on Settings → Sharing & access with a **Copy MCP URL** button. It is the daemon's
 loopback listener: the OAuth redirect must finish on `https` or a localhost address, and the MCP
-endpoint carries a bearer token, so it is deliberately not exposed on the LAN or tailnet.
+endpoint carries a bearer token, so it is deliberately not exposed on the LAN or tailnet. A LAN or
+tailnet listener answers 404 for `/mcp` and every OAuth route, and the daemon refuses a request
+whose `Host` is not a loopback name.
 
 ### Sign in
 
@@ -51,14 +53,20 @@ The daemon is its own OAuth 2.1 authorization server:
 - `GET /.well-known/oauth-authorization-server` — endpoints and supported methods;
 - `GET /.well-known/oauth-protected-resource` — the `/mcp` resource;
 - `POST /oauth/register` — dynamic client registration (public clients, no secret);
-- `GET /oauth/authorize` — the approval page;
-- `POST /oauth/approve` — the page's form;
+- `GET /oauth/authorize` — the page the client's browser opens;
+- `GET /oauth/authorize/pending` — the page's own navigation once the person answered;
 - `POST /oauth/token` — authorization code with PKCE (S256) and refresh tokens;
 - `POST /oauth/revoke` — revocation.
 
+There is no unauthenticated approve endpoint. The client's browser cannot grant anything: the
+person answers the request inside h4rn.
+
 Redirect URIs are admitted only when they are `https`, or plain `http` to `localhost`,
 `127.0.0.1` or `[::1]`, with no embedded credential and no fragment. Everything else is refused at
-registration, before a browser is sent anywhere.
+registration, before a browser is sent anywhere. A token request may omit `redirect_uri` (PKCE
+binds the exchange); when it sends one, it must match the authorization request exactly. A client
+that names an RFC 8707 `resource` gets a token bound to it, and `/mcp` refuses a token issued for
+anything else.
 
 For Claude Code:
 
@@ -77,23 +85,29 @@ codex mcp login h4rn
 The first request without a token answers `401` with a `WWW-Authenticate` header pointing at the
 protected-resource metadata, so a client that supports OAuth discovers the rest.
 
-### The approval page
+### Approving a sign-in
 
-The page is served by the daemon because the browser belongs to the outside client, not to the
-h4rn app. It names the client, says where its code will be returned, and asks for one of three
-levels:
+The authorize page names the client, labels that name **unverified (the app chose it)**, shows the
+exact callback origin the browser will return to, and says: approve this in h4rn. It never offers a
+level and has no form.
+
+Open h4rn → Settings → Sharing & access. The request is listed under **Waiting for you** with the
+same callback. Pick one of:
 
 - **Read only** — list projects, threads, providers and models, and read a thread.
-- **Supervised** — read, and start or message threads. Every thread it starts is forced to
-  `approval_required`, and every thread it messages is switched to that mode first.
+- **Supervised** — read, and start or message threads. Every thread it starts runs at
+  `approval_required`, and every message it sends carries that ceiling with it.
 - **Full access** — read, start and message threads at the mode the call asks for.
 
-The chosen level is written into the grant. The daemon checks it again on every tool call, so a
-client cannot call a write tool by guessing its name. The page is not framed, is not cached, and
-carries a strict content-security policy.
+Nothing is preselected: Supervised and Full access need an explicit choice. The browser then
+follows the answer to the callback on its own, so no form ever posts to another site.
 
-Only approve a sign-in you just started. Anyone who can open the page on the machine can approve
-it, exactly as anyone who can read the data directory can use the local access token.
+Answering without a level is refused. The level is written into the grant and checked again on
+every tool call, so a client cannot call a write tool by guessing its name.
+
+Only approve a sign-in you just started. A hostile page cannot approve one for you either: the
+daemon refuses a cross-site `Origin`, a `Sec-Fetch-Site: cross-site` request and any `Host` that is
+not loopback.
 
 ### Tokens
 
@@ -102,8 +116,17 @@ it, exactly as anyone who can read the data directory can use the local access t
 - Only a BLAKE3 digest is written to `outside_agents.json`; a copy of the file is not a copy of the
   credentials. No token is ever logged or returned in a tool result.
 - Revoking an agent in Settings → Sharing & access marks every token in its family revoked and
-  deletes its codes and pending approvals. The next request gets `401`.
-- OAuth endpoints and the MCP endpoint are rate-limited per client and token.
+  deletes its codes and pending approvals. The answer comes only after the file is on disk, so a
+  restart cannot resurrect the grant. The next request gets `401`.
+- A replayed authorization code revokes the tokens it issued, and a replayed rotated refresh token
+  revokes its whole family: either one means two parties hold the same credential.
+- If `outside_agents.json` cannot be read (corrupt, or written by an older build), the daemon
+  quarantines it as `outside_agents.corrupt-<time>.json`, starts with no grants, and logs a
+  warning. Agents reconnect by signing in again.
+- Registration is capped and unused registrations expire after a day. The unauthenticated OAuth
+  mutations have an aggregate rate limit checked before the body is read, and the per-client
+  buckets are keyed only on identifiers the daemon has registered — a flood of random values grows
+  nothing.
 
 ### What an outside agent can call
 
@@ -119,9 +142,19 @@ it, exactly as anyone who can read the data directory can use the local access t
 
 `start_thread` needs a project id or an absolute workspace, plus a harness and a model from
 `list_providers`. It never creates a worktree. A thread it starts cannot run with more permission
-than its grant allows.
+than its grant allows: a supervised grant always starts at `approval_required`, and a message it
+sends to an existing thread is clamped to that mode for the turn without changing the person's own
+thread setting.
 
 An outside agent never sees the person's own upstream MCP servers; it sees only this tool set.
+
+Both MCP endpoints accept one JSON-RPC message per request. A batch is refused, and a request whose
+`Origin` is another site is refused, so one scope check and one rate-limit hit always belong to one
+call.
+
+`get_thread` redacts credentials before it builds either output form: the daemon's own access
+token, `h4rn_`-prefixed tokens, and the forge token shapes h4rn already recognises (`ghp_`,
+`glpat-`, `ATATT` and the rest).
 
 ## Removal
 
@@ -132,14 +165,23 @@ and when the sign-in expires. **Revoke** cuts one off immediately.
 
 The Connect relay carries the daemon's Noise transport (ADR-018/031), not an HTTP MCP endpoint, so
 this phase offers the copied URL only on the local machine. A hosted agent needs a future HTTP
-route on the relay; the UI does not pretend one exists.
+route on the relay; the UI does not pretend one exists: when h4rn is open as a remote client, the
+Copy button is not shown and the page says the URL is the loopback address of the other computer
+and cannot be reached by an agent on the internet yet.
 
 ## Tests
 
 - `crates/h4rn-daemon/tests/mcp_server.rs` boots a real daemon: a FakeHarness session receives the
-  thread-bound token; the hub lists and calls the tools; OAuth registration, PKCE, the approval
-  page, level enforcement, rate limits, revocation, hashed storage and the protocol operations are
-  exercised; and the PR-link tools run against a scripted forge.
+  thread-bound token; the hub lists and calls the tools; OAuth registration, PKCE (including a
+  rejected `plain` challenge), the sign-in answered over the protocol, the page's redirect shape,
+  level enforcement, aggregate and per-client rate limits, revocation, hashed storage and the
+  protocol operations are exercised; approval without an owner session, a cross-site `Origin`, a
+  rebinding `Host`, a non-loopback listener, a foreign `resource`, a JSON-RPC batch, a supervised
+  ceiling raised after queueing, refresh rotation and redacted tool output are proved; and the
+  PR-link tools run against a scripted forge.
 - Unit tests in `crates/h4rn-daemon/src/mcp_server/` cover redirect allow-listing, PKCE vectors,
-  expiry, one-time codes, token revocation and the store's hashed form.
-- `apps/ui/src/features/access/` covers the Sharing & access list, copy and revoke.
+  expiry, one-time codes, replay revocation, resource binding, the revocation-versus-restart race,
+  registration caps, the bounded rate limiter, quarantine of an unreadable store, and the page
+  having no form.
+- `apps/ui/src/features/access/` covers the Sharing & access list, the waiting sign-in (unverified
+  name, callback origin, no preselected level), copy, revoke, and the remote-copy explanation.

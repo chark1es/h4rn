@@ -2,14 +2,23 @@
 //!
 //! An outside agent is an MCP client h4rn did not start: Claude Code in the
 //! person's own terminal, Codex, ChatGPT, a bot. It connects with OAuth 2.1
-//! authorization code + PKCE, after the person approves a level on the
-//! daemon's approval page. Every token is stored as a BLAKE3 digest, so a copy
-//! of the store is not a copy of the credentials.
+//! authorization code + PKCE, after the person approves a level inside h4rn.
+//! Every token is stored as a BLAKE3 digest, so a copy of the store is not a
+//! copy of the credentials.
 //!
 //! Tokens are scoped (read-only, supervised, full access), expiring (one hour
 //! for access, thirty days for refresh) and revocable per client. The daemon
 //! checks the scope again on every tool call; nothing the client says about
 //! its own authority is trusted.
+//!
+//! Two invariants shape the store:
+//!
+//! - **One lock covers the state and its write.** A revocation, a spent code
+//!   or a rotated token is written before the lock is released, so a slower
+//!   writer can never put a stale snapshot back on disk. The file is replaced
+//!   atomically.
+//! - **A replay is an attack, not a retry.** Presenting a code or a rotated
+//!   refresh token a second time revokes everything that came from it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +29,7 @@ use ::url::Url;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, TimeDelta, Utc};
-use h4rn_protocol::{OutsideAgentLevel, OutsideAgentView};
+use h4rn_protocol::{OutsideAgentLevel, OutsideAgentSignIn, OutsideAgentView};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
@@ -35,10 +44,17 @@ pub const REFRESH_TTL: TimeDelta = TimeDelta::days(30);
 pub const CODE_TTL: TimeDelta = TimeDelta::minutes(10);
 /// How long an approval page stays open.
 pub const PENDING_TTL: TimeDelta = TimeDelta::minutes(10);
+/// How long an unused registration is kept.
+pub const UNUSED_CLIENT_TTL: TimeDelta = TimeDelta::hours(24);
 
 const FILE: &str = "outside_agents.json";
 const MAX_REDIRECT_URIS: usize = 8;
 const MAX_NAME_CHARS: usize = 80;
+/// Registered clients kept at once. Dynamic registration is unauthenticated, so
+/// the list must be bounded; an unused registration expires first.
+pub const MAX_CLIENTS: usize = 32;
+/// How often the last-used timestamp is written.
+const LAST_USE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +78,9 @@ struct TokenRecord {
     client_id: String,
     level: OutsideAgentLevel,
     family: String,
+    /// RFC 8707 resource this token was issued for, when the client named one.
+    #[serde(default)]
+    resource: Option<String>,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     #[serde(default)]
@@ -83,23 +102,43 @@ struct CodeRecord {
     redirect_uri: String,
     challenge: String,
     level: OutsideAgentLevel,
+    /// Family of the pair this code issued, so a replay revokes it.
+    #[serde(default)]
+    family: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
     expires_at: DateTime<Utc>,
     #[serde(default)]
     used_at: Option<DateTime<Utc>>,
 }
 
+/// What the browser is eventually sent to.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// One authorization request waiting on the approval page.
+struct PendingResolution {
+    location: String,
+    at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+/// One authorization request waiting on the person in h4rn.
 pub struct PendingRecord {
     /// Approval id handed to the page.
     pub id: String,
-    client_id: String,
-    redirect_uri: String,
+    /// Client that asked.
+    pub client_id: String,
+    /// Exact callback the browser will be sent to.
+    pub redirect_uri: String,
+    redirect_origin: String,
     #[serde(default)]
     state: Option<String>,
     challenge: String,
+    #[serde(default)]
+    resource: Option<String>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    /// Set once the person answered; the waiting page then navigates.
+    #[serde(default)]
+    resolution: Option<PendingResolution>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -129,6 +168,9 @@ pub enum OAuthError {
     /// The request itself is malformed.
     #[error("{0}")]
     InvalidRequest(String),
+    /// The `resource` parameter names something this daemon does not serve.
+    #[error("{0}")]
+    InvalidTarget(String),
     /// The approval page had no such request, or it expired.
     #[error("{0}")]
     NotFound(String),
@@ -144,6 +186,7 @@ impl OAuthError {
             Self::InvalidClient => "invalid_client",
             Self::InvalidRedirect(_) | Self::InvalidRequest(_) => "invalid_request",
             Self::InvalidGrant(_) => "invalid_grant",
+            Self::InvalidTarget(_) => "invalid_target",
             Self::NotFound(_) => "invalid_request",
             Self::Storage(_) => "server_error",
         }
@@ -166,6 +209,8 @@ pub struct TokenPair {
     pub expires_in: u64,
     /// Level the pair carries.
     pub level: OutsideAgentLevel,
+    /// Resource the pair is bound to, when the client named one.
+    pub resource: Option<String>,
 }
 
 /// The authority behind one valid bearer token.
@@ -177,6 +222,8 @@ pub struct Grant {
     pub client_name: String,
     /// Chosen level.
     pub level: OutsideAgentLevel,
+    /// RFC 8707 resource the token is bound to, if any.
+    pub resource: Option<String>,
 }
 
 /// One client registration.
@@ -200,33 +247,72 @@ pub struct ApprovalRedirect {
 /// Durable OAuth state.
 pub struct OAuthStore {
     path: PathBuf,
-    file: Mutex<StoreFile>,
-    last_use_write: Mutex<Instant>,
+    /// The whole state and the write of it share one lock. A snapshot is never
+    /// taken, released and written later: that is what used to let a revocation
+    /// lose a race with a last-used update.
+    state: Mutex<StoreState>,
+}
+
+struct StoreState {
+    file: StoreFile,
+    last_use_write: Instant,
 }
 
 impl OAuthStore {
     /// Opens the store, treating a missing file as empty.
+    ///
+    /// A file the daemon cannot read is quarantined instead of stopping the
+    /// daemon: every grant in it is lost, which is the safe direction, and the
+    /// person is told where the old file went.
     pub fn open(data_dir: &Path) -> std::io::Result<Self> {
         let path = data_dir.join(FILE);
-        let file: StoreFile = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other)?,
+        let file = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<StoreFile>(&bytes) {
+                Ok(file) => file,
+                Err(error) => {
+                    let quarantine = quarantine_path(&path);
+                    // Never log the serde detail: a data error quotes the
+                    // unexpected value, and that value can be a credential.
+                    let kind = match error.classify() {
+                        serde_json::error::Category::Io => "a read failure",
+                        serde_json::error::Category::Syntax => "invalid JSON",
+                        serde_json::error::Category::Data => "an unexpected shape",
+                        serde_json::error::Category::Eof => "a truncated file",
+                    };
+                    tracing::warn!(
+                        kind,
+                        line = error.line(),
+                        column = error.column(),
+                        path = %path.display(),
+                        quarantined = %quarantine.display(),
+                        "the outside-agent grant file is unreadable; starting with no grants"
+                    );
+                    // A best-effort move: if it fails, the empty store still
+                    // starts and the unreadable file stays for inspection.
+                    let _ = std::fs::rename(&path, &quarantine);
+                    StoreFile::default()
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoreFile::default(),
             Err(error) => return Err(error),
         };
         Ok(Self {
             path,
-            file: Mutex::new(file),
-            last_use_write: Mutex::new(Instant::now() - Duration::from_secs(120)),
+            state: Mutex::new(StoreState {
+                file,
+                last_use_write: Instant::now() - LAST_USE_INTERVAL,
+            }),
         })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, StoreFile> {
-        self.file
+    fn lock(&self) -> std::sync::MutexGuard<'_, StoreState> {
+        self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn persist(&self, file: &StoreFile) -> Result<(), OAuthError> {
+    /// Writes the live state atomically. Called with the state lock held.
+    fn persist_locked(&self, file: &StoreFile) -> Result<(), OAuthError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| OAuthError::Storage(error.to_string()))?;
@@ -234,7 +320,18 @@ impl OAuthStore {
         let bytes = serde_json::to_vec_pretty(file)
             .map_err(|error| OAuthError::Storage(error.to_string()))?;
         let temp = self.path.with_extension("tmp");
-        std::fs::write(&temp, bytes).map_err(|error| OAuthError::Storage(error.to_string()))?;
+        {
+            use std::io::Write;
+            let mut handle = std::fs::File::create(&temp)
+                .map_err(|error| OAuthError::Storage(error.to_string()))?;
+            handle
+                .write_all(&bytes)
+                .map_err(|error| OAuthError::Storage(error.to_string()))?;
+            // A revocation that is only in the page cache is not a revocation.
+            handle
+                .sync_all()
+                .map_err(|error| OAuthError::Storage(error.to_string()))?;
+        }
         std::fs::rename(&temp, &self.path).map_err(|error| OAuthError::Storage(error.to_string()))
     }
 
@@ -270,15 +367,22 @@ impl OAuthStore {
             .filter(|value| !value.is_empty())
             .map(|value| value.chars().take(MAX_NAME_CHARS).collect::<String>())
             .unwrap_or_else(|| "An MCP client".to_owned());
+        let now = Utc::now();
+        let mut state = self.lock();
+        prune_clients(&mut state.file, now);
+        if state.file.clients.len() >= MAX_CLIENTS {
+            return Err(OAuthError::InvalidRequest(format!(
+                "at most {MAX_CLIENTS} outside clients can be registered at once; revoke one in h4rn"
+            )));
+        }
         let client = ClientRecord {
             client_id: format!("h4rn_client_{}", random_hex()),
             name,
             redirect_uris: admitted,
-            created_at: Utc::now(),
+            created_at: now,
         };
-        let mut file = self.lock();
-        file.clients.push(client.clone());
-        self.persist(&file)?;
+        state.file.clients.push(client.clone());
+        self.persist_locked(&state.file)?;
         Ok(RegisteredClient {
             client_id: client.client_id,
             name: client.name,
@@ -286,12 +390,22 @@ impl OAuthStore {
         })
     }
 
-    fn client(&self, client_id: &str) -> Option<ClientRecord> {
-        self.lock()
-            .clients
+    fn client_locked<'a>(file: &'a StoreFile, client_id: &str) -> Option<&'a ClientRecord> {
+        file.clients
             .iter()
             .find(|client| client.client_id == client_id)
-            .cloned()
+    }
+
+    fn client(&self, client_id: &str) -> Option<ClientRecord> {
+        Self::client_locked(&self.lock().file, client_id).cloned()
+    }
+
+    /// Whether `client_id` names a registered client.
+    ///
+    /// Rate-limit buckets are keyed on this: a bucket exists only for an id
+    /// that survived registration, never for an attacker's random string.
+    pub fn client_exists(&self, client_id: &str) -> bool {
+        Self::client_locked(&self.lock().file, client_id).is_some()
     }
 
     /// The display name of a registered client, for the approval page.
@@ -300,14 +414,22 @@ impl OAuthStore {
     }
 
     /// Starts an authorization request and returns the approval page id.
+    ///
+    /// `resource` is the RFC 8707 resource the caller named, already validated
+    /// against this daemon by the caller.
     pub fn begin_authorization(
         &self,
         client_id: &str,
         redirect_uri: &str,
         state: Option<&str>,
         challenge: &str,
+        resource: Option<&str>,
     ) -> Result<PendingRecord, OAuthError> {
-        let client = self.client(client_id).ok_or(OAuthError::InvalidClient)?;
+        let now = Utc::now();
+        let mut guard = self.lock();
+        let client = Self::client_locked(&guard.file, client_id)
+            .ok_or(OAuthError::InvalidClient)?
+            .clone();
         if !client.redirect_uris.iter().any(|uri| uri == redirect_uri) {
             return Err(OAuthError::InvalidRedirect(
                 "redirect_uri is not registered for this client".into(),
@@ -318,29 +440,76 @@ impl OAuthStore {
                 "code_challenge must be a base64url S256 digest (43 characters)".into(),
             ));
         }
+        let redirect_origin = url::origin_of(redirect_uri).ok_or_else(|| {
+            OAuthError::InvalidRedirect(format!("redirect_uri `{redirect_uri}` is not a URL"))
+        })?;
         let pending = PendingRecord {
             id: format!("h4rn_auth_{}", random_hex()),
             client_id: client.client_id,
             redirect_uri: redirect_uri.to_owned(),
+            redirect_origin,
             state: state.map(str::to_owned),
             challenge: challenge.to_owned(),
-            created_at: Utc::now(),
-            expires_at: Utc::now() + PENDING_TTL,
+            resource: resource.map(str::to_owned),
+            created_at: now,
+            expires_at: now + PENDING_TTL,
+            resolution: None,
         };
-        let mut file = self.lock();
-        file.pending.retain(|entry| entry.expires_at > Utc::now());
-        file.pending.push(pending.clone());
-        self.persist(&file)?;
+        guard.file.pending.retain(|entry| entry.expires_at > now);
+        guard.file.pending.push(pending.clone());
+        self.persist_locked(&guard.file)?;
         Ok(pending)
     }
 
     /// One pending approval, when it is still open.
     pub fn pending(&self, id: &str) -> Option<PendingRecord> {
+        let now = Utc::now();
         self.lock()
+            .file
             .pending
             .iter()
-            .find(|entry| entry.id == id && entry.expires_at > Utc::now())
+            .find(|entry| entry.id == id && entry.expires_at > now)
             .cloned()
+    }
+
+    /// Sign-ins waiting for the person, oldest first.
+    pub fn pending_sign_ins(&self) -> Vec<OutsideAgentSignIn> {
+        let now = Utc::now();
+        let guard = self.lock();
+        let mut sign_ins: Vec<OutsideAgentSignIn> = guard
+            .file
+            .pending
+            .iter()
+            .filter(|entry| entry.resolution.is_none() && entry.expires_at > now)
+            .map(|entry| OutsideAgentSignIn {
+                request_id: entry.id.clone(),
+                client_name: Self::client_locked(&guard.file, &entry.client_id)
+                    .map(|client| client.name.clone())
+                    .unwrap_or_else(|| "An MCP client".into()),
+                redirect_uri: entry.redirect_uri.clone(),
+                redirect_origin: entry.redirect_origin.clone(),
+                requested_at: entry.created_at,
+                expires_at: entry.expires_at,
+            })
+            .collect();
+        sign_ins.sort_by_key(|entry| entry.requested_at);
+        sign_ins
+    }
+
+    /// The browser's next stop once the person answered, if they have.
+    pub fn approval_outcome(&self, id: &str) -> Option<ApprovalOutcome> {
+        let now = Utc::now();
+        let guard = self.lock();
+        let entry = guard
+            .file
+            .pending
+            .iter()
+            .find(|entry| entry.id == id && entry.expires_at > now)?;
+        let resolution = entry.resolution.as_ref()?;
+        Some(ApprovalOutcome {
+            location: resolution.location.clone(),
+            decided_at: resolution.at,
+        })
     }
 
     /// Consumes an approval and issues a one-time code.
@@ -350,8 +519,9 @@ impl OAuthStore {
         level: OutsideAgentLevel,
     ) -> Result<ApprovalRedirect, OAuthError> {
         let now = Utc::now();
-        let mut file = self.lock();
-        let Some(index) = file
+        let mut guard = self.lock();
+        let Some(index) = guard
+            .file
             .pending
             .iter()
             .position(|entry| entry.id == id && entry.expires_at > now)
@@ -360,33 +530,45 @@ impl OAuthStore {
                 "this approval request is no longer open; start the sign-in again".into(),
             ));
         };
-        let pending = file.pending.remove(index);
+        if guard.file.pending[index].resolution.is_some() {
+            return Err(OAuthError::NotFound(
+                "this approval was already answered; start the sign-in again".into(),
+            ));
+        }
+        let pending = guard.file.pending[index].clone();
         let code = format!("h4rn_code_{}", random_hex());
-        file.codes.push(CodeRecord {
+        guard.file.codes.push(CodeRecord {
             hash: digest(&code),
             client_id: pending.client_id.clone(),
             redirect_uri: pending.redirect_uri.clone(),
             challenge: pending.challenge.clone(),
             level,
+            family: None,
+            resource: pending.resource.clone(),
             expires_at: now + CODE_TTL,
             used_at: None,
         });
         // Drop anything that expired while the page was open.
-        file.codes.retain(|entry| entry.expires_at > now);
-        self.persist(&file)?;
+        guard.file.codes.retain(|entry| entry.expires_at > now);
         let location = redirect_with(
             &pending.redirect_uri,
             &[("code", code.as_str())],
             pending.state.as_deref(),
         )?;
+        guard.file.pending[index].resolution = Some(PendingResolution {
+            location: location.clone(),
+            at: now,
+        });
+        self.persist_locked(&guard.file)?;
         Ok(ApprovalRedirect { location })
     }
 
     /// Consumes an approval and returns the client's error redirect.
     pub fn deny(&self, id: &str) -> Result<ApprovalRedirect, OAuthError> {
         let now = Utc::now();
-        let mut file = self.lock();
-        let Some(index) = file
+        let mut guard = self.lock();
+        let Some(index) = guard
+            .file
             .pending
             .iter()
             .position(|entry| entry.id == id && entry.expires_at > now)
@@ -395,23 +577,36 @@ impl OAuthStore {
                 "this approval request is no longer open; start the sign-in again".into(),
             ));
         };
-        let pending = file.pending.remove(index);
-        self.persist(&file)?;
+        if guard.file.pending[index].resolution.is_some() {
+            return Err(OAuthError::NotFound(
+                "this approval was already answered; start the sign-in again".into(),
+            ));
+        }
+        let pending = guard.file.pending[index].clone();
         let location = redirect_with(
             &pending.redirect_uri,
             &[("error", "access_denied")],
             pending.state.as_deref(),
         )?;
+        guard.file.pending[index].resolution = Some(PendingResolution {
+            location: location.clone(),
+            at: now,
+        });
+        self.persist_locked(&guard.file)?;
         Ok(ApprovalRedirect { location })
     }
 
     /// Exchanges an authorization code for a token pair.
+    ///
+    /// OAuth 2.1 no longer requires `redirect_uri` at the token endpoint: PKCE
+    /// binds the request. When the client does send it, it must match the
+    /// authorization request exactly.
     pub fn exchange_code(
         &self,
         code: &str,
         verifier: &str,
         client_id: &str,
-        redirect_uri: &str,
+        redirect_uri: Option<&str>,
     ) -> Result<TokenPair, OAuthError> {
         if !url::valid_verifier(verifier) {
             return Err(OAuthError::InvalidGrant(
@@ -421,16 +616,22 @@ impl OAuthStore {
         }
         let now = Utc::now();
         let hash = digest(code);
-        let mut file = self.lock();
-        let Some(index) = file.codes.iter().position(|entry| entry.hash == hash) else {
+        let mut guard = self.lock();
+        let Some(index) = guard.file.codes.iter().position(|entry| entry.hash == hash) else {
             return Err(OAuthError::InvalidGrant(
                 "the authorization code is unknown or was already used".into(),
             ));
         };
-        let record = file.codes[index].clone();
+        let record = guard.file.codes[index].clone();
         if record.used_at.is_some() {
+            // A code the client already spent came back. Whatever pair it
+            // issued is in an attacker's hands too: revoke it.
+            if let Some(family) = record.family.as_deref() {
+                revoke_family(&mut guard.file, family, now);
+            }
+            let _ = self.persist_locked(&guard.file);
             return Err(OAuthError::InvalidGrant(
-                "the authorization code was already used".into(),
+                "the authorization code was already used; its tokens were revoked".into(),
             ));
         }
         if record.expires_at <= now {
@@ -443,7 +644,9 @@ impl OAuthStore {
                 "the authorization code belongs to another client".into(),
             ));
         }
-        if record.redirect_uri != redirect_uri {
+        if let Some(supplied) = redirect_uri
+            && record.redirect_uri != supplied
+        {
             return Err(OAuthError::InvalidGrant(
                 "redirect_uri does not match the authorization request".into(),
             ));
@@ -453,121 +656,155 @@ impl OAuthStore {
                 "code_verifier does not match the PKCE challenge".into(),
             ));
         }
-        file.codes[index].used_at = Some(now);
-        let pair = issue_pair(&mut file, &record.client_id, record.level, now, None);
-        self.persist(&file)?;
+        guard.file.codes[index].used_at = Some(now);
+        let family = random_hex();
+        guard.file.codes[index].family = Some(family.clone());
+        let pair = issue_pair(
+            &mut guard.file,
+            &record.client_id,
+            record.level,
+            now,
+            Some(family),
+            record.resource.clone(),
+        );
+        self.persist_locked(&guard.file)?;
         Ok(pair)
     }
 
     /// Renews an access token with a refresh token, rotating the refresh token.
-    pub fn refresh(&self, refresh_token: &str, client_id: &str) -> Result<TokenPair, OAuthError> {
+    pub fn refresh(
+        &self,
+        refresh_token: &str,
+        client_id: &str,
+        resource: Option<&str>,
+    ) -> Result<TokenPair, OAuthError> {
         let now = Utc::now();
         let hash = digest(refresh_token);
-        let mut file = self.lock();
-        let Some(index) = file.tokens.iter().position(|entry| entry.hash == hash) else {
+        let mut guard = self.lock();
+        let Some(index) = guard
+            .file
+            .tokens
+            .iter()
+            .position(|entry| entry.hash == hash)
+        else {
             return Err(OAuthError::InvalidGrant(
                 "the refresh token is unknown".into(),
             ));
         };
-        let record = file.tokens[index].clone();
+        let record = guard.file.tokens[index].clone();
         if record.kind != TokenKind::Refresh || record.client_id != client_id || !record.live(now) {
+            // A rotated refresh token presented again means two parties hold
+            // it: kill the family rather than let either continue.
+            if record.kind == TokenKind::Refresh && record.client_id == client_id {
+                revoke_family(&mut guard.file, &record.family, now);
+                let _ = self.persist_locked(&guard.file);
+                return Err(OAuthError::InvalidGrant(
+                    "the refresh token was already used; its tokens were revoked".into(),
+                ));
+            }
             return Err(OAuthError::InvalidGrant(
                 "the refresh token is expired, revoked or belongs to another client".into(),
             ));
         }
-        file.tokens[index].revoked_at = Some(now);
+        if let Some(requested) = resource
+            && record
+                .resource
+                .as_deref()
+                .is_some_and(|bound| bound != requested)
+        {
+            return Err(OAuthError::InvalidTarget(
+                "this grant is bound to a different resource".into(),
+            ));
+        }
+        guard.file.tokens[index].revoked_at = Some(now);
         let pair = issue_pair(
-            &mut file,
+            &mut guard.file,
             &record.client_id,
             record.level,
             now,
             Some(record.family),
+            record.resource.clone(),
         );
-        self.persist(&file)?;
+        self.persist_locked(&guard.file)?;
         Ok(pair)
     }
 
     /// Verifies a bearer token and records its use.
-    pub fn verify_access(&self, token: &str) -> Option<Grant> {
+    ///
+    /// `expected_resource` is the resource the endpoint serves. A token bound to
+    /// another resource is refused (RFC 8707).
+    pub fn verify_access(&self, token: &str, expected_resource: Option<&str>) -> Option<Grant> {
         let now = Utc::now();
         let hash = digest(token);
-        let (grant, client_name) = {
-            let mut file = self.lock();
-            let index = file
-                .tokens
-                .iter()
-                .position(|entry| entry.hash == hash && entry.kind == TokenKind::Access)?;
-            if !file.tokens[index].live(now) {
+        let mut guard = self.lock();
+        let index = guard
+            .file
+            .tokens
+            .iter()
+            .position(|entry| entry.hash == hash && entry.kind == TokenKind::Access)?;
+        {
+            let record = &guard.file.tokens[index];
+            if !record.live(now) {
                 return None;
             }
-            file.tokens[index].last_used_at = Some(now);
-            let record = file.tokens[index].clone();
-            let name = file
-                .clients
-                .iter()
-                .find(|client| client.client_id == record.client_id)
-                .map(|client| client.name.clone())
-                .unwrap_or_else(|| "An MCP client".into());
-            (
-                Grant {
-                    client_id: record.client_id,
-                    client_name: name.clone(),
-                    level: record.level,
-                },
-                name,
-            )
-        };
-        let _ = client_name;
-        self.persist_use_if_due();
-        Some(grant)
-    }
-
-    /// Persists a last-used timestamp at most once every thirty seconds.
-    fn persist_use_if_due(&self) {
-        let mut last = self
-            .last_use_write
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if last.elapsed() < Duration::from_secs(30) {
-            return;
+            if let (Some(stored), Some(expected)) = (record.resource.as_deref(), expected_resource)
+                && stored != expected
+            {
+                return None;
+            }
         }
-        *last = Instant::now();
-        let snapshot = self.lock().clone();
-        if let Err(error) = self.persist(&snapshot) {
-            tracing::warn!(%error, "could not record an outside agent's last use");
+        let record = guard.file.tokens[index].clone();
+        let name = Self::client_locked(&guard.file, &record.client_id)
+            .map(|client| client.name.clone())
+            .unwrap_or_else(|| "An MCP client".into());
+        guard.file.tokens[index].last_used_at = Some(now);
+        // Last-used is a convenience, so it is written lazily -- but always
+        // from the state under this lock, never from a snapshot taken earlier.
+        if guard.last_use_write.elapsed() >= LAST_USE_INTERVAL {
+            guard.last_use_write = Instant::now();
+            if let Err(error) = self.persist_locked(&guard.file) {
+                tracing::warn!(%error, "could not record an outside agent's last use");
+            }
         }
+        Some(Grant {
+            client_id: record.client_id,
+            client_name: name,
+            level: record.level,
+            resource: record.resource,
+        })
     }
 
     /// Revokes a token and every token in its family.
+    ///
+    /// Returns only after the revocation is on disk.
     pub fn revoke_token(&self, token: &str) -> Result<(), OAuthError> {
         let now = Utc::now();
         let hash = digest(token);
-        let mut file = self.lock();
-        let family = file
+        let mut guard = self.lock();
+        let Some(family) = guard
+            .file
             .tokens
             .iter()
             .find(|entry| entry.hash == hash)
-            .map(|entry| entry.family.clone());
-        let Some(family) = family else {
+            .map(|entry| entry.family.clone())
+        else {
             // RFC 7009: an unknown token is not an error.
             return Ok(());
         };
-        for entry in file
-            .tokens
-            .iter_mut()
-            .filter(|entry| entry.family == family)
-        {
-            entry.revoked_at = Some(now);
-        }
-        self.persist(&file)
+        revoke_family(&mut guard.file, &family, now);
+        self.persist_locked(&guard.file)
     }
 
     /// Revokes every token for a client, and its codes and approvals.
+    ///
+    /// Returns only after the revocation is on disk, so "Revoke" in Settings
+    /// never reports success for a grant a restart would resurrect.
     pub fn revoke_client(&self, client_id: &str) -> Result<(), OAuthError> {
         let now = Utc::now();
-        let mut file = self.lock();
+        let mut guard = self.lock();
         let mut found = false;
-        for entry in file
+        for entry in guard
+            .file
             .tokens
             .iter_mut()
             .filter(|entry| entry.client_id == client_id)
@@ -575,32 +812,30 @@ impl OAuthStore {
             entry.revoked_at = Some(now);
             found = true;
         }
-        file.codes.retain(|entry| entry.client_id != client_id);
-        file.pending.retain(|entry| entry.client_id != client_id);
-        if !found
-            && !file
-                .clients
-                .iter()
-                .any(|client| client.client_id == client_id)
-        {
+        guard
+            .file
+            .codes
+            .retain(|entry| entry.client_id != client_id);
+        guard
+            .file
+            .pending
+            .retain(|entry| entry.client_id != client_id);
+        if !found && Self::client_locked(&guard.file, client_id).is_none() {
             return Err(OAuthError::NotFound(
                 "no outside agent has that client id".into(),
             ));
         }
-        self.persist(&file)
+        self.persist_locked(&guard.file)
     }
 
     /// Every client with a live token, newest first.
     pub fn connected_agents(&self) -> Vec<OutsideAgentView> {
         let now = Utc::now();
-        let file = self.lock();
+        let guard = self.lock();
+        let file = &guard.file;
         let mut agents: HashMap<String, OutsideAgentView> = HashMap::new();
         for token in file.tokens.iter().filter(|token| token.live(now)) {
-            let Some(client) = file
-                .clients
-                .iter()
-                .find(|client| client.client_id == token.client_id)
-            else {
+            let Some(client) = Self::client_locked(file, &token.client_id) else {
                 continue;
             };
             agents
@@ -641,11 +876,26 @@ impl OAuthStore {
     pub fn live_token_count(&self) -> usize {
         let now = Utc::now();
         self.lock()
+            .file
             .tokens
             .iter()
             .filter(|token| token.live(now))
             .count()
     }
+
+    /// Number of registered clients, for diagnostics and tests.
+    pub fn client_count(&self) -> usize {
+        self.lock().file.clients.len()
+    }
+}
+
+/// The stored answer to one pending approval.
+#[derive(Clone, Debug)]
+pub struct ApprovalOutcome {
+    /// Absolute redirect URI with the code or the error.
+    pub location: String,
+    /// When the person answered.
+    pub decided_at: DateTime<Utc>,
 }
 
 fn level_rank(level: OutsideAgentLevel) -> u8 {
@@ -656,12 +906,52 @@ fn level_rank(level: OutsideAgentLevel) -> u8 {
     }
 }
 
+/// Revokes every token issued from one code or refresh chain.
+fn revoke_family(file: &mut StoreFile, family: &str, now: DateTime<Utc>) {
+    for entry in file
+        .tokens
+        .iter_mut()
+        .filter(|entry| entry.family == family)
+    {
+        if entry.revoked_at.is_none() {
+            entry.revoked_at = Some(now);
+        }
+    }
+}
+
+/// Drops registrations that never connected and are past their window.
+fn prune_clients(file: &mut StoreFile, now: DateTime<Utc>) {
+    let cutoff = now - UNUSED_CLIENT_TTL;
+    let clients = std::mem::take(&mut file.clients);
+    for client in clients {
+        if client.created_at > cutoff || client_is_used(file, &client.client_id, now) {
+            file.clients.push(client);
+        }
+    }
+}
+
+/// Whether a registration has anything live that still names it.
+fn client_is_used(file: &StoreFile, client_id: &str, now: DateTime<Utc>) -> bool {
+    file.tokens
+        .iter()
+        .any(|token| token.client_id == client_id && token.expires_at > now)
+        || file
+            .codes
+            .iter()
+            .any(|code| code.client_id == client_id && code.expires_at > now)
+        || file
+            .pending
+            .iter()
+            .any(|pending| pending.client_id == client_id && pending.expires_at > now)
+}
+
 fn issue_pair(
     file: &mut StoreFile,
     client_id: &str,
     level: OutsideAgentLevel,
     now: DateTime<Utc>,
     family: Option<String>,
+    resource: Option<String>,
 ) -> TokenPair {
     let family = family.unwrap_or_else(random_hex);
     let access_token = format!("h4rn_at_{}", random_hex());
@@ -672,6 +962,7 @@ fn issue_pair(
         client_id: client_id.to_owned(),
         level,
         family: family.clone(),
+        resource: resource.clone(),
         issued_at: now,
         expires_at: now + ACCESS_TTL,
         revoked_at: None,
@@ -683,6 +974,7 @@ fn issue_pair(
         client_id: client_id.to_owned(),
         level,
         family,
+        resource: resource.clone(),
         issued_at: now,
         expires_at: now + REFRESH_TTL,
         revoked_at: None,
@@ -700,6 +992,7 @@ fn issue_pair(
         refresh_token,
         expires_in: ACCESS_TTL.num_seconds() as u64,
         level,
+        resource,
     }
 }
 
@@ -721,6 +1014,12 @@ fn redirect_with(
         }
     }
     Ok(url.to_string())
+}
+
+/// Where an unreadable store is moved so the daemon can start empty.
+fn quarantine_path(path: &Path) -> PathBuf {
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S");
+    path.with_extension(format!("corrupt-{stamp}.json"))
 }
 
 fn random_hex() -> String {
@@ -756,6 +1055,34 @@ mod tests {
         (verifier, challenge)
     }
 
+    fn approved_code(store: &OAuthStore, client_id: &str, level: OutsideAgentLevel) -> String {
+        let (_, challenge) = challenge();
+        let pending = store
+            .begin_authorization(
+                client_id,
+                "http://localhost:1455/cb",
+                None,
+                &challenge,
+                None,
+            )
+            .expect("begin");
+        let redirect = store.approve(&pending.id, level).expect("approve");
+        Url::parse(&redirect.location)
+            .expect("url")
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.to_string())
+            .expect("code")
+    }
+
+    fn pair(store: &OAuthStore, client_id: &str, level: OutsideAgentLevel) -> TokenPair {
+        let (verifier, _) = challenge();
+        let code = approved_code(store, client_id, level);
+        store
+            .exchange_code(&code, &verifier, client_id, None)
+            .expect("exchange")
+    }
+
     #[test]
     fn registration_stores_only_the_public_client_id() {
         let (dir, store) = store();
@@ -780,6 +1107,7 @@ mod tests {
                 "http://localhost:1455/cb",
                 Some("state-1"),
                 &challenge,
+                None,
             )
             .expect("begin");
         let redirect = store
@@ -792,21 +1120,69 @@ mod tests {
             .map(|(_, value)| value.to_string())
             .expect("code");
         let pair = store
-            .exchange_code(
-                &code,
-                &verifier,
-                &client.client_id,
-                "http://localhost:1455/cb",
-            )
+            .exchange_code(&code, &verifier, &client.client_id, None)
             .expect("exchange");
         assert_eq!(pair.level, OutsideAgentLevel::Supervised);
-        let grant = store.verify_access(&pair.access_token).expect("grant");
+        let grant = store
+            .verify_access(&pair.access_token, None)
+            .expect("grant");
         assert_eq!(grant.level, OutsideAgentLevel::Supervised);
         assert_eq!(grant.client_name, "Codex");
     }
 
     #[test]
-    fn a_code_cannot_be_used_twice() {
+    fn a_code_cannot_be_used_twice_and_a_replay_revokes_its_tokens() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (verifier, _) = challenge();
+        let code = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        let pair = store
+            .exchange_code(&code, &verifier, &client.client_id, None)
+            .expect("first use");
+        assert!(store.verify_access(&pair.access_token, None).is_some());
+        assert!(
+            store
+                .exchange_code(&code, &verifier, &client.client_id, None)
+                .is_err()
+        );
+        // The replay is treated as a stolen code: the pair it issued is dead.
+        assert!(store.verify_access(&pair.access_token, None).is_none());
+        assert!(
+            store
+                .refresh(&pair.refresh_token, &client.client_id, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_replayed_refresh_token_revokes_the_whole_family() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let first = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        let rotated = store
+            .refresh(&first.refresh_token, &client.client_id, None)
+            .expect("rotate");
+        assert!(store.verify_access(&rotated.access_token, None).is_some());
+        // The old refresh token comes back: someone else has it too.
+        assert!(
+            store
+                .refresh(&first.refresh_token, &client.client_id, None)
+                .is_err()
+        );
+        assert!(store.verify_access(&rotated.access_token, None).is_none());
+        assert!(
+            store
+                .refresh(&rotated.refresh_token, &client.client_id, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_token_bound_to_another_resource_is_refused() {
         let (_dir, store) = store();
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
@@ -818,8 +1194,13 @@ mod tests {
                 "http://localhost:1455/cb",
                 None,
                 &challenge,
+                Some("http://127.0.0.1:47800/mcp"),
             )
             .expect("begin");
+        assert_eq!(
+            pending.resource.as_deref(),
+            Some("http://127.0.0.1:47800/mcp")
+        );
         let redirect = store
             .approve(&pending.id, OutsideAgentLevel::ReadOnly)
             .expect("approve");
@@ -830,23 +1211,18 @@ mod tests {
             .unwrap()
             .1
             .to_string();
-        store
-            .exchange_code(
-                &code,
-                &verifier,
-                &client.client_id,
-                "http://localhost:1455/cb",
-            )
-            .expect("first use");
+        let pair = store
+            .exchange_code(&code, &verifier, &client.client_id, None)
+            .expect("exchange");
         assert!(
             store
-                .exchange_code(
-                    &code,
-                    &verifier,
-                    &client.client_id,
-                    "http://localhost:1455/cb"
-                )
-                .is_err()
+                .verify_access(&pair.access_token, Some("http://127.0.0.1:47800/mcp"))
+                .is_some()
+        );
+        assert!(
+            store
+                .verify_access(&pair.access_token, Some("https://elsewhere.example/mcp"))
+                .is_none()
         );
     }
 
@@ -856,29 +1232,35 @@ mod tests {
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
             .expect("register");
-        let (verifier, challenge) = challenge();
-        let pending = store
-            .begin_authorization(
-                &client.client_id,
-                "http://localhost:1455/cb",
-                None,
-                &challenge,
-            )
-            .expect("begin");
-        let redirect = store
-            .approve(&pending.id, OutsideAgentLevel::ReadOnly)
-            .expect("approve");
-        let code = Url::parse(&redirect.location)
-            .unwrap()
-            .query_pairs()
-            .find(|(key, _)| key == "code")
-            .unwrap()
-            .1
-            .to_string();
+        let (verifier, _) = challenge();
+        let code = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
         let wrong = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         assert!(
             store
-                .exchange_code(&code, wrong, &client.client_id, "http://localhost:1455/cb")
+                .exchange_code(&code, wrong, &client.client_id, None)
+                .is_err()
+        );
+        store
+            .exchange_code(&code, &verifier, &client.client_id, None)
+            .expect("right verifier still works");
+    }
+
+    #[test]
+    fn a_token_exchange_needs_no_redirect_uri_but_refuses_a_wrong_one() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (verifier, _) = challenge();
+        let code = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        assert!(
+            store
+                .exchange_code(
+                    &code,
+                    &verifier,
+                    &client.client_id,
+                    Some("http://localhost:1/x")
+                )
                 .is_err()
         );
         store
@@ -886,9 +1268,9 @@ mod tests {
                 &code,
                 &verifier,
                 &client.client_id,
-                "http://localhost:1455/cb",
+                Some("http://localhost:1455/cb"),
             )
-            .expect("right verifier still works");
+            .expect("the exact redirect still works");
     }
 
     #[test]
@@ -897,42 +1279,39 @@ mod tests {
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
             .expect("register");
-        let (verifier, challenge) = challenge();
-        let pending = store
-            .begin_authorization(
-                &client.client_id,
-                "http://localhost:1455/cb",
-                None,
-                &challenge,
-            )
-            .expect("begin");
-        let redirect = store
-            .approve(&pending.id, OutsideAgentLevel::FullAccess)
-            .expect("approve");
-        let code = Url::parse(&redirect.location)
-            .unwrap()
-            .query_pairs()
-            .find(|(key, _)| key == "code")
-            .unwrap()
-            .1
-            .to_string();
-        let pair = store
-            .exchange_code(
-                &code,
-                &verifier,
-                &client.client_id,
-                "http://localhost:1455/cb",
-            )
-            .expect("exchange");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::FullAccess);
         assert_eq!(store.connected_agents().len(), 1);
         store.revoke_client(&client.client_id).expect("revoke");
-        assert!(store.verify_access(&pair.access_token).is_none());
+        assert!(store.verify_access(&pair.access_token, None).is_none());
         assert!(
             store
-                .refresh(&pair.refresh_token, &client.client_id)
+                .refresh(&pair.refresh_token, &client.client_id, None)
                 .is_err()
         );
         assert!(store.connected_agents().is_empty());
+    }
+
+    #[test]
+    fn a_revocation_survives_a_restart_even_when_use_raced_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = OAuthStore::open(dir.path()).expect("store");
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        // Use the token so the lazy last-used write is armed, then revoke.
+        store
+            .verify_access(&pair.access_token, None)
+            .expect("grant");
+        store.revoke_client(&client.client_id).expect("revoke");
+        // A burst of use attempts on the now-dead token must not resurrect it.
+        for _ in 0..5 {
+            assert!(store.verify_access(&pair.access_token, None).is_none());
+        }
+        drop(store);
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        assert!(reopened.verify_access(&pair.access_token, None).is_none());
+        assert!(reopened.connected_agents().is_empty());
     }
 
     #[test]
@@ -941,44 +1320,129 @@ mod tests {
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
             .expect("register");
-        let (verifier, challenge) = challenge();
-        let pending = store
-            .begin_authorization(
-                &client.client_id,
-                "http://localhost:1455/cb",
-                None,
-                &challenge,
-            )
-            .expect("begin");
-        let redirect = store
-            .approve(&pending.id, OutsideAgentLevel::ReadOnly)
-            .expect("approve");
-        let code = Url::parse(&redirect.location)
-            .unwrap()
-            .query_pairs()
-            .find(|(key, _)| key == "code")
-            .unwrap()
-            .1
-            .to_string();
-        let pair = store
-            .exchange_code(
-                &code,
-                &verifier,
-                &client.client_id,
-                "http://localhost:1455/cb",
-            )
-            .expect("exchange");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
         {
-            let mut file = store.lock();
-            for token in &mut file.tokens {
+            let mut state = store.lock();
+            for token in &mut state.file.tokens {
                 if token.kind == TokenKind::Access {
                     token.expires_at = Utc::now() - TimeDelta::seconds(1);
                 }
             }
         }
-        assert!(store.verify_access(&pair.access_token).is_none());
+        assert!(store.verify_access(&pair.access_token, None).is_none());
         store
-            .refresh(&pair.refresh_token, &client.client_id)
+            .refresh(&pair.refresh_token, &client.client_id, None)
             .expect("refresh still works");
+    }
+
+    #[test]
+    fn a_pending_sign_in_shows_the_callback_origin_and_resolves_once() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(Some("Claude Code"), &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (_, challenge) = challenge();
+        let pending = store
+            .begin_authorization(
+                &client.client_id,
+                "http://localhost:1455/cb",
+                Some("s"),
+                &challenge,
+                None,
+            )
+            .expect("begin");
+        let sign_ins = store.pending_sign_ins();
+        assert_eq!(sign_ins.len(), 1);
+        assert_eq!(sign_ins[0].client_name, "Claude Code");
+        assert_eq!(sign_ins[0].redirect_origin, "http://localhost:1455");
+        assert!(store.approval_outcome(&pending.id).is_none());
+        store
+            .approve(&pending.id, OutsideAgentLevel::ReadOnly)
+            .expect("approve");
+        let outcome = store.approval_outcome(&pending.id).expect("outcome");
+        assert!(outcome.location.contains("code="));
+        assert!(store.pending_sign_ins().is_empty());
+        assert!(store.deny(&pending.id).is_err());
+    }
+
+    #[test]
+    fn registrations_are_capped() {
+        let (_dir, store) = store();
+        for index in 0..MAX_CLIENTS {
+            store
+                .register_client(
+                    Some(&format!("client {index}")),
+                    &["http://localhost:1455/cb".into()],
+                )
+                .expect("register");
+        }
+        assert_eq!(store.client_count(), MAX_CLIENTS);
+        assert!(
+            store
+                .register_client(None, &["http://localhost:1455/cb".into()])
+                .is_err()
+        );
+        assert_eq!(store.client_count(), MAX_CLIENTS);
+    }
+
+    /// A writer the log test can read back.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_corrupt_store_logs_no_credential_from_inside_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let planted = format!("{}{}", "h4rn_at_", "QUARANTINEDTESTVALUE");
+        let content = format!("{{ \"tokens\": [ \"{planted}\"");
+        std::fs::write(dir.path().join(FILE), content).expect("write");
+        let capture = Captured::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = OAuthStore::open(dir.path()).expect("open");
+        });
+        let logs = String::from_utf8(capture.0.lock().expect("logs").clone()).expect("utf8");
+        assert!(!logs.is_empty(), "the quarantine must be reported");
+        assert!(
+            !logs.contains(&planted),
+            "the warning repeated a credential: {logs}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_store_is_quarantined_instead_of_stopping_the_daemon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(FILE), b"{ not json").expect("write");
+        let store = OAuthStore::open(dir.path()).expect("the daemon starts");
+        assert!(store.connected_agents().is_empty());
+        assert_eq!(store.client_count(), 0);
+        let quarantined: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.contains("corrupt"))
+            })
+            .collect();
+        assert_eq!(quarantined.len(), 1, "the bad file must be kept aside");
     }
 }

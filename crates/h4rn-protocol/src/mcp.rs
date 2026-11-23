@@ -493,6 +493,28 @@ impl OutsideAgentLevel {
     }
 }
 
+/// One outside-agent sign-in waiting for the person in h4rn.
+///
+/// The browser that opened the client's authorize page cannot grant anything:
+/// it has no h4rn session. It shows the client's name and callback and sends
+/// the person to h4rn, where this record appears and the person picks a level.
+/// `request_id` is the only thing the decision names, and it is unguessable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct OutsideAgentSignIn {
+    /// Opaque approval id the page was opened with.
+    pub request_id: String,
+    /// Name the client registered with. The client chose it; nothing verifies it.
+    pub client_name: String,
+    /// Exact callback the browser will be sent to after approval.
+    pub redirect_uri: String,
+    /// Origin of that callback, shown prominently on both sides.
+    pub redirect_origin: String,
+    /// When the client asked.
+    pub requested_at: DateTime<Utc>,
+    /// When the request stops waiting.
+    pub expires_at: DateTime<Utc>,
+}
+
 /// One outside agent with a live OAuth grant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct OutsideAgentView {
@@ -635,6 +657,24 @@ pub enum McpRequest {
         harness: HarnessKind,
         /// New value.
         enabled: bool,
+    },
+    /// List outside-agent sign-ins waiting for the person's decision.
+    ///
+    /// This is the only way a client's authorization request can become a
+    /// grant: the answer runs over the authenticated h4rn session, never over
+    /// the public page the client opened.
+    ListOutsideAgentSignIns,
+    /// Approve or deny one waiting outside-agent sign-in.
+    ///
+    /// `level` is required to approve and ignored to deny. The level is the
+    /// person's explicit choice; nothing the client sent preselects it.
+    RespondOutsideAgentSignIn {
+        /// `request_id` from [`OutsideAgentSignIn`].
+        request_id: String,
+        /// Approve or deny.
+        decision: crate::ApprovalDecision,
+        /// Level to grant, when approving.
+        level: Option<OutsideAgentLevel>,
     },
 }
 

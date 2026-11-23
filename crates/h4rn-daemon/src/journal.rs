@@ -121,6 +121,12 @@ pub struct ParkedPrompt {
     pub text: String,
     /// Attachments to deliver with it.
     pub attachments: Vec<ParkedAttachment>,
+    /// The permission ceiling the sender attached to this prompt, if any.
+    ///
+    /// It survives a restart with the prompt: a supervised agent's message must
+    /// not come back at a more permissive mode just because the daemon paused.
+    #[serde(default)]
+    pub mode_ceiling: Option<h4rn_protocol::RuntimeMode>,
 }
 
 /// One attachment of a [`ParkedPrompt`].

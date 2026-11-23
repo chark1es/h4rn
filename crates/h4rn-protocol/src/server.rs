@@ -521,6 +521,11 @@ pub enum ResponseBody {
         /// Current settings.
         settings: crate::mcp::AgentToolSettings,
     },
+    /// Outside-agent sign-ins waiting for the person's decision.
+    OutsideAgentSignIns {
+        /// Waiting sign-ins, oldest first.
+        sign_ins: Vec<crate::mcp::OutsideAgentSignIn>,
+    },
     /// Aggregated usage from the durable ledger.
     UsageReport {
         /// The report.

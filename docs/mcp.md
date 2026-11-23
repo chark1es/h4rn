@@ -10,8 +10,10 @@ and [ADR-037](decisions.md#adr-037-mcp-configuration-and-secrets-live-apart-shar
 ## The endpoint
 
 - `POST /mcp` implements MCP revision `2025-06-18` (with `2025-03-26` and `2024-11-05` accepted for
-  older harnesses). It speaks JSON-RPC in, JSON-RPC out; batches are accepted and notifications get
-  `202 Accepted`.
+  older harnesses). It speaks JSON-RPC in, JSON-RPC out; one message per request, as the 2025-11-25
+  transport specifies, and notifications get `202 Accepted`. A batch is refused.
+- A request whose `Origin` is another site, or whose `Host` is not a loopback name, is refused: the
+  endpoint carries a bearer token and must not answer a page that reached it by rebinding.
 - `GET /mcp` returns `405`: the hub does not open a server-initiated stream, so a daemon restart
   only invalidates tokens rather than streams.
 - `DELETE /mcp` revokes the caller's token.

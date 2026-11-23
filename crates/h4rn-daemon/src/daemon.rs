@@ -708,6 +708,9 @@ impl Daemon {
         // Outside agents use the same loopback address: OAuth only finishes
         // over https or localhost, and this listener is loopback-only.
         self.outside.set_base_url(format!("http://{loopback}"));
+        // A thread may quote the person's own access token; an outside agent
+        // must never read it back out of `get_thread`.
+        self.outside.set_owner_token(&self.tokens);
         // With a secure transport this daemon can reach its peers' shared MCP
         // servers, authenticating as its own daemon key.
         if let Some(service) = &self.secure {
@@ -815,9 +818,14 @@ impl Daemon {
         }
 
         Ok(BoundDaemon {
-            app: server::router(state),
+            listeners: listeners
+                .into_iter()
+                .map(|listener| {
+                    let addr = listener.local_addr().unwrap_or(addrs[0]);
+                    (listener, server::router_for(&state, addr))
+                })
+                .collect(),
             network,
-            listeners,
             addrs,
             manager: self.manager,
             subagents: self.subagents,
@@ -837,10 +845,13 @@ impl Daemon {
 
 /// A daemon with sockets bound, ready for [`BoundDaemon::serve`].
 pub struct BoundDaemon {
-    app: axum::Router,
+    /// One listener and the router that listener serves.
+    ///
+    /// Only a loopback listener gets OAuth and `/mcp`; a LAN or tailnet
+    /// listener serves liveness and the encrypted routes.
+    listeners: Vec<(TcpListener, axum::Router)>,
     /// The dedicated LAN/tailnet listener, when network access is on.
     network: Arc<NetworkAccess>,
-    listeners: Vec<TcpListener>,
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
@@ -909,9 +920,8 @@ impl BoundDaemon {
         shutdown: impl std::future::Future<Output = ()>,
     ) -> anyhow::Result<()> {
         let Self {
-            app,
-            network,
             listeners,
+            network,
             addrs,
             manager,
             subagents,
@@ -933,7 +943,7 @@ impl BoundDaemon {
             "h4rn daemon listening"
         );
 
-        server::serve_all(listeners, app, shutdown).await?;
+        server::serve_all(listeners, shutdown).await?;
         // Close the LAN/tailnet listener before the services it routes to go
         // away, so no new remote session starts during shutdown.
         network.shutdown().await;

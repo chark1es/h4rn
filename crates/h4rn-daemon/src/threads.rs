@@ -476,6 +476,14 @@ type ThreadHandle = Arc<Mutex<ThreadRecord>>;
 /// requests while a harness accepts input.
 type SharedSession = Arc<Mutex<Box<dyn HarnessSession>>>;
 
+/// One message waiting behind the running turn.
+struct QueuedTurn {
+    input: UserInput,
+    /// The sender's permission ceiling, carried with the message so a later
+    /// mode change cannot lift it.
+    ceiling: Option<RuntimeMode>,
+}
+
 struct ThreadRecord {
     meta: ThreadMeta,
     state: ThreadState,
@@ -493,7 +501,7 @@ struct ThreadRecord {
     session_gen: u64,
     pump: Option<JoinHandle<()>>,
     pending_approvals: BTreeMap<String, PendingApproval>,
-    queued: VecDeque<UserInput>,
+    queued: VecDeque<QueuedTurn>,
     last_signature: Option<SummarySignature>,
     /// The most recent turn whose dead transport was already published as one
     /// error row.
@@ -676,6 +684,8 @@ struct TurnDispatch {
     turn_id: TurnId,
     /// The prompt this turn will write once it is claimed.
     input: UserInput,
+    /// The most autonomy the turn's sender allows, when it named one.
+    ceiling: Option<RuntimeMode>,
     state: std::sync::Mutex<DispatchState>,
     /// The session generation that was started for this turn, once one was.
     ///
@@ -932,15 +942,26 @@ struct DyingSession {
 }
 
 impl TurnDispatch {
-    fn new(turn_id: TurnId, input: UserInput) -> Self {
+    /// A dispatch whose turn may run with no more autonomy than `ceiling`.
+    fn new_at_most(turn_id: TurnId, input: UserInput, ceiling: Option<RuntimeMode>) -> Self {
         Self {
             turn_id,
             input,
+            ceiling,
             state: std::sync::Mutex::new(DispatchState::Pending),
             started_generation: AtomicU64::new(NO_GENERATION),
             #[cfg(test)]
             recover_pause: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The most autonomy this turn may run with, when its sender named one.
+    ///
+    /// An outside agent's supervised message carries `ApprovalRequired` here.
+    /// The ceiling belongs to this turn, so a later change to the thread's own
+    /// mode cannot lift it.
+    fn ceiling(&self) -> Option<RuntimeMode> {
+        self.ceiling
     }
 
     /// Records that `generation` is the session started for this turn.
@@ -1233,6 +1254,16 @@ impl ThreadRecord {
     /// The dispatch carries the prompt, so the same object a Stop may stop is
     /// the one the eventual writer must claim.
     fn begin_turn(&mut self, at: DateTime<Utc>, input: UserInput) -> Arc<TurnDispatch> {
+        self.begin_turn_at_most(at, input, None)
+    }
+
+    /// [`Self::begin_turn`] for a message whose sender named a ceiling.
+    fn begin_turn_at_most(
+        &mut self,
+        at: DateTime<Utc>,
+        input: UserInput,
+        ceiling: Option<RuntimeMode>,
+    ) -> Arc<TurnDispatch> {
         // A new turn is a fresh attempt: the previous limit and any resume
         // target no longer describe the thread.
         self.resume_at = None;
@@ -1242,7 +1273,7 @@ impl ThreadRecord {
         self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
         let turn_id = TurnId::new_uuid_v7();
         let item_id = assistant_item_id(&turn_id);
-        let dispatch = Arc::new(TurnDispatch::new(turn_id.clone(), input));
+        let dispatch = Arc::new(TurnDispatch::new_at_most(turn_id.clone(), input, ceiling));
         self.active = Some(ActiveTurn {
             turn_id: turn_id.clone(),
             item_id: item_id.clone(),
@@ -1397,7 +1428,18 @@ impl ThreadRecord {
             SessionSlot::None | SessionSlot::Starting(_) => return None,
         };
         let started = self.session_settings.as_ref()?;
-        if started == &ThreadSettings::of(&self.meta) {
+        let mut wanted = ThreadSettings::of(&self.meta);
+        // A turn whose sender capped its autonomy must not run on a session
+        // that is more permissive than the cap: keep the person's own mode in
+        // the thread, and start (or keep) a session at the stricter of the two.
+        if let Some(ceiling) = self
+            .active
+            .as_ref()
+            .and_then(|active| active.dispatch.ceiling())
+        {
+            wanted.runtime_mode = wanted.runtime_mode.clamped_to(ceiling);
+        }
+        if started == &wanted {
             return None;
         }
         self.detach_session(generation)
@@ -2287,6 +2329,25 @@ impl ThreadManager {
         text: String,
         attachments: Vec<AttachmentId>,
     ) -> Result<AcceptedMessage, ManagerError> {
+        self.send_message_at_most(thread_id, text, attachments, None)
+            .await
+    }
+
+    /// Appends a user message whose turn may run with no more autonomy than
+    /// `ceiling`.
+    ///
+    /// The ceiling belongs to this message. It is enforced when the turn is
+    /// dispatched -- a session started for it runs clamped, and a live session
+    /// that is more permissive is replaced -- so raising the thread's own mode
+    /// afterwards cannot lift a ceiling that is already queued. The thread's
+    /// recorded mode is never changed.
+    pub async fn send_message_at_most(
+        &self,
+        thread_id: &ThreadId,
+        text: String,
+        attachments: Vec<AttachmentId>,
+        ceiling: Option<RuntimeMode>,
+    ) -> Result<AcceptedMessage, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let resolved_attachments = self
             .inner
@@ -2323,9 +2384,12 @@ impl ThreadManager {
             // holds no prompt to deliver at all.
             let release_pending =
                 stale_schedule && record.pending_turn() && record.parks_persisted_prompt();
-            record.queued.push_back(UserInput {
-                text: text.clone(),
-                attachments: harness_attachments,
+            record.queued.push_back(QueuedTurn {
+                input: UserInput {
+                    text: text.clone(),
+                    attachments: harness_attachments,
+                },
+                ceiling,
             });
             let mut domain = vec![ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -2369,12 +2433,13 @@ impl ThreadManager {
             });
         }
 
-        let dispatch = record.begin_turn(
+        let dispatch = record.begin_turn_at_most(
             now,
             UserInput {
                 text: text.clone(),
                 attachments: harness_attachments,
             },
+            ceiling,
         );
         let turn_id = dispatch.turn_id.clone();
         let stale_schedule = record.scheduled_limit.take().is_some();
@@ -4225,7 +4290,11 @@ impl Inner {
                     meter: TurnMeter::new(self.now()),
                     tools: HashMap::new(),
                     last_tick: None,
-                    dispatch: Arc::new(TurnDispatch::new(parked.turn_id.clone(), parked.input())),
+                    dispatch: Arc::new(TurnDispatch::new_at_most(
+                        parked.turn_id.clone(),
+                        parked.input(),
+                        parked.mode_ceiling,
+                    )),
                     applied_limit_reset: None,
                 });
                 record.last_turn_id = Some(parked.turn_id);
@@ -4370,9 +4439,9 @@ impl Inner {
         // arrives now must queue behind it, not become the active turn first.
         if !record.closed
             && record.scheduled_limit.is_none()
-            && let Some(input) = record.queued.pop_front()
+            && let Some(queued) = record.queued.pop_front()
         {
-            let next = record.begin_turn(now, input);
+            let next = record.begin_turn_at_most(now, queued.input, queued.ceiling);
             let next_id = next.turn_id.clone();
             domain.push(ThreadEvent::TurnQueued { at: now });
             domain.push(ThreadEvent::TurnStarted { at: now });
@@ -4480,11 +4549,23 @@ impl Inner {
                 record.meta.resume_id = resume_id;
             }
             let resume_id = record.meta.resume_id.clone();
-            let started_settings = ThreadSettings::of(&record.meta);
+            // A turn sent with a ceiling starts its session at the stricter of
+            // the thread's mode and that ceiling. `session_settings` records
+            // what the session really runs, so the next uncapped turn notices
+            // the difference and starts a session at the person's own mode.
+            let ceiling = record
+                .active
+                .as_ref()
+                .and_then(|active| active.dispatch.ceiling());
+            let runtime_mode = ceiling
+                .map(|ceiling| record.meta.runtime_mode.clamped_to(ceiling))
+                .unwrap_or(record.meta.runtime_mode);
+            let mut started_settings = ThreadSettings::of(&record.meta);
+            started_settings.runtime_mode = runtime_mode;
             let spec = SessionSpec {
                 workspace,
                 model: record.meta.model.clone(),
-                runtime_mode: record.meta.runtime_mode,
+                runtime_mode,
                 reasoning_effort: record.meta.reasoning_effort.clone(),
                 fast: record.meta.fast,
                 resume_id,
@@ -4946,8 +5027,11 @@ impl Inner {
                                 if let Some(scheduled) = record.scheduled_limit.as_mut() {
                                     scheduled.parked_turn = Some(turn_id.clone());
                                 }
-                                record.meta.parked =
-                                    Some(ParkedPrompt::of(turn_id, &dispatch.input()));
+                                record.meta.parked = Some(ParkedPrompt::of(
+                                    turn_id,
+                                    &dispatch.input(),
+                                    dispatch.ceiling(),
+                                ));
                             }
                             if let Err(error) = self.emit(&mut record, domain, wire).await {
                                 tracing::error!(%error, "failed to record a rate limit");
@@ -7181,10 +7265,11 @@ fn harness_refs(attachments: &[Attachment]) -> Vec<AttachmentRef> {
 
 impl ParkedPrompt {
     /// The durable form of a prompt a pause is holding.
-    fn of(turn_id: &TurnId, input: &UserInput) -> Self {
+    fn of(turn_id: &TurnId, input: &UserInput, mode_ceiling: Option<RuntimeMode>) -> Self {
         Self {
             turn_id: turn_id.clone(),
             text: input.text.clone(),
+            mode_ceiling,
             attachments: input
                 .attachments
                 .iter()

@@ -337,6 +337,41 @@ impl McpService {
                 })?;
                 Ok(ResponseBody::Ack)
             }
+            McpRequest::ListOutsideAgentSignIns => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgentSignIns {
+                    sign_ins: outside.pending_sign_ins(),
+                })
+            }
+            McpRequest::RespondOutsideAgentSignIn {
+                request_id,
+                decision,
+                level,
+            } => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                outside
+                    .respond_sign_in(&request_id, decision, level)
+                    .map_err(|error| {
+                        let code =
+                            if matches!(error, crate::mcp_server::oauth::OAuthError::NotFound(_)) {
+                                h4rn_protocol::ProtoErrorCode::NotFound
+                            } else {
+                                h4rn_protocol::ProtoErrorCode::InvalidRequest
+                            };
+                        ProtoError::plain(code, error.description())
+                    })?;
+                Ok(ResponseBody::Ack)
+            }
             McpRequest::AgentTools => {
                 let settings = self.agent_tools.get().ok_or_else(|| {
                     ProtoError::plain(

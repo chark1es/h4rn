@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { OutsideAgentView, ResponseBody } from "@/gen";
+import type { OutsideAgentSignIn, OutsideAgentView, ResponseBody } from "@/gen";
 
 vi.mock("@/lib/store/appStore", () => ({
   getClient: () => ({ request: vi.fn() }),
@@ -44,6 +44,8 @@ beforeEach(() => {
         });
       case "revoke_outside_agent":
         return ok({ type: "ack" });
+      case "list_outside_agent_sign_ins":
+        return ok({ type: "outside_agent_sign_ins", sign_ins: [] });
       case "agent_tools":
         return ok({
           type: "agent_tools",
@@ -59,6 +61,7 @@ afterEach(() => {
   cleanup();
   resetAccessStore();
   setAccessRequesterForTests(null);
+  window.localStorage.clear();
 });
 
 describe("the Sharing & access page", () => {
@@ -93,5 +96,104 @@ describe("the Sharing & access page", () => {
     await waitFor(() =>
       expect(document.body.textContent).toContain("No outside agent is connected"),
     );
+  });
+});
+
+const pendingSignIn: OutsideAgentSignIn = {
+  request_id: "h4rn_auth_1",
+  client_name: "Codex",
+  redirect_uri: "http://localhost:1455/cb",
+  redirect_origin: "http://localhost:1455",
+  requested_at: "2026-11-22T10:00:00.000Z",
+  expires_at: "2026-11-22T10:10:00.000Z",
+};
+
+describe("a sign-in waiting for the person", () => {
+  function withSignIn() {
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      switch (body.request.type) {
+        case "list_outside_agents":
+          return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
+        case "list_outside_agent_sign_ins":
+          return ok({ type: "outside_agent_sign_ins", sign_ins: [pendingSignIn] });
+        case "respond_outside_agent_sign_in":
+          return ok({ type: "ack" });
+        default:
+          return ok({
+            type: "agent_tools",
+            settings: { enabled: { by_harness: [], by_machine: [] } },
+          });
+      }
+    });
+  }
+
+  it("shows the callback, calls the name unverified and needs a level", async () => {
+    withSignIn();
+    render(<AccessSettings />);
+    expect(await screen.findByText("Codex wants to connect")).toBeTruthy();
+    expect(document.body.textContent).toContain("Unverified name");
+    expect(document.body.textContent).toContain("http://localhost:1455");
+    const approve = screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("radio", { name: /Supervised/ }));
+    await waitFor(() => expect(approve.disabled).toBe(false));
+  });
+
+  it("answers the sign-in with the chosen level", async () => {
+    const answered: unknown[] = [];
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      switch (body.request.type) {
+        case "list_outside_agents":
+          return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
+        case "list_outside_agent_sign_ins":
+          return ok({ type: "outside_agent_sign_ins", sign_ins: [pendingSignIn] });
+        case "respond_outside_agent_sign_in":
+          answered.push(body.request);
+          return ok({ type: "ack" });
+        default:
+          return ok({
+            type: "agent_tools",
+            settings: { enabled: { by_harness: [], by_machine: [] } },
+          });
+      }
+    });
+    render(<AccessSettings />);
+    await screen.findByText("Codex wants to connect");
+    fireEvent.click(screen.getByRole("radio", { name: /Read only/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(answered).toEqual([
+        {
+          type: "respond_outside_agent_sign_in",
+          request_id: "h4rn_auth_1",
+          decision: "approve",
+          level: "read_only",
+        },
+      ]),
+    );
+    await waitFor(() => expect(screen.queryByText("Codex wants to connect")).toBeNull());
+  });
+});
+
+describe("the MCP URL when this app is a remote client", () => {
+  it("does not hand out a loopback URL as if it worked from here", async () => {
+    window.localStorage.setItem(
+      "h4rn.remote.active",
+      JSON.stringify({
+        connectUrl: "https://connect.example",
+        machineId: "host_1",
+        machineName: "Studio",
+        daemonNoiseKey: "0".repeat(64),
+        addresses: [],
+        online: true,
+        relay: true,
+      }),
+    );
+    render(<AccessSettings />);
+    await waitFor(() => expect(document.body.textContent).toContain("Studio"));
+    expect(screen.queryByRole("button", { name: "Copy the outside-agent MCP URL" })).toBeNull();
+    expect(document.body.textContent).toContain("cannot reach it yet");
   });
 });

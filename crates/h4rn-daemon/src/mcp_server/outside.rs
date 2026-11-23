@@ -11,7 +11,6 @@
 //! upstream servers.
 
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -22,7 +21,8 @@ use h4rn_protocol::{HarnessKind, HostId, OutsideAgentLevel, RuntimeMode, ThreadI
 use serde_json::{Value, json};
 
 use super::oauth::{Grant, OAuthStore};
-use super::rate::RateLimiter;
+use super::rate::{EndpointLimits, RateLimiter};
+use crate::auth::TokenStore;
 use crate::hosts::HostInventory;
 use crate::projects::ProjectService;
 use crate::threads::{NewThread, ThreadManager};
@@ -45,9 +45,12 @@ pub struct OutsideAgents {
     proxy: Arc<h4rn_proxy::ProxyService>,
     host: HostId,
     base_url: RwLock<Option<String>>,
-    /// Request rate limits. Registration is per client id; token traffic is
-    /// per client; the MCP endpoint is per bearer token family.
-    limits: std::sync::RwLock<RateLimiter>,
+    /// Request rate limits. One aggregate bucket covers the unauthenticated
+    /// OAuth mutations; per-key buckets are keyed by validated identifiers.
+    limits: RwLock<EndpointLimits>,
+    /// The owner's access-token store. A thread may quote the token; tool
+    /// output must never repeat it.
+    owner_token: RwLock<Option<TokenStore>>,
 }
 
 impl OutsideAgents {
@@ -68,7 +71,8 @@ impl OutsideAgents {
             proxy,
             host,
             base_url: RwLock::new(None),
-            limits: std::sync::RwLock::new(RateLimiter::new(120, Duration::from_secs(60))),
+            limits: RwLock::new(EndpointLimits::default()),
+            owner_token: RwLock::new(None),
         }
     }
 
@@ -78,17 +82,36 @@ impl OutsideAgents {
         self
     }
 
-    /// Replaces the limiter on a live server.
+    /// Replaces the per-key limiter on a live server.
     pub fn set_limits(&self, limits: RateLimiter) {
-        *self
-            .limits
+        self.limits
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = limits;
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .per_key = limits;
+    }
+
+    /// Replaces the aggregate limiter on a live server.
+    pub fn set_aggregate_limits(&self, limits: RateLimiter) {
+        self.limits
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .aggregate = limits;
     }
 
     /// The OAuth store.
     pub fn store(&self) -> Arc<OAuthStore> {
         Arc::clone(&self.store)
+    }
+
+    /// Names the store that holds the owner's access token.
+    ///
+    /// The local access token is the owner's own credential: a thread may quote
+    /// it, and an outside agent must never read it back.
+    pub fn set_owner_token(&self, tokens: &TokenStore) {
+        *self
+            .owner_token
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tokens.clone());
     }
 
     /// The base URL of this daemon's loopback listener.
@@ -121,12 +144,64 @@ impl OutsideAgents {
         &self.host
     }
 
-    /// Checks the per-token request limit. `Err(seconds)` becomes a 429.
+    /// Checks the per-key request limit. `Err(seconds)` becomes a 429.
     pub fn check_limit(&self, key: &str) -> Result<(), u64> {
         self.limits
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .per_key
             .check(key)
+    }
+
+    /// Checks the aggregate limit that covers every unauthenticated OAuth
+    /// mutation, before a body is parsed or any per-client state is allocated.
+    pub fn check_aggregate(&self) -> Result<(), u64> {
+        self.limits
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .aggregate
+            .check("oauth")
+    }
+
+    /// The RFC 8707 resource this daemon serves, when it has bound a listener.
+    fn resource(&self) -> Option<String> {
+        let url = self.mcp_url();
+        (!url.is_empty()).then_some(url)
+    }
+
+    /// Verifies a bearer token against this endpoint's resource.
+    pub fn verify_grant(&self, token: &str) -> Option<Grant> {
+        self.store.verify_access(token, self.resource().as_deref())
+    }
+
+    /// Sign-ins waiting for the person's decision.
+    pub fn pending_sign_ins(&self) -> Vec<h4rn_protocol::OutsideAgentSignIn> {
+        self.store.pending_sign_ins()
+    }
+
+    /// Answers one waiting sign-in from the authenticated h4rn session.
+    ///
+    /// This is the only path that turns a client's request into a grant. The
+    /// page the client opened has no way in.
+    pub fn respond_sign_in(
+        &self,
+        request_id: &str,
+        decision: h4rn_protocol::ApprovalDecision,
+        level: Option<OutsideAgentLevel>,
+    ) -> Result<(), super::oauth::OAuthError> {
+        match decision {
+            h4rn_protocol::ApprovalDecision::Approve => {
+                let level = level.ok_or_else(|| {
+                    super::oauth::OAuthError::InvalidRequest(
+                        "choose read-only, supervised or full access".into(),
+                    )
+                })?;
+                self.store.approve(request_id, level).map(|_| ())
+            }
+            h4rn_protocol::ApprovalDecision::Deny | h4rn_protocol::ApprovalDecision::Cancel => {
+                self.store.deny(request_id).map(|_| ())
+            }
+        }
     }
 
     /// Handles `POST /mcp` when the bearer token is an outside-agent token.
@@ -134,14 +209,14 @@ impl OutsideAgents {
         let Some(token) = bearer_token(&headers) else {
             return unauthorized(self);
         };
-        if let Err(retry) =
-            self.check_limit(&format!("mcp:{}", blake3::hash(token.as_bytes()).to_hex()))
-        {
-            return too_many(retry);
-        }
-        let Some(grant) = self.store.verify_access(token) else {
+        // The token is verified before anything is counted, so a bucket is
+        // never created for a value that is not a live grant.
+        let Some(grant) = self.verify_grant(token) else {
             return unauthorized(self);
         };
+        if let Err(retry) = self.check_limit(&format!("mcp:{}", grant.client_id)) {
+            return too_many(retry);
+        }
         let value: Value = match serde_json::from_slice(&body) {
             Ok(value) => value,
             Err(error) => {
@@ -152,24 +227,22 @@ impl OutsideAgents {
                 );
             }
         };
-        match value {
-            Value::Array(items) => {
-                let mut responses = Vec::new();
-                for item in items {
-                    if let Some(response) = self.dispatch(&grant, item).await {
-                        responses.push(response);
-                    }
-                }
-                if responses.is_empty() {
-                    (StatusCode::ACCEPTED, "").into_response()
-                } else {
-                    rpc_http(StatusCode::OK, Value::Array(responses))
-                }
-            }
-            value => match self.dispatch(&grant, value).await {
-                Some(response) => rpc_http(StatusCode::OK, response),
-                None => (StatusCode::ACCEPTED, "").into_response(),
-            },
+        if value.is_array() {
+            // The 2025-11-25 transport carries one message per POST. A batch
+            // would run several tool calls for one rate-limit hit and one
+            // scope check, so it is refused instead of half-supported.
+            return rpc_http(
+                StatusCode::BAD_REQUEST,
+                RpcErrorObject::new(
+                    jsonrpc::INVALID_REQUEST,
+                    "h4rn accepts one JSON-RPC message per request",
+                )
+                .response(Value::Null),
+            );
+        }
+        match self.dispatch(&grant, value).await {
+            Some(response) => rpc_http(StatusCode::OK, response),
+            None => (StatusCode::ACCEPTED, "").into_response(),
         }
     }
 
@@ -456,11 +529,20 @@ impl OutsideAgents {
                     .map(|wire| wire.event.clone())
                     .collect::<Vec<_>>();
                 let messages = recent_messages(&events, limit);
+                let mut summary = snapshot.summary.clone();
+                summary.title = self.redact(&summary.title);
+                let messages: Vec<MessageRow> = messages
+                    .into_iter()
+                    .map(|message| MessageRow {
+                        role: message.role,
+                        text: self.redact(&message.text),
+                    })
+                    .collect();
                 let text = format!(
                     "{} [{:?}] · {}\n{}",
-                    snapshot.summary.title,
-                    snapshot.summary.agent_state,
-                    snapshot.summary.workspace_path,
+                    summary.title,
+                    summary.agent_state,
+                    summary.workspace_path,
                     messages
                         .iter()
                         .map(|message| format!("{}: {}", message.role, message.text))
@@ -470,7 +552,7 @@ impl OutsideAgents {
                 Ok(structured(
                     text,
                     json!({
-                        "thread": thread_brief(&snapshot.summary),
+                        "thread": thread_brief(&summary),
                         "messages": messages,
                         "next_seq": snapshot.next_seq,
                     }),
@@ -636,17 +718,15 @@ impl OutsideAgents {
                 if text.trim().is_empty() {
                     return Err("`text` must not be empty".into());
                 }
-                if grant.level == OutsideAgentLevel::Supervised {
-                    // A supervised grant may steer, but never more permissively
-                    // than the level it was given.
-                    self.manager
-                        .set_thread_runtime_mode(&thread_id, RuntimeMode::ApprovalRequired)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
+                // A supervised grant carries its ceiling with the message. The
+                // thread's own mode is the person's and is never rewritten: the
+                // turn this message starts is clamped while it runs, and raising
+                // the mode afterwards cannot lift a ceiling already queued.
+                let ceiling = (grant.level == OutsideAgentLevel::Supervised)
+                    .then_some(RuntimeMode::ApprovalRequired);
                 let accepted = self
                     .manager
-                    .send_message(&thread_id, text, Vec::new())
+                    .send_message_at_most(&thread_id, text, Vec::new(), ceiling)
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(structured(
@@ -657,6 +737,7 @@ impl OutsideAgents {
                     json!({
                         "thread_id": accepted.thread_id,
                         "turn_id": accepted.turn_id,
+                        "runtime_mode_ceiling": ceiling,
                     }),
                 ))
             }
@@ -674,6 +755,70 @@ impl OutsideAgents {
             other => Err(format!("h4rn has no outside tool named `{other}`")),
         }
     }
+
+    /// Removes credential-shaped values from text an outside agent may read.
+    ///
+    /// Two layers: the daemon's own secret values (its access token), and the
+    /// shapes h4rn and forge clients use, so a token pasted into a thread never
+    /// comes back out of `get_thread`.
+    fn redact(&self, value: &str) -> String {
+        let mut output = value.to_owned();
+        // Read the token file rather than a copy: `h4rnd token --rotate` must
+        // not leave the new value unredacted.
+        let owner = self
+            .owner_token
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|store| store.load().ok().flatten());
+        if let Some(token) = owner.filter(|token| !token.is_empty())
+            && output.contains(token.as_str())
+        {
+            output = output.replace(token.as_str(), "[redacted]");
+        }
+        let output = redact_h4rn_tokens(&output);
+        h4rn_forge::redact(&output)
+    }
+}
+
+/// Prefixes of every credential h4rn itself mints.
+const H4RN_TOKEN_PREFIXES: [&str; 5] = [
+    "h4rn_at_",
+    "h4rn_rt_",
+    "h4rn_code_",
+    "h4rn_auth_",
+    "h4rn_mcp_",
+];
+
+/// Replaces every h4rn-shaped credential in `value`.
+fn redact_h4rn_tokens(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    loop {
+        let next = H4RN_TOKEN_PREFIXES
+            .iter()
+            .filter_map(|prefix| rest.find(prefix).map(|index| (index, *prefix)))
+            .min_by_key(|(index, _)| *index);
+        let Some((index, prefix)) = next else {
+            output.push_str(rest);
+            return output;
+        };
+        output.push_str(&rest[..index]);
+        output.push_str("[redacted]");
+        let after = &rest[index + prefix.len()..];
+        rest = &after[token_run(after)..];
+    }
+}
+
+/// Length of the credential characters at the start of `value`.
+fn token_run(value: &str) -> usize {
+    value
+        .char_indices()
+        .find(|(_, ch)| {
+            !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '~' | '+' | '/' | '='))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
 }
 
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value {

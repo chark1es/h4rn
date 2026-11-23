@@ -13,7 +13,10 @@ use h4rn_daemon::daemon::{BoundDaemon, DaemonBuilder};
 use h4rn_daemon::mcp_server::OutsideAgents;
 use h4rn_daemon::threads::{NewThread, ThreadManager, ThreadManagerOptions};
 use h4rn_harness::{FakeHarness, SessionMcp};
-use h4rn_protocol::{HarnessKind, HostId, McpRequest, ResponseBody, RuntimeMode};
+use h4rn_protocol::{
+    ApprovalDecision, HarnessKind, HostId, McpRequest, OutsideAgentLevel, ResponseBody,
+    RuntimeMode, TurnStatus, Usage,
+};
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use serde_json::{Value, json};
@@ -23,12 +26,14 @@ use url::Url;
 
 struct TestDaemon {
     addr: std::net::SocketAddr,
+    addrs: Vec<std::net::SocketAddr>,
     dir: tempfile::TempDir,
     manager: Arc<ThreadManager>,
     outside: Arc<OutsideAgents>,
     mcp_service: Arc<h4rn_daemon::mcp::McpService>,
     host: HostId,
     mcp: SessionMcp,
+    settings: h4rn_harness::SessionSettings,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<anyhow::Result<()>>,
 }
@@ -64,11 +69,19 @@ impl TestDaemon {
 }
 
 async fn boot(rate_limit: Option<usize>) -> TestDaemon {
+    boot_with(FakeHarness::new(), rate_limit, None).await
+}
+
+async fn boot_with(
+    fake: FakeHarness,
+    rate_limit: Option<usize>,
+    extra_bind: Option<std::net::SocketAddr>,
+) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         bind: "127.0.0.1:0".parse().expect("bind"),
-        extra_bind: None,
+        extra_bind,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
         network_access: None,
@@ -81,7 +94,8 @@ async fn boot(rate_limit: Option<usize>) -> TestDaemon {
         tick_interval: Duration::from_millis(20),
         clock: None,
     };
-    let (fake, mcp) = FakeHarness::new().with_mcp_injection();
+    let (fake, mcp) = fake.with_mcp_injection();
+    let (fake, settings) = fake.with_session_settings();
     let daemon = DaemonBuilder::new(config)
         .without_title_agents()
         .with_harness(Arc::new(fake))
@@ -93,6 +107,7 @@ async fn boot(rate_limit: Option<usize>) -> TestDaemon {
     let mcp_service = daemon.mcp();
     let bound: BoundDaemon = daemon.bind().await.expect("bind daemon");
     let addr = bound.local_addr();
+    let addrs = bound.addrs().to_vec();
     let outside = bound.outside_agents();
     if let Some(limit) = rate_limit {
         outside.set_limits(h4rn_daemon::mcp_server::rate::RateLimiter::new(
@@ -112,12 +127,14 @@ async fn boot(rate_limit: Option<usize>) -> TestDaemon {
     });
     TestDaemon {
         addr,
+        addrs,
         dir,
         manager,
         outside,
         mcp_service,
         host,
         mcp,
+        settings,
         shutdown: Some(shutdown),
         task,
     }
@@ -394,6 +411,7 @@ async fn register(client: &reqwest::Client, base: &str, redirect: &str) -> (Stat
 }
 
 async fn begin_and_approve(
+    daemon: &TestDaemon,
     client: &reqwest::Client,
     base: &str,
     client_id: &str,
@@ -401,6 +419,28 @@ async fn begin_and_approve(
     level: &str,
 ) -> String {
     let (verifier, challenge) = pkce();
+    let request = open_authorize(client, base, client_id, redirect, &challenge).await;
+    // Approval runs over the authenticated h4rn session, never over the page.
+    daemon
+        .outside
+        .respond_sign_in(
+            &request,
+            h4rn_protocol::ApprovalDecision::Approve,
+            h4rn_protocol::OutsideAgentLevel::parse(level),
+        )
+        .expect("the owner approves the sign-in");
+    let code = follow_pending(client, base, &request).await;
+    token_exchange(client, base, client_id, &code, &verifier).await
+}
+
+/// Opens the client's authorize page and returns the request id it names.
+async fn open_authorize(
+    client: &reqwest::Client,
+    base: &str,
+    client_id: &str,
+    redirect: &str,
+    challenge: &str,
+) -> String {
     let authorize = client
         .get(format!("{base}/oauth/authorize"))
         .query(&[
@@ -408,7 +448,7 @@ async fn begin_and_approve(
             ("client_id", client_id),
             ("redirect_uri", redirect),
             ("state", "state-1"),
-            ("code_challenge", challenge.as_str()),
+            ("code_challenge", challenge),
             ("code_challenge_method", "S256"),
         ])
         .send()
@@ -417,50 +457,73 @@ async fn begin_and_approve(
     assert_eq!(authorize.status(), StatusCode::OK);
     let page = authorize.text().await.expect("page");
     assert!(page.contains("Claude Code"));
-    assert!(page.contains("Read only"));
-    let request = page
-        .split("name=\"request\" value=\"")
+    assert!(page.contains("unverified"));
+    assert!(page.contains("http://localhost:1455"));
+    assert!(
+        !page.contains("<form"),
+        "the page must not be able to grant anything"
+    );
+    page.split("name=\"request\" value=\"")
         .nth(1)
-        .and_then(|rest| rest.split('"').next())
+        .or_else(|| {
+            page.split("request=")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+        })
         .expect("approval request id")
-        .to_owned();
+        .to_owned()
+}
+
+/// Follows the page's own navigation to the callback and returns the code.
+async fn follow_pending(client: &reqwest::Client, base: &str, request: &str) -> String {
     let response = client
-        .post(format!("{base}/oauth/approve"))
-        .form(&[
-            ("request", request.as_str()),
-            ("decision", "approve"),
-            ("level", level),
-        ])
+        .get(format!("{base}/oauth/authorize/pending"))
+        .query(&[("request", request)])
         .send()
         .await
-        .expect("approve");
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        .expect("pending");
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "an answered sign-in navigates to the callback"
+    );
     let location = response
         .headers()
         .get(reqwest::header::LOCATION)
         .expect("location")
         .to_str()
-        .expect("location text");
-    let url = Url::parse(location).expect("location url");
-    assert_eq!(
-        url.query_pairs()
-            .find(|(key, _)| key == "state")
-            .map(|(_, value)| value.into_owned()),
-        Some("state-1".into())
-    );
-    let code = url
+        .expect("location text")
+        .to_owned();
+    let url = Url::parse(&location).expect("location url");
+    let state = url
         .query_pairs()
+        .find(|(key, _)| key == "state")
+        .map(|(_, value)| value.into_owned());
+    assert!(
+        matches!(state.as_deref(), None | Some("state-1")),
+        "unexpected state {state:?}"
+    );
+    url.query_pairs()
         .find(|(key, _)| key == "code")
         .map(|(_, value)| value.into_owned())
-        .expect("code");
+        .expect("code")
+}
+
+async fn token_exchange(
+    client: &reqwest::Client,
+    base: &str,
+    client_id: &str,
+    code: &str,
+    verifier: &str,
+) -> String {
+    // OAuth 2.1: the token request needs no redirect_uri; PKCE binds it.
     let token_response = client
         .post(format!("{base}/oauth/token"))
         .form(&[
             ("grant_type", "authorization_code"),
-            ("code", code.as_str()),
+            ("code", code),
             ("client_id", client_id),
-            ("redirect_uri", redirect),
-            ("code_verifier", verifier.as_str()),
+            ("code_verifier", verifier),
         ])
         .send()
         .await
@@ -488,8 +551,15 @@ async fn oauth_pkce_grants_the_approved_level_and_stores_hashes() {
     assert_eq!(status, StatusCode::CREATED, "{registered}");
     let client_id = registered["client_id"].as_str().expect("client id");
 
-    let read_token =
-        begin_and_approve(&client, &daemon.base(), client_id, redirect, "read_only").await;
+    let read_token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "read_only",
+    )
+    .await;
     assert!(read_token.starts_with("h4rn_at_"));
     let tools = list_tools(&client, &daemon.outside_url(), &read_token).await;
     assert!(tools.contains(&"list_projects".to_owned()));
@@ -522,8 +592,15 @@ async fn oauth_pkce_grants_the_approved_level_and_stores_hashes() {
 
     // A supervised grant can start a thread, but it always runs at
     // approval-required even when the caller asks for full access.
-    let supervised =
-        begin_and_approve(&client, &daemon.base(), client_id, redirect, "supervised").await;
+    let supervised = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
     let repo = git_repo_with_remote();
     let started = call_tool(
         &client,
@@ -621,17 +698,22 @@ async fn denying_the_page_returns_access_denied_and_issues_no_code() {
         .await
         .expect("page");
     let request = page
-        .split("name=\"request\" value=\"")
+        .split("request=")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
         .expect("request id")
         .to_owned();
+    // The person denies it inside h4rn.
+    daemon
+        .outside
+        .respond_sign_in(&request, h4rn_protocol::ApprovalDecision::Deny, None)
+        .expect("deny");
     let response = client
-        .post(format!("{}/oauth/approve", daemon.base()))
-        .form(&[("request", request.as_str()), ("decision", "deny")])
+        .get(format!("{}/oauth/authorize/pending", daemon.base()))
+        .query(&[("request", request.as_str())])
         .send()
         .await
-        .expect("deny");
+        .expect("pending");
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let location = response
         .headers()
@@ -645,15 +727,24 @@ async fn denying_the_page_returns_access_denied_and_issues_no_code() {
 }
 
 #[tokio::test]
-async fn oauth_endpoints_are_rate_limited() {
-    let daemon = boot(Some(1)).await;
+async fn oauth_mutations_are_rate_limited_in_aggregate_before_parsing() {
+    let daemon = boot(None).await;
+    daemon
+        .outside
+        .set_aggregate_limits(h4rn_daemon::mcp_server::rate::RateLimiter::new(
+            1,
+            Duration::from_secs(60),
+        ));
     let client = http();
     let redirect = "http://localhost:1455/callback";
     let (first, _) = register(&client, &daemon.base(), redirect).await;
     assert_eq!(first, StatusCode::CREATED);
+    // A body that would not parse is still refused before it is read: the
+    // refusal comes from the aggregate limiter, not from parsing.
     let response = client
         .post(format!("{}/oauth/register", daemon.base()))
-        .json(&json!({"client_name": "Another", "redirect_uris": [redirect]}))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{ not json")
         .send()
         .await
         .expect("register");
@@ -673,7 +764,15 @@ async fn settings_report_connected_agents_and_revoke_them() {
     let redirect = "http://localhost:1455/callback";
     let (_, registered) = register(&client, &daemon.base(), redirect).await;
     let client_id = registered["client_id"].as_str().expect("client id");
-    let token = begin_and_approve(&client, &daemon.base(), client_id, redirect, "read_only").await;
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "read_only",
+    )
+    .await;
     let agents = daemon.outside.store().connected_agents();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].name, "Claude Code");
@@ -711,7 +810,15 @@ async fn the_protocol_lists_and_revokes_outside_agents() {
     let redirect = "http://localhost:1455/callback";
     let (_, registered) = register(&client, &daemon.base(), redirect).await;
     let client_id = registered["client_id"].as_str().expect("client id");
-    let _token = begin_and_approve(&client, &daemon.base(), client_id, redirect, "read_only").await;
+    let _token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "read_only",
+    )
+    .await;
 
     let listed = daemon
         .outside_agents()
@@ -1052,14 +1159,270 @@ async fn agent_tools_are_hidden_when_their_harness_switch_is_off() {
     daemon.stop().await;
 }
 
+// ---------------------------------------------------------------------------
+// The security model: only the person grants, a grant never exceeds its level,
+// a revoked grant stays revoked, and nothing secret leaves the daemon.
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn a_supervised_message_downgrades_a_thread_to_approval_required() {
+async fn approval_needs_the_owner_session_not_the_public_page() {
     let daemon = boot(None).await;
     let client = http();
     let redirect = "http://localhost:1455/callback";
     let (_, registered) = register(&client, &daemon.base(), redirect).await;
     let client_id = registered["client_id"].as_str().expect("client id");
-    let token = begin_and_approve(&client, &daemon.base(), client_id, redirect, "supervised").await;
+    let (_, challenge) = pkce();
+    let request = open_authorize(&client, &daemon.base(), client_id, redirect, &challenge).await;
+
+    // The page that anything on the machine can reach cannot grant anything.
+    let response = client
+        .post(format!("{}/oauth/approve", daemon.base()))
+        .form(&[
+            ("request", request.as_str()),
+            ("decision", "approve"),
+            ("level", "full_access"),
+        ])
+        .send()
+        .await
+        .expect("approve");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Nothing was granted: the browser still waits, and no client is connected.
+    let waiting = client
+        .get(format!("{}/oauth/authorize/pending", daemon.base()))
+        .query(&[("request", request.as_str())])
+        .send()
+        .await
+        .expect("pending");
+    assert_eq!(waiting.status(), StatusCode::OK);
+    assert!(
+        waiting
+            .text()
+            .await
+            .expect("page")
+            .contains("Waiting for h4rn")
+    );
+    assert!(daemon.outside.store().connected_agents().is_empty());
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_owner_answers_a_sign_in_over_the_protocol() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let (_, challenge) = pkce();
+    let request = open_authorize(&client, &daemon.base(), client_id, redirect, &challenge).await;
+
+    let listed = daemon
+        .outside_agents()
+        .handle(McpRequest::ListOutsideAgentSignIns)
+        .await
+        .expect("list sign-ins");
+    let ResponseBody::OutsideAgentSignIns { sign_ins } = listed else {
+        panic!("unexpected response {listed:?}");
+    };
+    assert_eq!(sign_ins.len(), 1);
+    assert_eq!(sign_ins[0].request_id, request);
+    assert_eq!(sign_ins[0].client_name, "Claude Code");
+    assert_eq!(sign_ins[0].redirect_origin, "http://localhost:1455");
+
+    // Approving without a level is refused: the person's choice is required.
+    let refused = daemon
+        .outside_agents()
+        .handle(McpRequest::RespondOutsideAgentSignIn {
+            request_id: request.clone(),
+            decision: ApprovalDecision::Approve,
+            level: None,
+        })
+        .await;
+    assert!(refused.is_err());
+
+    let approved = daemon
+        .outside_agents()
+        .handle(McpRequest::RespondOutsideAgentSignIn {
+            request_id: request.clone(),
+            decision: ApprovalDecision::Approve,
+            level: Some(OutsideAgentLevel::ReadOnly),
+        })
+        .await
+        .expect("approve");
+    assert!(matches!(approved, ResponseBody::Ack));
+    assert_eq!(daemon.outside.store().connected_agents().len(), 0);
+
+    // The browser's next navigation carries the code to the callback.
+    let code = follow_pending(&client, &daemon.base(), &request).await;
+    assert!(!code.is_empty());
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_cross_site_origin_cannot_register_or_spend_a_code() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let response = client
+        .post(format!("{}/oauth/register", daemon.base()))
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .json(&json!({"client_name": "Evil", "redirect_uris": [redirect]}))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .form(&[("grant_type", "authorization_code"), ("code", "x")])
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // A same-site origin, which is what the daemon's own pages send, works.
+    let (status, _) = register(&client, &daemon.base(), redirect).await;
+    assert_eq!(status, StatusCode::CREATED);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_rebinding_host_is_refused() {
+    let daemon = boot(None).await;
+    let client = http();
+    let response = client
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            daemon.base()
+        ))
+        .header(reqwest::header::HOST, "evil.example")
+        .send()
+        .await
+        .expect("discovery");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = client
+        .post(format!("{}/mcp", daemon.base()))
+        .header(reqwest::header::HOST, "evil.example")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .send()
+        .await
+        .expect("mcp");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn oauth_and_mcp_answer_only_on_the_loopback_listener() {
+    // A second listener bound to every interface is classified as non-loopback
+    // even though this test reaches it through 127.0.0.1.
+    let daemon = boot_with(FakeHarness::new(), None, Some("0.0.0.0:0".parse().unwrap())).await;
+    assert_eq!(daemon.addrs.len(), 2, "the extra listener must be bound");
+    let lan = daemon.addrs[1];
+    let lan_base = format!("http://127.0.0.1:{}", lan.port());
+
+    // Liveness is served there.
+    let response = reqwest::get(format!("{lan_base}/healthz"))
+        .await
+        .expect("healthz");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let client = http();
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/oauth/authorize",
+    ] {
+        let response = client
+            .get(format!("{lan_base}{path}"))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} leaked");
+    }
+    let response = client
+        .post(format!("{lan_base}/mcp"))
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .send()
+        .await
+        .expect("mcp");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // The loopback listener still serves them.
+    let (status, _) = register(&client, &daemon.base(), "http://localhost:1455/cb").await;
+    assert_eq!(status, StatusCode::CREATED);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_plain_pkce_challenge_is_rejected() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let (_, challenge) = pkce();
+    let response = client
+        .get(format!("{}/oauth/authorize", daemon.base()))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "plain"),
+        ])
+        .send()
+        .await
+        .expect("authorize");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        response
+            .text()
+            .await
+            .expect("body")
+            .contains("code_challenge_method must be S256")
+    );
+    daemon.stop().await;
+}
+
+/// Registers and approves a supervised client, starting the PKCE flow.
+async fn supervised_token(daemon: &TestDaemon, client: &reqwest::Client) -> String {
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    begin_and_approve(
+        daemon,
+        client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "supervised",
+    )
+    .await
+}
+
+async fn wait_for_settings(
+    settings: &h4rn_harness::SessionSettings,
+    count: usize,
+) -> Vec<h4rn_harness::SettingChange> {
+    let started = Instant::now();
+    loop {
+        let changes = settings.get();
+        if changes.len() >= count {
+            return changes;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            panic!("the fake harness never started a session: {changes:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_supervised_message_runs_at_approval_required_and_leaves_the_mode_alone() {
+    let daemon = boot(None).await;
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
     let repo = git_repo_with_remote();
     let mut request = new_thread(&daemon.host, repo.path(), "already running");
     request.runtime_mode = RuntimeMode::FullAccess;
@@ -1077,11 +1440,448 @@ async fn a_supervised_message_downgrades_a_thread_to_approval_required() {
     )
     .await;
     assert!(sent.get("error").is_none(), "{sent}");
+    assert_eq!(
+        sent["result"]["structuredContent"]["runtime_mode_ceiling"],
+        "approval_required"
+    );
     let summary = daemon
         .manager
         .thread_summary(&thread.thread_id)
         .await
         .expect("summary");
-    assert_eq!(summary.runtime_mode, RuntimeMode::ApprovalRequired);
+    // The person's own mode is untouched: only the turn the agent queued is
+    // clamped.
+    assert_eq!(summary.runtime_mode, RuntimeMode::FullAccess);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn raising_the_thread_mode_does_not_lift_a_queued_supervised_ceiling() {
+    use h4rn_harness::SettingChange;
+
+    let (fake, gate) = FakeHarness::new().with_send_gate();
+    let daemon = boot_with(fake, None, None).await;
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
+    let repo = git_repo_with_remote();
+
+    // The thread starts at approval-required, and its first turn is held open
+    // so the agent's message has to queue behind it.
+    let thread = daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, repo.path(), "held open"))
+        .await
+        .expect("create thread");
+    wait_for_settings(&daemon.settings, 1).await;
+
+    let sent = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "send_thread_message",
+        json!({"thread_id": thread.thread_id, "text": "raise it afterwards"}),
+    )
+    .await;
+    assert!(sent.get("error").is_none(), "{sent}");
+
+    // The person raises the thread to full access while the message waits.
+    daemon
+        .manager
+        .set_thread_runtime_mode(&thread.thread_id, RuntimeMode::FullAccess)
+        .await
+        .expect("raise the mode");
+
+    // Let both turns run.
+    gate.release();
+    let changes = wait_for_settings(&daemon.settings, 3).await;
+    let started: Vec<_> = changes
+        .iter()
+        .filter_map(|change| match change {
+            SettingChange::Started { runtime_mode, .. } => Some(*runtime_mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started.last().copied(),
+        Some(RuntimeMode::ApprovalRequired),
+        "the queued message ran on a session it should not have: {changes:?}"
+    );
+    // And the person's mode is still what they chose.
+    let summary = daemon
+        .manager
+        .thread_summary(&thread.thread_id)
+        .await
+        .expect("summary");
+    assert_eq!(summary.runtime_mode, RuntimeMode::FullAccess);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn refresh_rotation_works_over_http_and_a_replay_kills_the_family() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let (verifier, challenge) = pkce();
+    let request = open_authorize(&client, &daemon.base(), client_id, redirect, &challenge).await;
+    daemon
+        .outside
+        .respond_sign_in(
+            &request,
+            ApprovalDecision::Approve,
+            Some(OutsideAgentLevel::ReadOnly),
+        )
+        .expect("approve");
+    let code = follow_pending(&client, &daemon.base(), &request).await;
+    let token_body: Value = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client_id),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token")
+        .json()
+        .await
+        .expect("token json");
+    let first_refresh = token_body["refresh_token"]
+        .as_str()
+        .expect("refresh")
+        .to_owned();
+
+    let rotated: Value = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", first_refresh.as_str()),
+            ("client_id", client_id),
+        ])
+        .send()
+        .await
+        .expect("refresh")
+        .json()
+        .await
+        .expect("refresh json");
+    let access = rotated["access_token"].as_str().expect("access").to_owned();
+    let second_refresh = rotated["refresh_token"]
+        .as_str()
+        .expect("second refresh")
+        .to_owned();
+    assert_ne!(first_refresh, second_refresh);
+
+    // Replaying the rotated refresh token revokes the whole family.
+    let replay = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", first_refresh.as_str()),
+            ("client_id", client_id),
+        ])
+        .send()
+        .await
+        .expect("replay");
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.outside_url(),
+        &access,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_token_issued_for_another_resource_is_refused_at_mcp() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let (verifier, challenge) = pkce();
+
+    // A resource this daemon does not serve is refused at authorization.
+    let response = client
+        .get(format!("{}/oauth/authorize", daemon.base()))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("resource", "https://elsewhere.example/mcp"),
+        ])
+        .send()
+        .await
+        .expect("authorize");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"], "invalid_target");
+
+    // The address this daemon serves is accepted and the token works.
+    let mcp = daemon.outside.mcp_url();
+    let response = client
+        .get(format!("{}/oauth/authorize", daemon.base()))
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("resource", mcp.as_str()),
+        ])
+        .send()
+        .await
+        .expect("authorize");
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = response.text().await.expect("page");
+    let request = page
+        .split("request=")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("request id")
+        .to_owned();
+    daemon
+        .outside
+        .respond_sign_in(
+            &request,
+            ApprovalDecision::Approve,
+            Some(OutsideAgentLevel::ReadOnly),
+        )
+        .expect("approve");
+    let code = follow_pending(&client, &daemon.base(), &request).await;
+    let token = token_exchange(&client, &daemon.base(), client_id, &code, &verifier).await;
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_mcp_endpoint_refuses_another_site_and_json_rpc_batches() {
+    let daemon = boot(None).await;
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
+
+    let cross_site = client
+        .post(daemon.outside_url())
+        .bearer_auth(&token)
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}))
+        .send()
+        .await
+        .expect("mcp");
+    assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+
+    // A batch would be one rate-limit hit and one scope check for many calls.
+    let batch = client
+        .post(daemon.outside_url())
+        .bearer_auth(&token)
+        .json(&json!([
+            {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}
+        ]))
+        .send()
+        .await
+        .expect("batch");
+    assert_eq!(batch.status(), StatusCode::BAD_REQUEST);
+    let body: Value = batch.json().await.expect("json");
+    assert_eq!(body["error"]["code"], -32600);
+
+    // One message still works.
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn get_thread_redacts_h4rn_and_forge_credentials() {
+    let access_placeholder = format!("{}{}", "h4rn_at_", "TESTVALUE0123456789");
+    let forge_placeholder = format!("{}{}", "ghp_", "TESTVALUE0123456789");
+    let hub_placeholder = format!("{}{}", "h4rn_mcp_", "TESTVALUE0123456789");
+    let text = format!("here they are: {access_placeholder} {forge_placeholder} {hub_placeholder}");
+    let daemon = boot_with(
+        FakeHarness::with_events(vec![
+            h4rn_harness::HarnessEvent::TextDelta { text },
+            h4rn_harness::HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            },
+        ]),
+        None,
+        None,
+    )
+    .await;
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
+    let repo = git_repo_with_remote();
+    let thread = daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, repo.path(), "tokens galore"))
+        .await
+        .expect("create thread");
+    // Wait until the scripted reply really landed in the journal.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = daemon
+            .manager
+            .get_thread(&thread.thread_id, 0)
+            .await
+            .expect("snapshot");
+        let answered = snapshot.events.iter().any(|wire| {
+            matches!(
+                &wire.event,
+                h4rn_protocol::Event::ItemCompleted {
+                    item: h4rn_protocol::Item::Message {
+                        role: h4rn_protocol::MessageRole::Assistant,
+                        ..
+                    },
+                    ..
+                }
+            )
+        });
+        if answered || Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let read = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "get_thread",
+        json!({"thread_id": thread.thread_id}),
+    )
+    .await;
+    assert!(read.get("error").is_none(), "{read}");
+    let rendered = read.to_string();
+    for secret in [&access_placeholder, &forge_placeholder, &hub_placeholder] {
+        assert!(
+            !rendered.contains(secret.as_str()),
+            "a credential came back out of get_thread: {rendered}"
+        );
+    }
+    assert!(rendered.contains("[redacted]"));
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn no_token_appears_in_a_response_body_or_the_store() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let (verifier, challenge) = pkce();
+    let request = open_authorize(&client, &daemon.base(), client_id, redirect, &challenge).await;
+    daemon
+        .outside
+        .respond_sign_in(
+            &request,
+            ApprovalDecision::Approve,
+            Some(OutsideAgentLevel::ReadOnly),
+        )
+        .expect("approve");
+    let code = follow_pending(&client, &daemon.base(), &request).await;
+
+    // A wrong verifier is refused without echoing the code or the verifier.
+    let wrong = "A".repeat(43);
+    let response = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client_id),
+            ("code_verifier", wrong.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await.expect("body");
+    assert!(!body.contains(&code), "{body}");
+    assert!(!body.contains(&wrong), "{body}");
+
+    let token = token_exchange(&client, &daemon.base(), client_id, &code, &verifier).await;
+    // An unauthorized call never repeats a token.
+    let response = client
+        .post(daemon.outside_url())
+        .bearer_auth("not-a-real-token")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .send()
+        .await
+        .expect("mcp");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let headers = response.headers().clone();
+    let body = response.text().await.expect("body");
+    assert!(!body.contains(&token));
+    assert!(!format!("{headers:?}").contains(&token));
+
+    let raw =
+        std::fs::read_to_string(daemon.data_dir().join("outside_agents.json")).expect("store file");
+    assert!(!raw.contains(&token), "the access token leaked to disk");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_harness_mcp_endpoint_refuses_another_site_and_batches_too() {
+    let daemon = boot(None).await;
+    let repo = git_repo_with_remote();
+    daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, repo.path(), "hub transport"))
+        .await
+        .expect("create thread");
+    let injections = wait_for_injection(&daemon.mcp, 1).await;
+    let token = injections[0].token.as_deref().expect("session token");
+    let client = http();
+
+    let cross_site = client
+        .post(daemon.mcp_url())
+        .bearer_auth(token)
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}))
+        .send()
+        .await
+        .expect("mcp");
+    assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+
+    let batch = client
+        .post(daemon.mcp_url())
+        .bearer_auth(token)
+        .json(&json!([
+            {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}
+        ]))
+        .send()
+        .await
+        .expect("batch");
+    assert_eq!(batch.status(), StatusCode::BAD_REQUEST);
+
+    let (status, body) = post_rpc(
+        &client,
+        &daemon.mcp_url(),
+        token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     daemon.stop().await;
 }

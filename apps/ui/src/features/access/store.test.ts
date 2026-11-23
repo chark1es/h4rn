@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentToolSettings, OutsideAgentView, ResponseBody } from "@/gen";
+import type { AgentToolSettings, OutsideAgentSignIn, OutsideAgentView, ResponseBody } from "@/gen";
 import {
   getAccessState,
   loadAccess,
   resetAccessStore,
+  respondSignIn,
   revokeAccessAgent,
   setAccessRequesterForTests,
   setAgentToolsEnabled,
@@ -105,5 +106,68 @@ describe("Sharing & access store", () => {
         (entry) => entry.harness === "claude_code",
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("answering a waiting sign-in", () => {
+  const signIn: OutsideAgentSignIn = {
+    request_id: "h4rn_auth_1",
+    client_name: "Codex",
+    redirect_uri: "http://localhost:1455/cb",
+    redirect_origin: "http://localhost:1455",
+    requested_at: "2026-11-22T10:00:00.000Z",
+    expires_at: "2026-11-22T10:10:00.000Z",
+  };
+
+  it("grants the level the person chose and drops the prompt", async () => {
+    const seen: unknown[] = [];
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type === "list_outside_agents") {
+        return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
+      }
+      if (body.request.type === "list_outside_agent_sign_ins") {
+        return ok({ type: "outside_agent_sign_ins", sign_ins: [signIn] });
+      }
+      if (body.request.type === "respond_outside_agent_sign_in") {
+        seen.push(body.request);
+        return ok({ type: "ack" });
+      }
+      return ok({ type: "agent_tools", settings: { enabled: { by_harness: [], by_machine: [] } } });
+    });
+    await loadAccess();
+    expect(getAccessState().signIns).toHaveLength(1);
+    expect(await respondSignIn(signIn, "approve", "supervised")).toBe(true);
+    expect(seen).toEqual([
+      {
+        type: "respond_outside_agent_sign_in",
+        request_id: "h4rn_auth_1",
+        decision: "approve",
+        level: "supervised",
+      },
+    ]);
+    expect(getAccessState().signIns).toHaveLength(0);
+  });
+
+  it("never grants without a level", async () => {
+    setAccessRequesterForTests(() => ok({ type: "outside_agent_sign_ins", sign_ins: [signIn] }));
+    expect(await respondSignIn(signIn, "approve", null)).toBe(false);
+  });
+
+  it("puts the prompt back when the daemon refuses", async () => {
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type === "list_outside_agent_sign_ins") {
+        return ok({ type: "outside_agent_sign_ins", sign_ins: [signIn] });
+      }
+      if (body.request.type === "list_outside_agents") {
+        return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
+      }
+      return ok({ type: "agent_tools", settings: { enabled: { by_harness: [], by_machine: [] } } });
+    });
+    await loadAccess();
+    setAccessRequesterForTests(() => Promise.reject(new Error("the daemon refused")));
+    expect(await respondSignIn(signIn, "deny", null)).toBe(false);
+    expect(getAccessState().signIns).toHaveLength(1);
   });
 });

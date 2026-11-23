@@ -9,7 +9,8 @@ import { CheckIcon, CopyIcon, KeyRoundIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import type { HarnessKind, OutsideAgentView } from "@/gen";
+import { readActiveRemote } from "@/features/remote/active";
+import type { HarnessKind, OutsideAgentLevel, OutsideAgentSignIn, OutsideAgentView } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
 import { absoluteDateTime, relativeAge } from "@/lib/format";
 import { useApp } from "@/lib/store/appStore";
@@ -19,12 +20,19 @@ import {
   levelDescription,
   levelLabel,
   loadAccess,
+  respondSignIn,
   revokeAccessAgent,
   setAgentToolsEnabled,
   useAccess,
 } from "./store";
 
 const TOOL_HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity", "acp"];
+
+const LEVELS: Array<{ value: OutsideAgentLevel; label: string }> = [
+  { value: "read_only", label: "Read only" },
+  { value: "supervised", label: "Supervised" },
+  { value: "full_access", label: "Full access" },
+];
 
 /** A copy button that confirms in place instead of opening a toast. */
 function CopyButton({ value, label }: { value: string; label: string }) {
@@ -106,19 +114,84 @@ function harnessEnabled(
   return settings.by_harness.find((entry) => entry.harness === harness)?.enabled ?? true;
 }
 
+/**
+ * One sign-in waiting for the person.
+ *
+ * The client's browser cannot grant anything; this card is the grant. The name
+ * is the client's own choice, so it is labelled as unverified, and no level is
+ * preselected: approving needs an explicit choice.
+ */
+function SignInCard({ signIn }: { signIn: OutsideAgentSignIn }) {
+  const [level, setLevel] = useState<OutsideAgentLevel | null>(null);
+  const busy = useAccess((state) => Boolean(state.pending[signIn.request_id]));
+  return (
+    <div className="q-field" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
+      <div className="lab" style={{ width: "auto" }}>
+        <div className="t">{signIn.client_name} wants to connect</div>
+        <div className="s">
+          Unverified name, chosen by the app. If you approve, your browser returns to{" "}
+          <span className="q-mono">{signIn.redirect_origin}</span>.
+        </div>
+      </div>
+      <div role="radiogroup" aria-label={`What ${signIn.client_name} may do`}>
+        {LEVELS.map((entry) => (
+          <label key={entry.value} className="q-resolve-opt">
+            <input
+              type="radio"
+              name={`outside-level-${signIn.request_id}`}
+              className="sr-only"
+              checked={level === entry.value}
+              onChange={() => setLevel(entry.value)}
+            />
+            <span className={cn("q-radio", level === entry.value && "on")} aria-hidden />
+            <span>
+              <span style={{ fontWeight: 500 }}>{entry.label}</span>
+              <span className="q-faint sub">{levelDescription(entry.value)}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+        <button
+          type="button"
+          className="q-btn ghost"
+          disabled={busy}
+          onClick={() => void respondSignIn(signIn, "deny", null)}
+        >
+          Deny
+        </button>
+        <button
+          type="button"
+          className="q-btn primary"
+          disabled={busy || !level}
+          onClick={() => void respondSignIn(signIn, "approve", level)}
+        >
+          Approve
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function AccessSettings() {
   const online = useApp((state) => state.connection.status) === "online";
   const agents = useAccess((state) => state.agents);
+  const signIns = useAccess((state) => state.signIns);
   const mcpUrl = useAccess((state) => state.mcpUrl);
   const settings = useAccess((state) => state.settings);
   const loading = useAccess((state) => state.loading);
   const error = useAccess((state) => state.error);
   const pending = useAccess((state) => state.pending);
   const [revoking, setRevoking] = useState<OutsideAgentView | null>(null);
+  // A client's page says "approve this in h4rn"; this page polls so the request
+  // is already here by the time the person looks.
+  const [remote] = useState(() => readActiveRemote());
 
   useEffect(() => {
     if (!online) return;
     void loadAccess();
+    const timer = window.setInterval(() => void loadAccess(true), 3000);
+    return () => window.clearInterval(timer);
   }, [online]);
 
   if (!online) {
@@ -145,7 +218,7 @@ export function AccessSettings() {
         <h2>Outside agents</h2>
         <p className="q-faint" style={{ marginTop: -4, marginBottom: 12 }}>
           Add this URL to Claude Code, Codex or another MCP client that supports OAuth. The client
-          signs in once; you choose its level on the approval page.
+          signs in once; you choose its level here, in h4rn.
         </p>
         <div className="q-field">
           <div className="lab" style={{ flex: 1, minWidth: 0 }}>
@@ -157,9 +230,25 @@ export function AccessSettings() {
             </div>
           </div>
           <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
-            <CopyButton value={mcpUrl} label="Copy the outside-agent MCP URL" />
+            {remote ? null : <CopyButton value={mcpUrl} label="Copy the outside-agent MCP URL" />}
           </div>
         </div>
+        {remote ? (
+          <p className="q-faint" style={{ marginTop: 8 }}>
+            This h4rn app is connected to {remote.machineName} from another device. That URL is the
+            address on that computer's own loopback, so it works only there: an agent on the
+            internet cannot reach it yet. Copy it from h4rn on {remote.machineName} itself.
+          </p>
+        ) : null}
+
+        {signIns.length > 0 ? (
+          <div style={{ marginTop: 16 }}>
+            <h3 style={{ margin: "0 0 8px", fontSize: 13, fontWeight: 600 }}>Waiting for you</h3>
+            {signIns.map((signIn) => (
+              <SignInCard key={signIn.request_id} signIn={signIn} />
+            ))}
+          </div>
+        ) : null}
 
         {loading ? (
           <p className="q-faint" style={{ marginTop: 12 }}>

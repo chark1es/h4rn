@@ -37,6 +37,20 @@ pub fn redirect_allowed(value: &str) -> bool {
     }
 }
 
+/// The scheme, host and port of `value`, as a browser would show it.
+///
+/// The approval page and h4rn both show this instead of the whole callback:
+/// it is the part a person can actually judge, and it is short enough to read.
+pub fn origin_of(value: &str) -> Option<String> {
+    let url = Url::parse(value.trim()).ok()?;
+    let origin = url.origin();
+    if origin.is_tuple() {
+        Some(origin.ascii_serialization())
+    } else {
+        None
+    }
+}
+
 /// Whether a PKCE challenge is a base64url-encoded SHA-256 digest.
 ///
 /// S256 is the only method h4rn accepts; a 43-character base64url string is

@@ -119,18 +119,27 @@ pub struct AppState {
 /// (ADR-009).
 pub fn router(state: AppState) -> Router {
     let outside = Arc::clone(&state.outside);
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/ws", get(ws_handler))
-        .route("/secure", get(secure_handler))
-        .route("/secure-mcp", get(secure_mcp_handler))
+    // The MCP endpoint carries bearer tokens for harness sessions and for
+    // outside agents, so it is guarded like the OAuth routes: only a loopback
+    // `Host` and a same-site `Origin` may reach it.
+    let mcp = Router::new()
         .route(
             "/mcp",
             get(mcp_http_get)
                 .post(mcp_http_post)
                 .delete(mcp_http_delete),
         )
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn(
+            crate::mcp_server::http::loopback_guard,
+        ));
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/ws", get(ws_handler))
+        .route("/secure", get(secure_handler))
+        .route("/secure-mcp", get(secure_mcp_handler))
         .with_state(state)
+        .merge(mcp)
         .merge(crate::mcp_server::router(outside))
 }
 
@@ -138,13 +147,29 @@ pub fn router(state: AppState) -> Router {
 ///
 /// Plaintext `/ws` is deliberately absent, so a device on the LAN cannot open
 /// an unencrypted session even if it learns the access token. `/mcp` is absent
-/// too: the hub endpoint carries a bearer token and stays loopback-only.
+/// too: the hub endpoint carries a bearer token and stays loopback-only, and so
+/// do the OAuth routes, because a redirect that finishes on `localhost` is the
+/// only one the daemon admits.
 pub fn network_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/secure", get(secure_handler))
         .route("/secure-mcp", get(secure_mcp_handler))
         .with_state(state)
+}
+
+/// The router one listener serves, chosen by the address it is bound to.
+///
+/// OAuth and `/mcp` exist only where they are safe: on the loopback listener.
+/// A LAN or tailnet listener serves liveness and the encrypted routes and
+/// answers 404 to everything else, so a plaintext OAuth form or a bearer token
+/// never crosses the network.
+pub fn router_for(state: &AppState, addr: SocketAddr) -> Router {
+    if addr.ip().is_loopback() {
+        router(state.clone())
+    } else {
+        network_router(state.clone())
+    }
 }
 
 /// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
@@ -1958,14 +1983,12 @@ pub fn bound_addr(listener: &TcpListener) -> Option<SocketAddr> {
 
 /// Spawns one axum server per listener and waits for a shutdown signal.
 pub(crate) async fn serve_all(
-    listeners: Vec<TcpListener>,
-    app: Router,
+    listeners: Vec<(TcpListener, Router)>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     let (tx, rx) = watch::channel(false);
     let mut handles: Vec<JoinHandle<std::io::Result<()>>> = Vec::new();
-    for listener in listeners {
-        let app = app.clone();
+    for (listener, app) in listeners {
         let mut rx = rx.clone();
         handles.push(tokio::spawn(async move {
             serve_listener(listener, app, async move {

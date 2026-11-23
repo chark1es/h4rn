@@ -6,7 +6,8 @@
 //! requests: Streamable HTTP allows a server to answer without a long-lived
 //! stream, so a restart of the daemon only invalidates tokens, not streams.
 //!
-//! JSON-RPC batches are accepted. Notifications return `202 Accepted` with no
+//! JSON-RPC carries one message per request (the 2025-11-25 Streamable HTTP
+//! transport dropped batches). Notifications return `202 Accepted` with no
 //! body. A malformed body returns a JSON-RPC parse error rather than an HTML
 //! error page, because harnesses parse the body.
 
@@ -159,32 +160,30 @@ async fn mcp_post(
             );
         }
     };
-    match value {
-        Value::Array(items) => {
-            let mut responses = Vec::new();
-            for item in items {
-                if let Some(response) = dispatch(&state, &session, item).await {
-                    responses.push(response.body);
-                }
+    if value.is_array() {
+        // The 2025-11-25 transport carries one JSON-RPC message per POST. A
+        // batch would run several tool calls for one authorization check and
+        // one rate-limit hit, so it is refused rather than half-supported.
+        return rpc_error(
+            StatusCode::BAD_REQUEST,
+            Value::Null,
+            RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                "h4rn accepts one JSON-RPC message per request",
+            ),
+        );
+    }
+    match dispatch(&state, &session, value).await {
+        Some(response) => {
+            let mut http_response = json_response(response.body);
+            if let Some(session_id) = response.session_id
+                && let Ok(value) = session_id.parse()
+            {
+                http_response.headers_mut().insert("mcp-session-id", value);
             }
-            if responses.is_empty() {
-                (StatusCode::ACCEPTED, "").into_response()
-            } else {
-                json_response(Value::Array(responses))
-            }
+            http_response
         }
-        value => match dispatch(&state, &session, value).await {
-            Some(response) => {
-                let mut http_response = json_response(response.body);
-                if let Some(session_id) = response.session_id
-                    && let Ok(value) = session_id.parse()
-                {
-                    http_response.headers_mut().insert("mcp-session-id", value);
-                }
-                http_response
-            }
-            None => (StatusCode::ACCEPTED, "").into_response(),
-        },
+        None => (StatusCode::ACCEPTED, "").into_response(),
     }
 }
 

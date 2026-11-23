@@ -1400,6 +1400,14 @@ impl McpHub {
                     duration_ms: started.elapsed().as_millis() as u64,
                 }))
             }
+            // Outside-agent sign-ins are a daemon-level decision (they grant an
+            // OAuth token), so the hub never answers them; the daemon's MCP
+            // service handles both before the request reaches this match.
+            McpRequest::ListOutsideAgentSignIns | McpRequest::RespondOutsideAgentSignIn { .. } => {
+                Err(HubError::Invalid(
+                    "outside-agent sign-ins are answered by the daemon, not the hub".into(),
+                ))
+            }
         }
     }
 

@@ -9,9 +9,12 @@
 import { useSyncExternalStore } from "react";
 import type {
   AgentToolSettings,
+  ApprovalDecision,
   ClientRequest,
   HarnessKind,
   McpEnabledMatrix,
+  OutsideAgentLevel,
+  OutsideAgentSignIn,
   OutsideAgentView,
   ProtoError,
   ResponseBody,
@@ -21,6 +24,8 @@ import { getClient, pushToast } from "@/lib/store/appStore";
 
 export type AccessState = {
   agents: OutsideAgentView[];
+  /** Sign-ins waiting for the person's decision inside h4rn. */
+  signIns: OutsideAgentSignIn[];
   /** Streamable-HTTP endpoint an outside agent connects to. */
   mcpUrl: string;
   settings: AgentToolSettings | null;
@@ -33,6 +38,7 @@ export type AccessState = {
 
 const initialState: AccessState = {
   agents: [],
+  signIns: [],
   mcpUrl: "",
   settings: null,
   loading: false,
@@ -88,24 +94,82 @@ function applyAgents(response: ResponseBody): boolean {
   return true;
 }
 
+function applySignIns(response: ResponseBody): boolean {
+  if (response.type !== "outside_agent_sign_ins") return false;
+  set({ signIns: response.sign_ins });
+  return true;
+}
+
 function applySettings(response: ResponseBody): boolean {
   if (response.type !== "agent_tools") return false;
   set({ settings: response.settings });
   return true;
 }
 
-/** Reads the connected agents, the MCP URL and the tool switches. */
+/** Reads the connected agents, the waiting sign-ins, the MCP URL and the tools. */
 export async function loadAccess(quiet = false): Promise<void> {
   set(quiet ? { refreshing: true } : { loading: true, error: null });
   try {
     const agents = await request({ type: "mcp", request: { type: "list_outside_agents" } });
     applyAgents(agents);
+    const signIns = await request({
+      type: "mcp",
+      request: { type: "list_outside_agent_sign_ins" },
+    });
+    applySignIns(signIns);
     const settings = await request({ type: "mcp", request: { type: "agent_tools" } });
     applySettings(settings);
     set({ loading: false, refreshing: false });
   } catch (error) {
     const proto = toProtoError(error);
     set({ loading: false, refreshing: false, error: proto });
+  }
+}
+
+/** Answers one waiting sign-in. Nothing is granted until a level is chosen. */
+export async function respondSignIn(
+  signIn: OutsideAgentSignIn,
+  decision: ApprovalDecision,
+  level: OutsideAgentLevel | null,
+): Promise<boolean> {
+  const before = state.signIns;
+  set({
+    signIns: before.filter((row) => row.request_id !== signIn.request_id),
+    pending: { ...state.pending, [signIn.request_id]: true },
+  });
+  try {
+    if (decision === "approve" && !level) {
+      throw new Error("choose read-only, supervised or full access");
+    }
+    await request({
+      type: "mcp",
+      request: {
+        type: "respond_outside_agent_sign_in",
+        request_id: signIn.request_id,
+        decision,
+        level: decision === "approve" ? level : null,
+      },
+    });
+    if (decision === "approve" && level) {
+      pushToast({
+        title: `${signIn.client_name} is connected.`,
+        description: `${levelLabel(level)}: ${levelDescription(level)}`,
+      });
+    }
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    set({ signIns: before });
+    pushToast({
+      title: `Couldn't answer ${signIn.client_name}.`,
+      description: `${proto.message}${proto.hint ? ` ${proto.hint}` : ""}`,
+      variant: "error",
+    });
+    return false;
+  } finally {
+    const pending = { ...state.pending };
+    delete pending[signIn.request_id];
+    set({ pending });
   }
 }
 
@@ -194,7 +258,7 @@ export async function setAgentToolsEnabled(
 }
 
 /** Human words for a granted level. */
-export function levelLabel(level: OutsideAgentView["level"]): string {
+export function levelLabel(level: OutsideAgentLevel): string {
   switch (level) {
     case "read_only":
       return "Read only";
@@ -206,7 +270,7 @@ export function levelLabel(level: OutsideAgentView["level"]): string {
 }
 
 /** What the level lets an agent do, in one line. */
-export function levelDescription(level: OutsideAgentView["level"]): string {
+export function levelDescription(level: OutsideAgentLevel): string {
   switch (level) {
     case "read_only":
       return "Reads projects, threads and providers; nothing changes.";

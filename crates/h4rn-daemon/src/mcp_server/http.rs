@@ -1,25 +1,30 @@
 //! HTTP routes for outside agents: OAuth, discovery and the MCP endpoint.
 //!
-//! The approval page is served by the daemon itself because the browser that
-//! opens it belongs to the outside client, not to the h4rn app. It is plain,
-//! self-contained HTML: the person sees the client's name, where the code will
-//! go, and the three levels before anything is granted.
+//! The authorize page is served by the daemon because the browser that opens it
+//! belongs to the outside client, not to the h4rn app. It can show who is asking
+//! and where the code would go, but it cannot grant anything: the browser has no
+//! h4rn session. The person answers the request inside h4rn (Settings →
+//! Sharing & access), and this page then follows the answer to the callback.
+//!
+//! Every route here is reachable only on the loopback listener, and every
+//! request is checked against a loopback `Host` (DNS rebinding) and a same-site
+//! `Origin` (cross-site form posts).
 
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
-use h4rn_protocol::OutsideAgentLevel;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::oauth::OAuthError;
 use super::outside::OutsideAgents;
-use super::url::html_escape;
+use super::url::{html_escape, origin_of};
 
 /// Builds the outside-agent router.
 pub fn router(service: Arc<OutsideAgents>) -> Router {
@@ -34,14 +39,103 @@ pub fn router(service: Arc<OutsideAgents>) -> Router {
         )
         .route("/oauth/register", post(register))
         .route("/oauth/authorize", get(authorize))
-        .route("/oauth/approve", post(approve))
+        .route("/oauth/authorize/pending", get(authorize_pending))
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
         .route(
             "/mcp/outside",
             post(mcp_post).get(mcp_get).delete(mcp_delete),
         )
+        .layer(axum::middleware::from_fn(loopback_guard))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&service),
+            aggregate_guard,
+        ))
         .with_state(service)
+}
+
+/// The host names a loopback listener answers to.
+const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+
+fn host_is_loopback(value: &str) -> bool {
+    let value = value.trim();
+    // `[::1]:47800` and `127.0.0.1:47800`; a bare name has no port.
+    let name = if let Some(rest) = value.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        value.split(':').next().unwrap_or(value)
+    };
+    LOOPBACK_HOSTS
+        .iter()
+        .any(|host| name.eq_ignore_ascii_case(host))
+}
+
+fn origin_is_loopback(value: &str) -> bool {
+    origin_of(value).is_some_and(|origin| {
+        let rest = origin
+            .split_once("://")
+            .map(|(_, rest)| rest.to_owned())
+            .unwrap_or(origin);
+        host_is_loopback(&rest)
+    })
+}
+
+/// Refuses a request that did not come from this machine's own page.
+///
+/// A DNS-rebinding page reaches the loopback port with its own `Host`; a
+/// cross-site form post arrives with another site's `Origin` or
+/// `Sec-Fetch-Site: cross-site`. Both are refused before a handler runs, so a
+/// page the person happens to visit cannot register a client or spend a code.
+pub async fn loopback_guard(request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if !host.is_some_and(host_is_loopback) {
+        return refused("this endpoint is only reachable through h4rn's loopback address");
+    }
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        && !origin_is_loopback(origin)
+    {
+        return refused("a request from another site cannot change anything in h4rn");
+    }
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        && site.eq_ignore_ascii_case("cross-site")
+    {
+        return refused("a request from another site cannot change anything in h4rn");
+    }
+    next.run(request).await
+}
+
+fn refused(message: &str) -> Response {
+    no_store(
+        (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            message.to_owned(),
+        )
+            .into_response(),
+    )
+}
+
+/// Caps the unauthenticated mutation endpoints before their body is parsed.
+async fn aggregate_guard(
+    State(service): State<Arc<OutsideAgents>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if matches!(
+        request.uri().path(),
+        "/oauth/register" | "/oauth/token" | "/oauth/revoke"
+    ) && let Err(seconds) = service.check_aggregate()
+    {
+        return rate_limited(seconds);
+    }
+    next.run(request).await
 }
 
 fn no_store(mut response: Response) -> Response {
@@ -104,6 +198,7 @@ async fn authorization_server_metadata(State(service): State<Arc<OutsideAgents>>
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": ["read", "supervised", "full"],
+            "resource_indicators_supported": true,
         }))
         .into_response(),
     )
@@ -137,9 +232,6 @@ async fn register(
     State(service): State<Arc<OutsideAgents>>,
     Json(body): Json<RegisterBody>,
 ) -> Response {
-    if let Err(seconds) = service.check_limit("register") {
-        return rate_limited(seconds);
-    }
     match service
         .store()
         .register_client(body.client_name.as_deref(), &body.redirect_uris)
@@ -174,6 +266,28 @@ struct AuthorizeQuery {
     code_challenge_method: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+}
+
+/// Why the client's `resource` is not one this daemon serves.
+fn check_resource(
+    service: &OutsideAgents,
+    resource: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(resource) = resource else {
+        return Ok(None);
+    };
+    let mcp = service.mcp_url();
+    if mcp.is_empty() {
+        return Ok(None);
+    }
+    if resource.trim() != mcp {
+        return Err(format!(
+            "`resource` must name this daemon's MCP endpoint ({mcp})"
+        ));
+    }
+    Ok(Some(mcp))
 }
 
 async fn authorize(
@@ -183,7 +297,11 @@ async fn authorize(
     let Some(client_id) = query.client_id.as_deref() else {
         return bad_request("client_id is required");
     };
-    if let Err(seconds) = service.check_limit(&format!("authorize:{client_id}")) {
+    // Per-key buckets exist only for registered clients: an unknown id cannot
+    // allocate one, and the aggregate limiter already covered this request.
+    if service.store().client_exists(client_id)
+        && let Err(seconds) = service.check_limit(&format!("authorize:{client_id}"))
+    {
         return rate_limited(seconds);
     }
     if query.response_type.as_deref() != Some("code") {
@@ -198,11 +316,16 @@ async fn authorize(
     let Some(challenge) = query.code_challenge.as_deref() else {
         return bad_request("code_challenge is required");
     };
+    let resource = match check_resource(&service, query.resource.as_deref()) {
+        Ok(resource) => resource,
+        Err(message) => return oauth_error(OAuthError::InvalidTarget(message)),
+    };
     let pending = match service.store().begin_authorization(
         client_id,
         redirect_uri,
         query.state.as_deref(),
         challenge,
+        resource.as_deref(),
     ) {
         Ok(pending) => pending,
         Err(error) => return bad_request(&error.description()),
@@ -210,13 +333,51 @@ async fn authorize(
     let Some(client) = service.store().client_name(client_id) else {
         return bad_request("the client is not registered");
     };
-    let requested_scope = query.scope.as_deref().unwrap_or("");
     page_response(approval_page(
         &client,
         redirect_uri,
         &pending.id,
-        requested_scope,
+        query.scope.as_deref(),
     ))
+}
+
+/// Follows the person's answer once they have given one.
+///
+/// The browser navigates here on its own (a link or the page's refresh), which
+/// is what keeps the approval form out of the cross-origin redirect: no form
+/// ever targets the client's callback.
+async fn authorize_pending(
+    State(service): State<Arc<OutsideAgents>>,
+    Query(query): Query<PendingQuery>,
+) -> Response {
+    let Some(request) = query.request.as_deref() else {
+        return bad_request("request is required");
+    };
+    match service.store().approval_outcome(request) {
+        Some(outcome) => no_store(Redirect::to(&outcome.location).into_response()),
+        None => match service.store().pending(request) {
+            Some(pending) => {
+                let client = service
+                    .store()
+                    .client_name(&pending.client_id)
+                    .unwrap_or_else(|| "An MCP client".into());
+                page_response(waiting_page(&client, &pending.redirect_uri, request))
+            }
+            None => no_store(
+                (
+                    StatusCode::GONE,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "this sign-in expired. Start it again from your MCP client.",
+                )
+                    .into_response(),
+            ),
+        },
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PendingQuery {
+    request: Option<String>,
 }
 
 fn page_response(html: String) -> Response {
@@ -248,36 +409,6 @@ fn bad_request(message: &str) -> Response {
 }
 
 #[derive(Debug, Deserialize)]
-struct ApproveForm {
-    request: String,
-    decision: String,
-    #[serde(default)]
-    level: Option<String>,
-}
-
-async fn approve(
-    State(service): State<Arc<OutsideAgents>>,
-    Form(form): Form<ApproveForm>,
-) -> Response {
-    if let Err(seconds) = service.check_limit(&format!("approve:{}", form.request)) {
-        return rate_limited(seconds);
-    }
-    if form.decision == "deny" {
-        return match service.store().deny(&form.request) {
-            Ok(redirect) => Redirect::to(&redirect.location).into_response(),
-            Err(error) => bad_request(&error.description()),
-        };
-    }
-    let Some(level) = form.level.as_deref().and_then(OutsideAgentLevel::parse) else {
-        return bad_request("choose read-only, supervised or full access");
-    };
-    match service.store().approve(&form.request, level) {
-        Ok(redirect) => Redirect::to(&redirect.location).into_response(),
-        Err(error) => bad_request(&error.description()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
 struct TokenForm {
     grant_type: Option<String>,
     #[serde(default)]
@@ -290,33 +421,38 @@ struct TokenForm {
     code_verifier: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
 }
 
 async fn token(State(service): State<Arc<OutsideAgents>>, Form(form): Form<TokenForm>) -> Response {
-    let key = format!("token:{}", form.client_id.as_deref().unwrap_or("unknown"));
-    if let Err(seconds) = service.check_limit(&key) {
-        return rate_limited(seconds);
-    }
     let Some(client_id) = form.client_id.as_deref() else {
         return oauth_error(OAuthError::InvalidClient);
     };
+    // The aggregate limiter already covered this call; this bucket exists only
+    // for a client the daemon has registered.
+    if service.store().client_exists(client_id)
+        && let Err(seconds) = service.check_limit(&format!("token:{client_id}"))
+    {
+        return rate_limited(seconds);
+    }
     let pair = match form.grant_type.as_deref() {
         Some("authorization_code") => {
-            let (Some(code), Some(verifier), Some(redirect_uri)) = (
-                form.code.as_deref(),
-                form.code_verifier.as_deref(),
-                form.redirect_uri.as_deref(),
-            ) else {
+            let (Some(code), Some(verifier)) =
+                (form.code.as_deref(), form.code_verifier.as_deref())
+            else {
                 return oauth_error(OAuthError::InvalidRequest(
-                    "authorization_code needs code, code_verifier and redirect_uri".into(),
+                    "authorization_code needs code and code_verifier".into(),
                 ));
             };
             service
                 .store()
-                .exchange_code(code, verifier, client_id, redirect_uri)
+                .exchange_code(code, verifier, client_id, form.redirect_uri.as_deref())
         }
         Some("refresh_token") => match form.refresh_token.as_deref() {
-            Some(token) => service.store().refresh(token, client_id),
+            Some(token) => service
+                .store()
+                .refresh(token, client_id, form.resource.as_deref()),
             None => {
                 return oauth_error(OAuthError::InvalidRequest(
                     "refresh_token grant needs refresh_token".into(),
@@ -343,6 +479,7 @@ async fn token(State(service): State<Arc<OutsideAgents>>, Form(form): Form<Token
                     "expires_in": pair.expires_in,
                     "refresh_token": pair.refresh_token,
                     "scope": pair.level.scope(),
+                    "resource": pair.resource,
                 })
                 .to_string(),
             )
@@ -364,9 +501,6 @@ async fn revoke(
     State(service): State<Arc<OutsideAgents>>,
     Form(form): Form<RevokeForm>,
 ) -> Response {
-    if let Err(seconds) = service.check_limit("revoke") {
-        return rate_limited(seconds);
-    }
     // RFC 7009: invalid tokens still get 200.
     let _ = service.store().revoke_token(&form.token);
     (
@@ -399,7 +533,7 @@ pub async fn outside_get(service: &OutsideAgents, headers: HeaderMap) -> Respons
         )
             .into_response();
     };
-    if service.store().verify_access(token).is_none() {
+    if service.verify_grant(token).is_none() {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -427,21 +561,7 @@ pub async fn outside_delete(service: &OutsideAgents, headers: HeaderMap) -> Resp
     (StatusCode::NO_CONTENT, "").into_response()
 }
 
-fn approval_page(
-    client_name: &str,
-    redirect_uri: &str,
-    request: &str,
-    requested_scope: &str,
-) -> String {
-    let name = html_escape(client_name);
-    let redirect = html_escape(redirect_uri);
-    let request = html_escape(request);
-    let scope = html_escape(requested_scope);
-    let checked_scope = match requested_scope {
-        "supervised" => "supervised",
-        "full" => "full_access",
-        _ => "read_only",
-    };
+fn page_shell(title: &str, refresh: Option<&str>, body: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -449,7 +569,8 @@ fn approval_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Connect {name} to h4rn</title>
+<title>{title}</title>
+{refresh}
 <style>
 :root {{ color-scheme: light dark; --paper:#f7f6f3; --graphite:#1c1c1a; --muted:#6b6a66; --hair:#e1dfda; --blue:#2563eb; --card:#ffffff; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --paper:#171715; --graphite:#f1efe9; --muted:#a3a19a; --hair:#302f2b; --card:#1f1f1c; }} }}
@@ -461,74 +582,85 @@ h1 {{ font-size: 1.5rem; line-height: 1.25; margin: 0 0 .5rem; font-weight: 600;
 .lead {{ margin: 0 0 .35rem; }}
 .where {{ color: var(--muted); font-size: 13px; margin: 0 0 1.75rem; overflow-wrap: anywhere; }}
 code {{ font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border:1px solid var(--hair); border-radius: 5px; padding: 1px 5px; }}
-fieldset {{ border: 0; margin: 0 0 1.5rem; padding: 0; display: grid; gap: .5rem; }}
-legend {{ color: var(--muted); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: .4rem; }}
-label.opt {{ display: grid; grid-template-columns: auto 1fr; gap: .75rem; align-items: start; background: var(--card); border: 1px solid var(--hair); border-radius: 8px; padding: .8rem .9rem; cursor: pointer; }}
-label.opt:has(input:checked) {{ border-color: var(--graphite); }}
-input[type=radio] {{ margin-top: .2rem; accent-color: var(--graphite); }}
-.t {{ font-weight: 550; }}
-.d {{ color: var(--muted); font-size: 13px; }}
-.actions {{ display: flex; align-items: center; gap: .6rem; margin-top: 1.5rem; }}
-.grow {{ flex: 1; }}
-button {{ font: inherit; border-radius: 7px; padding: .55rem .95rem; cursor: pointer; border: 1px solid var(--hair); }}
-button.primary {{ background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 550; }}
-button.secondary {{ background: transparent; color: var(--graphite); }}
+.step {{ background: var(--card); border: 1px solid var(--hair); border-radius: 8px; padding: .85rem .95rem; margin: 0 0 1rem; }}
+.step .t {{ font-weight: 550; }}
+.step .d {{ color: var(--muted); font-size: 13px; }}
 .note {{ color: var(--muted); font-size: 12.5px; margin-top: 2rem; border-top: 1px solid var(--hair); padding-top: 1rem; }}
+a {{ color: var(--blue); }}
 </style>
 </head>
 <body>
 <main>
-<p class="eyebrow">h4rn · Sharing &amp; access</p>
-<h1>Connect {name} to h4rn?</h1>
-<p class="lead"><strong>{name}</strong> is asking to work with h4rn on this machine.</p>
-<p class="where">After approval the browser returns to <code>{redirect}</code>{scope_note}.</p>
-<form method="post" action="/oauth/approve">
-<input type="hidden" name="request" value="{request}">
-<fieldset>
-<legend>What it may do</legend>
-<label class="opt">
-<input type="radio" name="level" value="read_only"{checked_read}>
-<span><span class="t">Read only</span><br><span class="d">List projects, threads and providers and models, and read a thread. It cannot change anything.</span></span>
-</label>
-<label class="opt">
-<input type="radio" name="level" value="supervised"{checked_supervised}>
-<span><span class="t">Supervised</span><br><span class="d">Read, and start or message threads. Every thread it starts or steers runs at approval-required.</span></span>
-</label>
-<label class="opt">
-<input type="radio" name="level" value="full_access"{checked_full}>
-<span><span class="t">Full access</span><br><span class="d">Read, start and message threads at the mode it asks for, including unattended runs.</span></span>
-</label>
-</fieldset>
-<div class="actions">
-<button class="secondary" type="submit" name="decision" value="deny">Deny</button>
-<span class="grow"></span>
-<button class="primary" type="submit" name="decision" value="approve">Approve</button>
-</div>
-</form>
-<p class="note">Only approve a sign-in you just started. Anyone who can open this page on this machine can approve it, and a code is returned only to the address above.</p>
+{body}
 </main>
 </body>
 </html>"#,
-        scope_note = if scope.is_empty() {
-            String::new()
-        } else {
-            format!(" with scope <code>{scope}</code>")
-        },
-        checked_read = if checked_scope == "read_only" {
-            " checked"
-        } else {
-            ""
-        },
-        checked_supervised = if checked_scope == "supervised" {
-            " checked"
-        } else {
-            ""
-        },
-        checked_full = if checked_scope == "full_access" {
-            " checked"
-        } else {
-            ""
-        },
+        title = html_escape(title),
+        refresh = refresh.unwrap_or(""),
+        body = body,
+    )
+}
+
+/// The page a client's browser lands on. It grants nothing; it explains.
+fn approval_page(
+    client_name: &str,
+    redirect_uri: &str,
+    request: &str,
+    scope: Option<&str>,
+) -> String {
+    let name = html_escape(client_name);
+    let origin = html_escape(&origin_of(redirect_uri).unwrap_or_else(|| redirect_uri.to_owned()));
+    let request = html_escape(request);
+    let scope_note = match scope.filter(|value| !value.is_empty()) {
+        Some(scope) => format!(
+            " It asked for the scope <code>{}</code>.",
+            html_escape(scope)
+        ),
+        None => String::new(),
+    };
+    page_shell(
+        &format!("Connect {client_name} to h4rn"),
+        Some(&format!(
+            r#"<meta http-equiv="refresh" content="2; url=/oauth/authorize/pending?request={}">"#,
+            html_escape(request.as_str())
+        )),
+        &format!(
+            r#"<p class="eyebrow">h4rn · Sharing &amp; access</p>
+<h1>Connect {name} to h4rn?</h1>
+<p class="lead"><strong>{name}</strong> is asking to work with h4rn on this machine. That name is
+unverified: the app chose it when it registered.</p>
+<p class="where">If you approve, this browser returns to <code>{origin}</code>.{scope_note}</p>
+<div class="step">
+<div class="t">Approve this sign-in in h4rn</div>
+<div class="d">Open h4rn → Settings → Sharing &amp; access. The request appears at the top, with the
+same callback, and nothing is granted until you pick a level there.</div>
+</div>
+<p class="where">This page refreshes itself. If nothing happens,
+<a href="/oauth/authorize/pending?request={request}">continue</a>.</p>
+<p class="note">Anyone who can reach h4rn on this machine still needs your h4rn session to approve.
+A client cannot approve itself.</p>"#
+        ),
+    )
+}
+
+/// The page shown while the request waits for the person.
+fn waiting_page(client_name: &str, redirect_uri: &str, request: &str) -> String {
+    let name = html_escape(client_name);
+    let origin = html_escape(&origin_of(redirect_uri).unwrap_or_else(|| redirect_uri.to_owned()));
+    let request = html_escape(request);
+    page_shell(
+        &format!("Waiting for h4rn to approve {client_name}"),
+        Some(&format!(
+            r#"<meta http-equiv="refresh" content="2; url=/oauth/authorize/pending?request={}">"#,
+            html_escape(request.as_str())
+        )),
+        &format!(
+            r#"<p class="eyebrow">h4rn · Sharing &amp; access</p>
+<h1>Waiting for h4rn</h1>
+<p class="lead">Approve <strong>{name}</strong> in h4rn → Settings → Sharing &amp; access. The
+browser returns to <code>{origin}</code> as soon as you do, or when you deny it.</p>
+<p class="where">Still waiting… <a href="/oauth/authorize/pending?request={request}">Check again</a></p>"#
+        ),
     )
 }
 
@@ -542,9 +674,37 @@ mod tests {
             "<script>alert(1)</script>",
             "http://localhost:1455/cb",
             "req-1",
-            "",
+            Some(""),
         );
         assert!(!page.contains("<script>alert(1)</script>"));
         assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn the_approval_page_shows_the_callback_origin_and_no_form() {
+        let page = approval_page("Claude Code", "http://localhost:1455/cb", "req-1", None);
+        assert!(page.contains("http://localhost:1455"));
+        assert!(!page.contains("<form"));
+        assert!(!page.contains("full_access"));
+        assert!(page.contains("unverified"));
+    }
+
+    #[test]
+    fn loopback_hosts_are_the_only_ones_admitted() {
+        assert!(host_is_loopback("127.0.0.1:47800"));
+        assert!(host_is_loopback("localhost:47800"));
+        assert!(host_is_loopback("[::1]:47800"));
+        assert!(host_is_loopback("localhost"));
+        assert!(!host_is_loopback("evil.example"));
+        assert!(!host_is_loopback("127.0.0.1.evil.example:47800"));
+        assert!(!host_is_loopback("192.168.1.5:47800"));
+    }
+
+    #[test]
+    fn loopback_origins_are_admitted_and_foreign_ones_are_not() {
+        assert!(origin_is_loopback("http://127.0.0.1:47800"));
+        assert!(origin_is_loopback("http://localhost:1455"));
+        assert!(!origin_is_loopback("https://evil.example"));
+        assert!(!origin_is_loopback("http://127.0.0.1.evil.example"));
     }
 }
