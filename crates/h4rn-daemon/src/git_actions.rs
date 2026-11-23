@@ -17,7 +17,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use h4rn_protocol::{
     GitChangeSet, GitCommitResult, GitOperation, GitPushResult, GitThreadStatus, ProtoError,
@@ -33,6 +33,14 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(180);
 /// Deadline for a push, including slow remotes.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(180);
+/// The whole budget for opening a pull request: the remote lookup, the push
+/// and the forge request. The dialog waits 240 s for the answer, so a request
+/// that follows this budget always reports before the client gives up.
+pub const OPEN_PR_BUDGET: Duration = Duration::from_secs(220);
+/// The pre-pull-request lookup may take at most this much of that budget.
+const PR_LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// The forge client's own request timeout, reserved inside the budget.
+const PR_FORGE_RESERVE: Duration = Duration::from_secs(30);
 /// Deadline for the reads that build model input.
 const INPUT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Longest commit message the daemon accepts.
@@ -49,6 +57,42 @@ const DIFF_STAT_MAX_CHARS: usize = 4_000;
 const RECENT_SUBJECTS: usize = 20;
 /// Longest recent subject kept.
 const SUBJECT_MAX_CHARS: usize = 120;
+
+/// One deadline shared by the lookup, the push and the forge request that
+/// open a pull request, so no step can push the whole request past the
+/// budget the client waits for.
+#[derive(Clone, Copy, Debug)]
+pub struct Deadline {
+    at: Instant,
+}
+
+impl Deadline {
+    /// A deadline `budget` from now.
+    pub fn after(budget: Duration) -> Self {
+        Self {
+            at: Instant::now() + budget,
+        }
+    }
+
+    /// Time left, never negative.
+    pub fn remaining(&self) -> Duration {
+        self.at.saturating_duration_since(Instant::now())
+    }
+
+    /// Time one step may use: its own cap, or what is left when that is less.
+    pub fn step(&self, cap: Duration) -> Duration {
+        cap.min(self.remaining())
+    }
+}
+
+/// What a pre-pull-request push may use: the budget left after the lookup cap
+/// and the forge reserve, and never what would eat the forge's own time.
+fn pr_push_budget(deadline: &Deadline) -> Duration {
+    let cap = OPEN_PR_BUDGET
+        .saturating_sub(PR_LOOKUP_TIMEOUT)
+        .saturating_sub(PR_FORGE_RESERVE);
+    cap.min(deadline.remaining().saturating_sub(PR_FORGE_RESERVE))
+}
 
 /// A git action failure at the daemon boundary.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -200,17 +244,29 @@ pub async fn pull_request_input(
 /// Pushes a branch before a pull request when the remote needs it.
 ///
 /// Nothing is pushed when the remote's own branch already points at `HEAD`.
-/// The remote is asked directly, so a stale remote-tracking ref cannot skip a
-/// needed push or hide one that moved. A missing branch is created on `remote`.
+/// The remote is asked directly, with the same dry-run push the real push
+/// would run, so a stale remote-tracking ref cannot skip a needed push or hide
+/// one that moved. A missing branch is created on `remote`.
 pub async fn push_for_pull_request(
     workspace: &Path,
     remote: &str,
     branch: &str,
 ) -> Result<bool, GitActionError> {
+    push_for_pull_request_until(workspace, remote, branch, Deadline::after(OPEN_PR_BUDGET)).await
+}
+
+/// [`push_for_pull_request`] inside a deadline shared with the forge request
+/// that follows it.
+pub async fn push_for_pull_request_until(
+    workspace: &Path,
+    remote: &str,
+    branch: &str,
+    deadline: Deadline,
+) -> Result<bool, GitActionError> {
     let workspace = workspace.to_path_buf();
     let remote = remote.to_owned();
     let branch = branch.to_owned();
-    blocking(move || push_for_pull_request_blocking(&workspace, &remote, &branch)).await
+    blocking(move || push_for_pull_request_blocking(&workspace, &remote, &branch, deadline)).await
 }
 
 /// Runs one blocking git action on the blocking pool.
@@ -612,34 +668,34 @@ fn remote_branch_head(workspace: &Path, remote: &str, branch: &str) -> Option<St
     .filter(|value| !value.is_empty())
 }
 
-/// The commit `<remote>/<branch>` points at on the remote itself.
+/// Whether the remote's own branch already points at `HEAD`.
 ///
 /// `refs/remotes/<remote>/<branch>` is only what the last fetch saw. A branch
 /// deleted on the forge keeps that ref until `fetch --prune`, so a decision
 /// made from it can skip the push a pull request needs; a ref that a fetch has
-/// not advanced can hide a remote that moved. Asking the remote costs one
-/// round trip and sees the truth. The URL is the one a push uses, which is also
-/// what a fork or a test with a separate push URL needs.
-fn remote_branch_head_on_remote(
+/// not advanced can hide a remote that moved. A dry-run push asks the exact
+/// target the real push will use — the named remote, its `pushurl` and any
+/// `insteadOf` rewrite resolved once, the same way `git push` resolves them —
+/// so it cannot query a different repository than the one about to be written.
+/// It also answers through [`classify_push_error`], so a rejected credential is
+/// reported as one instead of as raw git output.
+fn remote_is_up_to_date(
     workspace: &Path,
     remote: &str,
     branch: &str,
-) -> Result<Option<String>, GitActionError> {
-    let url = git_text(
-        workspace,
-        &["remote", "get-url", "--push", "--", remote],
-        STATUS_TIMEOUT,
-    )?;
-    let reference = format!("refs/heads/{branch}");
-    let output = git_text(
-        workspace,
-        &["ls-remote", "--heads", "--", url.trim(), &reference],
-        PUSH_TIMEOUT,
-    )?;
-    Ok(output.lines().find_map(|line| {
-        let mut parts = line.split_whitespace();
-        let sha = parts.next()?;
-        (parts.next() == Some(reference.as_str())).then(|| sha.to_owned())
+    limit: Duration,
+) -> Result<bool, GitActionError> {
+    let args = dry_run_push_args(branch, remote);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = match git::run_with_timeout(workspace, &args, limit) {
+        Ok(output) => output,
+        Err(error) => return Err(classify_push_error(&error)),
+    };
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    // Porcelain prints `<flag>\t<from>:<to>\t<summary>`; `=` means up to date.
+    Ok(output.lines().any(|line| {
+        let mut fields = line.split('\t');
+        fields.next() == Some("=") && fields.next() == Some(refspec.as_str())
     }))
 }
 
@@ -648,18 +704,31 @@ fn remote_branch_head_on_remote(
 /// The refspec has no `+`, and it is on the command line, so neither
 /// `push.default` nor `remote.<name>.push` can widen or force it.
 fn push_args(branch: &str, remote: &str, set_upstream: bool) -> Vec<String> {
-    let mut args = vec![
+    let mut args = push_command_args(branch, remote);
+    if set_upstream {
+        args.insert(3, "-u".to_owned());
+    }
+    args
+}
+
+/// The same push as a dry run, in porcelain form, for the pre-PR decision.
+fn dry_run_push_args(branch: &str, remote: &str) -> Vec<String> {
+    let mut args = push_command_args(branch, remote);
+    args.insert(3, "--dry-run".to_owned());
+    args.insert(4, "--porcelain".to_owned());
+    args
+}
+
+/// The push every caller shares: config hardening, the remote and the refspec.
+fn push_command_args(branch: &str, remote: &str) -> Vec<String> {
+    vec![
         "-c".to_owned(),
         "push.default=nothing".to_owned(),
         "push".to_owned(),
-    ];
-    if set_upstream {
-        args.push("-u".to_owned());
-    }
-    args.push("--".to_owned());
-    args.push(remote.to_owned());
-    args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
-    args
+        "--".to_owned(),
+        remote.to_owned(),
+        format!("refs/heads/{branch}:refs/heads/{branch}"),
+    ]
 }
 
 /// Pushes the current branch, blocking.
@@ -690,8 +759,13 @@ fn push_blocking(workspace: &Path, set_upstream: bool) -> Result<GitPushResult, 
 
 /// Runs one push and turns an auth or rejected answer into an honest error.
 fn run_push(workspace: &Path, args: &[String]) -> Result<(), GitActionError> {
+    run_push_with(workspace, args, PUSH_TIMEOUT)
+}
+
+/// [`run_push`] with the time that step is allowed inside a shared budget.
+fn run_push_with(workspace: &Path, args: &[String], limit: Duration) -> Result<(), GitActionError> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match git::run_with_timeout(workspace, &args, PUSH_TIMEOUT) {
+    match git::run_with_timeout(workspace, &args, limit) {
         Ok(_) => Ok(()),
         Err(error) => Err(classify_push_error(&error)),
     }
@@ -699,14 +773,16 @@ fn run_push(workspace: &Path, args: &[String]) -> Result<(), GitActionError> {
 
 /// Turns git's push stderr into the class the person needs to act on.
 ///
-/// The text is redacted first: git can echo a credential-shaped URL back, and
-/// an error is not a place for a token.
+/// The text is redacted first: git can echo a credential-shaped URL back, both
+/// a token in the URL and the userinfo or query that carried it, and an error
+/// is not a place for a credential.
 fn classify_push_error(error: &str) -> GitActionError {
-    let error = h4rn_forge::redact(error);
+    let error = h4rn_forge::redact(&redact_url_credentials(error));
     let lowered = error.to_ascii_lowercase();
     let detail = tail(&error);
     if [
         "authentication failed",
+        "authentication required",
         "could not read username",
         "could not read password",
         "permission denied",
@@ -714,6 +790,10 @@ fn classify_push_error(error: &str) -> GitActionError {
         "invalid username or password",
         "terminal prompts disabled",
         "support for password authentication was removed",
+        "returned error: 401",
+        "returned error: 403",
+        "403 forbidden",
+        "401 unauthorized",
     ]
     .iter()
     .any(|needle| lowered.contains(needle))
@@ -734,15 +814,55 @@ fn classify_push_error(error: &str) -> GitActionError {
     GitActionError::Git(format!("git push failed: {detail}"))
 }
 
+/// Removes the credential-carrying parts of every URL in `text`.
+///
+/// Git echoes a failing URL whole, and a push URL can carry a credential in
+/// its userinfo (`user:token@host`) or in its query (`?access_token=…`). The
+/// token shapes [`h4rn_forge::redact`] knows are covered there; this covers
+/// credentials with no recognisable shape by dropping the userinfo and the
+/// whole query, which never carries anything the message needs.
+fn redact_url_credentials(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find("://") {
+        let scheme_end = index + 3;
+        output.push_str(&rest[..scheme_end]);
+        let after = &rest[scheme_end..];
+        let end = after
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, '\'' | '"' | ')' | ']' | '}' | '>'))
+            .unwrap_or(after.len());
+        output.push_str(&redact_one_url(&after[..end]));
+        rest = &after[end..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// One URL without its userinfo and query.
+fn redact_one_url(url: &str) -> String {
+    let authority_end = url.find(['/', '?', '#']).unwrap_or(url.len());
+    let (prefix, rest) = match url[..authority_end].rfind('@') {
+        Some(at) => ("[redacted]@", &url[at + 1..]),
+        None => ("", url),
+    };
+    let rest = match rest.find('?') {
+        Some(query) => format!("{}?[redacted]", &rest[..query]),
+        None => rest.to_owned(),
+    };
+    format!("{prefix}{rest}")
+}
+
 /// Pushes a branch before a PR, blocking; returns whether it pushed.
 ///
-/// The decision reads `<remote>/<branch>`, not the branch's configured
-/// upstream, so a branch that tracks `origin/main` is still published as its
-/// own name on the same remote.
+/// The decision is a dry-run push against the named remote, not the branch's
+/// configured upstream, so a branch that tracks `origin/main` is still
+/// published as its own name on the same remote — and the target is resolved
+/// exactly as the real push resolves it.
 fn push_for_pull_request_blocking(
     workspace: &Path,
     remote: &str,
     branch: &str,
+    deadline: Deadline,
 ) -> Result<bool, GitActionError> {
     validate_branch(branch)?;
     validate_remote(remote)?;
@@ -756,13 +876,16 @@ fn push_for_pull_request_blocking(
     }
     // Compare the remote's own answer with `HEAD`, not the local tracking ref:
     // a stale ref can name a branch that was deleted, or miss one that moved.
-    let head = git_text(workspace, &["rev-parse", "HEAD"], STATUS_TIMEOUT)?;
-    if remote_branch_head_on_remote(workspace, remote, branch)?.as_deref() == Some(head.trim()) {
+    if remote_is_up_to_date(workspace, remote, branch, deadline.step(PR_LOOKUP_TIMEOUT))? {
         return Ok(false);
     }
     let target = format!("{remote}/{branch}");
     let set_upstream = status.upstream.as_deref() != Some(target.as_str());
-    run_push(workspace, &push_args(branch, remote, set_upstream))?;
+    run_push_with(
+        workspace,
+        &push_args(branch, remote, set_upstream),
+        pr_push_budget(&deadline),
+    )?;
     Ok(true)
 }
 

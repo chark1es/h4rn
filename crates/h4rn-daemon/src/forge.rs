@@ -947,7 +947,11 @@ impl ForgeService {
         let branch = crate::fs::git::branch(workspace).ok_or_else(|| {
             ForgeError::Local("the workspace has a detached HEAD; check out a branch".into())
         })?;
-        crate::git_actions::push_for_pull_request(workspace, remote, &branch).await?;
+        // One budget for the lookup, the push and the forge request, so the
+        // whole open never outlives the dialog's wait (see OPEN_PR_BUDGET).
+        let deadline = crate::git_actions::Deadline::after(crate::git_actions::OPEN_PR_BUDGET);
+        crate::git_actions::push_for_pull_request_until(workspace, remote, &branch, deadline)
+            .await?;
         client
             .open_pr(
                 &repo,

@@ -928,3 +928,145 @@ fn a_path_is_kept_verbatim() {
     );
     assert!(validate_path(&workspace, "src/../with space.rs").is_err());
 }
+
+/// A push URL may carry a credential in its query. Git echoes the whole URL
+/// when the remote answers 403, so neither the lookup nor the push may pass
+/// that text on, and the failure is a credential problem, not an internal one.
+#[tokio::test]
+async fn a_credential_in_the_push_url_never_reaches_the_client() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    // Built at runtime so no credential-shaped literal lives in the tree.
+    let credential = format!("{}{}", "fake", "credential-4f9c");
+    let repo = Repo::new();
+    let url = format!("{}/repo.git?access_token={credential}", server.uri());
+    repo.git(&["remote", "add", "origin", &url]);
+
+    let error = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect_err("403");
+    assert!(
+        matches!(error, GitActionError::Unauthorized(_)),
+        "{error:?}"
+    );
+    let shown = error.to_string();
+    assert!(
+        !shown.contains(&credential),
+        "the credential is removed: {shown}"
+    );
+    assert!(
+        !shown.contains("access_token"),
+        "the query is removed: {shown}"
+    );
+    assert!(shown.contains("[redacted]"), "{shown}");
+}
+
+/// The lookup must ask the repository the push will write. `get-url --push`
+/// expands `insteadOf` once, and passing that result to `ls-remote` can expand
+/// a second rule and query another repository. A dry-run push resolves the
+/// push URL exactly once, so it sees the real target.
+#[tokio::test]
+async fn the_lookup_asks_the_actual_push_target() {
+    let repo = Repo::new();
+    let real = Bare::new();
+    let decoy = Bare::new();
+    repo.git(&["remote", "add", "origin", decoy.path().to_str().unwrap()]);
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.write("feature.txt", "first\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "First feature"]);
+    // The real target already has the first commit; the decoy will get the
+    // second one only, and the local tracking ref will claim the second.
+    repo.git(&[
+        "push",
+        real.path().to_str().unwrap(),
+        "refs/heads/feature/widget:refs/heads/feature/widget",
+    ]);
+    repo.write("feature.txt", "second\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Second feature"]);
+    let head = repo.head();
+    repo.git(&["push", "origin", "feature/widget"]);
+    repo.git(&["update-ref", "refs/remotes/origin/feature/widget", &head]);
+
+    // The push URL is one rewrite away from the real target, and the expanded
+    // path is another rewrite away from the decoy.
+    let real_path = real.path().to_str().unwrap();
+    let decoy_path = decoy.path().to_str().unwrap();
+    repo.git(&["config", "remote.origin.pushurl", "h4rn-push:"]);
+    repo.git(&[
+        "config",
+        &format!("url.{real_path}.insteadOf"),
+        "h4rn-push:",
+    ]);
+    repo.git(&["config", &format!("url.{decoy_path}.insteadOf"), real_path]);
+    assert_eq!(
+        repo.git(&["remote", "get-url", "--push", "origin"]),
+        real_path,
+        "the expanded push URL is the real target"
+    );
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "feature/widget")
+        .await
+        .expect("push");
+    assert!(pushed, "the real target is behind, so the branch is pushed");
+    assert_eq!(
+        bare_head(real.path(), "feature/widget"),
+        head,
+        "the push went to the repository the push URL names"
+    );
+    assert_eq!(
+        bare_head(decoy.path(), "feature/widget"),
+        head,
+        "the decoy is untouched here"
+    );
+}
+
+/// The lookup, the push and the forge request share one budget that is
+/// shorter than the dialog waits, and no step can outlive it.
+#[test]
+fn the_open_pull_request_budget_fits_inside_the_client_wait() {
+    let deadline = Deadline::after(OPEN_PR_BUDGET);
+    assert!(deadline.remaining() <= OPEN_PR_BUDGET);
+    assert_eq!(deadline.step(PR_LOOKUP_TIMEOUT), PR_LOOKUP_TIMEOUT);
+    assert_eq!(pr_push_budget(&deadline), Duration::from_secs(160));
+    assert_eq!(
+        PR_LOOKUP_TIMEOUT + pr_push_budget(&deadline) + PR_FORGE_RESERVE,
+        OPEN_PR_BUDGET,
+        "lookup, push and forge request fill one budget"
+    );
+    assert!(
+        OPEN_PR_BUDGET < Duration::from_secs(240),
+        "the daemon answers before the dialog stops waiting"
+    );
+
+    // No step may run past the deadline, even a generous cap.
+    let expired = Deadline::after(Duration::ZERO);
+    assert_eq!(expired.step(PUSH_TIMEOUT), Duration::ZERO);
+    assert_eq!(pr_push_budget(&expired), Duration::ZERO);
+}
+
+/// A credential with no recognisable token shape is still removed from an
+/// echoed URL: both the userinfo and the query can carry one.
+#[test]
+fn a_plain_credential_in_a_url_is_redacted() {
+    let credential = format!("{}{}", "plain", "secret-2b7e");
+    let message = format!(
+        "fatal: unable to access 'https://user:{credential}@example.invalid/acme/widget.git?token={credential}': The requested URL returned error: 403"
+    );
+    let error = classify_push_error(&message);
+    assert!(
+        matches!(error, GitActionError::Unauthorized(_)),
+        "{error:?}"
+    );
+    let shown = error.to_string();
+    assert!(!shown.contains(&credential), "{shown}");
+    assert!(!shown.contains("token="), "{shown}");
+    assert!(shown.contains("[redacted]@"), "{shown}");
+}

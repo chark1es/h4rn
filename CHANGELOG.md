@@ -424,12 +424,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 - **Commit, push and pull request follow what git and the forge really say.** A
   branch deleted on the forge no longer skips the push a pull request needs just
-  because the local remote-tracking ref is stale: the daemon asks the remote
-  which commit its branch points at. A path-limited commit message describes the
-  working-tree content `--only` will record, including an edit that was never
-  staged. A push result names the remote branch it wrote (`remote_branch`) and no
+  because the local remote-tracking ref is stale: the daemon asks the remote with
+  the same dry-run push the real push will run, so a separate `pushurl` or an
+  `insteadOf` rewrite cannot make it check a different repository. A failing
+  lookup is classified and redacted like a push, so a 403 that echoes a
+  credential shows "sign in to the git remote" without the credential. A
+  path-limited commit message describes the working-tree content `--only` will
+  record, including an edit that was never staged. A push result names the remote
+  branch it wrote (still sent as `upstream`, so older clients read it) and no
   longer claims the branch's tracking upstream changed when `set_upstream` was
-  false. See [docs/git-actions.md](docs/git-actions.md).
+  false. Opening a pull request gives the lookup, the push and the forge call one
+  220-second budget, inside the dialog's 240-second wait. See
+  [docs/git-actions.md](docs/git-actions.md).
 - **Thread settings always describe the session that will run the next turn.** The model list a
   Codex session reports survives the session ending, so an idle thread still offers the models its
   CLI really has (and a new Codex thread starts on the first of them, not on a static default the

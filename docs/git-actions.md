@@ -49,16 +49,20 @@ remote). It always names one non-forced refspec,
 `refs/heads/<branch>:refs/heads/<branch>`, so `push.default=matching` cannot move
 other branches and a `remote.<name>.push` beginning with `+` cannot force-update
 anything. A branch without one gets `origin/<branch>` created, because the
-panel's button always asks for it. The decision to push reads
-`<remote>/<branch>`, not whatever upstream a branch happens to track (the
-panel's ahead/behind counts still follow the branch's tracking upstream): a
-branch that tracks `origin/main` is still published as `origin/<branch>`, and a
-fork with two remotes pushes to `origin`. The push result names the remote
-branch it wrote (`remote_branch`); the branch's tracking upstream changes only
-when the request asked for it (`set_upstream`). A push is **never forced**: when
-the remote has commits the branch does not, the panel says so and asks you to
-pull or rebase. A rejected credential is reported as a credential problem, not a
-generic failure, and any credential-shaped text git prints is redacted.
+panel's button always asks for it. The decision to push is a dry run of that
+same push against the named remote, which resolves its `pushurl` and any
+`insteadOf` rewrite exactly as the real push does; it never reads
+`<remote>/<branch>` or whatever upstream a branch happens to track (the panel's
+ahead/behind counts still follow the branch's tracking upstream): a branch that
+tracks `origin/main` is still published as `origin/<branch>`, and a fork with
+two remotes pushes to `origin`. The push result names the remote branch it
+wrote (sent as `upstream`, the protocol 1 key, so an older client still reads
+it); the branch's tracking upstream changes only when the request asked for it
+(`set_upstream`). A push is **never forced**: when the remote has commits the
+branch does not, the panel says so and asks you to pull or rebase. A rejected
+credential is reported as a credential problem, not a generic failure, and any
+credential-shaped text git prints — including the userinfo or query of an
+echoed URL — is redacted.
 
 ## Pull request
 
@@ -69,18 +73,22 @@ is left empty and the panel asks you to name the target rather than guessing
 `main`. **Generate** fills the title and body and does nothing else.
 
 The daemon asks the remote which commit its branch points at, then pushes first
-when `<remote>/<branch>` is missing or does not name the local `HEAD`. It does
-not trust the local remote-tracking ref for that: a branch deleted on the forge
-leaves a stale `refs/remotes/<remote>/<branch>` until a prune, and the pull
-request would otherwise name a head branch that no longer exists. Then it asks
-the forge to open the request. On GitHub, Bitbucket and Azure DevOps the draft
-flag travels in its own field; GitLab and Gitea have no such field on the create
-request and mark a draft with a `Draft:` or `WIP:` title prefix (a title that
-already carries one is sent as it is). The
-open request waits as long as the push may take, and the dialog cannot submit
-twice. A PR opened this way is linked to its thread, so the header badge, the PR
-page and a watch all find it. Opening a request is never done silently from
-Generate.
+when `<remote>/<branch>` is missing or does not name the local `HEAD`. The
+question is a dry-run push of the exact refspec and remote the real push will
+use, so a separate `pushurl` or an `insteadOf` rewrite cannot make the check ask
+a different repository, and it does not trust the local remote-tracking ref: a
+branch deleted on the forge leaves a stale `refs/remotes/<remote>/<branch>`
+until a prune, and the pull request would otherwise name a head branch that no
+longer exists. Then it asks the forge to open the request. On GitHub, Bitbucket
+and Azure DevOps the draft flag travels in its own field; GitLab and Gitea have
+no such field on the create request and mark a draft with a `Draft:` or `WIP:`
+title prefix (a title that already carries one is sent as it is). The lookup,
+the push and the forge call share one 220-second budget — the lookup may use at
+most 30 seconds and the push at most 160, leaving the forge client's 30-second
+timeout — so the whole request answers within the dialog's 240-second wait. The
+dialog cannot submit twice. A PR opened this way is linked to its thread, so the
+header badge, the PR page and a watch all find it. Opening a request is never
+done silently from Generate.
 
 ## Generated messages
 

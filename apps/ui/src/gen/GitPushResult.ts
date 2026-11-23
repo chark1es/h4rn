@@ -14,8 +14,13 @@ branch: string,
  *
  * This is the push target, not the branch's tracking upstream: the
  * upstream changes only when the request asked to set it.
+ *
+ * It travels as `upstream`, the key protocol version 1 has always used,
+ * so a client built before the rename keeps reading it and a newer client
+ * still parses a reply from an older daemon. [`Self::remote_branch`] is
+ * the honest name for what the value is.
  */
-remote_branch: string, 
+upstream: string, 
 /**
  * Fresh status after the push.
  */
