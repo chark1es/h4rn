@@ -554,7 +554,7 @@ pub(super) async fn handle(
                 return Err(ProtoError::new(
                     h4rn_protocol::ProtoErrorCode::Forbidden,
                     "this Linear team is not attached to a project on this host, so its issues are read-only",
-                    "Choose the team for a project in Settings → Source control & issues",
+                    "Choose the team for a project in Settings → Source control",
                 ));
             }
             let result = conn

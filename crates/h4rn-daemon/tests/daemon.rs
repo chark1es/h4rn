@@ -360,7 +360,8 @@ impl Client {
                 | ServerFrame::TerminalEvent { .. }
                 | ServerFrame::ProxyEvent { .. }
                 | ServerFrame::UsageEvent { .. }
-                | ServerFrame::HarnessEvent { .. } => {}
+                | ServerFrame::HarnessEvent { .. }
+                | ServerFrame::ScheduleEvent { .. } => {}
             }
         }
     }

@@ -30,13 +30,48 @@ All notable changes to h4rn are recorded here. The format follows
   reads the whole label catalogue, even when a server caps its pages smaller
   than the 50 rows asked for). A GitHub duplicate close resolves the
   picked number to that issue's own
-  id, and Linear's `duplicate` workflow state shows as closed. A Linear API key connected under Settings → Source control & issues is
+  id, and Linear's `duplicate` workflow state shows as closed. A Linear API key connected under Settings → Source control is
   stored like a forge token, never returned and never echoed in an error; pick a team per project
   and its issues appear beside the forge ones, with comments. Issues link to threads through the
   journal, survive a restart, are always read live, and appear with pull requests in the thread's
   linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
   `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and
   `LinkIssue`/`UnlinkIssue`/`ListThreadIssues`. See [docs/forges.md](docs/forges.md).
+- **A prompt can run on a schedule or when a webhook fires.** Settings →
+  Scheduled tasks creates a task with a workspace, harness, model, permissions
+  and prompt, then runs it once, every N minutes or hours, daily or weekly at a
+  local time, or on a five-field cron expression in a chosen time zone. A run
+  can start a new thread, continue one thread, or keep one thread with a fresh
+  session each time. The daemon owns the timer and stores tasks and the newest
+  100 runs in the journal, so they survive a restart; a slot missed while the
+  daemon was down runs once, and a slot whose previous run is still working is
+  skipped and recorded. **Run now** starts a task by hand, even while it is
+  paused, and History links to the threads it created. A webhook task gets a random path with Copy and Rotate;
+  the path is a secret, so lists and change events carry only a "has a URL" flag
+  and an admin request reveals it. It accepts POST only, checks the path before
+  reading the body, caps the body at 64 KiB, allows 30 deliveries a minute and
+  answers 202 before the run starts. Prompts can use `{{body.path}}`,
+  `{{headers.name}}`, `{{query.name}}`, `{{body}}` and `{{request}}`; each value
+  is wrapped as untrusted request data, and the secret path and credential
+  headers are redacted from everything a prompt or transcript sees. Admission is
+  atomic, so one slot starts one run even across a pause or two simultaneous
+  deliveries; run history and the advanced clock commit together; and a failed
+  journal write retries only that run while the real next slot is kept, so a
+  retry never becomes a second run and a slot waiting for its retry is never
+  read as due again. A once slot is taken when it is admitted, so a pause
+  during the run cannot arm it again, and a spent Once task stays spent across
+  edits and resumes; only a different date, time or time zone names a new slot,
+  and a run is refused until that marker is durable, so a crash cannot re-arm
+  it. A schedule that cannot name its next slot is disarmed and records the
+  reason instead of starting a thread on every backoff. Daily and weekly times
+  run only at the first occurrence in a fall-back hour, cron returns the
+  earliest UTC instant among that hour's jobs, and the editor's default zone
+  comes from the daemon. The editor also says why when it cannot reveal a
+  webhook URL.
+  Webhooks follow the configured `--bind` and any extra bind, never the tailnet
+  or LAN listeners.
+  A thread with an enabled task keeps its worktree through a clear. See
+  [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the

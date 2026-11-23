@@ -319,7 +319,7 @@ impl IssueSource for TrackerIssueSource {
                 match accounts.as_slice() {
                     [only] => Ok(only.account_id.clone()),
                     [] => Err(IssueLinkError::Tracker(
-                        "connect Linear in Settings → Source control & issues first".into(),
+                        "connect Linear in Settings → Source control first".into(),
                     )),
                     _ => Err(IssueLinkError::InvalidIssue(
                         "several Linear connections exist; name account_id".into(),

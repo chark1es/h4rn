@@ -291,8 +291,7 @@ impl LinearService {
             .cloned()
             .ok_or_else(|| {
                 ForgeError::NotConfigured(
-                    "choose a Linear team for this project in Settings → Source control & issues"
-                        .into(),
+                    "choose a Linear team for this project in Settings → Source control".into(),
                 )
                 .into()
             })

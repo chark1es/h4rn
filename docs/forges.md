@@ -453,7 +453,7 @@ links need `approve`; connecting Linear needs `admin`.
 
 ### Linear
 
-Settings → Source control & issues connects a Linear workspace with a
+Settings → Source control connects a Linear workspace with a
 personal API key. The daemon validates it with a `viewer` query, stores it in
 the OS keychain or the encrypted secret file, and never returns it;
 `LinearAccount` carries only the workspace name and email. Choose a team per

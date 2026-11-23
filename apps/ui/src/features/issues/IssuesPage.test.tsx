@@ -528,7 +528,7 @@ describe("the Issues page", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
     expect(
       await screen.findByText(
-        "This Linear team is not attached to a project, so its issues are read-only. Choose the team for a project in Settings → Source control & issues.",
+        "This Linear team is not attached to a project, so its issues are read-only. Choose the team for a project in Settings → Source control.",
       ),
     ).toBeTruthy();
     expect(screen.queryByLabelText("Issue title")).toBeNull();

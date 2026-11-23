@@ -13,7 +13,7 @@ const api = (request: IssueRequest = (value) => getClient().request(value)) =>
   new IssueApi(request);
 
 /**
- * Settings → Source control & issues: Linear connections and each project's
+ * Settings → Source control: Linear connections and each project's
  * team. The key is validated by the daemon before it is stored and is never
  * shown again.
  */
