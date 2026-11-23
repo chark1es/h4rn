@@ -10,7 +10,7 @@ import type {
 } from "@/gen";
 
 import { H4rnRequestError, protoError } from "./errors";
-import { emitHarnessFrame, emitProxyFrame, emitUsageFrame } from "./frames";
+import { emitHarnessFrame, emitProxyFrame, emitScheduleFrame, emitUsageFrame } from "./frames";
 import type {
   ClientOptions,
   ConnectionSnapshot,
@@ -966,6 +966,13 @@ export class H4rnClient {
     // reconnecting view re-reads the versions instead of replaying it.
     if (frame.kind === "harness_event") {
       emitHarnessFrame(frame.event);
+      return;
+    }
+
+    // A scheduled task changed after a run, an edit or a rotation. A
+    // reconnecting view re-reads the list instead of replaying this.
+    if (frame.kind === "schedule_event") {
+      emitScheduleFrame(frame.event);
       return;
     }
 

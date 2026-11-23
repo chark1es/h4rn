@@ -56,6 +56,8 @@ import type { ProxyProfile } from "./ProxyProfile";
 import type { ProxyTestReport } from "./ProxyTestReport";
 import type { Resets } from "./Resets";
 import type { ResumeSchedule } from "./ResumeSchedule";
+import type { ScheduleRun } from "./ScheduleRun";
+import type { ScheduleTask } from "./ScheduleTask";
 import type { SeqEvent } from "./SeqEvent";
 import type { SkillConflict } from "./SkillConflict";
 import type { SkillDetail } from "./SkillDetail";
@@ -600,7 +602,19 @@ report: TextGeneratorTestReport, } | { "type": "text_generation_settings",
 /**
  * Current settings.
  */
-settings: TextGenerationSettings, } | { "type": "thread_renamed", 
+settings: TextGenerationSettings, } | { "type": "schedules", 
+/**
+ * Stored tasks.
+ */
+tasks: Array<ScheduleTask>, } | { "type": "schedule_task", 
+/**
+ * The task's current state.
+ */
+task: ScheduleTask, } | { "type": "schedule_runs", 
+/**
+ * Recorded runs, at most the daemon's history bound.
+ */
+runs: Array<ScheduleRun>, } | { "type": "thread_renamed", 
 /**
  * The thread with its new title.
  */

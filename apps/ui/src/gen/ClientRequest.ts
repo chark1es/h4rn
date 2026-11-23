@@ -24,6 +24,8 @@ import type { ProxyProfileDraft } from "./ProxyProfileDraft";
 import type { ProxyProfileId } from "./ProxyProfileId";
 import type { ProxyProfilePatch } from "./ProxyProfilePatch";
 import type { RuntimeMode } from "./RuntimeMode";
+import type { ScheduleDraft } from "./ScheduleDraft";
+import type { ScheduleTaskId } from "./ScheduleTaskId";
 import type { SkillConflictResolution } from "./SkillConflictResolution";
 import type { SkillSource } from "./SkillSource";
 import type { SubagentRequest } from "./SubagentRequest";
@@ -827,7 +829,43 @@ account: string | null, } | { "type": "set_auto_resume_policy",
 /**
  * New policy.
  */
-policy: AutoResumePolicy, } | { "type": "forge_list_accounts" } | { "type": "forge_add_account", 
+policy: AutoResumePolicy, } | { "type": "list_schedules" } | { "type": "create_schedule", 
+/**
+ * The task to create.
+ */
+task: ScheduleDraft, } | { "type": "update_schedule", 
+/**
+ * Task to edit.
+ */
+task_id: ScheduleTaskId, 
+/**
+ * New fields.
+ */
+task: ScheduleDraft, } | { "type": "delete_schedule", 
+/**
+ * Task to delete.
+ */
+task_id: ScheduleTaskId, } | { "type": "set_schedule_enabled", 
+/**
+ * Task to change.
+ */
+task_id: ScheduleTaskId, 
+/**
+ * Whether the clock or webhook may start it.
+ */
+enabled: boolean, } | { "type": "run_schedule_now", 
+/**
+ * Task to run.
+ */
+task_id: ScheduleTaskId, } | { "type": "list_schedule_runs", 
+/**
+ * Task whose history to read.
+ */
+task_id: ScheduleTaskId, } | { "type": "rotate_schedule_webhook", 
+/**
+ * Task to rotate.
+ */
+task_id: ScheduleTaskId, } | { "type": "forge_list_accounts" } | { "type": "forge_add_account", 
 /**
  * Forge implementation.
  */

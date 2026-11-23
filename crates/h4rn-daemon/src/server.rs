@@ -22,16 +22,16 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::SEC_WEBSOCKET_PROTOCOL};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Router, serve};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
-    Event, PROTOCOL_VERSION, PairScope, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent,
-    ServerFrame, Topic,
+    Event, MAX_WEBHOOK_BODY_BYTES, PROTOCOL_VERSION, PairScope, ProtoError, ProtoErrorCode,
+    ResponseBody, SeqEvent, ServerFrame, Topic,
 };
 use h4rn_transport::server::{AcceptOutcome, Link, LinkError, SecureService, SessionSender};
 use h4rn_transport::session::AppFrame;
@@ -106,6 +106,8 @@ pub struct AppState {
     pub projects: Arc<crate::projects::ProjectService>,
     /// Title generation: coding-agent CLI or a configured text generator.
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
+    /// Scheduled tasks and webhook automations.
+    pub schedules: Arc<crate::schedules::ScheduleService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -126,6 +128,10 @@ pub fn router(state: AppState) -> Router {
             get(mcp_http_get)
                 .post(mcp_http_post)
                 .delete(mcp_http_delete),
+        )
+        .route(
+            "/webhooks/{secret}",
+            post(webhook_post).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)),
         )
         .with_state(state)
 }
@@ -154,6 +160,54 @@ async fn mcp_http_get(State(state): State<AppState>) -> Response {
 
 async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
     crate::mcp::http_delete(state.mcp.http_state(), headers).await
+}
+
+/// One webhook delivery.
+///
+/// The path is the secret, the method is POST (axum answers every other method
+/// with 405), and the body is capped by the route layer. The run starts on its
+/// own task, so a harness that takes seconds to start never delays the 202.
+async fn webhook_post(
+    State(state): State<AppState>,
+    Path(secret): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let headers = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
+        })
+        .collect();
+    let request = crate::schedules::WebhookRequest {
+        method: "POST".to_owned(),
+        path: format!("{}{secret}", crate::schedules::WEBHOOK_PREFIX),
+        query: query.into_iter().collect(),
+        headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    };
+    match state.schedules.deliver_webhook(&secret, request).await {
+        crate::schedules::WebhookOutcome::Accepted => {
+            (StatusCode::ACCEPTED, Json(json!({ "status": "accepted" }))).into_response()
+        }
+        crate::schedules::WebhookOutcome::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no webhook task owns this path" })),
+        )
+            .into_response(),
+        crate::schedules::WebhookOutcome::RateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "too many deliveries; try again later" })),
+        )
+            .into_response(),
+        crate::schedules::WebhookOutcome::Rejected(reason) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": reason }))).into_response()
+        }
+    }
 }
 
 /// Owner half of cross-machine MCP sharing (ADR-006).

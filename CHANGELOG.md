@@ -7,6 +7,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **A prompt can run on a schedule or when a webhook fires.** Settings →
+  Scheduled tasks creates a task with a workspace, harness, model, permissions
+  and prompt, then runs it once, every N minutes or hours, daily or weekly at a
+  local time, or on a five-field cron expression in a chosen time zone. A run
+  can start a new thread, continue one thread, or keep one thread with a fresh
+  session each time. The daemon owns the timer and stores tasks and the newest
+  100 runs in the journal, so they survive a restart; a slot missed while the
+  daemon was down runs once, and a slot whose previous run is still working is
+  skipped and recorded. **Run now** starts a task by hand, and History links to
+  the threads it created. A webhook task gets a random path with Copy and Rotate;
+  it accepts POST only, caps the body at 64 KiB, allows 30 deliveries a minute
+  and answers 202 before the run starts. Prompts can use `{{body.path}}`,
+  `{{headers.name}}`, `{{query.name}}`, `{{body}}` and `{{request}}`; each value
+  is wrapped as untrusted request data. A thread with an enabled task keeps its
+  worktree through a clear. See [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the

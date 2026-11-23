@@ -28,6 +28,7 @@ use crate::remote::{
         read_direct_pairing, remove_direct_pairing,
     },
 };
+use crate::schedules::ScheduleService;
 use crate::server::{self, AppState};
 use crate::subagents::{SubagentManager, SubagentOptions, SubagentProvider};
 use crate::supervisor::ProcessSupervisor;
@@ -272,6 +273,21 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open thread manager: {error}"))?,
         );
 
+        // Scheduled tasks share the journal so the timer, secrets and run
+        // history survive a restart. The runner starts once the worktree
+        // tracker exists, so a task that protects a checkout is wired before
+        // it can fire.
+        let schedules = Arc::new(
+            ScheduleService::open(
+                Arc::clone(&journal),
+                Arc::clone(&manager),
+                hosts.local_id().clone(),
+                Arc::new(crate::threads::SystemClock),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open scheduled tasks: {error:?}"))?,
+        );
+
         // Profiles and their keys are daemon-global; sessions pick them up
         // through `ThreadManager::set_proxy` at start time (ADR-015).
         let proxy = Arc::new(
@@ -498,7 +514,9 @@ impl DaemonBuilder {
             .await
             .map_err(|error| anyhow::anyhow!("open the worktree tracker: {error}"))?,
         );
+        worktrees.set_schedule_service(Arc::clone(&schedules));
         worktrees.start();
+        schedules.start();
 
         let harness_versions = Arc::new(crate::harness_versions::HarnessVersionService::new(
             Arc::clone(&catalog),
@@ -535,6 +553,7 @@ impl DaemonBuilder {
             meter,
             network_access_enabled,
             text_generation,
+            schedules,
         })
     }
 }
@@ -566,6 +585,7 @@ pub struct Daemon {
     acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     projects: Arc<crate::projects::ProjectService>,
     text_generation: Arc<crate::text_generation::TextGenerationService>,
+    schedules: Arc<ScheduleService>,
     /// The network-listener setting resolved at build time.
     network_access_enabled: bool,
 }
@@ -584,6 +604,11 @@ impl Daemon {
     /// Thread manager handle (tests and diagnostics).
     pub fn manager(&self) -> Arc<ThreadManager> {
         Arc::clone(&self.manager)
+    }
+
+    /// The host id this daemon reports for its own machine.
+    pub fn local_host(&self) -> h4rn_protocol::HostId {
+        self.hosts.local_id().clone()
     }
 
     /// Subagent supervisor handle (tests and diagnostics).
@@ -619,6 +644,11 @@ impl Daemon {
     /// Durable metering hub (tests and diagnostics).
     pub fn meter(&self) -> Arc<h4rn_meter::MeterHub> {
         Arc::clone(&self.meter)
+    }
+
+    /// Scheduled tasks (tests and diagnostics).
+    pub fn schedules(&self) -> Arc<ScheduleService> {
+        Arc::clone(&self.schedules)
     }
 
     /// Binds the primary and optional extra listener.
@@ -717,6 +747,7 @@ impl Daemon {
             acp_agents: Arc::clone(&self.acp_agents),
             projects: Arc::clone(&self.projects),
             text_generation: Arc::clone(&self.text_generation),
+            schedules: Arc::clone(&self.schedules),
         };
 
         // The network listener serves a restricted router: liveness and the
@@ -787,6 +818,7 @@ impl Daemon {
             terminals: self.terminals,
             forge: self.forge,
             pr_links: self.pr_links,
+            schedules: self.schedules,
             mcp: self.mcp,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
@@ -808,6 +840,7 @@ pub struct BoundDaemon {
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
     pr_links: Arc<crate::pr_links::PrLinkService>,
+    schedules: Arc<ScheduleService>,
     mcp: Arc<McpService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
@@ -867,6 +900,7 @@ impl BoundDaemon {
             terminals,
             forge,
             pr_links,
+            schedules,
             mcp,
             supervisor,
             data_dir,
@@ -888,6 +922,7 @@ impl BoundDaemon {
         for task in remote_tasks {
             task.abort();
         }
+        schedules.shutdown().await;
         forge.shutdown();
         pr_links.shutdown();
         mcp.shutdown().await;

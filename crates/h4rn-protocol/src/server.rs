@@ -71,6 +71,14 @@ pub enum ServerFrame {
         /// One output line or the final result.
         event: crate::HarnessUpdateEvent,
     },
+    /// An ephemeral scheduled-task change, outside the durable thread log.
+    ///
+    /// A reconnecting client re-reads the list with
+    /// [`crate::ClientRequest::ListSchedules`].
+    ScheduleEvent {
+        /// The task that was created, changed or deleted.
+        event: crate::ScheduleEvent,
+    },
 }
 
 /// A device paired directly (LAN/tailnet) with this computer.
@@ -658,6 +666,21 @@ pub enum ResponseBody {
     TextGenerationSettings {
         /// Current settings.
         settings: crate::text_generation::TextGenerationSettings,
+    },
+    /// Every scheduled task on this daemon, oldest first.
+    Schedules {
+        /// Stored tasks.
+        tasks: Vec<crate::ScheduleTask>,
+    },
+    /// One scheduled task after a create, edit, enable/disable, run or rotate.
+    ScheduleTask {
+        /// The task's current state.
+        task: crate::ScheduleTask,
+    },
+    /// One task's run history, newest first.
+    ScheduleRuns {
+        /// Recorded runs, at most the daemon's history bound.
+        runs: Vec<crate::ScheduleRun>,
     },
     /// A thread row after the owner renamed it.
     ThreadRenamed {

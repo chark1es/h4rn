@@ -6097,3 +6097,63 @@ fn a_staged_submodule_update_counts_even_when_the_submodule_is_ignored() {
         "the staged submodule update is staged work"
     );
 }
+
+#[tokio::test]
+async fn a_clear_keeps_a_thread_with_an_enabled_scheduled_task() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-scheduled", "scheduled-branch");
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(FakeHarness::new())]).await;
+    let schedules = Arc::new(
+        crate::schedules::ScheduleService::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("schedule journal")),
+            Arc::clone(&threads),
+            HostId::new("host_local"),
+            Arc::new(crate::threads::SystemClock),
+        )
+        .await
+        .expect("schedule service"),
+    );
+    let task = schedules
+        .create(h4rn_protocol::ScheduleDraft {
+            name: "Keep this checkout".into(),
+            host: HostId::new("host_local"),
+            workspace_path: linked.to_string_lossy().into_owned(),
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            model: "default".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            prompt: "Keep working here".into(),
+            schedule: h4rn_protocol::ScheduleSpec::Every {
+                count: 1,
+                unit: h4rn_protocol::IntervalUnit::Hours,
+            },
+            timezone: "UTC".into(),
+            destination: h4rn_protocol::ScheduleDestination::ContinueThread,
+            enabled: true,
+        })
+        .await
+        .expect("create scheduled task");
+    let run = schedules.run_now(&task.task_id).await.expect("run now");
+    let thread = run.thread_id.expect("thread");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while threads.thread_is_busy(&thread).await {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the scheduled run settles");
+    tracker.set_schedule_service(Arc::clone(&schedules));
+
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == git::norm(&linked))
+        .unwrap_or_else(|| panic!("the scheduled thread workspace is listed: {listed:?}"));
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, "has an enabled scheduled task");
+    assert!(linked.is_dir(), "the scheduled checkout is kept");
+}
