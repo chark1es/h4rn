@@ -423,6 +423,19 @@ not on the allowlist until the host confirms the SAS with `ConfirmPairing`.
 sends a transport `Close` control so the client learns immediately rather than
 waiting for a probe timeout.
 
+### Guest HTTP over the relay
+
+A guest has no Noise key, so a guest link cannot use the device session. The
+relay instead carries one HTTP exchange at a time: Connect accepts
+`/guest/<machine>/<token>/...`, looks up the machine's daemon, sends a
+`GuestHttp` frame whose payload is a `GuestHttpRequest` (method, path, headers
+and body), and waits for a `GuestHttpResponse` with the same request id. The
+daemon answers it in-process through the guest surface. The token in the path is
+the only credential; Connect cannot mint access because only the daemon knows
+the hash. Connect does not store the path or body, but it does see them while
+forwarding, just as it sees any plaintext that is not a Noise session.
+
+
 ### Pairing
 
 ```sh

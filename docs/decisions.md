@@ -1428,3 +1428,54 @@ with no shell and its arguments as an array, streams output as transient `Harnes
 the result names what is on disk, not what the registry promised. The registry client and the
 process runner are injectable seams, so no test touches the network or a real global CLI.
 
+
+## ADR-044: A guest link is a narrow HTTP scope bound to one thread and one browser
+
+**Status:** Accepted
+
+A guest link exists so one teammate can follow one thread without an account.
+That rules out the device protocol: a guest has no Noise identity, no pairing
+and no access token, and inventing a device for them would widen every scope
+check. The link is therefore a bearer URL and the daemon answers a small HTTP
+surface instead of upgrading `/ws`.
+
+The token is 256 random bits. The journal stores its BLAKE3 hash and the hash of
+the browser's cookie, never the raw values; both comparisons are constant time.
+The raw token lives only in the running daemon's memory, so a restart keeps a
+guest working but the owner must create a new link to copy it again. That is a
+deliberate cost: a stolen journal cannot be replayed as a link.
+
+A link names exactly one thread. The client never sends a thread id, so a
+malicious page cannot ask for another thread; every read, submission and blob
+fetch resolves the token first and then uses the link's thread. The surface has
+four routes: the page, a snapshot of events after a sequence, a message
+submission, and one attachment from a message in that thread. `ThreadUpserted`
+is filtered from the snapshot (it carries the workspace path), turn changes are
+stripped so diffs never appear, and attachment `local_path` values are cleared.
+
+A guest message is not a turn. It is a row in the journal and an event,
+`GuestRequested`, which raises a hand in the lifecycle and renders as a Request
+at the end of the thread; `SendGuestRequest` uploads its files, calls the normal
+`SendMessage` path with the thread's current permission mode, and
+`DismissGuestRequest` deletes the files. Settling a thread, stopping sharing,
+creating a new link, turning the Labs setting off, or the 24-hour expiry ends
+the link; every end path deletes waiting files.
+
+The guest scope (`PairScope::Guest`) exists as the narrow server-side statement
+of what the surface may do: one thread's events and a waiting message. A device
+pairing never offers it, because a device has an identity and the guest surface
+has none.
+
+When the machine is linked to Connect, the link names
+`<connect>/guest/<machine>/<token>`. Connect forwards each HTTP exchange to the
+daemon over its existing authenticated relay socket as a `GuestHttp` frame,
+correlates the answer by request id and returns it; it never stores the path or
+body. The payload is plaintext at that hop, as the rest of the relay path is
+TLS to Connect plus Noise only for device sessions; a guest has no Noise key.
+Without Connect the link names the daemon's own listener and the person sharing
+must make sure the guest can reach it.
+
+The guest page polls its snapshot every couple of seconds rather than opening a
+second long-lived socket. That keeps one transport (HTTP) working through both
+the direct address and the relay proxy, and the thread still follows live work
+within that interval.

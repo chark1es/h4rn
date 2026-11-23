@@ -278,6 +278,7 @@ Every command is ⌘ (Ctrl on Windows and Linux) plus a key, with optional ⇧ o
 | `⌘⇧A` | Acknowledge (Done) |
 | `⌘⌥S` | Snooze for an hour |
 | `⌘⌥P` | Keep in Working |
+| `⌘⌥G` | Share with guest |
 | `⌘⌥U` | Reopen a settled thread |
 | `⌘U` | Attach files |
 | `⌘B` | Toggle sidebar |

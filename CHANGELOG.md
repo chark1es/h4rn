@@ -7,6 +7,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Share one thread with a teammate through an expiring guest link.** A link is
+  bound to one thread and one browser, lasts 24 hours, and works through the
+  Connect relay when the machine is linked. The guest sees that thread's real
+  events — messages, replies, plans and tool output — and can attach up to four
+  files (10 MB per message, 20 MB waiting); they never see diffs, other threads,
+  files, terminals or settings, and they cannot answer the agent or change the
+  model. Every message they write waits as a **Request** above your composer and
+  in the sidebar; **Send** runs it as a normal turn with the thread's current
+  permissions, **Dismiss** deletes it and its files. Settling the thread, Stop
+  sharing, a new link, or Settings → Labs → Guest links off ends the link and
+  deletes waiting files. The journal stores only hashes of the link token and
+  the browser cookie.
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the
