@@ -55,19 +55,20 @@ const fakes = vi.hoisted(() => {
       return { dispose: () => undefined };
     }
     attachCustomKeyEventHandler(): void {}
-    private writeCallback: (() => void) | null = null;
+    private writeCallbacks: Array<(() => void) | undefined> = [];
     write(_data: string | Uint8Array, callback?: () => void): void {
-      this.writeCallback = callback ?? null;
+      // xterm's WriteBuffer keeps writes queued and parses them later, in the
+      // order they were handed in. A write without a callback gives the test
+      // nothing to observe, so only the callbacks are queued.
+      if (callback) this.writeCallbacks.push(callback);
     }
     focus(): void {}
     reset(): void {}
     dispose(): void {}
 
-    /** Acts like xterm finishing the last chunk it was given. */
+    /** Acts like xterm finishing the oldest chunk it was given. */
     finishWrite() {
-      const callback = this.writeCallback;
-      this.writeCallback = null;
-      callback?.();
+      this.writeCallbacks.shift()?.();
     }
 
     /** Acts like the program sending a query. */
@@ -111,13 +112,13 @@ type BinarySink = { handler: ((data: ArrayBuffer) => void) | null };
 function fakeClient(sent: BinaryFrame[], binary: BinarySink, startSeq = 0) {
   return {
     getSnapshot: () => ({ status: "online" }),
-    request: async (body: { type: string; reply_positions?: boolean }) => {
+    request: async (body: { type: string; reply_positions_v2?: boolean }) => {
       if (body.type === "terminal_open") {
         return { type: "terminal_opened", terminal: TERMINAL_INFO };
       }
       if (body.type === "terminal_attach") {
-        if (body.reply_positions !== true) {
-          throw new Error("attach must declare that replies carry positions");
+        if (body.reply_positions_v2 !== true) {
+          throw new Error("attach must declare protocol 2 reply positions");
         }
         return {
           type: "terminal_attached",
@@ -294,57 +295,56 @@ describe("terminal controller query replies", () => {
     controller.dispose();
   });
 
-  it("names the chunk where a query split across frames ends", async () => {
+  it("names the chunk where a query split across frames starts", async () => {
     const sent: BinaryFrame[] = [];
     const { controller, term, binary } = await startController(sent);
 
     // The query starts in chunk 7 and its final byte arrives in chunk 8.
     pushOutput(binary, 7, "\x1b[?12");
     term.finishWrite();
-    pushOutput(binary, 8, ";2$y");
-    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    pushOutput(binary, 8, ";2$p");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12, 2])).toBe(false);
     term.input("\x1b[?12;2$y");
     term.finishWrite();
 
-    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(8)]);
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(7, 0)]);
     controller.dispose();
   });
 
-  it("lets the daemon drop a late viewer's answer when another viewer saw the query", async () => {
-    // The early viewer parses chunks 7 and 8. The late one attaches with
-    // chunk 7 already folded into its snapshot, so it parses only chunk 8 and
-    // numbers its answers differently.
+  it("gives the same answer the same name for a viewer that attached mid-query", async () => {
+    // The early viewer parses chunks 5 and 6; the late one attached with chunk
+    // 5 already folded into its snapshot, so it parses chunk 6 alone.
     const earlySent: BinaryFrame[] = [];
     const early = await startController(earlySent, 0);
     const lateSent: BinaryFrame[] = [];
-    const late = await startController(lateSent, 7);
+    const late = await startController(lateSent, 5);
 
-    pushOutput(early.binary, 7, "\x1b[?12");
+    pushOutput(early.binary, 5, "\x1b[?12");
     early.term.finishWrite();
-    pushOutput(early.binary, 8, ";2$y");
-    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    pushOutput(early.binary, 6, ";2$p\x1b[?25$p");
+    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [12, 2])).toBe(false);
     early.term.input("\x1b[?12;2$y");
     expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
     early.term.input("\x1b[?25;2$y");
     early.term.finishWrite();
 
-    // The late viewer sees only the tail of the split query and the second
-    // query, which it numbers as ordinal 0.
-    pushOutput(late.binary, 8, ";2$y");
+    // The late viewer never saw the query that started in chunk 5; the query
+    // it does answer started in chunk 6, and it names it the way the early
+    // viewer does.
+    pushOutput(late.binary, 6, ";2$p\x1b[?25$p");
     expect(late.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
     late.term.input("\x1b[?25;2$y");
     late.term.finishWrite();
     late.term.input("ls\r");
 
     expect(earlySent.map((frame) => [frame.seq, payload(frame)])).toEqual([
-      [ptyInputReplySeq(8, 0), "\x1b[?12;2$y"],
-      [ptyInputReplySeq(8, 1), "\x1b[?25;2$y"],
+      [ptyInputReplySeq(5, 0), "\x1b[?12;2$y"],
+      [ptyInputReplySeq(6, 0), "\x1b[?25;2$y"],
     ]);
-    // The client always sends its answer and lets the daemon decide: here the
-    // early viewer has the position, so the late one's frame is dropped
-    // daemon-side, not silently in the client.
+    // Both viewers send the shared answer with one identity, so the daemon
+    // writes it once whichever arrived first; the client never drops it.
     expect(lateSent.map((frame) => [frame.seq, payload(frame)])).toEqual([
-      [ptyInputReplySeq(8, 0), "\x1b[?25;2$y"],
+      [ptyInputReplySeq(6, 0), "\x1b[?25;2$y"],
       [0, "ls\r"],
     ]);
 
@@ -379,6 +379,55 @@ describe("terminal controller query replies", () => {
     term.input("\x1b[?12;2$y");
 
     expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(6)]);
+    controller.dispose();
+  });
+
+  it("names a query parsed before a queued snapshot by its own chunk", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent, 0);
+
+    // Chunk 5's write is queued; the snapshot at 6 is applied before xterm
+    // has parsed chunk 5, exactly as its WriteBuffer schedules writes. The
+    // snapshot's reset must wait: chunk 5 is parsed first and its answer keeps
+    // chunk 5's name, not the snapshot's.
+    pushOutput(binary, 5, "\x1b[?25$p");
+    pushSnapshot(binary, 6);
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    term.input("\x1b[?25;2$y");
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(5, 0)]);
+
+    // Once chunk 5 finishes, the snapshot chunk starts parsing and the old
+    // query state is gone: the same report is now typed input.
+    term.finishWrite();
+    term.finishWrite();
+    term.input("\x1b[?25;2$y");
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(5, 0), 0]);
+    controller.dispose();
+  });
+
+  it("cancels an open sequence with the snapshot's leading escape", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent, 0);
+
+    // Chunk 4 ends in the middle of a mode query. xterm's `reset()` keeps its
+    // parser, so it is still inside that CSI when the snapshot is written; the
+    // snapshot's real leading `ESC[0m` starts a new escape and cancels it.
+    pushOutput(binary, 4, "\x1b[?25");
+    term.finishWrite();
+    pushSnapshot(binary, 5, "\x1b[0m\x1b[H");
+    term.finishWrite();
+
+    // Chunk 6 begins with bytes that would have completed the stale query,
+    // then asks a real one. The answer names chunk 6, where the live query
+    // starts, not chunk 4, whose query xterm abandoned at the snapshot.
+    pushOutput(binary, 6, "$p\x1b[?25$p");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    term.input("\x1b[?25;2$y");
+    term.finishWrite();
+
+    expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(6), "\x1b[?25;2$y"],
+    ]);
     controller.dispose();
   });
 });

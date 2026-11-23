@@ -257,14 +257,14 @@ impl Client {
         terminal_id: &TerminalId,
         cols: u16,
         rows: u16,
-        reply_positions: bool,
+        reply_positions_v2: bool,
     ) -> AttachedView {
         match self
             .request(ClientRequest::TerminalAttach {
                 terminal_id: terminal_id.clone(),
                 cols: Some(cols),
                 rows: Some(rows),
-                reply_positions,
+                reply_positions_v2,
             })
             .await
             .expect("attach terminal")
@@ -814,7 +814,7 @@ fn attach_viewer_declaring(
     manager: &Arc<TerminalManager>,
     terminal: &TerminalInfo,
     read: bool,
-    reply_positions: bool,
+    reply_positions_v2: bool,
 ) -> (
     u64,
     mpsc::Receiver<Outbound>,
@@ -829,7 +829,7 @@ fn attach_viewer_declaring(
             tx,
             Some(80),
             Some(24),
-            reply_positions,
+            reply_positions_v2,
         )
         .expect("attach viewer");
     if read {
@@ -1136,32 +1136,33 @@ async fn a_reply_for_output_never_sent_is_ignored() {
 }
 
 /// A viewer that attached after a chunk was produced never parsed that chunk,
-/// so its answer ordinals for the next chunk differ from an earlier viewer's.
-/// Its reply is dropped and the earlier viewer's answer is the one written.
+/// so it has no answer for a query that started there. The queries it does
+/// see keep the same identity as an earlier viewer's, so both name the next
+/// chunk's query alike and it is written once.
 #[tokio::test]
-async fn a_viewer_that_attached_mid_query_cannot_answer_that_chunk() {
+async fn a_viewer_that_attached_mid_query_names_the_next_query_the_same_way() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (early_id, _early_rx, early) = attach_viewer(&manager, &terminal, false);
     mark_sent(&early, 10);
     let (late_id, mut late_rx, late) = attach_viewer(&manager, &terminal, true);
     // The late viewer attaches with chunk 1 already folded into its snapshot:
     // it parses chunks 2 onward, so a query that started in chunk 1 is not in
-    // its numbering.
+    // its numbering at all.
     late.viewer.reset_credit(1);
     mark_sent(&late, 10);
 
-    // An earlier viewer answers the split query (ordinal 0) and a second query
-    // in the same chunk (ordinal 1). The late viewer's parser sees only the
-    // second query, so it calls it ordinal 0.
+    // Both viewers answered the query that starts in chunk 2 the same way, so
+    // the first reply is the one written and the other is a duplicate. The
+    // early viewer also answers the query that started in chunk 1.
     manager
-        .input_by_stream(terminal.stream_id, late_id, b"iLATE0", at(2, 0))
-        .expect("late viewer's misnumbered answer is dropped");
+        .input_by_stream(terminal.stream_id, late_id, b"iLATE", at(2, 0))
+        .expect("the late viewer's answer to the chunk-2 query is written");
     manager
-        .input_by_stream(terminal.stream_id, early_id, b"iEARLY0", at(2, 0))
-        .expect("the split query's answer is written");
+        .input_by_stream(terminal.stream_id, early_id, b"iEARLY", at(2, 0))
+        .expect("the early viewer's duplicate is dropped");
     manager
-        .input_by_stream(terminal.stream_id, early_id, b"iEARLY1", at(2, 1))
-        .expect("the second query's answer is written");
+        .input_by_stream(terminal.stream_id, early_id, b"iSPLIT", at(1, 0))
+        .expect("the early viewer answers the query that started in chunk 1");
     manager
         .input_by_stream(terminal.stream_id, late_id, b"iHELLO", QueryReply::No)
         .expect("typed input");
@@ -1175,18 +1176,18 @@ async fn a_viewer_that_attached_mid_query_cannot_answer_that_chunk() {
     )
     .await;
     assert_eq!(
-        output.matches("iEARLY0").count(),
+        output.matches("iSPLIT").count(),
         1,
-        "the earlier viewer answers the split query: {output:?}"
+        "the query that started before the late snapshot is answered once: {output:?}"
     );
     assert_eq!(
-        output.matches("iEARLY1").count(),
+        output.matches("iLATE").count(),
         1,
-        "the earlier viewer answers the later query: {output:?}"
+        "the late viewer's answer to the chunk-2 query is the one written: {output:?}"
     );
     assert!(
-        !output.contains("iLATE0"),
-        "a viewer that attached mid-query must not answer that chunk: {output:?}"
+        !output.contains("iEARLY"),
+        "both viewers name the chunk-2 query alike, so the second answer is dropped: {output:?}"
     );
 
     drop(early);
@@ -1228,6 +1229,152 @@ async fn a_sole_viewer_that_attached_at_a_snapshot_answers_its_first_chunk() {
     );
 
     drop(attached);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A viewer never parsed the chunk its snapshot replaced raw. xterm can still
+/// report a query that the snapshot's leading escape completed, so the viewer
+/// may name that chunk; but with another viewer attached holding the raw
+/// chunk, only that viewer's answer is real. The snapshot claim is dropped and
+/// never suppresses it.
+#[tokio::test]
+async fn a_snapshot_chunk_claim_is_dropped_when_another_viewer_can_answer() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (raw_id, mut raw_rx, raw) = attach_viewer(&manager, &terminal, true);
+    // The raw viewer saw chunk 5 as output.
+    mark_sent(&raw, 5);
+    let (snapshot_id, _snapshot_rx, snapshot) = attach_viewer(&manager, &terminal, false);
+    // This viewer attached with chunk 5 already folded into its snapshot.
+    snapshot.viewer.reset_credit(5);
+    mark_sent(&snapshot, 5);
+
+    manager
+        .input_by_stream(terminal.stream_id, snapshot_id, b"iSNAPSHOT", at(5, 0))
+        .expect("a snapshot-chunk claim is dropped without failing the connection");
+    manager
+        .input_by_stream(terminal.stream_id, raw_id, b"iRAW", at(5, 0))
+        .expect("the viewer that parsed the chunk raw answers it");
+    manager
+        .input_by_stream(terminal.stream_id, raw_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut raw_rx,
+        &manager,
+        &terminal.terminal_id,
+        raw_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iRAW").count(),
+        1,
+        "the raw viewer's answer is written exactly once: {output:?}"
+    );
+    assert!(
+        !output.contains("iSNAPSHOT"),
+        "a claim for a chunk the snapshot replaced cannot suppress the real answer: {output:?}"
+    );
+
+    drop(raw);
+    drop(snapshot);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// With no other parser attached, the snapshot viewer is the only one that can
+/// answer a query whose start the snapshot replaced, so its claim on the
+/// snapshot chunk itself is written. The shell is never left unanswered.
+#[tokio::test]
+async fn a_sole_viewer_answers_a_query_the_snapshot_completed() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (viewer_id, mut rx, attached) = attach_viewer(&manager, &terminal, true);
+    // The snapshot covers chunk 5. xterm completes a query that started in
+    // that chunk with the snapshot's leading bytes, naming it (5, 0).
+    attached.viewer.reset_credit(5);
+    mark_sent(&attached, 5);
+
+    // A second viewer is registered but still taking its attach snapshot: it
+    // has no output and cannot answer, so it must not make the ready viewer a
+    // non-sole one and leave the query unanswered.
+    let attaching_id = manager.next_viewer_id();
+    let (attaching_tx, _attaching_rx) = mpsc::channel::<Outbound>(4);
+    attached.session.add_viewer(
+        attaching_id,
+        80,
+        24,
+        true,
+        Arc::new(Viewer::new(attaching_tx)),
+    );
+
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iSNAPSHOT", at(5, 0))
+        .expect("the sole viewer answers the query its snapshot completed");
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut rx,
+        &manager,
+        &terminal.terminal_id,
+        viewer_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iSNAPSHOT").count(),
+        1,
+        "a sole viewer's snapshot answer reaches the shell once: {output:?}"
+    );
+
+    drop(attached);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// When every attached viewer saw a query's chunk only inside its snapshot,
+/// no viewer has it raw, so neither claim is dropped: the shared identity
+/// writes exactly one answer and the shell is never left without one.
+#[tokio::test]
+async fn two_viewers_that_saw_a_query_only_in_snapshots_answer_it_once() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, mut rx, first) = attach_viewer(&manager, &terminal, true);
+    let (second_id, _second_rx, second) = attach_viewer(&manager, &terminal, true);
+    for attached in [&first, &second] {
+        attached.viewer.reset_credit(5);
+        mark_sent(attached, 5);
+    }
+
+    manager
+        .input_by_stream(terminal.stream_id, first_id, b"iFIRST5", at(5, 0))
+        .expect("the first snapshot viewer answers");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iSECOND5", at(5, 0))
+        .expect("the second snapshot viewer's duplicate is accepted and deduped");
+    manager
+        .input_by_stream(terminal.stream_id, first_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut rx,
+        &manager,
+        &terminal.terminal_id,
+        first_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iFIRST5").count() + output.matches("iSECOND5").count(),
+        1,
+        "two snapshot-only viewers give the shell exactly one answer: {output:?}"
+    );
+
+    drop((first, second));
     manager.close(&terminal.terminal_id).await.expect("close");
     manager.shutdown().await;
     drop(cwd);
@@ -1289,7 +1436,7 @@ async fn a_stalled_viewer_below_the_chunk_does_not_block_the_answer() {
     mark_sent(&early, 3);
     let (late_id, mut late_rx, late) = attach_viewer(&manager, &terminal, true);
     // The late viewer attached with chunk 6 in its snapshot: chunk 7 is its
-    // first raw chunk and lies below its answer floor.
+    // first raw chunk, and it is the only viewer that received it.
     late.viewer.reset_credit(6);
     mark_sent(&late, 7);
 
@@ -1359,23 +1506,162 @@ async fn a_sole_viewer_answers_after_a_resync_snapshot() {
     drop(cwd);
 }
 
-/// A viewer that never received chunk 3 cannot claim its first answer and
+/// A chunk a viewer parsed raw stays answerable after a later resync: only
+/// the positions the snapshot replaced are snapshot-only, and the viewer that
+/// never parsed chunk 5 raw gives way to the one that did.
+#[tokio::test]
+async fn a_chunk_parsed_raw_before_a_resync_is_still_answerable() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (raw_id, mut raw_rx, raw) = attach_viewer(&manager, &terminal, true);
+    // This viewer parsed chunk 5 as output, then was resynced at 8, so 6..=8
+    // arrived only inside its snapshot.
+    mark_sent(&raw, 5);
+    raw.viewer.begin_resync();
+    raw.viewer.record_snapshot_sent(8);
+    let (late_id, _late_rx, late) = attach_viewer(&manager, &terminal, false);
+    // This viewer attached with 7 in its snapshot and never parsed 5 raw.
+    late.viewer.reset_credit(7);
+
+    manager
+        .input_by_stream(terminal.stream_id, late_id, b"iLATE", at(5, 0))
+        .expect("a snapshot-only claim gives way without failing the connection");
+    manager
+        .input_by_stream(terminal.stream_id, raw_id, b"iRAW", at(5, 0))
+        .expect("the chunk parsed raw before the resync is answerable");
+    manager
+        .input_by_stream(terminal.stream_id, raw_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut raw_rx,
+        &manager,
+        &terminal.terminal_id,
+        raw_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iRAW").count(),
+        1,
+        "the viewer that parsed chunk 5 raw answers it exactly once: {output:?}"
+    );
+    assert!(
+        !output.contains("iLATE"),
+        "a snapshot-only claim cannot suppress the answer of the viewer that saw the bytes: {output:?}"
+    );
+
+    drop(raw);
+    drop(late);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// Two viewers that each parsed the same chunk raw before their resync name
+/// the answer alike, and the shared record still writes it once.
+#[tokio::test]
+async fn two_resynced_viewers_that_parsed_the_chunk_raw_write_one_answer() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, mut first_rx, first) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&first, 5);
+    first.viewer.begin_resync();
+    first.viewer.record_snapshot_sent(10);
+    let (second_id, _second_rx, second) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&second, 5);
+    second.viewer.begin_resync();
+    second.viewer.record_snapshot_sent(10);
+
+    manager
+        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, at(5, 0))
+        .expect("the first viewer's claim is accepted");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(5, 0))
+        .expect("the duplicate is dropped without failing the connection");
+    manager
+        .input_by_stream(terminal.stream_id, first_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut first_rx,
+        &manager,
+        &terminal.terminal_id,
+        first_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "two viewers that parsed the chunk raw still write one answer: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A resynced viewer that completed a split query answers it even though a
+/// freshly attached viewer is present: that viewer never saw chunk 5 raw, so
+/// dropping the claim would leave the shell without an answer.
+#[tokio::test]
+async fn a_resynced_viewer_answers_when_a_fresh_viewer_never_saw_the_chunk() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (resynced_id, mut resynced_rx, resynced) = attach_viewer(&manager, &terminal, true);
+    // It parsed chunk 5 raw (where the query starts) and was resynced at 10.
+    mark_sent(&resynced, 5);
+    resynced.viewer.begin_resync();
+    resynced.viewer.record_snapshot_sent(10);
+    let (_fresh_id, _fresh_rx, fresh) = attach_viewer(&manager, &terminal, false);
+    // The fresh viewer attached with 7 in its snapshot; 5 is not in it.
+    fresh.viewer.reset_credit(7);
+
+    manager
+        .input_by_stream(terminal.stream_id, resynced_id, b"iCOMPLETE", at(5, 0))
+        .expect("the only viewer that parsed the query raw answers it");
+    manager
+        .input_by_stream(terminal.stream_id, resynced_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut resynced_rx,
+        &manager,
+        &terminal.terminal_id,
+        resynced_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iCOMPLETE").count(),
+        1,
+        "a snapshot-only position with no other raw parser is answerable: {output:?}"
+    );
+
+    drop(resynced);
+    drop(fresh);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A viewer that never received chunk 5 cannot claim its first answer and
 /// suppress the viewer that did receive it.
 #[tokio::test]
 async fn a_bogus_position_cannot_claim_a_real_answer() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (bogus_id, _bogus_rx, bogus) = attach_viewer(&manager, &terminal, false);
-    // It attached after chunk 3 (its snapshot holds it), then received 4 and 5.
+    // It attached after chunk 3 (its snapshot holds it), then received 4.
     bogus.viewer.reset_credit(3);
-    mark_sent(&bogus, 5);
+    mark_sent(&bogus, 4);
     let (real_id, mut real_rx, real) = attach_viewer(&manager, &terminal, true);
     mark_sent(&real, 5);
 
     manager
-        .input_by_stream(terminal.stream_id, bogus_id, b"iBOGUS", at(3, 0))
+        .input_by_stream(terminal.stream_id, bogus_id, b"iBOGUS", at(5, 0))
         .expect("a position it was never sent is ignored");
     manager
-        .input_by_stream(terminal.stream_id, real_id, b"iREAL", at(3, 0))
+        .input_by_stream(terminal.stream_id, real_id, b"iREAL", at(5, 0))
         .expect("the legitimate answer is written");
     manager
         .input_by_stream(terminal.stream_id, real_id, b"iHELLO", QueryReply::No)

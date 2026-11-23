@@ -154,65 +154,116 @@ same locks in the same order, so it reuses that status rather than reporting `-1
 failed wait; the reap and the captured status can no longer be observed apart. The close path never
 waits for the child handle: the hangup wait only tries its lock, and when the reader thread already
 holds it in `wait()` after a PTY EOF, TERM and KILL still go out on schedule, with KILL addressed to
-the shell's pid as well as its group.
+the shell's pid as well as its group. The session also keeps a cloned child killer — on Windows a
+duplicated process handle — so the close path can end the shell through that handle even while the
+reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
+the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
+falls back to the same cloned killer, so the shell still ends without the child lock. Once the close
+wait has reaped the shell, the pid fallbacks are skipped: SIGHUP and SIGKILL by pid could reach a
+process that reused it, while the Windows handle kill still runs because it holds a process handle.
+The killer is
+a separate mutex, so a busy reader thread cannot delay it. After the signals the close path drops
+both PTY ends: on Windows a killed ConPTY client does not close the pseudoconsole itself, so the
+master would keep the reader thread blocked in `read` and the session alive; dropping the master
+closes the console and dropping the writer closes its input pipe, and together they release the
+reader so the exit report runs. On Unix the drop releases a master read that outlived the killed
+group. The Windows close test waits for that exit report, so a blocked reader leaks into a failure
+rather than hiding behind the child handle.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's
-`seq` flag. Bit 0 marks a reply, bits 1-32 carry the output chunk whose bytes xterm was parsing when
-it saw the query, and bits 33-52 carry the answer's ordinal among the answers expected for that
-chunk: one chunk can ask several questions (two DSR/OSC queries, a batched `OSC 4` palette query)
-and xterm answers each separately. A query split across chunks names the chunk that contained its
-end. The daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer; only
-exact duplicates and positions at or below the evicted high-water mark are dropped. A reply for an
-older position that has not been answered yet is accepted, because it can only rescue a pending
-query. A reply naming a position the daemon never sent to that viewer is ignored and leaves the
-record untouched, so a bogus claim cannot suppress a real answer.
+`seq` flag. Bit 0 marks a reply, bits 1-32 carry the output chunk that contained the query's
+**first** byte, and bits 33-52 carry the query's index among the queries that start in that chunk:
+one chunk can ask several questions (two DSR/OSC queries, a batched `OSC 4` palette query) and
+xterm answers each separately. A query split across chunks names the chunk where it started, not
+the one where it ended. Both parts are properties of the output stream, so every viewer that parsed
+the starting chunk computes the same identity, whatever else it received or in what order. The
+scanner that recognises a sequence at a chunk boundary copies xterm's parser instead of a permissive
+reading of the bytes: an empty parameter list is `[0]` (the parser's `CLEAR` action resets the list
+and adds a zero), an empty sub-parameter stays `-1`, values clamp to the positive int32 range, ESC
+starts a new escape in every state — abandoning an open CSI, ending an OSC, DCS or string first —
+and CAN and SUB cancel back to ground. The C0 controls that xterm executes (0x00–0x17, 0x19 and
+0x1c–0x1f) execute in place inside escape, CSI and DCS entry/parameter states: they are not
+appended to the parameters and do not change state, so a `CR`, `LF` or `BEL` between a query's
+bytes cannot corrupt its signature. DEL is ignored inside those sequences. The scan runs on decoded
+code points, not raw bytes, and keeps one streaming UTF-8 decoder across chunks, following xterm's
+decoder byte for byte: a wrong continuation discards the sequence and reprocesses the byte from
+ground, and an overlong, surrogate, BOM or out-of-range code point produces no code point at all
+(never a replacement character, which would corrupt an OSC/DCS payload). U+009B starts a CSI,
+U+0090 a DCS, U+009D an OSC, U+0098/U+009E/U+009F a string, U+009C is ST, and the other C1 controls
+return to ground. A 0x9c byte inside a multi-byte character is therefore data, never a string
+terminator, even when its lead byte arrived in the previous chunk. A split character is named by the
+chunk that carried its **first** byte, so a C1 opener sent as `C2` | `9B` belongs to the chunk with
+`C2` even though xterm only decodes the code point when `9B` arrives. A sequence xterm threw away is
+never matched against a later hook. An OSC identifier is accepted only when every character before
+the first `;` is an ASCII digit and there is at least one: xterm's `OscParser` aborts the whole
+command at the first non-digit, so `10x`, ` 10` and `+10` are not `10` and cannot capture a later
+query.
 
-An answer's ordinal is counted from the start of its chunk, so the answer identity is only shared
-by viewers that began parsing the chunk at the same place. The daemon records, per viewer, the
-first raw output chunk it was sent after a snapshot; a reply naming chunk P is accepted only if
-that viewer also received chunk P-1, which means it attached at or before P-1 and parsed any query
-that started in the previous chunk. A viewer that attached at position 0 is the exception, because
-there is no earlier chunk, so its first chunk is answerable. The rule protects the other viewers'
-numbering rather than the viewer itself: a reply below that viewer's floor is accepted when no
-other attached viewer could answer P, meaning no other viewer was sent P *and* has its floor at or
-below it, because then there is nothing to collide with. A viewer that is still attaching (its
-snapshot position is not set, so it was sent nothing) and a viewer whose output credit never
-reached P are not possible answerers and cannot hold an answer back. A sole viewer that attached at
-a snapshot — or that resynced after falling behind — therefore still answers its first raw chunk.
-The client never drops a reply below its own floor; it always sends and lets the daemon decide.
-When another viewer could answer the position, a viewer that attached mid-query is dropped rather
-than allowed to renumber that viewer's answers, and the earlier-attached viewer writes them.
-A query spanning more than two 64 KiB chunks is out of scope: only the previous chunk is known to
-the daemon, and such a query is already unanswerable by a parser that attaches between its start
-and end. The sent bound also advances only when a frame is actually handed to the viewer's outbound
-channel, so a blocked send leaves it unchanged.
+`term.reset()` resets the screen but not xterm's escape parser or its UTF-8 decoder, so the tracker
+keeps both across a snapshot. A chunk that ends inside an OSC or DCS query is completed by the
+snapshot's leading bytes (`ESC[0m` ends the OSC, an `ESC` ends the DCS) and keeps the chunk that
+carried its first byte, exactly as the viewer that saw that chunk raw names it; a character split
+across the boundary stays whole. Only the record of queries from before the snapshot is cleared, and
+only when the snapshot chunk actually starts parsing: xterm's `WriteBuffer` schedules writes, so an
+output chunk applied just before the snapshot may still be waiting. Its query keeps the chunk that
+carried it. Ordinals for a chunk this viewer already parsed survive the snapshot, because the
+snapshot does not unsee those queries; a query whose terminator only arrives in the snapshot keeps
+its place after them, so it names the same `(position, ordinal)` pair as another viewer's. The
+daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer; only exact
+duplicates and positions at or below the evicted high-water mark are dropped. A reply for an older
+position that has not been answered yet is accepted, because it can only rescue a pending query. A
+reply naming a position the daemon never sent to that viewer is ignored and leaves the record
+untouched, so a bogus claim cannot suppress a real answer.
 
-Clients declare reply-position support in the attach request (default false, so an older build is
-recognised immediately). While any attached viewer has not declared it, every reply follows the
+The identity comes from the output stream, so the position a viewer may claim is one the daemon
+sent it, with one narrow exception for bytes it never parsed. Each viewer records the ranges it
+received as raw output. A position at or below its last snapshot that lies outside those ranges is
+snapshot-only for that viewer: it arrived as rendered state, never as that chunk's bytes. A snapshot
+does not unsee what came before it, so a chunk the viewer parsed raw and a later resync replaced
+stays its own to claim. The daemon drops a claim only when both hold: the position is snapshot-only
+for that viewer, and another attached viewer received **that position** raw. That other viewer has
+the bytes and answers the query, and its answer must be the one written. Everything else is
+accepted: a chunk the viewer parsed raw, a position no other viewer parsed raw, and the case where
+every viewer saw the query only through a snapshot, where the shared `(position, ordinal)` record
+still reduces the replies to one write. A viewer remembers at most 32 raw ranges (one per resync
+that skipped output); forgetting the oldest makes those old positions look snapshot-only for it, so
+its claim there gives way to a viewer that has them raw, or is accepted when none does. Either way
+the answer record still allows one write, so the cap can never cause a second answer. A viewer
+still taking its attach snapshot has received
+nothing, so it never makes another viewer's claim give way. A viewer that stalled before a chunk and
+catches up later therefore names the answers exactly as a viewer that kept up does: the query it
+missed stays unseen, and the queries it saw are written once between them, in arrival order. The one
+exception is a query xterm completes with a snapshot's leading bytes: the viewer that owns those
+bytes may claim them, and with nobody else able to answer the shell is never left without an answer.
+The old per-viewer attach floor guarded chunk-local numbering, and that numbering is gone; this
+snapshot rule is about which bytes the viewer actually parsed, and the answer record is what keeps
+the reply count at one.
+
+Clients declare reply-position support in the attach request with `reply_positions_v2` (default
+false). The field is new rather than the first `reply_positions` flag because the numbering changed
+from the chunk where the query ended to the chunk where it starts: a client that only sends the old
+flag is legacy, exactly like one that sends nothing, so its answers are never correlated with a
+position and cannot collide with a positioned viewer's numbering. While any attached viewer has not
+declared it, every reply follows the
 legacy single-owner rule: the first viewer to send a marked reply that is actually written owns
 them all, and its positioned replies are still validated and deduplicated. A rejected claim — a
-position the daemon never sent, or one that fails the attach boundary — does not take the role, so
-it cannot suppress the old client's next valid reply, and neither does a reply whose write fails:
-the role and the answered-position record are only committed once the bytes reach the shell, all
-under the writer lock. The role moves only when its owner detaches
-or is replaced, or when the last legacy viewer leaves and the per-answer rule resumes; another
-legacy viewer attaching or detaching does not reset it while an answer may be in flight. Both
-arrival orders therefore write exactly one answer. When every attached viewer has declared
-positions, each answer is decided by its `(position, ordinal)` alone. Acceptance and the PTY write
-happen under the same writer lock, so two connections cannot be accepted in one order and write out
-of order. Recent chunks keep a bounded bitset of answered ordinals: 64 chunks with 1024 answers
-each, deliberately fixed so memory stays constant; the tail of a larger chunk collapses to a
-single high-water ordinal, and chunks older than the window collapse into the evicted high-water
-mark. Those limits are deliberate, not a missing feature: a 1024-answer batch in one 64 KiB chunk
-is already far beyond real queries, and the collapse can only drop answers for a chunk that has
-left the window. A late reply for a chunk older than the whole window is itself the entry retired,
-so it can never push a still-tracked chunk out. A viewer that was not sent the query's chunk — one
-whose credit is exhausted so the chunk never reached it, or one that is still attaching — therefore
-never blocks another viewer's answer, and two active viewers never both answer. One case remains: a
-viewer that was sent the chunk and has not answered it yet still counts as the possible answerer, so
-a later-attached viewer's reply for that position is dropped until the silent viewer answers or
-detaches. The client never gives up reconnecting: after
+position the daemon never sent — does not take the role, so it cannot suppress the old client's
+next valid reply, and neither does a reply whose write fails: the role and the answered-position
+record are only committed once the bytes reach the shell, all under the writer lock. The role moves
+only when its owner detaches or is replaced, or when the last legacy viewer leaves and the
+per-answer rule resumes; another legacy viewer attaching or detaching does not reset it while an
+answer may be in flight. Both arrival orders therefore write exactly one answer. When every
+attached viewer has declared positions, each answer is decided by its `(position, ordinal)` alone.
+Acceptance and the PTY write happen under the same writer lock, so two connections cannot be
+accepted in one order and write out of order. Recent chunks keep a bounded bitset of answered
+ordinals: 64 chunks with 1024 answers each, deliberately fixed so memory stays constant; the tail
+of a larger chunk collapses to a single high-water ordinal, and chunks older than the window
+collapse into the evicted high-water mark. Those limits are deliberate, not a missing feature: a
+1024-answer batch in one 64 KiB chunk is already far beyond real queries, and the collapse can only
+drop answers for a chunk that has left the window. A late reply for a chunk older than the whole
+window is itself the entry retired, so it can never push a still-tracked chunk out. The client
+never gives up reconnecting: after
 the fast backoff it retries at the capped interval, and an online, focus or visibility event retries
 at once, except during the very first connect, which is not yet a retry, and while an attempt that
 started less than a second ago is still opening.

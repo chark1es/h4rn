@@ -254,13 +254,18 @@ cols: number | null,
  */
 rows: number | null, 
 /**
- * Whether this client names the output position on every marked reply.
+ * Whether this client names the output position on every marked reply
+ * with protocol 2 numbering: the chunk where the query **starts**.
  *
- * A client that omits it is an older build. While one is attached the
- * terminal keeps the legacy single-owner reply rule, because its
- * answers cannot be correlated with a query position.
+ * The field is new rather than reused because the first version of
+ * positioned replies numbered answers by the chunk where the query
+ * *ended*. An older client sends no such field (or only
+ * `reply_positions`), so it is treated as legacy and its answers are
+ * never correlated with a position; an older daemon ignores the field
+ * and applies its own single-owner rule. While one such viewer is
+ * attached the terminal keeps that legacy rule.
  */
-reply_positions: boolean, } | { "type": "terminal_list", 
+reply_positions_v2: boolean, } | { "type": "terminal_list", 
 /**
  * Filter to one thread, or every terminal when `None`.
  */

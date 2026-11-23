@@ -14,6 +14,11 @@ use h4rn_protocol::{DiffAgainst, FsCreateKind, FsFileContent, ThreadId, TurnId};
 
 /// A temporary workspace plus daemon data directory.
 struct Fixture {
+    /// Kept alive for the whole test so the temporary workspace survives.
+    ///
+    /// No Windows test reaches through the directory handle, so the field is
+    /// deliberately unread there and must not fail `-D warnings`.
+    #[cfg_attr(windows, allow(dead_code))]
     dir: tempfile::TempDir,
     workspace: PathBuf,
     data: PathBuf,
