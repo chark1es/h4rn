@@ -300,7 +300,13 @@ pub(crate) fn sanitize(command: &mut Command) {
         // Grafts (`<common>/info/grafts`, or an inherited `GIT_GRAFT_FILE`)
         // rewrite parent links the same way and are honoured regardless of
         // `GIT_NO_REPLACE_OBJECTS`; point git at an empty graft file.
-        .env("GIT_GRAFT_FILE", EMPTY_FILE);
+        .env("GIT_GRAFT_FILE", EMPTY_FILE)
+        // Git's messages are parsed (push classification, URL redaction, the
+        // tracker's error triage) and localized catalogs change their quotes,
+        // spacing and words, so every call speaks the C locale.
+        .env("LC_ALL", "C")
+        .env("LANG", "C");
+    command.env_remove("LANGUAGE");
     for name in TRACE_VARS.iter().chain(LOCATION_VARS).chain(
         [
             "GIT_REPLACE_REF_BASE",
@@ -1630,6 +1636,29 @@ where
         return Err(failure_message(status, &stderr));
     }
     Ok((
+        String::from_utf8_lossy(&stdout).trim().to_owned(),
+        String::from_utf8_lossy(&stderr).trim().to_owned(),
+    ))
+}
+
+/// Runs git with a deadline and reports whether it succeeded, with its stdout
+/// and stderr either way.
+///
+/// A porcelain push prints the fate of every ref on stdout and still exits
+/// non-zero when one is rejected, so a caller that must read that record
+/// cannot use the helpers that throw stdout away on failure.
+pub fn run_combined_with_timeout<I, S>(
+    dir: &Path,
+    args: I,
+    limit: Duration,
+) -> Result<(bool, String, String), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let (status, stdout, stderr) = run_raw(dir, args, limit)?;
+    Ok((
+        status.success(),
         String::from_utf8_lossy(&stdout).trim().to_owned(),
         String::from_utf8_lossy(&stderr).trim().to_owned(),
     ))

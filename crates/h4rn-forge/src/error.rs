@@ -74,7 +74,7 @@ pub enum ForgeError {
 
 fn retry_suffix(retry_after_secs: Option<u64>) -> String {
     match retry_after_secs {
-        Some(seconds) => format!("; retry in {seconds}s"),
+        Some(seconds) => format!("; try again in {seconds}s"),
         None => String::new(),
     }
 }
