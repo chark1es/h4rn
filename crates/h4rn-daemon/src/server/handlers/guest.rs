@@ -33,12 +33,23 @@ pub(super) async fn handle(
     match request {
         ClientRequest::GetGuestSharing { thread_id } => {
             let base = share_base(conn);
+            let visible = may_read_link_url(conn);
             let sharing = conn
                 .state
                 .guest
-                .sharing(&thread_id, &base, may_read_link_url(conn))
+                .sharing(&thread_id, &base, visible)
                 .await
                 .map_err(internal)?;
+            // The URL is the bearer credential, so reading it is an audited
+            // action, not just a metadata read.
+            if visible && sharing.link.as_ref().is_some_and(|link| link.url.is_some()) {
+                conn.audit(
+                    "guest.link_viewed",
+                    Some("thread"),
+                    Some(thread_id.as_ref()),
+                    serde_json::json!({"expires_at": sharing.link.as_ref().map(|link| link.expires_at)}),
+                );
+            }
             Ok(ResponseBody::GuestSharing { sharing })
         }
         ClientRequest::ShareThreadWithGuest { thread_id } => {
