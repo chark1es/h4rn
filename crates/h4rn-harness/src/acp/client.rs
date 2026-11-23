@@ -258,6 +258,25 @@ pub enum AcpEvent {
         /// Which end of the transport failed.
         kind: TransportCloseKind,
     },
+    /// The session is about to write a prompt.
+    ///
+    /// Queued through the reader's own event queue before the prompt frame is
+    /// written, so the bridge knows that updates arriving from here on belong
+    /// to a running turn (see [`Self::Settled`]).
+    PromptStarted,
+    /// The events a prompt task produced for the turn it just finished.
+    ///
+    /// Queued through the reader's own event queue, so they are published
+    /// behind every `session/update` the reader had already read. The prompt
+    /// task and the bridge are two producers of one turn's stream; without
+    /// this order a turn's last update could land after its completion and be
+    /// applied to the turn that follows it. The bridge drops session updates
+    /// after this until the next [`Self::PromptStarted`]: no turn is running
+    /// then, so an update cannot belong to one.
+    Settled {
+        /// The turn's final events, in the order they must be applied.
+        events: Vec<crate::HarnessEvent>,
+    },
 }
 
 type PendingMap = Mutex<HashMap<String, oneshot::Sender<Result<Value, AcpError>>>>;
@@ -417,7 +436,36 @@ impl AcpClient {
                 // this client ended it on purpose (a write deadline, a
                 // shutdown): that exit is not a second failure to report.
                 let deliberate = shared.shutting_down.swap(true, Ordering::SeqCst);
+                // The agent's last reply can still be in the pipe when it is
+                // reaped: a real peer writes a newline-terminated answer and
+                // exits at once. The reader owns the order, so give it the
+                // drain window before failing anything, or a request the agent
+                // answered would be settled with the exit error. A grandchild
+                // may hold the pipe open, so the wait is bounded.
+                let reader = lock(&shared.reader).take();
+                let (_, _) = tokio::join!(
+                    async {
+                        if let Some(mut reader) = reader
+                            && tokio::time::timeout(STDERR_DRAIN_GRACE, &mut reader)
+                                .await
+                                .is_err()
+                        {
+                            // A grandchild is holding the pipe open: nothing
+                            // more can arrive inside the window, and the task
+                            // would otherwise outlive the agent it belongs to.
+                            reader.abort();
+                        }
+                    },
+                    // The agent's last diagnostic can still be in the pipe when
+                    // the notable events are sent: let the reader drain it
+                    // before the exit report is built, so the one failure row a
+                    // waiting prompt publishes carries it. Bounded for the same
+                    // reason as above.
+                    tokio::time::timeout(STDERR_DRAIN_GRACE, stderr_task),
+                );
                 shared.health.close_with(TransportCloseKind::Exit);
+                // Only requests the drain did not answer are failed now; the
+                // reader removed every reply it read from the pending map.
                 fail_pending(
                     &shared,
                     AcpError::Closed {
@@ -425,12 +473,6 @@ impl AcpClient {
                         kind: TransportCloseKind::Exit,
                     },
                 );
-                // The agent's last diagnostic can still be in the pipe when the
-                // notable events are sent: let the reader drain it before the
-                // exit report is built, so the one failure row a waiting prompt
-                // publishes carries it. A grandchild may hold the pipe open, so
-                // the wait is bounded.
-                let _ = tokio::time::timeout(STDERR_DRAIN_GRACE, stderr_task).await;
                 let (status_text, stderr_tail) = match status {
                     Ok(status) => (status.to_string(), shared.stderr.snapshot()),
                     Err(error) => (
@@ -574,6 +616,17 @@ impl AcpClient {
     /// Takes the event receiver. A client has exactly one consumer.
     pub fn take_events(&self) -> Option<mpsc::Receiver<AcpEvent>> {
         lock(&self.shared.events_rx).take()
+    }
+
+    /// Queues `event` behind every frame the reader has already read.
+    ///
+    /// The reader sends a frame's events before it resolves that frame's
+    /// reply, so an event queued here after the reply was observed is behind
+    /// every update the turn produced before it. The prompt task uses this to
+    /// publish its turn's settlement without overtaking the turn's own
+    /// updates.
+    pub(crate) async fn queue_behind_reader(&self, event: AcpEvent) -> bool {
+        self.shared.events_tx.send(event).await.is_ok()
     }
 
     /// Opens a new session and returns its models, modes and id.
@@ -1354,7 +1407,10 @@ where
 
         // The agent's stdout is gone: no reply can ever come back. Mark the
         // transport dead before failing the pending calls, so a prompt that
-        // fails because of this can see why.
+        // fails because of this can see why. This runs only after every line
+        // already in the pipe was read, so a reply the agent wrote before
+        // exiting is resolved rather than failed; the supervisor waits for
+        // this reader to reach EOF for exactly that reason.
         shared.health.close_with(close_kind);
         fail_pending(
             &shared,
@@ -2830,6 +2886,38 @@ mod tests {
         }
         agent_task.await.expect("agent");
         client.shutdown().await.expect("shutdown");
+    }
+
+    /// A reply that reached the pipe before the agent exited is never lost.
+    ///
+    /// A real peer answers and exits at once: the newline-terminated reply is
+    /// already in the child's stdout when the supervisor reaps the process.
+    /// The supervisor used to close the transport and fail every pending call
+    /// before the reader had drained that reply, so an answered request was
+    /// settled with the exit error. The reader owns that order now: the
+    /// supervisor waits, bounded, for it to reach EOF before failing what is
+    /// still pending.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_written_before_the_exit_resolves_instead_of_failing() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // The peer answers the first frame it reads with a well-formed
+        // `initialize` reply (the client's first request always uses id 1)
+        // and exits immediately, without waiting for anything else.
+        let config = AcpClientConfig::new("/bin/sh", workspace.path()).args([
+            "-c",
+            "read -r line; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"Exit Peer\"}}}'; exit 0",
+        ]);
+        for run in 0..100 {
+            let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+            let _events = client.take_events().expect("events");
+            let info = client
+                .initialize()
+                .await
+                .unwrap_or_else(|error| panic!("run {run}: the reply was lost: {error:?}"));
+            assert_eq!(info.agent_name, "Exit Peer", "run {run}");
+            client.shutdown().await.expect("shutdown");
+        }
     }
 
     #[test]
