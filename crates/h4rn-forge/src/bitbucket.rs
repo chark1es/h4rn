@@ -26,9 +26,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use h4rn_protocol::{
     ForgeCapabilities, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeComment, ForgeCommentPage,
-    ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeKind, ForgeMergeable, ForgeNewPr,
-    ForgePrFilter, ForgePrState, ForgePrSummary, ForgePullRequest, ForgeRepoRef, ForgeReview,
-    ForgeReviewComment, ForgeReviewState, ForgeReviewThread,
+    ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeIssue, ForgeIssueComment,
+    ForgeIssueCommentPage, ForgeIssueFilter, ForgeIssuePage, ForgeIssueUpdate, ForgeKind,
+    ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary, ForgePullRequest,
+    ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState, ForgeReviewThread,
 };
 use serde_json::{Value, json};
 
@@ -643,6 +644,46 @@ impl Forge for BitbucketClient {
             )
             .await?;
         map_pr_detail(repo, &value)
+    }
+
+    async fn list_issues(
+        &self,
+        repo: &ForgeRepoRef,
+        filter: ForgeIssueFilter,
+        page: u32,
+        query: Option<&str>,
+    ) -> Result<ForgeIssuePage> {
+        crate::issues::bitbucket::list(&self.http, &self.api, repo, filter, page, query).await
+    }
+
+    async fn get_issue(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeIssue> {
+        crate::issues::bitbucket::get(&self.http, &self.api, repo, number).await
+    }
+
+    async fn list_issue_comments(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeIssueCommentPage> {
+        crate::issues::bitbucket::comments(&self.http, &self.api, repo, number).await
+    }
+
+    async fn comment_issue(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        body: &str,
+    ) -> Result<ForgeIssueComment> {
+        crate::issues::bitbucket::comment(&self.http, &self.api, repo, number, body).await
+    }
+
+    async fn update_issue(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        update: &ForgeIssueUpdate,
+    ) -> Result<ForgeIssue> {
+        crate::issues::bitbucket::update(&self.http, &self.api, repo, number, update).await
     }
 }
 

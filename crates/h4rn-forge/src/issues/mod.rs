@@ -1,0 +1,595 @@
+//! Shared issue helpers and the Linear GraphQL client.
+//!
+//! Forge issue mappings live next to their provider; this module keeps the
+//! pieces every provider needs (labels, people, state names) and the Linear
+//! client, whose model (teams, workflow states, cursors) is different enough to
+//! stand alone. Requests carry the same redaction as forge calls.
+
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use h4rn_protocol::issues::{
+    ForgeIssueCapabilities, ForgeIssueFilter, ForgeIssuePerson, ForgeIssueState, LinearIssue,
+    LinearIssueComment, LinearIssueLinkedPr, LinearIssuePage, LinearIssueSummary, LinearStateType,
+    LinearTeam,
+};
+use h4rn_protocol::{ForgeKind, ForgeLabel};
+use serde_json::{Value, json};
+
+use crate::error::{ForgeError, Result};
+use crate::http::redact;
+
+pub(crate) mod azure;
+pub(crate) mod bitbucket;
+pub(crate) mod gitea;
+pub(crate) mod github;
+pub(crate) mod gitlab;
+
+/// What each forge's issue tracker can do.
+pub fn capabilities(kind: ForgeKind) -> ForgeIssueCapabilities {
+    match kind {
+        ForgeKind::GitHub => ForgeIssueCapabilities {
+            read: true,
+            write: true,
+            comments: true,
+            labels: true,
+            assignees: true,
+            close_reason: true,
+            search: true,
+            assigned_filter: true,
+            created_filter: true,
+            mentioning_filter: true,
+            linked_pull_requests: true,
+        },
+        ForgeKind::GitLab => ForgeIssueCapabilities {
+            read: true,
+            write: true,
+            comments: true,
+            labels: true,
+            assignees: true,
+            close_reason: false,
+            search: true,
+            assigned_filter: true,
+            created_filter: true,
+            mentioning_filter: false,
+            linked_pull_requests: true,
+        },
+        ForgeKind::Gitea | ForgeKind::Forgejo => ForgeIssueCapabilities {
+            read: true,
+            write: true,
+            comments: true,
+            labels: true,
+            assignees: true,
+            close_reason: false,
+            search: true,
+            assigned_filter: true,
+            created_filter: true,
+            mentioning_filter: true,
+            linked_pull_requests: false,
+        },
+        ForgeKind::Bitbucket => ForgeIssueCapabilities {
+            read: true,
+            write: true,
+            comments: true,
+            labels: false,
+            assignees: true,
+            close_reason: true,
+            search: true,
+            assigned_filter: false,
+            created_filter: false,
+            mentioning_filter: false,
+            linked_pull_requests: false,
+        },
+        ForgeKind::AzureDevOps => ForgeIssueCapabilities {
+            read: true,
+            write: true,
+            comments: true,
+            labels: true,
+            assignees: true,
+            close_reason: false,
+            search: true,
+            assigned_filter: true,
+            created_filter: true,
+            mentioning_filter: false,
+            linked_pull_requests: true,
+        },
+    }
+}
+
+/// Linear's public GraphQL endpoint.
+pub const LINEAR_ENDPOINT: &str = "https://api.linear.app/graphql";
+/// Issues returned per page.
+pub const LINEAR_PAGE_SIZE: u32 = 50;
+
+/// Identity behind a Linear API key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinearViewer {
+    /// Workspace or user display name.
+    pub name: String,
+    /// Account email, when reported.
+    pub email: Option<String>,
+}
+
+/// A small Linear GraphQL client.
+///
+/// The API key lives only in this struct and is redacted from every error. The
+/// client is rebuilt from the daemon's secret store when needed, never
+/// persisted here.
+pub struct LinearClient {
+    client: reqwest::Client,
+    endpoint: String,
+    key: String,
+}
+
+impl LinearClient {
+    /// Builds a client for the public endpoint.
+    pub fn new(api_key: &str) -> Result<Self> {
+        Self::with_endpoint(api_key, LINEAR_ENDPOINT)
+    }
+
+    /// Builds a client for an explicit endpoint, used by wiremock tests.
+    pub fn with_endpoint(api_key: &str, endpoint: &str) -> Result<Self> {
+        let key = api_key
+            .trim()
+            .trim_start_matches("Bearer ")
+            .trim()
+            .to_owned();
+        if key.is_empty() {
+            return Err(ForgeError::InvalidRequest(
+                "the Linear API key is empty".into(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("h4rn-forge/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|error| ForgeError::Network(redact(&error.to_string())))?;
+        Ok(Self {
+            client,
+            endpoint: endpoint.to_owned(),
+            key,
+        })
+    }
+
+    async fn query(&self, query: &str, variables: Value) -> Result<Value> {
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .header("authorization", &self.key)
+            .json(&json!({"query": query, "variables": variables}))
+            .send()
+            .await
+            .map_err(|error| ForgeError::Network(redact(&error.to_string())))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ForgeError::Network(redact(&error.to_string())))?;
+        let value: Value = serde_json::from_str(&body).map_err(|error| {
+            ForgeError::Parse(format!("Linear returned a non-JSON body: {error}"))
+        })?;
+        if !status.is_success() {
+            let message = value["message"]
+                .as_str()
+                .or_else(|| value["errors"][0]["message"].as_str())
+                .unwrap_or("Linear rejected the request")
+                .to_owned();
+            return Err(match status.as_u16() {
+                401 => ForgeError::InvalidRequest(format!(
+                    "the Linear API key was rejected: {message}"
+                )),
+                403 => ForgeError::Forbidden {
+                    forge: h4rn_protocol::ForgeKind::GitHub,
+                    message: format!("Linear refused the request: {}", redact(&message)),
+                },
+                429 => ForgeError::RateLimited {
+                    forge: h4rn_protocol::ForgeKind::GitHub,
+                    retry_after_secs: None,
+                    retry_at: None,
+                    message: redact(&message),
+                },
+                _ => ForgeError::Http {
+                    status: status.as_u16(),
+                    message: redact(&message),
+                },
+            });
+        }
+        if let Some(errors) = value["errors"].as_array()
+            && let Some(message) = errors.first().and_then(|error| error["message"].as_str())
+        {
+            let message = redact(message);
+            // Linear reports an invalid key as a GraphQL error with HTTP 200.
+            return Err(if message.to_ascii_lowercase().contains("authentication") {
+                ForgeError::InvalidRequest(format!("the Linear API key was rejected: {message}"))
+            } else {
+                ForgeError::InvalidRequest(message)
+            });
+        }
+        Ok(value["data"].clone())
+    }
+
+    /// Validates the key and returns the workspace identity.
+    pub async fn viewer(&self) -> Result<LinearViewer> {
+        let data = self
+            .query(
+                "query { viewer { name email organization { name } } }",
+                json!({}),
+            )
+            .await?;
+        let name = text(&data["viewer"]["organization"], "name");
+        let name = if name.is_empty() {
+            text(&data["viewer"], "name")
+        } else {
+            name
+        };
+        Ok(LinearViewer {
+            name,
+            email: optional_text(&data["viewer"], "email"),
+        })
+    }
+
+    /// Teams visible to the key.
+    pub async fn teams(&self) -> Result<Vec<LinearTeam>> {
+        let data = self
+            .query(
+                "query { teams(first: 100) { nodes { id key name } } }",
+                json!({}),
+            )
+            .await?;
+        Ok(data["teams"]["nodes"]
+            .as_array()
+            .map(|teams| {
+                teams
+                    .iter()
+                    .map(|team| LinearTeam {
+                        id: text(team, "id"),
+                        key: text(team, "key"),
+                        name: text(team, "name"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Lists one team's issues. `cursor` is the previous page's `endCursor`.
+    pub async fn list_issues(
+        &self,
+        team_id: &str,
+        filter: ForgeIssueFilter,
+        cursor: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<LinearIssuePage> {
+        let involvement = match filter {
+            ForgeIssueFilter::Assigned => Some(json!({"assignee": {"isMe": {"eq": true}}})),
+            ForgeIssueFilter::Created => Some(json!({"creator": {"isMe": {"eq": true}}})),
+            ForgeIssueFilter::Mentioning => {
+                return Err(ForgeError::Unsupported(
+                    "Linear has no issue filter for mentions; search instead".into(),
+                ));
+            }
+            _ => None,
+        };
+        let state = match filter {
+            ForgeIssueFilter::Closed => {
+                Some(json!({"state": {"type": {"in": ["completed", "canceled"]}}}))
+            }
+            ForgeIssueFilter::Open | ForgeIssueFilter::Assigned | ForgeIssueFilter::Created => {
+                Some(json!({"state": {"type": {"in": ["backlog", "unstarted", "started"]}}}))
+            }
+            ForgeIssueFilter::All | ForgeIssueFilter::Mentioning => None,
+        };
+        let mut filter_value = json!({"team": {"id": {"eq": team_id}}});
+        if let Some(state) = state {
+            merge(&mut filter_value, state);
+        }
+        if let Some(involvement) = involvement {
+            merge(&mut filter_value, involvement);
+        }
+
+        let term = query.map(str::trim).filter(|term| !term.is_empty());
+        let (document, variables) = match term {
+            Some(term) => (
+                LINEAR_SEARCH_QUERY,
+                json!({
+                    "teamId": team_id,
+                    "term": term,
+                    "first": LINEAR_PAGE_SIZE,
+                    "after": cursor,
+                }),
+            ),
+            None => (
+                LINEAR_LIST_QUERY,
+                json!({
+                    "teamId": team_id,
+                    "filter": filter_value,
+                    "first": LINEAR_PAGE_SIZE,
+                    "after": cursor,
+                }),
+            ),
+        };
+        let data = self.query(document, variables).await?;
+        let connection = if term.is_some() {
+            &data["searchIssues"]
+        } else {
+            &data["issues"]
+        };
+        let issues = connection["nodes"]
+            .as_array()
+            .map(|nodes| nodes.iter().filter_map(map_issue_summary).collect())
+            .unwrap_or_default();
+        let next_cursor = connection["pageInfo"]["hasNextPage"]
+            .as_bool()
+            .unwrap_or(false)
+            .then(|| optional_text(&connection["pageInfo"], "endCursor"))
+            .flatten();
+        Ok(LinearIssuePage {
+            issues,
+            next_cursor,
+        })
+    }
+
+    /// Reads one issue and its comments.
+    pub async fn get_issue(&self, issue_id: &str) -> Result<LinearIssue> {
+        let data = self
+            .query(LINEAR_DETAIL_QUERY, json!({"id": issue_id}))
+            .await?;
+        let issue = &data["issue"];
+        let summary = map_issue_summary(issue).ok_or_else(|| {
+            ForgeError::NotFound(format!("Linear issue {issue_id} was not found"))
+        })?;
+        let comments = issue["comments"]["nodes"]
+            .as_array()
+            .map(|nodes| nodes.iter().filter_map(map_comment).collect())
+            .unwrap_or_default();
+        let linked_pull_requests = issue["attachments"]["nodes"]
+            .as_array()
+            .map(|nodes| nodes.iter().filter_map(map_attachment).collect())
+            .unwrap_or_default();
+        Ok(LinearIssue {
+            summary,
+            description: text(issue, "description"),
+            created_at: parse_datetime(&issue["createdAt"], "createdAt")
+                .unwrap_or_else(|_| Utc::now()),
+            comments,
+            linked_pull_requests,
+        })
+    }
+
+    /// Posts a comment and returns what Linear stored.
+    pub async fn create_comment(&self, issue_id: &str, body: &str) -> Result<LinearIssueComment> {
+        let data = self
+            .query(
+                LINEAR_COMMENT_MUTATION,
+                json!({"issueId": issue_id, "body": body}),
+            )
+            .await?;
+        let comment = &data["commentCreate"]["comment"];
+        map_comment(comment)
+            .ok_or_else(|| ForgeError::Parse("Linear returned no comment after posting".into()))
+    }
+}
+
+/// GraphQL document that lists a team's issues.
+pub const LINEAR_LIST_QUERY: &str = r#"
+query($teamId: ID!, $filter: IssueFilter, $first: Int!, $after: String) {
+  issues(first: $first, after: $after, filter: $filter, orderBy: updatedAt) {
+    nodes {
+      id identifier title updatedAt url
+      state { name type }
+      team { id key }
+      assignees { nodes { displayName } }
+      labels { nodes { name } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
+
+/// GraphQL document that searches a team's issues.
+pub const LINEAR_SEARCH_QUERY: &str = r#"
+query($teamId: String!, $term: String!, $first: Int!, $after: String) {
+  searchIssues(term: $term, teamId: $teamId, first: $first, after: $after) {
+    nodes {
+      id identifier title updatedAt url
+      state { name type }
+      team { id key }
+      assignees { nodes { displayName } }
+      labels { nodes { name } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
+
+/// GraphQL document that reads one issue and its comments.
+pub const LINEAR_DETAIL_QUERY: &str = r#"
+query($id: String!) {
+  issue(id: $id) {
+    id identifier title description createdAt updatedAt url
+    state { name type }
+    team { id key }
+    assignees { nodes { displayName } }
+    labels { nodes { name } }
+    comments(first: 100) {
+      nodes { id body createdAt updatedAt user { displayName } }
+    }
+    attachments(first: 100) { nodes { title url metadata } }
+  }
+}"#;
+
+/// GraphQL mutation that posts one comment.
+pub const LINEAR_COMMENT_MUTATION: &str = r#"
+mutation($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+    comment { id body createdAt updatedAt user { displayName } }
+  }
+}"#;
+
+fn map_issue_summary(value: &Value) -> Option<LinearIssueSummary> {
+    Some(LinearIssueSummary {
+        id: optional_text(value, "id")?,
+        identifier: text(value, "identifier"),
+        title: text(value, "title"),
+        state_name: text(&value["state"], "name"),
+        state_type: state_type(&text(&value["state"], "type")),
+        team_id: text(&value["team"], "id"),
+        team_key: text(&value["team"], "key"),
+        assignees: string_nodes(&value["assignees"]),
+        labels: string_nodes_named(&value["labels"]),
+        updated_at: parse_datetime(&value["updatedAt"], "updatedAt").unwrap_or_else(|_| Utc::now()),
+        url: text(value, "url"),
+    })
+}
+
+fn map_comment(value: &Value) -> Option<LinearIssueComment> {
+    Some(LinearIssueComment {
+        id: optional_text(value, "id")?,
+        author: text(&value["user"], "displayName"),
+        body: text(value, "body"),
+        created_at: parse_datetime(&value["createdAt"], "createdAt").ok()?,
+        updated_at: parse_optional_datetime(value.get("updatedAt")),
+    })
+}
+
+fn map_attachment(value: &Value) -> Option<LinearIssueLinkedPr> {
+    let url = optional_text(value, "url")?;
+    if !(url.contains("/pull/")
+        || url.contains("/merge_requests/")
+        || url.contains("/pull-requests/"))
+    {
+        return None;
+    }
+    Some(LinearIssueLinkedPr {
+        title: text(value, "title"),
+        url,
+        state: text(&value["metadata"], "state"),
+    })
+}
+
+fn string_nodes(value: &Value) -> Vec<String> {
+    value["nodes"]
+        .as_array()
+        .map(|nodes| nodes.iter().map(|node| text(node, "displayName")).collect())
+        .unwrap_or_default()
+}
+
+fn string_nodes_named(value: &Value) -> Vec<String> {
+    value["nodes"]
+        .as_array()
+        .map(|nodes| nodes.iter().map(|node| text(node, "name")).collect())
+        .unwrap_or_default()
+}
+
+fn state_type(value: &str) -> LinearStateType {
+    match value {
+        "backlog" => LinearStateType::Backlog,
+        "unstarted" => LinearStateType::Unstarted,
+        "started" => LinearStateType::Started,
+        "completed" => LinearStateType::Completed,
+        "canceled" => LinearStateType::Canceled,
+        _ => LinearStateType::Unstarted,
+    }
+}
+
+fn merge(target: &mut Value, source: Value) {
+    if let (Some(target), Value::Object(source)) = (target.as_object_mut(), source) {
+        for (key, value) in source {
+            target.insert(key, value);
+        }
+    }
+}
+
+fn text(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn optional_text(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn parse_datetime(value: &Value, field: &str) -> Result<DateTime<Utc>> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| ForgeError::Parse(format!("Linear {field} is not a string")))?;
+    DateTime::parse_from_rfc3339(text)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| ForgeError::Parse(format!("Linear {field} is not RFC 3339: {error}")))
+}
+
+fn parse_optional_datetime(value: Option<&Value>) -> Option<DateTime<Utc>> {
+    value.and_then(|value| parse_datetime(value, "timestamp").ok())
+}
+
+/// Maps a GitHub/Gitea-style label array.
+pub(crate) fn labels(value: &Value) -> Vec<ForgeLabel> {
+    value
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .map(|label| ForgeLabel {
+                    name: text(label, "name"),
+                    color: optional_text(label, "color").filter(|color| !color.is_empty()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Maps a provider's assignee array (`login`/`name` or GitLab's `username`).
+pub(crate) fn people(value: &Value) -> Vec<ForgeIssuePerson> {
+    value
+        .as_array()
+        .map(|people| {
+            people
+                .iter()
+                .filter_map(|person| {
+                    let login = optional_text(person, "login")
+                        .or_else(|| optional_text(person, "username"))
+                        .or_else(|| optional_text(person, "displayName"))?;
+                    Some(ForgeIssuePerson {
+                        login,
+                        name: optional_text(person, "name")
+                            .or_else(|| optional_text(person, "display_name"))
+                            .or_else(|| optional_text(person, "displayName")),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Maps an open/closed boolean to the protocol state.
+pub(crate) fn state_from_closed(closed: bool) -> ForgeIssueState {
+    if closed {
+        ForgeIssueState::Closed
+    } else {
+        ForgeIssueState::Open
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_state_names_map_to_linear_families() {
+        assert_eq!(state_type("started"), LinearStateType::Started);
+        assert_eq!(state_type("completed"), LinearStateType::Completed);
+        assert_eq!(state_type("something"), LinearStateType::Unstarted);
+    }
+
+    #[test]
+    fn only_pull_request_attachments_are_linked() {
+        let pull = json!({"title": "Fix", "url": "https://github.com/o/r/pull/4"});
+        let doc = json!({"title": "Doc", "url": "https://example.test/doc"});
+        assert_eq!(map_attachment(&pull).map(|pr| pr.title), Some("Fix".into()));
+        assert!(map_attachment(&doc).is_none());
+    }
+}

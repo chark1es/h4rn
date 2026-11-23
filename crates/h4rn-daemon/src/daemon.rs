@@ -343,11 +343,23 @@ impl DaemonBuilder {
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
         let pr_links = crate::pr_links::PrLinkService::new(
-            journal,
+            Arc::clone(&journal),
             Arc::new(crate::pr_links::ForgePrSource::new(Arc::clone(&forge))),
             Arc::new(crate::pr_links::ThreadWakeSink::new(Arc::clone(&manager))),
         );
         pr_links.start();
+        let linear = crate::linear::LinearService::open(&self.config.data_dir)
+            .map_err(|error| anyhow::anyhow!("open the Linear service: {error}"))?;
+        let issue_links = crate::issue_links::IssueLinkService::new(
+            journal,
+            Arc::new(crate::issue_links::TrackerIssueSource::new(
+                Arc::clone(&forge),
+                Arc::clone(&linear),
+            )),
+            Arc::new(crate::issue_links::ThreadTitleSink::new(Arc::clone(
+                &manager,
+            ))),
+        );
 
         let tokens = TokenStore::new(&self.config.data_dir);
         // Provision on first serve so a client has a token to read.
@@ -524,6 +536,8 @@ impl DaemonBuilder {
             fs,
             forge,
             pr_links,
+            linear,
+            issue_links,
             skills,
             secure,
             remote,
@@ -552,6 +566,8 @@ pub struct Daemon {
     fs: Arc<FsService>,
     forge: Arc<ForgeService>,
     pr_links: Arc<crate::pr_links::PrLinkService>,
+    linear: Arc<crate::linear::LinearService>,
+    issue_links: Arc<crate::issue_links::IssueLinkService>,
     skills: Arc<h4rn_skills::SkillsService>,
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
@@ -704,6 +720,8 @@ impl Daemon {
             fs: self.fs,
             forge: Arc::clone(&self.forge),
             pr_links: Arc::clone(&self.pr_links),
+            linear: Arc::clone(&self.linear),
+            issue_links: Arc::clone(&self.issue_links),
             skills: Arc::clone(&self.skills),
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),

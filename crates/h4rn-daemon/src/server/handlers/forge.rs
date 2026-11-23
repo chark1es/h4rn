@@ -43,6 +43,23 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
             | ClientRequest::ListPrThreads { .. }
             | ClientRequest::WatchPullRequest { .. }
             | ClientRequest::UnwatchPullRequest { .. }
+            | ClientRequest::ForgeListIssues { .. }
+            | ClientRequest::ForgeGetIssue { .. }
+            | ClientRequest::ForgeListIssueComments { .. }
+            | ClientRequest::ForgeCommentIssue { .. }
+            | ClientRequest::ForgeUpdateIssue { .. }
+            | ClientRequest::LinearListAccounts
+            | ClientRequest::LinearConnect { .. }
+            | ClientRequest::LinearRemoveAccount { .. }
+            | ClientRequest::LinearListTeams { .. }
+            | ClientRequest::LinearProjectTeams
+            | ClientRequest::LinearSetProjectTeam { .. }
+            | ClientRequest::LinearListIssues { .. }
+            | ClientRequest::LinearGetIssue { .. }
+            | ClientRequest::LinearCommentIssue { .. }
+            | ClientRequest::LinkIssue { .. }
+            | ClientRequest::UnlinkIssue { .. }
+            | ClientRequest::ListThreadIssues { .. }
     )
 }
 
@@ -350,6 +367,252 @@ pub(super) async fn handle(
             conn.state.pr_links.unwatch(&thread_id, &repo, number);
             Ok(ResponseBody::Ack)
         }
+        ClientRequest::ForgeListIssues {
+            account_id,
+            repo,
+            filter,
+            page,
+            query,
+        } => {
+            let read_only = !repo_is_owned(conn, &repo).await;
+            conn.state
+                .forge
+                .list_issues(account_id.as_deref(), &repo, filter, page, query.as_deref())
+                .await
+                .map(|result| ResponseBody::ForgeIssues {
+                    issues: result.issues,
+                    page: result.page,
+                    has_more: result.has_more,
+                    read_only,
+                })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::ForgeGetIssue {
+            account_id,
+            repo,
+            number,
+        } => {
+            let read_only = !repo_is_owned(conn, &repo).await;
+            conn.state
+                .forge
+                .get_issue(account_id.as_deref(), &repo, number)
+                .await
+                .map(|issue| ResponseBody::ForgeIssue { issue, read_only })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::ForgeListIssueComments {
+            account_id,
+            repo,
+            number,
+        } => conn
+            .state
+            .forge
+            .list_issue_comments(account_id.as_deref(), &repo, number)
+            .await
+            .map(|page| ResponseBody::ForgeIssueComments { page })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::ForgeCommentIssue {
+            account_id,
+            repo,
+            number,
+            body,
+        } => {
+            if !repo_is_owned(conn, &repo).await {
+                return Err(read_only_repo(&repo));
+            }
+            let result = conn
+                .state
+                .forge
+                .comment_issue(account_id.as_deref(), &repo, number, &body)
+                .await;
+            if result.is_ok() {
+                conn.audit(
+                    "forge.issue_comment",
+                    Some("forge_issue"),
+                    Some(&format!("{}#{number}", repo.full_name())),
+                    json!({"chars": body.len()}),
+                );
+            }
+            result
+                .map(|comment| ResponseBody::ForgeIssueCommentPosted { comment })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::ForgeUpdateIssue {
+            account_id,
+            repo,
+            number,
+            update,
+        } => {
+            if !repo_is_owned(conn, &repo).await {
+                return Err(read_only_repo(&repo));
+            }
+            let result = conn
+                .state
+                .forge
+                .update_issue(account_id.as_deref(), &repo, number, &update)
+                .await;
+            if result.is_ok() {
+                conn.audit(
+                    "forge.issue_update",
+                    Some("forge_issue"),
+                    Some(&format!("{}#{number}", repo.full_name())),
+                    json!({"labels": update.labels, "assignees": update.assignees}),
+                );
+            }
+            let read_only = !repo_is_owned(conn, &repo).await;
+            result
+                .map(|issue| ResponseBody::ForgeIssue { issue, read_only })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::LinearListAccounts => Ok(ResponseBody::LinearAccounts {
+            accounts: conn.state.linear.list_accounts(),
+        }),
+        ClientRequest::LinearConnect { api_key } => conn
+            .state
+            .linear
+            .connect(&api_key)
+            .await
+            .map(|account| {
+                conn.audit(
+                    "linear.connected",
+                    Some("linear"),
+                    Some(&account.name),
+                    json!({}),
+                );
+                ResponseBody::LinearAccounts {
+                    accounts: conn.state.linear.list_accounts(),
+                }
+            })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::LinearRemoveAccount { account_id } => {
+            let result = conn.state.linear.remove(&account_id);
+            if result.is_ok() {
+                conn.audit(
+                    "linear.removed",
+                    Some("linear"),
+                    Some(&account_id),
+                    json!({}),
+                );
+            }
+            result
+                .map(|()| ResponseBody::Ack)
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::LinearListTeams { account_id } => conn
+            .state
+            .linear
+            .teams(&account_id)
+            .await
+            .map(|teams| ResponseBody::LinearTeams { teams })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::LinearProjectTeams => Ok(ResponseBody::LinearProjectTeams {
+            teams: conn.state.linear.project_teams(),
+        }),
+        ClientRequest::LinearSetProjectTeam { project_id, team } => {
+            let result = conn.state.linear.set_project_team(&project_id, team).await;
+            if let Ok(Some(mapping)) = &result {
+                conn.audit(
+                    "linear.team_set",
+                    Some("project"),
+                    Some(&project_id),
+                    json!({"account": mapping.account_id, "team": mapping.team_key}),
+                );
+            }
+            result
+                .map(|_| ResponseBody::LinearProjectTeams {
+                    teams: conn.state.linear.project_teams(),
+                })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::LinearListIssues {
+            project_id,
+            filter,
+            cursor,
+            query,
+        } => {
+            let read_only = !project_is_known(conn, &project_id).await;
+            conn.state
+                .linear
+                .list_issues(&project_id, filter, cursor.as_deref(), query.as_deref())
+                .await
+                .map(|page| ResponseBody::LinearIssues {
+                    issues: page.issues,
+                    next_cursor: page.next_cursor,
+                    read_only,
+                })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::LinearGetIssue {
+            account_id,
+            issue_id,
+        } => {
+            let read_only = !linear_issue_owned(conn, &account_id, &issue_id).await?;
+            conn.state
+                .linear
+                .get_issue(&account_id, &issue_id)
+                .await
+                .map(|issue| ResponseBody::LinearIssue { issue, read_only })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::LinearCommentIssue {
+            account_id,
+            issue_id,
+            body,
+        } => {
+            if !linear_issue_owned(conn, &account_id, &issue_id).await? {
+                return Err(ProtoError::new(
+                    h4rn_protocol::ProtoErrorCode::Forbidden,
+                    "this Linear team is not attached to a project on this host, so its issues are read-only",
+                    "Choose the team for a project in Settings → Source control & issues",
+                ));
+            }
+            let result = conn
+                .state
+                .linear
+                .comment(&account_id, &issue_id, &body)
+                .await;
+            if result.is_ok() {
+                conn.audit(
+                    "linear.issue_comment",
+                    Some("linear_issue"),
+                    Some(&issue_id),
+                    json!({"chars": body.len()}),
+                );
+            }
+            result
+                .map(|comment| ResponseBody::LinearIssueCommentPosted { comment })
+                .map_err(ForgeServiceError::into_proto)
+        }
+        ClientRequest::LinkIssue {
+            thread_id,
+            account_id,
+            scope,
+            issue_id,
+        } => conn
+            .state
+            .issue_links
+            .link(&thread_id, account_id.as_deref(), &scope, &issue_id)
+            .await
+            .map(|issue| ResponseBody::ThreadIssue { issue })
+            .map_err(crate::issue_links::IssueLinkError::into_proto),
+        ClientRequest::UnlinkIssue {
+            thread_id,
+            scope,
+            issue_id,
+        } => conn
+            .state
+            .issue_links
+            .unlink(&thread_id, &scope, &issue_id)
+            .await
+            .map(|()| ResponseBody::Ack)
+            .map_err(crate::issue_links::IssueLinkError::into_proto),
+        ClientRequest::ListThreadIssues { thread_id } => conn
+            .state
+            .issue_links
+            .list(&thread_id)
+            .await
+            .map(|issues| ResponseBody::ThreadIssues { thread_id, issues })
+            .map_err(crate::issue_links::IssueLinkError::into_proto),
         ClientRequest::ForgeHandPrToAgent {
             account_id,
             repo,
@@ -381,6 +644,75 @@ pub(super) async fn handle(
     }
 }
 
+/// Whether a registered project owns this repository's remote.
+///
+/// An issue read through a repository no local project checks out is shown
+/// read-only: the daemon cannot prove the person has write access there.
+async fn repo_is_owned(conn: &Connection, repo: &h4rn_protocol::ForgeRepoRef) -> bool {
+    for project in conn.state.projects.list().await {
+        if let Ok(remotes) = conn.state.forge.detect_repo(&project.path)
+            && repo_in_remotes(&remotes, repo)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether any detected remote names the repository.
+fn repo_in_remotes(
+    remotes: &[h4rn_protocol::ForgeRemote],
+    repo: &h4rn_protocol::ForgeRepoRef,
+) -> bool {
+    remotes.iter().any(|remote| remote.repo == *repo)
+}
+
+/// The refusal for a write through a repository no project owns.
+fn read_only_repo(repo: &h4rn_protocol::ForgeRepoRef) -> ProtoError {
+    ProtoError::new(
+        h4rn_protocol::ProtoErrorCode::Forbidden,
+        format!(
+            "{} is not checked out by a project on this host, so its issues are read-only",
+            repo.full_name()
+        ),
+        "Open the repository as a project on this host to comment or edit",
+    )
+}
+
+/// Whether a Linear issue's team is attached to a project on this host.
+async fn linear_issue_owned(
+    conn: &Connection,
+    account_id: &str,
+    issue_id: &str,
+) -> Result<bool, ProtoError> {
+    let issue = conn
+        .state
+        .linear
+        .get_issue(account_id, issue_id)
+        .await
+        .map_err(ForgeServiceError::into_proto)?;
+    let mapping = conn
+        .state
+        .linear
+        .project_teams()
+        .into_iter()
+        .find(|team| team.account_id == account_id && team.team_id == issue.summary.team_id);
+    match mapping {
+        Some(team) => Ok(project_is_known(conn, &team.project_id).await),
+        None => Ok(false),
+    }
+}
+
+/// Whether a registered project still exists.
+async fn project_is_known(conn: &Connection, project_id: &str) -> bool {
+    conn.state
+        .projects
+        .list()
+        .await
+        .iter()
+        .any(|project| project.id == project_id)
+}
+
 /// Spawns this service's transient-event forwarder for one connection.
 pub(super) fn spawn(conn: &Connection) -> JoinHandle<()> {
     tokio::spawn(forward_loop(
@@ -405,4 +737,31 @@ pub(super) fn spawn(conn: &Connection) -> JoinHandle<()> {
             }))
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repo_in_remotes;
+    use h4rn_protocol::{ForgeKind, ForgeRemote, ForgeRepoRef};
+
+    fn repo(owner: &str, name: &str) -> ForgeRepoRef {
+        ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: "https://github.com".into(),
+            owner: owner.into(),
+            repo: name.into(),
+        }
+    }
+
+    #[test]
+    fn only_a_project_whose_remote_names_the_repository_owns_it() {
+        let remotes = vec![ForgeRemote {
+            remote: "origin".into(),
+            repo: repo("acme", "widget"),
+            url: "https://github.com/acme/widget".into(),
+        }];
+        assert!(repo_in_remotes(&remotes, &repo("acme", "widget")));
+        assert!(!repo_in_remotes(&remotes, &repo("other", "widget")));
+        assert!(!repo_in_remotes(&[], &repo("acme", "widget")));
+    }
 }

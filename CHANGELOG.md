@@ -7,6 +7,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Issues from every forge and Linear sit beside your projects, and can be linked to a
+  thread.** The new Issues page reads each visible project's tracker, grouped per account, with
+  open/closed, assigned/opened/mentioning filters, a per-project visibility toggle and search that
+  runs on the tracker. Selecting an issue opens it beside the list with its body, state, labels,
+  assignees, comments and linked pull requests. Where the account allows it you can comment, edit
+  the title and body, replace labels and assignees, and close or reopen (with a reason where the
+  tracker records one); a repository no local project owns is read-only. GitHub, GitLab,
+  Gitea/Forgejo, Bitbucket Cloud (when the repository's issue tracker is on) and Azure Boards work
+  items of type Issue/Bug are supported. A Linear API key connected under Settings → Source
+  control & issues is stored like a forge token and never returned; pick a team per project and
+  its issues appear beside the forge ones, with comments. Issues link to threads through the
+  journal, survive a restart, are always read live, and appear with pull requests in the thread's
+  linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
+  `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and
+  `LinkIssue`/`UnlinkIssue`/`ListThreadIssues`. See [docs/forges.md](docs/forges.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the

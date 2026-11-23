@@ -24,6 +24,7 @@ mod gitea;
 mod github;
 mod gitlab;
 mod http;
+pub mod issues;
 pub mod remote;
 
 use std::sync::Arc;
@@ -31,8 +32,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use h4rn_protocol::{
     ForgeAccount, ForgeCapabilities, ForgeChecks, ForgeComment, ForgeCommentPage, ForgeCommits,
-    ForgeCredentialSource, ForgeDiffPage, ForgeKind, ForgeNewPr, ForgePrFilter, ForgePrSummary,
-    ForgePullRequest, ForgeRepoRef, ForgeReviewComment,
+    ForgeCredentialSource, ForgeDiffPage, ForgeIssue, ForgeIssueComment, ForgeIssueCommentPage,
+    ForgeIssueFilter, ForgeIssuePage, ForgeIssueUpdate, ForgeKind, ForgeNewPr, ForgePrFilter,
+    ForgePrSummary, ForgePullRequest, ForgeRepoRef, ForgeReviewComment,
 };
 
 pub use azure::AzureDevOpsClient;
@@ -164,6 +166,75 @@ pub trait Forge: Send + Sync {
 
     /// Opens a pull request whose head branch already exists.
     async fn open_pr(&self, repo: &ForgeRepoRef, request: &ForgeNewPr) -> Result<ForgePullRequest>;
+
+    /// Lists issues from the repository's tracker.
+    ///
+    /// A forge whose issue tracker is disabled for this repository answers
+    /// [`ForgeError::Unsupported`] with the reason; it never returns an empty
+    /// list that would look like a tracker with no issues.
+    async fn list_issues(
+        &self,
+        repo: &ForgeRepoRef,
+        filter: ForgeIssueFilter,
+        page: u32,
+        query: Option<&str>,
+    ) -> Result<ForgeIssuePage> {
+        let _ = (repo, filter, page, query);
+        Err(ForgeError::Unsupported(format!(
+            "{} does not expose issues",
+            self.kind().display_name()
+        )))
+    }
+
+    /// Reads one issue.
+    async fn get_issue(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeIssue> {
+        let _ = (repo, number);
+        Err(ForgeError::Unsupported(format!(
+            "{} does not expose issues",
+            self.kind().display_name()
+        )))
+    }
+
+    /// Reads one issue's comments.
+    async fn list_issue_comments(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeIssueCommentPage> {
+        let _ = (repo, number);
+        Err(ForgeError::Unsupported(format!(
+            "{} does not expose issues",
+            self.kind().display_name()
+        )))
+    }
+
+    /// Posts a comment on an issue.
+    async fn comment_issue(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        body: &str,
+    ) -> Result<ForgeIssueComment> {
+        let _ = (repo, number, body);
+        Err(ForgeError::Unsupported(format!(
+            "{} does not expose issues",
+            self.kind().display_name()
+        )))
+    }
+
+    /// Changes an issue's title, body, state, labels or assignees.
+    async fn update_issue(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        update: &ForgeIssueUpdate,
+    ) -> Result<ForgeIssue> {
+        let _ = (repo, number, update);
+        Err(ForgeError::Unsupported(format!(
+            "{} does not expose issues",
+            self.kind().display_name()
+        )))
+    }
 }
 
 /// Builds a client for one stored account.
@@ -245,6 +316,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             graphql: true,
             rerun_checks: true,
             conditional_poll: true,
+            issues: issues::capabilities(ForgeKind::GitHub),
         },
         ForgeKind::GitLab => ForgeCapabilities {
             device_flow: false,
@@ -258,6 +330,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             graphql: false,
             rerun_checks: true,
             conditional_poll: false,
+            issues: issues::capabilities(ForgeKind::GitLab),
         },
         ForgeKind::Gitea => ForgeCapabilities {
             device_flow: false,
@@ -271,6 +344,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             graphql: false,
             rerun_checks: false,
             conditional_poll: false,
+            issues: issues::capabilities(ForgeKind::Gitea),
         },
         ForgeKind::Forgejo => ForgeCapabilities {
             device_flow: false,
@@ -284,6 +358,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             graphql: false,
             rerun_checks: false,
             conditional_poll: false,
+            issues: issues::capabilities(ForgeKind::Forgejo),
         },
         ForgeKind::Bitbucket => ForgeCapabilities {
             device_flow: false,
@@ -300,6 +375,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             graphql: false,
             rerun_checks: false,
             conditional_poll: false,
+            issues: issues::capabilities(ForgeKind::Bitbucket),
         },
         ForgeKind::AzureDevOps => ForgeCapabilities {
             device_flow: false,
@@ -314,6 +390,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             // Re-queuing a pipeline needs the Builds API and a broader token.
             rerun_checks: false,
             conditional_poll: false,
+            issues: issues::capabilities(ForgeKind::AzureDevOps),
         },
     }
 }

@@ -40,9 +40,10 @@ use futures::StreamExt;
 use h4rn_protocol::{
     ForgeCapabilities, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeComment, ForgeCommentPage,
     ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus,
-    ForgeKind, ForgeLabel, ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary,
-    ForgePullRequest, ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState,
-    ForgeReviewThread,
+    ForgeIssue, ForgeIssueComment, ForgeIssueCommentPage, ForgeIssueFilter, ForgeIssuePage,
+    ForgeIssueUpdate, ForgeKind, ForgeLabel, ForgeMergeable, ForgeNewPr, ForgePrFilter,
+    ForgePrState, ForgePrSummary, ForgePullRequest, ForgeRepoRef, ForgeReview, ForgeReviewComment,
+    ForgeReviewState, ForgeReviewThread,
 };
 use serde_json::{Value, json};
 
@@ -926,6 +927,46 @@ impl Forge for AzureDevOpsClient {
             )
             .await?;
         map_pr_detail(repo, &value)
+    }
+
+    async fn list_issues(
+        &self,
+        repo: &ForgeRepoRef,
+        filter: ForgeIssueFilter,
+        page: u32,
+        query: Option<&str>,
+    ) -> Result<ForgeIssuePage> {
+        crate::issues::azure::list(&self.http, &self.api, repo, filter, page, query).await
+    }
+
+    async fn get_issue(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeIssue> {
+        crate::issues::azure::get(&self.http, &self.api, repo, number).await
+    }
+
+    async fn list_issue_comments(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeIssueCommentPage> {
+        crate::issues::azure::comments(&self.http, &self.api, repo, number).await
+    }
+
+    async fn comment_issue(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        body: &str,
+    ) -> Result<ForgeIssueComment> {
+        crate::issues::azure::comment(&self.http, &self.api, repo, number, body).await
+    }
+
+    async fn update_issue(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        update: &ForgeIssueUpdate,
+    ) -> Result<ForgeIssue> {
+        crate::issues::azure::update(&self.http, &self.api, repo, number, update).await
     }
 }
 

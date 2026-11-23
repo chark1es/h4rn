@@ -61,7 +61,7 @@ afterEach(() => {
 });
 
 function openBadge(): void {
-  const trigger = screen.getByRole("button", { name: "Linked pull requests" });
+  const trigger = screen.getByRole("button", { name: "Linked items" });
   fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
   fireEvent.pointerUp(trigger, { button: 0, pointerType: "mouse" });
   fireEvent.click(trigger);
@@ -77,7 +77,7 @@ describe("linked pull request badge and panel", () => {
         onUnwatch={() => undefined}
       />,
     );
-    const badge = screen.getByRole("button", { name: "Linked pull requests" });
+    const badge = screen.getByRole("button", { name: "Linked items" });
     expect(badge.textContent).toContain("#7 Open");
     expect(badge.textContent).toContain("+1");
   });
@@ -98,7 +98,7 @@ describe("linked pull request badge and panel", () => {
 
     openBadge();
 
-    expect(screen.getByText("Linked pull requests")).toBeTruthy();
+    expect(screen.getByText("Linked items")).toBeTruthy();
     expect(screen.getByText("Add PR watch")).toBeTruthy();
     expect(screen.getByText("Old experiment")).toBeTruthy();
     expect(screen.getByText("Draft")).toBeTruthy();
@@ -134,7 +134,7 @@ describe("linked pull request badge and panel", () => {
       />,
     );
 
-    const trigger = screen.getByRole("button", { name: "Linked pull requests" });
+    const trigger = screen.getByRole("button", { name: "Linked items" });
     trigger.focus();
     fireEvent.keyDown(trigger, { key: "Enter" });
 

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
+import { LinearSettings } from "@/features/issues/LinearSettings";
 import {
   installedTitleAgents,
   saveTitleModel,
@@ -133,10 +134,11 @@ export function SourceControlSettings() {
 
   return (
     <div className="q-form">
-      <h1>Source control</h1>
+      <h1>Source control &amp; issues</h1>
       <p className="lead">
         Commit messages and pull request text can be written by a model when you ask for them. A
         request you write yourself is never replaced, and Generate never commits or opens anything.
+        Linear teams are chosen per project below.
       </p>
 
       {settingsError ? (
@@ -300,6 +302,7 @@ export function SourceControlSettings() {
           </div>
         </>
       ) : null}
+      <LinearSettings />
     </div>
   );
 }

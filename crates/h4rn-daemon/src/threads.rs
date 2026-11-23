@@ -7664,6 +7664,32 @@ mod tests {
         ) -> Result<Vec<crate::pr_links::PrLinkRecord>, crate::journal::JournalError> {
             self.inner.pr_links_for_pr(repo, number).await
         }
+
+        async fn upsert_issue_link(
+            &self,
+            link: &crate::issue_links::IssueLinkRecord,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.upsert_issue_link(link).await
+        }
+
+        async fn remove_issue_link(
+            &self,
+            thread_id: &ThreadId,
+            scope: &h4rn_protocol::IssueScope,
+            issue_id: &str,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner
+                .remove_issue_link(thread_id, scope, issue_id)
+                .await
+        }
+
+        async fn issue_links_for_thread(
+            &self,
+            thread_id: &ThreadId,
+        ) -> Result<Vec<crate::issue_links::IssueLinkRecord>, crate::journal::JournalError>
+        {
+            self.inner.issue_links_for_thread(thread_id).await
+        }
     }
 
     fn new_thread(host: HostId, workspace: &std::path::Path, prompt: &str) -> NewThread {

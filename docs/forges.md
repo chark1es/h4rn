@@ -350,6 +350,12 @@ read the flags instead of assuming all forges behave alike.
 | GraphQL used | yes | no | no | no | no | no |
 | Re-run failed checks | yes (check suites) | yes (pipeline retry) | no | no | no | no |
 | Conditional PR poll | yes | no | no | no | no | no |
+| Issues read | yes | yes | yes | yes | yes (tracker on) | yes (Issue/Bug work items) |
+| Issues write | yes | yes | yes | yes | yes | yes |
+| Issue labels | yes | yes | yes | yes | no | yes (tags) |
+| Issue assignees | yes | yes | yes | yes | yes (one) | yes (one) |
+| Issue close reason | yes | no | no | no | yes (status) | no |
+| Issue linked PRs | yes | yes | no | no | no | yes (relations) |
 
 The conditional PR poll is what the thread watch uses on GitHub: every read of
 `GET /pulls/{n}` revalidates with `If-None-Match`, so an unchanged detail comes
@@ -363,6 +369,55 @@ spends more of their request budget for the same two-minute interval.
 Diff pagination on Gitea/Forgejo, Bitbucket Cloud and Azure DevOps is applied
 locally: the provider's diff (or changed-file list) is read and sliced by
 `page`/`per_page`, and `has_more` reports whether more files exist.
+
+## Issues
+
+The Issues page reads the tracker behind every visible project's forge
+remote, grouped by the account the daemon reads it with. Open/Closed and
+involvement filters (assigned, opened by you, mentioning you) use the
+provider's own query where it has one: GitHub's issue search, GitLab's
+`scope`, Gitea/Forgejo's `assigned`/`created`/`mentioned` flags, and Azure
+Boards' WIQL `@Me` clauses. Bitbucket Cloud has no involvement filter; the
+page says so instead of returning a list that looks complete. The search box
+asks the tracker (`is:issue`, `search=`, `q=`, WIQL `CONTAINS`, Bitbucket's
+`title~`), and **Load more** reads the next page. Azure DevOps has no issue
+collection separate from Boards, so this surface reads work items of type
+`Issue` and `Bug`; tags are shown as labels.
+
+Each row comes from the tracker. GitHub's `/issues` list also returns pull
+requests, so those rows are removed; a repository whose Bitbucket issue
+tracker is disabled answers `unsupported` with the setting to change, never
+an empty list. Issue detail shows the body, state, labels, assignees,
+comments and the pull requests the tracker reports (GitHub's timeline,
+GitLab's related merge requests, Azure's work-item relations).
+
+Writes are `ForgeCommentIssue` and `ForgeUpdateIssue`: comment, title, body,
+labels, assignees, and close/reopen. The daemon only sends the fields the
+caller named, so an edit never clears the others. GitHub closes with a
+`state_reason`; Bitbucket maps a reason to `resolved`, `wontfix` or
+`duplicate`; GitLab, Gitea/Forgejo and Azure record no reason, and their
+capability row says so. An issue read through a repository no registered
+project checks out is marked read-only and every write is refused. Requests
+that read are a paired device's `view` scope; comments, edits and links need
+`approve`; connecting Linear needs `admin`.
+
+### Linear
+
+Settings → Source control & issues connects a Linear workspace with a
+personal API key. The daemon validates it with a `viewer` query, stores it in
+the OS keychain or the encrypted secret file, and never returns it;
+`LinearAccount` carries only the workspace name and email. Choose a team per
+project there; the Issues page lists that team's issues beside the project's
+forge issues (GraphQL `issues` / `searchIssues`, cursor paging, workflow
+state families), shows their comments and lets you comment
+(`commentCreate`). Linear issues can be linked to threads like forge issues.
+
+### Thread links
+
+`LinkIssue` stores the tracker scope and provider issue id in the journal, so
+a link survives a restart; `ThreadIssues` reads each linked issue live and
+reports a failed read as an error rather than a stale row. The thread header's
+linked-items panel shows issues beside pull requests with open and unlink.
 
 ## Checks, logs, re-run and commits
 

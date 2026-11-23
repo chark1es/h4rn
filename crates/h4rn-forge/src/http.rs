@@ -133,6 +133,22 @@ impl ForgeHttp {
         body: Option<&Value>,
         conditional: bool,
     ) -> Result<HttpResponse> {
+        self.request_with_content_type(method, url, body, conditional, None)
+            .await
+    }
+
+    /// Performs a request with an explicit JSON content type.
+    ///
+    /// Azure Boards only accepts JSON Patch as
+    /// `application/json-patch+json`; every other client keeps the default.
+    pub async fn request_with_content_type(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        conditional: bool,
+        content_type: Option<&str>,
+    ) -> Result<HttpResponse> {
         self.limiter.acquire().await?;
 
         let mut request = self.client.request(method.clone(), url).header(
@@ -155,7 +171,15 @@ impl ForgeHttp {
         }
 
         if let Some(body) = body {
-            request = request.json(body);
+            if let Some(content_type) = content_type {
+                request = request
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(serde_json::to_vec(body).map_err(|error| {
+                        ForgeError::InvalidRequest(format!("could not encode the request: {error}"))
+                    })?);
+            } else {
+                request = request.json(body);
+            }
         }
 
         let response = request
@@ -256,6 +280,26 @@ impl ForgeHttp {
     /// PATCHes JSON and maps the response.
     pub async fn patch_json(&self, url: &str, body: &Value) -> Result<Value> {
         let response = self.request(Method::PATCH, url, Some(body), false).await?;
+        self.json(response)
+    }
+
+    /// PUTs JSON and maps the response.
+    pub async fn put_json(&self, url: &str, body: &Value) -> Result<Value> {
+        let response = self.request(Method::PUT, url, Some(body), false).await?;
+        self.json(response)
+    }
+
+    /// PATCHes a JSON Patch document and maps the response.
+    pub async fn patch_json_patch(&self, url: &str, body: &Value) -> Result<Value> {
+        let response = self
+            .request_with_content_type(
+                Method::PATCH,
+                url,
+                Some(body),
+                false,
+                Some("application/json-patch+json"),
+            )
+            .await?;
         self.json(response)
     }
 

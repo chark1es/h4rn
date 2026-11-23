@@ -82,6 +82,10 @@ pub struct AppState {
     pub forge: Arc<ForgeService>,
     /// Thread ↔ pull request links and the PR watch.
     pub pr_links: Arc<crate::pr_links::PrLinkService>,
+    /// Connected Linear workspaces, teams and issue reads.
+    pub linear: Arc<crate::linear::LinearService>,
+    /// Thread ↔ issue links.
+    pub issue_links: Arc<crate::issue_links::IssueLinkService>,
     /// Skill registry, installers and connect sync (ADR-034, ADR-035).
     pub skills: Arc<h4rn_skills::SkillsService>,
     /// Noise-encrypted multipath transport, when enabled.

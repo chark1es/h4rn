@@ -153,39 +153,44 @@ fn forge_proto_error(error: ForgeError) -> ProtoError {
     ProtoError::new(code, message, hint)
 }
 
-/// Account token storage: OS keychain first, encrypted file otherwise.
-struct TokenStore {
+/// Token storage shared by forge and Linear connections: OS keychain first,
+/// encrypted file otherwise.
+pub(crate) struct SecretStore {
     data_dir: PathBuf,
     keychain: bool,
+    service: &'static str,
+    prefix: &'static str,
 }
 
-impl TokenStore {
-    fn new(data_dir: &Path) -> Self {
+impl SecretStore {
+    pub(crate) fn new(data_dir: &Path, service: &'static str, prefix: &'static str) -> Self {
         Self {
             data_dir: data_dir.to_path_buf(),
             keychain: keyring::Entry::store_status().is_ok(),
+            service,
+            prefix,
         }
     }
 
     fn path(&self, account_id: &str) -> PathBuf {
-        self.data_dir.join(format!("forge-token-{account_id}"))
+        self.data_dir.join(format!("{}{account_id}", self.prefix))
     }
 
-    fn save(&self, account_id: &str, token: &str) -> Result<(), ForgeServiceError> {
+    pub(crate) fn save(&self, account_id: &str, token: &str) -> Result<(), ForgeServiceError> {
         if self.keychain {
-            if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, account_id) {
+            if let Ok(entry) = keyring::Entry::new(self.service, account_id) {
                 if entry.set_password(token).is_ok() {
                     return Ok(());
                 }
             }
         }
         h4rn_transport::keys::write_secret_file(&self.path(account_id), token.as_bytes())
-            .map_err(|error| ForgeServiceError::Local(format!("store forge token: {error}")))
+            .map_err(|error| ForgeServiceError::Local(format!("store secret: {error}")))
     }
 
-    fn load(&self, account_id: &str) -> Result<Option<String>, ForgeServiceError> {
+    pub(crate) fn load(&self, account_id: &str) -> Result<Option<String>, ForgeServiceError> {
         if self.keychain {
-            if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, account_id) {
+            if let Ok(entry) = keyring::Entry::new(self.service, account_id) {
                 if let Ok(token) = entry.get_password() {
                     if !token.is_empty() {
                         return Ok(Some(token));
@@ -194,21 +199,21 @@ impl TokenStore {
             }
         }
         let bytes = h4rn_transport::keys::read_secret_file(&self.path(account_id))
-            .map_err(|error| ForgeServiceError::Local(format!("read forge token: {error}")))?;
+            .map_err(|error| ForgeServiceError::Local(format!("read secret: {error}")))?;
         match bytes {
             Some(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).trim().to_owned())),
             None => Ok(None),
         }
     }
 
-    fn remove(&self, account_id: &str) {
+    pub(crate) fn remove(&self, account_id: &str) {
         if self.keychain
-            && let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, account_id)
+            && let Ok(entry) = keyring::Entry::new(self.service, account_id)
         {
             let _ = entry.delete_credential();
         }
         if let Err(error) = h4rn_transport::keys::remove_secret_file(&self.path(account_id)) {
-            tracing::warn!(%error, "could not remove a forge token file");
+            tracing::warn!(%error, "could not remove a stored secret");
         }
     }
 }
@@ -275,7 +280,7 @@ struct DeviceFlowState {
 pub struct ForgeService {
     accounts_path: PathBuf,
     hosts: ForgeHosts,
-    tokens: TokenStore,
+    tokens: SecretStore,
     accounts: RwLock<Vec<ForgeAccount>>,
     clients: RwLock<HashMap<String, Arc<dyn Forge>>>,
     audit: ForgeAudit,
@@ -303,7 +308,7 @@ impl ForgeService {
         let service = Arc::new(Self {
             accounts_path: data_dir.join(ACCOUNTS_FILE),
             hosts,
-            tokens: TokenStore::new(data_dir),
+            tokens: SecretStore::new(data_dir, KEYCHAIN_SERVICE, "forge-token-"),
             accounts: RwLock::new(accounts),
             clients: RwLock::new(HashMap::new()),
             audit: ForgeAudit::new(data_dir),
@@ -851,6 +856,87 @@ impl ForgeService {
             json!({"thread": thread_id, "comment": comment_id, "chars": body.len()}),
         );
         Ok(comment)
+    }
+
+    /// Lists issues for one repository.
+    pub async fn list_issues(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        filter: h4rn_protocol::ForgeIssueFilter,
+        page: u32,
+        query: Option<&str>,
+    ) -> Result<h4rn_protocol::ForgeIssuePage, ForgeServiceError> {
+        let (_account, client) = self.resolve_client(account_id, repo)?;
+        Ok(client.list_issues(repo, filter, page.max(1), query).await?)
+    }
+
+    /// Reads one issue.
+    pub async fn get_issue(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<h4rn_protocol::ForgeIssue, ForgeServiceError> {
+        let (_account, client) = self.resolve_client(account_id, repo)?;
+        Ok(client.get_issue(repo, number).await?)
+    }
+
+    /// Reads one issue's comments.
+    pub async fn list_issue_comments(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<h4rn_protocol::ForgeIssueCommentPage, ForgeServiceError> {
+        let (_account, client) = self.resolve_client(account_id, repo)?;
+        Ok(client.list_issue_comments(repo, number).await?)
+    }
+
+    /// Posts a comment on an issue.
+    pub async fn comment_issue(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        body: &str,
+    ) -> Result<h4rn_protocol::ForgeIssueComment, ForgeServiceError> {
+        let (account, client) = self.resolve_client(account_id, repo)?;
+        let comment = client.comment_issue(repo, number, body).await?;
+        self.audit.record(
+            "issue.comment",
+            &account,
+            repo,
+            number,
+            json!({"chars": body.len()}),
+        );
+        Ok(comment)
+    }
+
+    /// Changes an issue's title, body, state, labels or assignees.
+    pub async fn update_issue(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        update: &h4rn_protocol::ForgeIssueUpdate,
+    ) -> Result<h4rn_protocol::ForgeIssue, ForgeServiceError> {
+        let (account, client) = self.resolve_client(account_id, repo)?;
+        let issue = client.update_issue(repo, number, update).await?;
+        self.audit.record(
+            "issue.updated",
+            &account,
+            repo,
+            number,
+            json!({
+                "title": update.title.is_some(),
+                "body": update.body.is_some(),
+                "state": update.state.map(|state| format!("{state:?}")),
+                "labels": update.labels.as_ref().map(Vec::len),
+                "assignees": update.assignees.as_ref().map(Vec::len),
+            }),
+        );
+        Ok(issue)
     }
 
     /// Posts a general PR comment.

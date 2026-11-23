@@ -2,6 +2,7 @@ import {
   ArchiveIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
+  CircleDotIcon,
   Code2Icon,
   FileDiffIcon,
   GitPullRequestIcon,
@@ -364,6 +365,16 @@ export function CommandPalette() {
               >
                 <Code2Icon aria-hidden />
                 IDE
+              </CommandItem>
+              <CommandItem
+                value="issues trackers"
+                onSelect={() =>
+                  close(() => navigate({ kind: "placeholder", surface: "issues", path: "/issues" }))
+                }
+              >
+                <CircleDotIcon aria-hidden />
+                Open issues
+                <CommandShortcut command="nav.issues" />
               </CommandItem>
               <CommandItem
                 value="pull requests prs"

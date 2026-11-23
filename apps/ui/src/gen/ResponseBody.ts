@@ -19,6 +19,10 @@ import type { ForgeDeviceFlow } from "./ForgeDeviceFlow";
 import type { ForgeDeviceFlowStatus } from "./ForgeDeviceFlowStatus";
 import type { ForgeDiffPage } from "./ForgeDiffPage";
 import type { ForgeHandoff } from "./ForgeHandoff";
+import type { ForgeIssue } from "./ForgeIssue";
+import type { ForgeIssueComment } from "./ForgeIssueComment";
+import type { ForgeIssueCommentPage } from "./ForgeIssueCommentPage";
+import type { ForgeIssueSummary } from "./ForgeIssueSummary";
 import type { ForgePrSummary } from "./ForgePrSummary";
 import type { ForgePullRequest } from "./ForgePullRequest";
 import type { ForgeRemote } from "./ForgeRemote";
@@ -40,6 +44,12 @@ import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
 import type { LimitsReport } from "./LimitsReport";
+import type { LinearAccount } from "./LinearAccount";
+import type { LinearIssue } from "./LinearIssue";
+import type { LinearIssueComment } from "./LinearIssueComment";
+import type { LinearIssueSummary } from "./LinearIssueSummary";
+import type { LinearProjectTeam } from "./LinearProjectTeam";
+import type { LinearTeam } from "./LinearTeam";
 import type { McpImportPreview } from "./McpImportPreview";
 import type { McpServerView } from "./McpServerView";
 import type { McpShareApproval } from "./McpShareApproval";
@@ -71,6 +81,7 @@ import type { TextGenerationSettings } from "./TextGenerationSettings";
 import type { TextGenerator } from "./TextGenerator";
 import type { TextGeneratorTestReport } from "./TextGeneratorTestReport";
 import type { ThreadId } from "./ThreadId";
+import type { ThreadIssue } from "./ThreadIssue";
 import type { ThreadPullRequest } from "./ThreadPullRequest";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { TrackedWorktree } from "./TrackedWorktree";
@@ -381,7 +392,87 @@ comment: ForgeReviewComment, } | { "type": "forge_pr_opened",
 /**
  * The new PR.
  */
-pr: ForgePullRequest, } | { "type": "git_status", 
+pr: ForgePullRequest, } | { "type": "forge_issues", 
+/**
+ * Matching issues.
+ */
+issues: Array<ForgeIssueSummary>, 
+/**
+ * Page number returned.
+ */
+page: number, 
+/**
+ * Another page exists.
+ */
+has_more: boolean, 
+/**
+ * The local checkout does not own the repository, so writes are off.
+ */
+read_only: boolean, } | { "type": "forge_issue", 
+/**
+ * Detail.
+ */
+issue: ForgeIssue, 
+/**
+ * The local checkout does not own the repository, so writes are off.
+ */
+read_only: boolean, } | { "type": "forge_issue_comments", 
+/**
+ * Comments page.
+ */
+page: ForgeIssueCommentPage, } | { "type": "forge_issue_comment_posted", 
+/**
+ * The new comment.
+ */
+comment: ForgeIssueComment, } | { "type": "linear_accounts", 
+/**
+ * Connections, oldest first.
+ */
+accounts: Array<LinearAccount>, } | { "type": "linear_teams", 
+/**
+ * Teams.
+ */
+teams: Array<LinearTeam>, } | { "type": "linear_project_teams", 
+/**
+ * Mappings.
+ */
+teams: Array<LinearProjectTeam>, } | { "type": "linear_issues", 
+/**
+ * Matching issues.
+ */
+issues: Array<LinearIssueSummary>, 
+/**
+ * Cursor for the next page.
+ */
+next_cursor: string | null, 
+/**
+ * The local checkout does not own the project, so writes are off.
+ */
+read_only: boolean, } | { "type": "linear_issue", 
+/**
+ * Detail.
+ */
+issue: LinearIssue, 
+/**
+ * The issue's team is not attached to a project here, so writes are off.
+ */
+read_only: boolean, } | { "type": "linear_issue_comment_posted", 
+/**
+ * The new comment.
+ */
+comment: LinearIssueComment, } | { "type": "thread_issues", 
+/**
+ * Thread the links belong to.
+ */
+thread_id: ThreadId, 
+/**
+ * Linked issues, oldest link first.
+ */
+issues: Array<ThreadIssue>, } | { "type": "thread_issue", 
+/**
+ * The link and its latest state.
+ */
+issue: ThreadIssue, } | { "type": "git_status", 
 /**
  * Branch, upstream, counts and paths.
  */

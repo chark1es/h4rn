@@ -162,6 +162,10 @@ pub struct ForgeCapabilities {
     /// to stay inside the rate limit.
     #[serde(default)]
     pub conditional_poll: bool,
+    /// What this forge's issue tracker can do. `read: false` hides Issues for
+    /// the account; the rest hides actions that would not work.
+    #[serde(default)]
+    pub issues: crate::issues::ForgeIssueCapabilities,
 }
 
 /// One configured forge account.
@@ -960,5 +964,25 @@ mod tests {
         assert!(ForgeCheckStatus::Failure.is_failure());
         assert!(ForgeCheckStatus::Success.is_success());
         assert!(!ForgeCheckStatus::Unknown.is_success());
+    }
+
+    #[test]
+    fn an_older_capability_row_without_issue_fields_still_deserialises() {
+        let value = serde_json::json!({
+            "device_flow": true,
+            "review_threads": true,
+            "resolve_threads": true,
+            "nested_replies": true,
+            "inline_review_comments": true,
+            "checks": true,
+            "pipelines": false,
+            "diff_pagination": true,
+            "graphql": true,
+            "rerun_checks": true,
+            "conditional_poll": true
+        });
+        let capabilities: ForgeCapabilities = serde_json::from_value(value).unwrap();
+        assert!(!capabilities.issues.read);
+        assert!(!capabilities.issues.write);
     }
 }
