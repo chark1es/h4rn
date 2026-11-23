@@ -32,8 +32,10 @@ The link works through your Connect relay address when the machine is linked to
 Connect. Without Connect a direct link names the daemon's loopback address, so
 it works only in a browser on this machine; the share dialog says so. A direct
 link is never offered over a plain LAN address: the link is a bearer token, and
-the daemon has no HTTPS listener for a teammate's browser. To share with someone
-on another machine, link this machine to Connect first.
+the daemon has no HTTPS listener for a teammate's browser. The LAN listener
+(Settings → Network access) does not serve guest paths at all, so a direct guest
+path there answers 404. To share with someone on another machine, link this
+machine to Connect first.
 
 ## What the guest sees
 
@@ -41,6 +43,11 @@ The guest sees the thread's recent history and everything after it, in the same
 timeline you see: your messages and their files, the agent's replies, its
 reasoning and plans, its tool calls with expandable output, and the images it
 shows. The page keeps following the thread while it is open.
+
+A guest sees only its own queued messages. Replacing the link creates a new
+guest, and that guest's page never replays an earlier link's waiting or
+dismissed message text or file names; a message you sent appears in the
+transcript like any other message.
 
 The guest does **not** see diffs, other threads, your file system, terminals or
 settings. They cannot answer the agent's questions or approvals, change the
@@ -97,10 +104,19 @@ thread named by the link still has a live link and is not settled. The client
 never sends a thread id, so there is nothing to tamper with. A message
 submission checks the token and binding from its headers before any of the body
 is read, requires a same-origin JSON POST, reserves the pending quota before it
-writes any file, and publishes the request only once the files are written; if
-the link ended meanwhile, it deletes the files and the reservation. Send and
-Dismiss each claim a request with one conditional update, so two actions can
-never run the same message.
+writes any file, and publishes the request only after the files are written. A
+request is written in two steps: a row that holds the quota and its files, then
+the card above your composer. Startup finishes or discards a request interrupted
+between them, so there is never a row that uses quota without a card. If the
+link ended, expired, the Labs switch turned off or the thread settled while the
+files were being written, publication is refused and the files and row are
+deleted.
+
+Send, Dismiss and every cleanup pass claim a request with one conditional
+update, so a message can never be both sent and dismissed, and the sweep can
+never pull the files out from under a Send that already claimed them. Turning
+the Labs switch off saves the setting and ends every link in one transaction, so
+re-enabling it cannot bring a link back.
 
 A guest request can only read that thread's events, submit a waiting message,
 and fetch an attachment that belongs to a message in that thread. Events are
@@ -114,7 +130,10 @@ no guest scope to grant.
 
 Only the machine's owner, or a paired device with the admin scope, may copy a
 link's URL; a view-only device sees that a link exists and when it expires, but
-the URL comes back `null`. The URL is the credential, so reading it is audited.
+the URL comes back `null`. A paired device's read of the URL is written to the
+daemon's remote audit trail with the thread it belongs to. Reading the URL on
+the machine itself is the owner acting locally, not a remote action, so it is
+not recorded there.
 
 Through Connect, the guest page itself is served by Connect from its own fixed,
 hash-checked CSP document; Connect never relays a daemon's HTML. Only JSON and

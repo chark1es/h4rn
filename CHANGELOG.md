@@ -520,8 +520,24 @@ All notable changes to h4rn are recorded here. The format follows
   stream, a reload replay and a plan update each render once, and its "Waiting for the connection"
   notice stays up while it retries. Pairing lost the unused `guest` scope. Connect now sends
   `Content-Security-Policy: sandbox; default-src 'none'` on every relayed answer, downloads PDFs and
-  opaque files, and forgets a guest waiter on every failure. Reading a guest link's URL is audited.
-  The custom-journal fallback uses one in-memory SQLite connection, so its tables do not vanish.
+  opaque files, and forgets a guest waiter on every failure. Reading a guest link's URL from a paired
+  device is audited; reading it on the machine itself is not a remote action. The custom-journal
+  fallback uses one in-memory SQLite connection, so its tables do not vanish.
+- **Guest links bind the first browser through Connect, and each request and its card stay one
+  decision.** The relay now carries the daemon's page-load cookie back to Connect, which checks its
+  name, path, `HttpOnly`, `Secure` and `SameSite=Strict` before rebuilding it, so a fresh link opens
+  bound instead of showing "opened in another browser". A request is written in a `publishing` step
+  before its card and finished as `pending`, and startup either raises the same card or discards the
+  row and its files, so a crash never leaves a row that uses quota without a card. Publication
+  re-checks the link, the Labs switch and the thread's placement, so an expired, revoked or settled
+  guest gets a refusal and leaves nothing behind. Cleanup claims each row with a conditional update
+  like Send and Dismiss, so a sweep cannot delete an attachment a Send already claimed or release a
+  reservation its writer still owns. Turning the Labs switch off saves the setting and ends every
+  link in one transaction, so re-enabling it cannot revive a link. A guest's page also sees only its
+  own link's queued messages: a new link never replays the previous guest's dismissed text or file
+  names. The LAN listener serves no guest route at all, direct links stay loopback-only, and the
+  guest page shows real plan text (not "Step 1"), keys plans by turn, and draws its focus ring on
+  the visible attach control. `?thumbnail=0` now serves the original image, not a thumbnail.
 - **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
   the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
   All four sources now show the active tab's file against the source on screen, and the wider
