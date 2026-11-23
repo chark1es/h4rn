@@ -19,6 +19,8 @@ fn spec(workspace: &std::path::Path, resume_id: Option<String>) -> SessionSpec {
         workspace: workspace.to_path_buf(),
         model: "default".into(),
         runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+        reasoning_effort: None,
+        fast: false,
         resume_id,
         mcp_endpoint: None,
         env_overrides: Default::default(),

@@ -2151,6 +2151,83 @@ fieldset.q-seg-fs {
 .q-model:hover {
   background: var(--hover);
 }
+.q-rot180 {
+  transform: rotate(180deg);
+}
+/* Thread controls: a quiet panel of one-choice rows. */
+.q-tctrl {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.q-tctrl-head {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fg-2);
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+.q-tctrl-head:first-child {
+  margin-top: 0;
+}
+.q-tctrl-note {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-3);
+  margin: 0 0 4px;
+}
+.q-tctrl-quiet {
+  max-width: 150px;
+  color: var(--fg-3);
+  font-weight: 400;
+}
+.q-tctrl-model {
+  display: flex;
+  gap: 6px;
+}
+.q-tctrl-model input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--fill-1);
+  border: 1px solid var(--line);
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.q-tctrl-list {
+  display: flex;
+  flex-direction: column;
+}
+.q-tctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 6px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--fg-1);
+}
+.q-tctrl-row:hover {
+  background: var(--hover);
+}
+.q-tctrl-check {
+  width: 14px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+}
+.q-tctrl-hint {
+  display: block;
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
 .q-send {
   width: 28px;
   height: 28px;

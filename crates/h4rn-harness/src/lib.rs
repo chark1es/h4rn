@@ -32,11 +32,16 @@ mod antigravity;
 mod attachments;
 mod claude_code;
 mod codex;
+mod controls;
 mod fake;
 mod opencode;
 pub mod registry;
 pub mod stats;
 pub mod versions;
+
+pub use controls::{
+    CLAUDE_EFFORTS, CODEX_EFFORTS, SessionControls, ThreadControls, thread_controls,
+};
 
 pub use acp_agent::{
     AcpAgentConfigSource, GenericAcpHarness, StaticAcpAgents, probe_acp_agent, resolve_acp_command,
@@ -61,7 +66,7 @@ pub use codex::{
 };
 pub use fake::{
     EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionCount,
-    SessionModels, test_spec,
+    SessionModels, SessionSettings, SettingChange, test_spec,
 };
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
@@ -106,8 +111,14 @@ pub struct SessionSpec {
     pub workspace: PathBuf,
     /// Model slug.
     pub model: String,
-    /// Permission autonomy chosen when the thread was created.
+    /// Permission autonomy chosen when the thread was created (or last
+    /// changed).
     pub runtime_mode: RuntimeMode,
+    /// Reasoning effort in the harness's own vocabulary, when the thread asked
+    /// for one.
+    pub reasoning_effort: Option<String>,
+    /// Whether the thread asked for the harness's fast tier.
+    pub fast: bool,
     /// Harness session to resume, when resuming.
     pub resume_id: Option<String>,
     /// The single h4rn MCP hub endpoint injected into the session.
@@ -363,6 +374,22 @@ pub enum HarnessError {
         /// Requested feature.
         feature: String,
     },
+    /// This live session cannot apply a value it accepts, but the next session
+    /// start can.
+    ///
+    /// Unlike [`Self::Unsupported`] the value is valid. The daemon records it,
+    /// shows it, and starts a session that really uses it on the next turn
+    /// instead of refusing the change. The one case today is an ACP agent's
+    /// default-model alias: ACP has no "reset to the agent's default" method
+    /// and the catalogue does not name which entry is the default, so a live
+    /// session cannot honour the alias while a fresh one can.
+    #[error("{harness:?} will apply {feature} on the next session")]
+    Deferred {
+        /// Harness involved.
+        harness: HarnessKind,
+        /// The value that is deferred.
+        feature: String,
+    },
 }
 
 impl HarnessError {
@@ -460,6 +487,12 @@ impl TransportHealth {
 /// A running harness session.
 #[async_trait]
 pub trait HarnessSession: Send {
+    /// Which harness this session belongs to.
+    ///
+    /// The session already knows; the daemon uses it for errors that name the
+    /// adapter when a session-level switch is not supported.
+    fn kind(&self) -> HarnessKind;
+
     /// Sends a user message to the harness.
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError>;
 
@@ -542,6 +575,55 @@ pub trait HarnessSession: Send {
     /// The tail of the harness's stderr, for error surfaces.
     fn stderr_tail(&self) -> String {
         String::new()
+    }
+
+    /// Thread settings this live session advertised, when the adapter's
+    /// catalogue only exists at runtime.
+    ///
+    /// `None` means the harness's static [`thread_controls`] are authoritative.
+    fn controls(&self) -> Option<SessionControls> {
+        None
+    }
+
+    /// Switches the live session to `mode`.
+    ///
+    /// An adapter without an in-place permission switch answers
+    /// [`HarnessError::Unsupported`]; the daemon then keeps the change for the
+    /// next session start instead of pretending it applied now.
+    async fn set_runtime_mode(&mut self, _mode: RuntimeMode) -> Result<(), HarnessError> {
+        Err(HarnessError::Unsupported {
+            harness: self.kind(),
+            feature: "switching the permission mode on a live session".into(),
+        })
+    }
+
+    /// Switches the live session to `model`.
+    ///
+    /// The next turn runs on it; a conversation already in progress keeps its
+    /// history. A valid value this session cannot apply but a fresh one can
+    /// (ACP's default-model alias) answers [`HarnessError::Deferred`], which the
+    /// daemon records and applies from the next session instead of refusing.
+    async fn set_model(&mut self, _model: &str) -> Result<(), HarnessError> {
+        Err(HarnessError::Unsupported {
+            harness: self.kind(),
+            feature: "switching the model on a live session".into(),
+        })
+    }
+
+    /// Switches the live session to `effort` (`None` is the harness default).
+    async fn set_reasoning_effort(&mut self, _effort: Option<&str>) -> Result<(), HarnessError> {
+        Err(HarnessError::Unsupported {
+            harness: self.kind(),
+            feature: "switching reasoning effort on a live session".into(),
+        })
+    }
+
+    /// Switches the live session to (or off) the harness's fast tier.
+    async fn set_fast(&mut self, _fast: bool) -> Result<(), HarnessError> {
+        Err(HarnessError::Unsupported {
+            harness: self.kind(),
+            feature: "switching the fast tier on a live session".into(),
+        })
     }
 }
 

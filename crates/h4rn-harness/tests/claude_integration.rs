@@ -27,6 +27,8 @@ async fn real_claude_code_round_trip() {
         workspace: workspace.path().to_path_buf(),
         model: "default".into(),
         runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+        reasoning_effort: None,
+        fast: false,
         resume_id: None,
         mcp_endpoint: None,
         env_overrides: Default::default(),

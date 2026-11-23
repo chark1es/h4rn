@@ -83,6 +83,13 @@ pub struct ThreadMeta {
     pub model: String,
     /// Permission autonomy chosen at creation.
     pub runtime_mode: RuntimeMode,
+    /// Reasoning effort in the harness's own vocabulary, when one was chosen.
+    ///
+    /// Absent in rows written before thread controls; those threads keep the
+    /// harness default.
+    pub reasoning_effort: Option<String>,
+    /// Whether the thread asks for the harness's fast tier.
+    pub fast: bool,
     /// Worktree intent recorded at creation.
     pub worktree: Option<WorktreeRequest>,
     /// Creation time, used as the initial lifecycle clock.
@@ -276,6 +283,8 @@ impl SqliteJournal {
                 usage_json     TEXT NOT NULL,
                 resume_id      TEXT,
                 runtime_mode   TEXT NOT NULL DEFAULT 'approval_required',
+                reasoning_effort TEXT,
+                fast           INTEGER NOT NULL DEFAULT 0,
                 worktree_json  TEXT,
                 parent_thread_id TEXT,
                 subagent_id    TEXT,
@@ -306,6 +315,10 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "agent_fingerprint", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "reasoning_effort", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "fast", "INTEGER NOT NULL DEFAULT 0")
             .await?;
         self.ensure_column(
             "daemon_threads",
@@ -399,8 +412,8 @@ async fn upsert_thread_on(
     let parked_json = serde_json::to_string(&meta.parked)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -411,6 +424,8 @@ async fn upsert_thread_on(
             usage_json = excluded.usage_json,
             resume_id = excluded.resume_id,
             runtime_mode = excluded.runtime_mode,
+            reasoning_effort = excluded.reasoning_effort,
+            fast = excluded.fast,
             worktree_json = excluded.worktree_json,
             parent_thread_id = excluded.parent_thread_id,
             subagent_id = excluded.subagent_id,
@@ -429,6 +444,8 @@ async fn upsert_thread_on(
     .bind(usage_json)
     .bind(meta.resume_id.as_deref())
     .bind(runtime_mode)
+    .bind(meta.reasoning_effort.as_deref())
+    .bind(meta.fast as i64)
     .bind(worktree_json)
     .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
     .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
@@ -472,7 +489,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -511,6 +528,8 @@ impl Journal for SqliteJournal {
                 model: row.try_get("model")?,
                 runtime_mode: serde_json::from_str(&format!("\"{runtime_mode}\""))
                     .unwrap_or_default(),
+                reasoning_effort: row.try_get("reasoning_effort")?,
+                fast: row.try_get::<i64, _>("fast")? != 0,
                 worktree: worktree_json
                     .and_then(|json| serde_json::from_str(&json).ok())
                     .flatten(),
@@ -755,6 +774,8 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "model": meta.model,
         "created_at": meta.created_at,
         "runtime_mode": meta.runtime_mode,
+        "reasoning_effort": meta.reasoning_effort,
+        "fast": meta.fast,
         "worktree": meta.worktree,
         "usage": meta.usage,
         "resume_id": meta.resume_id,
@@ -781,6 +802,8 @@ mod tests {
             workspace_path: "/tmp/work".into(),
             model: "test-model".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
             worktree: None,
             created_at: Utc::now(),
             usage: Usage::default(),
@@ -801,6 +824,11 @@ mod tests {
             workspace_path: "/tmp/work".into(),
             branch: Some("h4rn/first-prompt".into()),
             model: "test-model".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
+            models: Vec::new(),
+            fast: false,
             tab: h4rn_protocol::ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

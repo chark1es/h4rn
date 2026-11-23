@@ -90,7 +90,8 @@ pub enum AgentState {
 /// How much autonomy a harness session is granted (ADR-005).
 ///
 /// The daemon maps this to the harness's own permission switch; the Claude Code
-/// adapter uses `--permission-mode`. It is fixed for the life of a thread.
+/// adapter uses `--permission-mode`. A change applies to the live session where
+/// the harness can switch in place, or at the next session start.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeMode {
@@ -99,6 +100,11 @@ pub enum RuntimeMode {
     ApprovalRequired,
     /// File edits are accepted; commands and network access still ask.
     AutoAcceptEdits,
+    /// Read, plan and report without changing the workspace.
+    ///
+    /// Only offered for harnesses with a real plan mode (Claude Code and ACP
+    /// agents that advertise one); every other adapter refuses it.
+    Plan,
     /// No approvals; the harness may run unattended.
     FullAccess,
 }
@@ -366,6 +372,39 @@ pub struct ThreadSummary {
     pub branch: Option<String>,
     /// Model slug reported by the harness.
     pub model: String,
+    /// Permission autonomy for the thread.
+    ///
+    /// Older daemons did not report the live setting; their threads
+    /// deserialize as [`RuntimeMode::ApprovalRequired`], the old fixed mode.
+    #[serde(default)]
+    pub runtime_mode: RuntimeMode,
+    /// Reasoning effort for the thread, in the harness's own vocabulary.
+    ///
+    /// `None` leaves the harness on its own default. Harnesses without a real
+    /// effort control never report a value here.
+    #[serde(default)]
+    #[ts(optional)]
+    pub reasoning_effort: Option<String>,
+    /// Effort values the live session advertised.
+    ///
+    /// Empty until a session names a catalogue. A configured ACP agent only
+    /// reveals its effort option at session start, so the picker fills from
+    /// here rather than guessing.
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
+    /// Model ids the live session advertised.
+    ///
+    /// Empty until a session names a catalogue. Codex publishes its
+    /// `model/list` at session start, and the picker offers exactly those ids
+    /// (plus the current one) instead of the adapter's static guess. An older
+    /// daemon's thread has none, so the picker falls back to the static list.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Whether the thread asks the harness for its fast tier.
+    ///
+    /// Only harnesses with a real fast tier (Codex service tiers) report this.
+    #[serde(default)]
+    pub fast: bool,
     /// Derived tab placement.
     pub tab: ThreadTab,
     /// Whether the current tab is where the person just placed the thread.
@@ -640,6 +679,26 @@ mod tests {
         let summary: ThreadSummary = serde_json::from_value(json).expect("old JSON");
         assert_eq!(summary.agent_id, None);
         assert_eq!(summary.harness, HarnessKind::ClaudeCode);
+        // A thread written before thread controls had no live settings: it
+        // deserializes on the fixed mode it was created with.
+        assert_eq!(summary.runtime_mode, RuntimeMode::ApprovalRequired);
+        assert_eq!(summary.reasoning_effort, None);
+        assert!(!summary.fast);
+    }
+
+    #[test]
+    fn a_thread_summary_round_trips_its_thread_controls() {
+        let mut summary = summary_with(None, None);
+        summary.runtime_mode = RuntimeMode::Plan;
+        summary.reasoning_effort = Some("xhigh".into());
+        summary.fast = true;
+
+        let json = serde_json::to_string(&summary).expect("serialise the summary");
+        let decoded: ThreadSummary = serde_json::from_str(&json).expect("parse the summary");
+        assert_eq!(decoded, summary);
+        assert_eq!(decoded.runtime_mode, RuntimeMode::Plan);
+        assert_eq!(decoded.reasoning_effort.as_deref(), Some("xhigh"));
+        assert!(decoded.fast);
     }
 
     fn summary_with(
@@ -656,6 +715,11 @@ mod tests {
             workspace_path: "/tmp/work".into(),
             branch: Some("h4rn/usage-limit".into()),
             model: "claude-sonnet-5".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
+            models: Vec::new(),
+            fast: false,
             tab: ThreadTab::Working,
             placed_by_user: false,
             pinned: false,

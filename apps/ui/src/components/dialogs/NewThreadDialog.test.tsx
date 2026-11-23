@@ -9,6 +9,7 @@ const mock = vi.hoisted(() => {
     connection: { status: string };
     hosts: Record<string, HostSummary>;
     localHostId: string | null;
+    threads: Record<string, unknown>;
     ui: {
       newThreadOpen: boolean;
       newThreadPreset: { host: string; workspace: string } | null;
@@ -17,6 +18,7 @@ const mock = vi.hoisted(() => {
     connection: { status: "online" },
     hosts: {},
     localHostId: null,
+    threads: {},
     ui: { newThreadOpen: true, newThreadPreset: null },
   };
   const harness: {
@@ -90,6 +92,7 @@ vi.mock("@/features/attachments/use-attachments", () => ({
   useAttachShortcut: () => undefined,
 }));
 
+import { setDefaultPermissionMode } from "@/features/threads/settings";
 import {
   DEFAULT_NEW_THREAD_WORKSPACE,
   drafts,
@@ -120,6 +123,10 @@ function folderField(): HTMLInputElement {
   return document.getElementById("new-thread-workspace") as HTMLInputElement;
 }
 
+function modelField(): HTMLInputElement {
+  return document.getElementById("new-thread-model") as HTMLInputElement;
+}
+
 function commitFolder(value: string): void {
   fireEvent.change(folderField(), { target: { value } });
   fireEvent.blur(folderField());
@@ -133,6 +140,7 @@ describe("NewThreadDialog drafts", () => {
     mock.state.connection.status = "online";
     mock.state.hosts = {};
     mock.state.localHostId = null;
+    mock.state.threads = {};
     mock.state.ui.newThreadOpen = true;
     mock.state.ui.newThreadPreset = null;
     mock.harness.agents = [];
@@ -143,6 +151,7 @@ describe("NewThreadDialog drafts", () => {
     mock.harness.loaded = false;
     mock.createThread.mockReset();
     mock.closeNewThread.mockReset();
+    setDefaultPermissionMode("approval_required");
   });
 
   afterEach(() => {
@@ -439,7 +448,7 @@ describe("NewThreadDialog drafts", () => {
         path: "/usr/bin/demo-agent",
       },
     ];
-    // An agent with its own mode ids: h4rn can select none of them.
+    // An agent with its own mode ids: h4rn maps none of them.
     mock.harness.probes = {
       demo: {
         id: "demo",
@@ -447,8 +456,8 @@ describe("NewThreadDialog drafts", () => {
         version: null,
         models: [{ id: "demo-model", name: "Demo" }],
         modes: [
-          { id: "ask", name: "Ask", description: null },
           { id: "code", name: "Code", description: null },
+          { id: "architect", name: "Architect", description: null },
         ],
         error: null,
       },
@@ -467,7 +476,123 @@ describe("NewThreadDialog drafts", () => {
 
     await waitFor(() => expect(screen.getByText("Mode is managed by the agent.")).toBeTruthy());
     expect(screen.queryByRole("button", { name: "Mode: Approval required" })).toBeNull();
-    expect(screen.queryByText("Fixed for the life of the thread.")).toBeNull();
+    expect(screen.queryByText("Can be changed later from the composer.")).toBeNull();
+  });
+
+  it("shows no mode picker until the agent names any mode", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.harness.agents = [
+      {
+        id: "demo",
+        name: "Demo agent",
+        command: "demo-agent",
+        env: {},
+        working_dir: { kind: "thread_workspace" },
+        installed: true,
+        models: [],
+        modes: [],
+        version: null,
+        path: "/usr/bin/demo-agent",
+      },
+    ];
+    // The agent advertises no mode catalogue at all. h4rn cannot map a mode it
+    // was never told about, so all four h4rn modes must not be offered.
+    mock.harness.probes = {
+      demo: {
+        id: "demo",
+        installed: true,
+        version: null,
+        models: [{ id: "demo-model", name: "Demo" }],
+        modes: [],
+        error: null,
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+
+    await waitFor(() => expect(screen.getByText("Mode is managed by the agent.")).toBeTruthy());
+    for (const label of [
+      "Mode: Approval required",
+      "Mode: Auto-accept edits",
+      "Mode: Plan",
+      "Mode: Full access",
+    ]) {
+      expect(screen.queryByRole("button", { name: label })).toBeNull();
+    }
+  });
+
+  it("offers Plan at creation and keeps a Plan default", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    setDefaultPermissionMode("plan");
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    // Claude Code has a real plan mode, so the dialog offers it and does not
+    // coerce the device's Plan default to the first row.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Mode: Plan" })).toBeTruthy());
+    expect(screen.getByText("Can be changed later from the composer.")).toBeTruthy();
+  });
+
+  it("offers the agent's own mode ids at creation", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.harness.agents = [
+      {
+        id: "demo",
+        name: "Demo agent",
+        command: "demo-agent",
+        env: {},
+        working_dir: { kind: "thread_workspace" },
+        installed: true,
+        models: [],
+        modes: [],
+        version: null,
+        path: "/usr/bin/demo-agent",
+      },
+    ];
+    mock.harness.probes = {
+      demo: {
+        id: "demo",
+        installed: true,
+        version: null,
+        models: [{ id: "demo-model", name: "Demo" }],
+        modes: [
+          { id: "acceptEdits", name: "Accept edits", description: null },
+          { id: "bypassPermissions", name: "Bypass", description: null },
+        ],
+        error: null,
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+
+    // The daemon maps these ids to auto-accept-edits and full-access, so the
+    // dialog offers them instead of deciding the agent manages its own mode.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Mode: Auto-accept edits" })).toBeTruthy(),
+    );
   });
 
   it("shows a fixed working directory and starts the thread there", async () => {
@@ -673,5 +798,163 @@ describe("NewThreadDialog drafts", () => {
 
     expect(readNewThreadDraft("host_a", "~/code/api")).toBe("");
     expect(readNewThreadDraft("host_a", "~/code/web")).toBe("web work");
+  });
+
+  it("starts a new Codex thread on the model the host's live catalogue lists", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+    // A thread on this host already reported Codex's own `model/list`; the
+    // static default (`gpt-5.1-codex`) is not in the installed CLI any more.
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect((document.getElementById("new-thread-model") as HTMLInputElement).value).toBe(
+        "gpt-6.2-sol",
+      ),
+    );
+  });
+
+  it("keeps the live model when the host already bound is picked again", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
+
+    // ChipSelect fires onChange even for the row that is already selected.
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: atlas" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /atlas/ }));
+
+    // The live catalogue still wins: reselecting must not fall back to the
+    // static `gpt-5.1-codex` the installed CLI no longer lists.
+    await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
+  });
+
+  it("keeps a non-first harness and its typed model when the bound host is picked again", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["claude_code", "codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [
+      { harness: "claude_code", installed: "2.1.329" },
+      { harness: "codex", installed: "0.171.0" },
+    ];
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Codex/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Codex" })).toBeTruthy(),
+    );
+    fireEvent.change(modelField(), { target: { value: "gpt-6.2-astra" } });
+
+    // Picking the host that is already bound changes nothing, even though its
+    // first detected harness is Claude Code.
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: atlas" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /atlas/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Codex" })).toBeTruthy(),
+    );
+    expect(modelField().value).toBe("gpt-6.2-astra");
+  });
+
+  it("adopts a live catalogue that arrives after the dialog opened", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+
+    const view = render(<NewThreadDialog />);
+    // Nothing has reported the CLI's list yet, so the static default stands.
+    await waitFor(() => expect(modelField().value).toBe("gpt-5.1-codex"));
+
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+    view.rerender(<NewThreadDialog />);
+
+    await waitFor(() => expect(modelField().value).toBe("gpt-6.2-sol"));
+  });
+
+  it("never overwrites a model the person typed when the catalogue arrives", async () => {
+    mock.state.hosts = {
+      host_a: { ...host("host_a", "atlas"), harnesses: ["codex"] },
+    };
+    mock.state.localHostId = "host_a";
+    mock.harness.loaded = true;
+    mock.harness.rows = [{ harness: "codex", installed: "0.171.0" }];
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(modelField().value).toBe("gpt-5.1-codex"));
+    fireEvent.change(modelField(), { target: { value: "my-own-model" } });
+
+    mock.state.threads = {
+      th_codex: {
+        thread_id: "th_codex",
+        host: "host_a",
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        last_activity: "2026-01-01T00:00:00Z",
+      },
+    };
+    view.rerender(<NewThreadDialog />);
+
+    // Give the adopt effect a chance to run; the typed value stays.
+    await waitFor(() => expect(modelField().value).toBe("my-own-model"));
   });
 });

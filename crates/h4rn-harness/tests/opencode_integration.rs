@@ -52,6 +52,8 @@ fn spec(workspace: &std::path::Path, resume_id: Option<String>) -> SessionSpec {
         workspace: workspace.to_path_buf(),
         model: model(),
         runtime_mode: RuntimeMode::FullAccess,
+        reasoning_effort: None,
+        fast: false,
         resume_id,
         mcp_endpoint: None,
         env_overrides,
