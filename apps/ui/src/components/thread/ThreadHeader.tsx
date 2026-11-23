@@ -5,6 +5,7 @@ import {
   GitBranchIcon,
   MoreHorizontalIcon,
   PanelRightIcon,
+  PencilIcon,
   PinIcon,
   Share2Icon,
   SquareIcon,
@@ -12,9 +13,12 @@ import {
   TerminalIcon,
 } from "lucide-react";
 
+import { useState } from "react";
+
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { SidebarReveal } from "@/components/shell/Sidebar";
+import { RenameThreadDialog } from "@/components/thread/RenameThreadDialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,6 +27,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
@@ -126,6 +131,7 @@ export function ThreadHeader({
   onOpenPanel?: () => void;
   stale?: boolean;
 }) {
+  const [renaming, setRenaming] = useState(false);
   const hostOnline = host?.online ?? false;
   const working = summary.tab === "working";
   const unreachable =
@@ -157,6 +163,10 @@ export function ThreadHeader({
         <DropdownMenuItem onSelect={() => void togglePin(summary.thread_id)}>
           <PinIcon aria-hidden />
           {summary.pinned ? "Unpin from Working" : "Keep in Working"}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setRenaming(true)}>
+          <PencilIcon aria-hidden />
+          Rename…
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "done")}>
           Move to Done
@@ -204,9 +214,19 @@ export function ThreadHeader({
     </DropdownMenu>
   );
 
+  const renameDialog = (
+    <RenameThreadDialog
+      threadId={summary.thread_id}
+      initial={summary.title}
+      open={renaming}
+      onOpenChange={setRenaming}
+    />
+  );
+
   if (isPhone) {
     return (
       <>
+        {renameDialog}
         <div className="q-ph-nav">
           <button type="button" className="navbtn" aria-label="Back to inbox" onClick={onBack}>
             <span aria-hidden className="q-ph-back-glyph">
@@ -259,6 +279,7 @@ export function ThreadHeader({
             />
             <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
             <span className="grow" />
+            <ThreadPullRequestBadge threadId={summary.thread_id} />
             <span className={cn("q-th-state", summary.needs_attention && "q-accent")}>
               <AgentGlyph glyph={glyph} size={14} />
               <span>{stateLabel}</span>
@@ -271,6 +292,7 @@ export function ThreadHeader({
 
   return (
     <header className="q-th-head">
+      {renameDialog}
       <SidebarReveal />
       <div className="q-th-titles">
         <h1>{summary.title}</h1>
@@ -311,6 +333,7 @@ export function ThreadHeader({
       </div>
 
       <div className="q-th-actions">
+        <ThreadPullRequestBadge threadId={summary.thread_id} />
         {working && !stale && !unreachable ? (
           <button
             type="button"

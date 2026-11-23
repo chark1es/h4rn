@@ -22,6 +22,7 @@ import type { ForgeHandoff } from "./ForgeHandoff";
 import type { ForgePrSummary } from "./ForgePrSummary";
 import type { ForgePullRequest } from "./ForgePullRequest";
 import type { ForgeRemote } from "./ForgeRemote";
+import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { ForgeReviewComment } from "./ForgeReviewComment";
 import type { FsDeleteResult } from "./FsDeleteResult";
 import type { FsDiff } from "./FsDiff";
@@ -40,6 +41,7 @@ import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
 import type { PairScope } from "./PairScope";
 import type { PairingConfirmation } from "./PairingConfirmation";
+import type { PrLinkedThread } from "./PrLinkedThread";
 import type { Project } from "./Project";
 import type { ProxyFailoverChoice } from "./ProxyFailoverChoice";
 import type { ProxyLimits } from "./ProxyLimits";
@@ -59,7 +61,11 @@ import type { SkillSyncStatus } from "./SkillSyncStatus";
 import type { SkippedWorktree } from "./SkippedWorktree";
 import type { SubagentView } from "./SubagentView";
 import type { TerminalInfo } from "./TerminalInfo";
+import type { TextGenerationSettings } from "./TextGenerationSettings";
+import type { TextGenerator } from "./TextGenerator";
+import type { TextGeneratorTestReport } from "./TextGeneratorTestReport";
 import type { ThreadId } from "./ThreadId";
+import type { ThreadPullRequest } from "./ThreadPullRequest";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { TrackedWorktree } from "./TrackedWorktree";
 import type { TurnId } from "./TurnId";
@@ -361,7 +367,31 @@ pr: ForgePullRequest, } | { "type": "forge_handoff",
 /**
  * Thread, turn and the exact markdown sent.
  */
-handoff: ForgeHandoff, } | { "type": "mcp_servers", 
+handoff: ForgeHandoff, } | { "type": "thread_pull_requests", 
+/**
+ * Thread the links belong to.
+ */
+thread_id: ThreadId, 
+/**
+ * Linked PRs, oldest link first.
+ */
+pulls: Array<ThreadPullRequest>, } | { "type": "thread_pull_request", 
+/**
+ * The link and its latest state.
+ */
+pull: ThreadPullRequest, } | { "type": "pr_threads", 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, 
+/**
+ * Linking threads.
+ */
+threads: Array<PrLinkedThread>, } | { "type": "mcp_servers", 
 /**
  * Servers in configuration order.
  */
@@ -512,7 +542,27 @@ project: Project, } | { "type": "directories",
 /**
  * The listing.
  */
-listing: DirectoryListing, } | { "type": "subscribed", 
+listing: DirectoryListing, } | { "type": "text_generators", 
+/**
+ * Generators, oldest first.
+ */
+generators: Array<TextGenerator>, } | { "type": "text_generator", 
+/**
+ * The generator.
+ */
+generator: TextGenerator, } | { "type": "text_generator_tested", 
+/**
+ * What the tiny prompt did.
+ */
+report: TextGeneratorTestReport, } | { "type": "text_generation_settings", 
+/**
+ * Current settings.
+ */
+settings: TextGenerationSettings, } | { "type": "thread_renamed", 
+/**
+ * The thread with its new title.
+ */
+summary: ThreadSummary, } | { "type": "subscribed", 
 /**
  * Journal head at the moment the subscription was served.
  */

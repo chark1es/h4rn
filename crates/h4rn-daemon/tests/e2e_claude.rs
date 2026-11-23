@@ -66,6 +66,8 @@ fn options() -> ThreadManagerOptions {
 
 async fn boot(config: &Config, catalog: Arc<StaticHarnessCatalog>) -> Arc<ThreadManager> {
     DaemonBuilder::new(config.clone())
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_catalog(catalog)
         .with_lifecycle(options())
         .build()

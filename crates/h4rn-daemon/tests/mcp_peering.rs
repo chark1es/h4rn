@@ -89,6 +89,8 @@ async fn boot(host: &str) -> TestDaemon {
     };
     let host = HostId::new(host);
     let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
         .with_secure(secure)

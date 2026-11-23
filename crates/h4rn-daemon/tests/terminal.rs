@@ -53,7 +53,12 @@ async fn boot() -> TestDaemon {
         network_access: None,
         network_port: 0,
     };
-    let daemon = DaemonBuilder::new(config).build().await.expect("build");
+    let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
+        .build()
+        .await
+        .expect("build");
     let token = TokenStore::new(dir.path())
         .load()
         .expect("read token")

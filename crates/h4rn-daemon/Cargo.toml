@@ -52,6 +52,7 @@ sha2.workspace = true
 sqlx.workspace = true
 subtle.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
@@ -68,7 +69,6 @@ libc.workspace = true
 blake2.workspace = true
 ed25519-dalek.workspace = true
 h4rn-connect.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 wiremock.workspace = true

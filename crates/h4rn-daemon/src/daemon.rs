@@ -50,6 +50,9 @@ pub struct DaemonBuilder {
     local_host: Option<(h4rn_protocol::HostId, String)>,
     harness_registry: Option<Arc<dyn h4rn_harness::RegistryClient>>,
     update_runner: Option<Arc<dyn h4rn_harness::UpdateRunner>>,
+    text_generation: Option<Arc<crate::text_generation::TextGenerationService>>,
+    /// Whether a title job may look for the host's own `claude` or `codex`.
+    detect_title_agents: bool,
 }
 
 impl DaemonBuilder {
@@ -70,6 +73,8 @@ impl DaemonBuilder {
             local_host: None,
             harness_registry: None,
             update_runner: None,
+            text_generation: None,
+            detect_title_agents: true,
         }
     }
 
@@ -130,6 +135,25 @@ impl DaemonBuilder {
     /// Replaces the harness catalog wholesale.
     pub fn with_catalog(mut self, catalog: Arc<dyn HarnessCatalog>) -> Self {
         self.catalog = Some(catalog);
+        self
+    }
+
+    /// Replaces the text-generation service (tests and fixture CLIs).
+    pub fn with_text_generation(
+        mut self,
+        service: Arc<crate::text_generation::TextGenerationService>,
+    ) -> Self {
+        self.text_generation = Some(service);
+        self
+    }
+
+    /// Keeps title jobs away from the host's own harness CLIs.
+    ///
+    /// Tests and embedders use this: a generated title may never spawn the
+    /// machine's `claude`. The service still runs, so it fails
+    /// honestly with "not installed" instead of silently doing nothing.
+    pub fn without_title_agents(mut self) -> Self {
+        self.detect_title_agents = false;
         self
     }
 
@@ -238,7 +262,7 @@ impl DaemonBuilder {
             Arc::clone(&blobs) as Arc<dyn AttachmentResolver>;
         let manager = Arc::new(
             ThreadManager::open(
-                journal,
+                Arc::clone(&journal),
                 Arc::clone(&catalog),
                 hosts.local_id(),
                 self.options,
@@ -261,6 +285,28 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open CLIProxyAPI profiles: {error}"))?,
         );
         manager.set_proxy(Arc::clone(&proxy));
+
+        // Titles can come from an installed coding agent or a configured text
+        // generator; the service decides per thread from its saved settings.
+        let text_generation = match self.text_generation {
+            Some(service) => service,
+            None => {
+                let service =
+                    crate::text_generation::TextGenerationService::open(&self.config.data_dir)
+                        .map_err(|error| anyhow::anyhow!("open text generation: {error}"))?;
+                // A unit-test build must never spawn the host's own CLIs
+                // either, even when the builder was left at its defaults.
+                let service = if self.detect_title_agents && !cfg!(test) {
+                    service
+                } else {
+                    service.without_detected_agents()
+                };
+                Arc::new(service)
+            }
+        };
+        manager.set_text_generation(
+            Arc::clone(&text_generation) as Arc<dyn crate::text_generation::TextGeneration>
+        );
 
         // Durable metering and auto-resume share the daemon data directory but
         // own a separate SQLite file so ledger writes never block the journal.
@@ -296,6 +342,12 @@ impl DaemonBuilder {
 
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
+        let pr_links = crate::pr_links::PrLinkService::new(
+            journal,
+            Arc::new(crate::pr_links::ForgePrSource::new(Arc::clone(&forge))),
+            Arc::new(crate::pr_links::ThreadWakeSink::new(Arc::clone(&manager))),
+        );
+        pr_links.start();
 
         let tokens = TokenStore::new(&self.config.data_dir);
         // Provision on first serve so a client has a token to read.
@@ -471,6 +523,7 @@ impl DaemonBuilder {
             tokens,
             fs,
             forge,
+            pr_links,
             skills,
             secure,
             remote,
@@ -481,6 +534,7 @@ impl DaemonBuilder {
             proxy,
             meter,
             network_access_enabled,
+            text_generation,
         })
     }
 }
@@ -497,6 +551,7 @@ pub struct Daemon {
     tokens: TokenStore,
     fs: Arc<FsService>,
     forge: Arc<ForgeService>,
+    pr_links: Arc<crate::pr_links::PrLinkService>,
     skills: Arc<h4rn_skills::SkillsService>,
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
@@ -510,6 +565,7 @@ pub struct Daemon {
     harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
     acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     projects: Arc<crate::projects::ProjectService>,
+    text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// The network-listener setting resolved at build time.
     network_access_enabled: bool,
 }
@@ -647,6 +703,7 @@ impl Daemon {
             tokens: self.tokens,
             fs: self.fs,
             forge: Arc::clone(&self.forge),
+            pr_links: Arc::clone(&self.pr_links),
             skills: Arc::clone(&self.skills),
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
@@ -659,6 +716,7 @@ impl Daemon {
             harness_versions: Arc::clone(&self.harness_versions),
             acp_agents: Arc::clone(&self.acp_agents),
             projects: Arc::clone(&self.projects),
+            text_generation: Arc::clone(&self.text_generation),
         };
 
         // The network listener serves a restricted router: liveness and the
@@ -728,6 +786,7 @@ impl Daemon {
             worktrees: self.worktrees,
             terminals: self.terminals,
             forge: self.forge,
+            pr_links: self.pr_links,
             mcp: self.mcp,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
@@ -748,6 +807,7 @@ pub struct BoundDaemon {
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
+    pr_links: Arc<crate::pr_links::PrLinkService>,
     mcp: Arc<McpService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
@@ -806,6 +866,7 @@ impl BoundDaemon {
             worktrees,
             terminals,
             forge,
+            pr_links,
             mcp,
             supervisor,
             data_dir,
@@ -828,6 +889,7 @@ impl BoundDaemon {
             task.abort();
         }
         forge.shutdown();
+        pr_links.shutdown();
         mcp.shutdown().await;
         worktrees.shutdown().await;
         subagents.shutdown().await;

@@ -57,6 +57,8 @@ export type UiState = {
   paletteOpen: boolean;
   shortcutsOpen: boolean;
   newThreadOpen: boolean;
+  /** The Link pull request dialog is open for the focused thread. */
+  linkPrOpen: boolean;
   theme: Theme;
   snoozedOpen: boolean;
   filter: ThreadFilterState;
@@ -158,6 +160,13 @@ export type AppState = {
   connection: ConnectionSnapshot;
   hosts: Record<HostId, HostSummary>;
   threads: Record<ThreadId, ThreadSummary>;
+  /**
+   * Journal sequence of the newest summary this client has applied per thread.
+   *
+   * A reply that carries a summary without one (a create response) must not
+   * overwrite a summary projected from a newer event.
+   */
+  threadSeqs: Record<ThreadId, number>;
   logs: Record<ThreadId, ThreadLog>;
   threadErrors: Record<ThreadId, ProtoError>;
   loadingThreads: boolean;
@@ -205,6 +214,7 @@ function createInitialState(): AppState {
     },
     hosts: {},
     threads: {},
+    threadSeqs: {},
     logs: {},
     threadErrors: {},
     loadingThreads: true,
@@ -224,6 +234,7 @@ function createInitialState(): AppState {
       paletteOpen: false,
       shortcutsOpen: false,
       newThreadOpen: false,
+      linkPrOpen: false,
       theme: initialTheme(),
       snoozedOpen: false,
       filter: { host: null, harness: null, needsAttention: false, unread: false },
@@ -439,6 +450,15 @@ export function closeShortcuts(): void {
 /** Opens New thread, optionally starting in one project's folder. */
 export function openNewThread(preset?: { host: string; workspace: string }): void {
   setUi({ newThreadOpen: true, paletteOpen: false, newThreadPreset: preset ?? null });
+}
+
+/** Opens the "Link pull request" dialog for the focused thread. */
+export function openLinkPullRequest(): void {
+  setUi({ linkPrOpen: true, paletteOpen: false });
+}
+
+export function closeLinkPullRequest(): void {
+  setUi({ linkPrOpen: false });
 }
 
 export function openAddProject(): void {
@@ -934,6 +954,10 @@ export async function loadThread(threadId: ThreadId, sinceSeq = 0): Promise<void
     setState({
       ...current,
       threads: { ...current.threads, [threadId]: response.summary },
+      threadSeqs: {
+        ...current.threadSeqs,
+        [threadId]: Math.max(current.threadSeqs[threadId] ?? 0, response.next_seq),
+      },
       logs: { ...current.logs, [threadId]: log },
       threadErrors: omitKey(current.threadErrors, threadId),
     });
@@ -1025,12 +1049,14 @@ function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
   return next;
 }
 
-function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
+/** Folds one server event into a state; exposed for tests. */
+export function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
   const { event } = envelope;
 
   if (event.type === "thread_upserted") {
     const { type: _type, ...summary } = event;
     let threads = { ...state.threads, [summary.thread_id]: summary };
+    const threadSeqs = { ...state.threadSeqs, [summary.thread_id]: envelope.seq };
     let logs = state.logs;
     let pendingCreates = state.pendingCreates;
     let ui = state.ui;
@@ -1064,6 +1090,7 @@ function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
     return {
       ...state,
       threads,
+      threadSeqs,
       logs,
       pendingCreates,
       ui,
@@ -1133,7 +1160,10 @@ function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
 async function runThreadAction(
   threadId: ThreadId,
   label: string,
-  body: Extract<ClientRequest, { type: "set_thread_tab" | "snooze" | "interrupt" }>,
+  body: Extract<
+    ClientRequest,
+    { type: "set_thread_tab" | "snooze" | "interrupt" | "rename_thread" }
+  >,
 ): Promise<boolean> {
   const placement = body.type === "set_thread_tab" && isPlacementMove(body.tab);
   const state = getState();
@@ -1221,6 +1251,17 @@ export async function snoozeThread(threadId: ThreadId, until: string | null): Pr
 
 export async function interruptThread(threadId: ThreadId): Promise<void> {
   await runThreadAction(threadId, "Interrupting", { type: "interrupt", thread_id: threadId });
+}
+
+/** Renames a thread by hand. The daemon never replaces a name you typed. */
+export async function renameThread(threadId: ThreadId, title: string): Promise<boolean> {
+  const trimmed = title.trim();
+  if (!trimmed) return false;
+  return runThreadAction(threadId, "Renaming", {
+    type: "rename_thread",
+    thread_id: threadId,
+    title: trimmed,
+  });
 }
 
 /** The first approval of a thread that still needs an answer, if any. */
@@ -1388,20 +1429,24 @@ export type CreateThreadInput = {
 function reconcileCreatedThread(
   tempId: ThreadId,
   threadId: ThreadId,
-  summary: ThreadSummary,
+  created: ThreadSummary,
 ): void {
   const state = getState();
   const tempLog = state.logs[tempId];
   const existingLog = state.logs[threadId];
   const threads = omitKey(state.threads, tempId);
-  threads[threadId] = summary;
+  // The create reply carries no sequence, and it was written before the first
+  // event. If an upsert for this thread is already projected — a generated
+  // title can land this fast — that summary is the newer one and stays.
+  threads[threadId] =
+    state.threadSeqs[threadId] !== undefined ? (state.threads[threadId] ?? created) : created;
   const logs = omitKey(state.logs, tempId);
   logs[threadId] = tempLog
     ? { ...tempLog, loaded: true, loading: false }
     : (existingLog ?? { ...createThreadLog(), loaded: true });
   const pendingCreates = state.pendingCreates.filter((pending) => pending.tempId !== tempId);
 
-  moveLocalThreadDraft(summary.host, tempId, threadId);
+  moveLocalThreadDraft(created.host, tempId, threadId);
 
   let ui = state.ui;
   if (ui.route.kind === "thread" && ui.route.threadId === tempId) {
