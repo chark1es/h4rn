@@ -740,10 +740,12 @@ impl Session {
     /// kept up. A position the daemon never sent to that viewer is ignored, so
     /// a bogus claim cannot suppress a real answer. A position the viewer only
     /// received inside a snapshot yields to another viewer that received it
-    /// raw (that viewer has the bytes and must be the one written), but not
-    /// to a viewer without them: a snapshot-only position is still answerable
-    /// when nobody else parses it, because xterm can complete the query with
-    /// the snapshot's own bytes and the shell must still get one answer.
+    /// raw, but only when that viewer can actually write the answer: with a
+    /// legacy client attached, the reply owner is the only one written, and a
+    /// non-owner's copy must not leave the query unanswered. A snapshot-only
+    /// position is still answerable when nobody else can write it, because
+    /// xterm can complete the query with the snapshot's own bytes and the
+    /// shell must still get one answer.
     ///
     /// The acceptance decision, the PTY write and the record update happen
     /// under the same writer lock: two connections cannot be accepted in one
@@ -785,6 +787,8 @@ impl Session {
     /// hangup targets the spawned child rather than the cached foreground
     /// group: a shell that starts a job while it boots puts that job in the
     /// foreground, and the job would receive the hangup instead of the shell.
+    /// On Unix `child.kill()` is a SIGHUP to that same pid, so it is skipped
+    /// once the wait reaped the shell; Windows keeps its handle kill.
     ///
     /// Waiting for the shell rather than a fixed delay is what makes the
     /// hangup reliable under load: an interactive shell forwards SIGHUP to its
@@ -819,8 +823,21 @@ impl Session {
             // Windows refused it) gets the same fallback as a busy lock. The
             // child lock is held while the reaped status is read, in the same
             // order as `finish`.
+            //
+            // On Unix `child.kill()` is a SIGHUP to the child's pid, not a
+            // handle operation, so it is skipped once the close wait has
+            // reaped the shell: that pid may already belong to another
+            // process. Windows keeps it, because there it holds a process
+            // handle.
             Some(mut child) => {
-                if child.kill().is_err() {
+                #[cfg(windows)]
+                let kill_failed = child.kill().is_err();
+                #[cfg(not(windows))]
+                let kill_failed = {
+                    let reaped = lock(&self.reaped_status).is_some() || !self.is_alive();
+                    !reaped && child.kill().is_err()
+                };
+                if kill_failed {
                     self.kill_after_busy_handle();
                 }
             }
@@ -1072,10 +1089,11 @@ fn clear_legacy_owners(viewers: &mut HashMap<ViewerId, ViewerEntry>) {
 /// never sent is ignored, so a bogus claim cannot suppress a real answer.
 ///
 /// A position inside this viewer's snapshot that it never parsed raw is
-/// claimable only when no other attached viewer received it raw. The rule is
-/// deliberately narrow: only a snapshot-only position gives way, and only to
-/// a viewer that actually has the bytes. A chunk this viewer parsed raw before
-/// a later resync stays its own to claim, and when every viewer saw the query
+/// claimable only when no other attached viewer that could actually write
+/// received it raw. The rule is deliberately narrow: only a snapshot-only
+/// position gives way, and only to a viewer that has the bytes and can answer
+/// under the current ownership rule. A chunk this viewer parsed raw before a
+/// later resync stays its own to claim, and when every viewer saw the query
 /// only through a snapshot nobody gives way, so the shared record still
 /// dedupes the answer to one write and the shell is never left without one.
 /// A rejected reply is dropped without advancing the record, so it cannot
@@ -1096,15 +1114,44 @@ fn accept_position(
     }
     let snapshot_only = position <= snapshot && !viewer.raw_contains(position);
     if snapshot_only
-        && viewers
-            .iter()
-            .any(|(id, entry)| *id != viewer_id && entry.viewer.raw_contains(position))
+        && viewers.iter().any(|(id, entry)| {
+            *id != viewer_id
+                && entry.viewer.raw_contains(position)
+                && answers_position(id, entry, viewers)
+        })
     {
         return false;
     }
     // Checked here and recorded after the write (`commit_reply`); the writer
     // lock makes the two steps one decision.
     !lock(answers).is_answered(position, ordinal)
+}
+
+/// Whether a viewer's reply for this position could actually be written.
+///
+/// Giving way is only right when the other viewer can answer: otherwise the
+/// query is dropped twice and the shell never hears back. When no legacy
+/// client is attached every attached viewer names positions, so any of them
+/// can write. While one is attached, a single viewer owns marked replies once
+/// an owner exists, and before that only a viewer that names positions can
+/// answer a positioned query: a legacy client's unpositioned reply does not
+/// name this `(position, ordinal)` at all.
+fn answers_position(
+    id: &ViewerId,
+    entry: &ViewerEntry,
+    viewers: &HashMap<ViewerId, ViewerEntry>,
+) -> bool {
+    if viewers.values().all(|entry| entry.reply_positions) {
+        return true;
+    }
+    match viewers
+        .iter()
+        .find(|(_, entry)| entry.legacy_owner)
+        .map(|(owner, _)| *owner)
+    {
+        Some(owner) => *id == owner,
+        None => entry.reply_positions,
+    }
 }
 
 /// Which query a reply answers.
@@ -2585,6 +2632,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_legacy_owner_answers_a_snapshot_only_chunk_a_non_owner_has_raw() {
+        // A owns replies and parsed 1..=3 raw before a resync at 8, so chunk 6
+        // reached it only inside the snapshot. Legacy B, which is not the
+        // owner, has 1..=8 raw, but B's unpositioned reply can never be
+        // written while A owns. A's claim must not give way to an answer that
+        // cannot come: dropping both would leave the shell unanswered.
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = recording_writer(&written);
+        let (owner, _owner_rx) = viewer_sent_then_resynced(3, 8);
+        let (legacy, _legacy_rx) = viewer_since_snapshot(0, 8);
+        let (viewers, answers) = input_state(&[(1, owner), (2, legacy)]);
+        {
+            let mut viewers = lock(&viewers);
+            viewers
+                .get_mut(&1)
+                .expect("the positioned owner")
+                .legacy_owner = true;
+            viewers
+                .get_mut(&2)
+                .expect("the legacy viewer")
+                .reply_positions = false;
+        }
+
+        write_input_locked(&writer, &viewers, &answers, 1, b"iOWN", at(6, 0))
+            .expect("the owner answers the query it only saw in its snapshot");
+        write_input_locked(
+            &writer,
+            &viewers,
+            &answers,
+            2,
+            b"iLEGACY",
+            QueryReply::Unpositioned,
+        )
+        .expect("the non-owner's reply is dropped without failing the connection");
+
+        assert_eq!(
+            &*lock(&written),
+            b"iOWN",
+            "the only viewer that can answer writes exactly one answer"
+        );
+        assert!(lock(&answers).is_answered(6, 0));
+    }
+
+    #[test]
+    fn the_legacy_owner_does_not_give_way_to_a_positioned_viewer_that_cannot_write() {
+        // The same layout with a positioned non-owner: it parsed 1..=8 raw,
+        // but while A owns replies its positioned answer is dropped too, so
+        // only A's snapshot-only claim can answer chunk 6.
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = recording_writer(&written);
+        let (owner, _owner_rx) = viewer_sent_then_resynced(3, 8);
+        let (positioned, _positioned_rx) = viewer_since_snapshot(0, 8);
+        let (legacy, _legacy_rx) = attached_viewer(8);
+        let (viewers, answers) = input_state(&[(1, owner), (2, positioned), (3, legacy)]);
+        {
+            let mut viewers = lock(&viewers);
+            viewers
+                .get_mut(&1)
+                .expect("the positioned owner")
+                .legacy_owner = true;
+            viewers
+                .get_mut(&3)
+                .expect("the legacy viewer")
+                .reply_positions = false;
+        }
+
+        write_input_locked(&writer, &viewers, &answers, 1, b"iOWN", at(6, 0))
+            .expect("the owner answers the query it only saw in its snapshot");
+        write_input_locked(&writer, &viewers, &answers, 2, b"iOTHER", at(6, 0))
+            .expect("a positioned non-owner's reply is dropped");
+
+        assert_eq!(
+            &*lock(&written),
+            b"iOWN",
+            "a claim never gives way to a viewer the owner rule blocks"
+        );
+        assert!(lock(&answers).is_answered(6, 0));
+    }
+
     /// A killer that counts how often it was asked to end the shell.
     #[derive(Debug)]
     struct CountingKiller {
@@ -2701,24 +2828,31 @@ mod tests {
         }
     }
 
-    /// A shell that exits during the hangup grace and then refuses a handle
-    /// kill, as an already reaped child does.
+    /// A shell that exits during the hangup grace and records any later
+    /// attempt to end it through the child handle.
     #[derive(Debug)]
-    struct ReapThenRefuseChild {
+    struct ReapThenRecordKillChild {
         pid: u32,
+        kills: Arc<AtomicU64>,
     }
 
-    impl portable_pty::ChildKiller for ReapThenRefuseChild {
+    impl portable_pty::ChildKiller for ReapThenRecordKillChild {
         fn kill(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("the child was already reaped"))
+            // On Unix this stand-in for `child.kill()` is the SIGHUP by pid
+            // that portable-pty sends; a reaped shell must not receive it.
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(Self { pid: self.pid })
+            Box::new(Self {
+                pid: self.pid,
+                kills: Arc::clone(&self.kills),
+            })
         }
     }
 
-    impl portable_pty::Child for ReapThenRefuseChild {
+    impl portable_pty::Child for ReapThenRecordKillChild {
         fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
             Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
         }
@@ -2814,6 +2948,74 @@ mod tests {
         );
     }
 
+    /// A busy child lock with an already-reaped shell must not fall back to the
+    /// pid signals: on Unix they are the same pid the primary kill would use.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reaped_shell_with_a_busy_child_lock_is_not_signalled_by_pid() {
+        use std::time::Instant;
+
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
+        let mut session = Session::new(
+            TerminalId::new("term_reaped_busy_child"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(IdleChild {
+                kills: Arc::clone(&kills),
+            }),
+            writer,
+        );
+        let signals = Arc::new(RecordedSignals::default());
+        session.signals = Arc::clone(&signals) as Arc<dyn CloseSignals>;
+        // `finish` clears the flag before it takes the child lock, so a close
+        // that lands in that window sees a busy handle for an exited shell.
+        session.alive.store(false, Ordering::SeqCst);
+        let session = Arc::new(session);
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let _held = lock(&session.child);
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.child.try_lock().is_ok() {
+            assert!(Instant::now() < deadline, "the child lock must be held");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        session.kill_with_grace().await;
+        let _ = release_tx.send(());
+        holder.join().expect("the lock holder joins");
+
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            0,
+            "a reaped shell must not get the handle kill's SIGHUP"
+        );
+        assert!(
+            lock(&signals.pids).is_empty(),
+            "a reaped shell must not get a pid SIGKILL"
+        );
+    }
+
     #[tokio::test]
     async fn a_shell_that_exits_during_the_hangup_grace_is_not_signalled_by_pid() {
         let pty = portable_pty::native_pty_system()
@@ -2825,6 +3027,7 @@ mod tests {
             })
             .expect("open pty");
         let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
         let mut session = Session::new(
             TerminalId::new("term_reaped_close"),
             1,
@@ -2835,7 +3038,10 @@ mod tests {
             80,
             24,
             pty.master,
-            Box::new(ReapThenRefuseChild { pid: 4_000_001 }),
+            Box::new(ReapThenRecordKillChild {
+                pid: 4_000_001,
+                kills: Arc::clone(&kills),
+            }),
             writer,
         );
         let signals = Arc::new(RecordedSignals::default());
@@ -2856,6 +3062,21 @@ mod tests {
         assert!(
             pids.is_empty(),
             "a reaped pid may belong to another process and must not be signalled: {pids:?}"
+        );
+        // The primary kill is the other way the same pid is reached: on Unix
+        // `child.kill()` sends SIGHUP by pid, so a reap must stop it too. On
+        // Windows it holds a process handle and still runs.
+        #[cfg(unix)]
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            0,
+            "the handle kill must not signal a reaped shell's pid"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            1,
+            "the Windows handle kill still runs after a reap"
         );
     }
 

@@ -159,8 +159,10 @@ duplicated process handle — so the close path can end the shell through that h
 reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
 the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
 falls back to the same cloned killer, so the shell still ends without the child lock. Once the close
-wait has reaped the shell, the pid fallbacks are skipped: SIGHUP and SIGKILL by pid could reach a
-process that reused it, while the Windows handle kill still runs because it holds a process handle.
+wait has reaped the shell, no pid signal is sent: `child.kill()`, which sends SIGHUP to the child's
+pid on Unix, is skipped before the fallbacks, and the pid fallbacks themselves are skipped too
+because SIGHUP and SIGKILL by pid could reach a process that reused it; the Windows handle kill
+still runs because it holds a process handle rather than a bare pid.
 The killer is
 a separate mutex, so a busy reader thread cannot delay it. After the signals the close path drops
 both PTY ends: on Windows a killed ConPTY client does not close the pseudoconsole itself, so the
@@ -222,7 +224,12 @@ received as raw output. A position at or below its last snapshot that lies outsi
 snapshot-only for that viewer: it arrived as rendered state, never as that chunk's bytes. A snapshot
 does not unsee what came before it, so a chunk the viewer parsed raw and a later resync replaced
 stays its own to claim. The daemon drops a claim only when both hold: the position is snapshot-only
-for that viewer, and another attached viewer received **that position** raw. That other viewer has
+for that viewer, and another attached viewer that can actually write it received **that position**
+raw. A viewer can write when every attached client names positions; with a legacy client attached
+only the reply owner is written, so another viewer's raw copy never makes the owner's claim give
+way, and before an owner exists only a viewer that names positions can answer a positioned query,
+because a legacy client's unpositioned reply cannot name it. A claim therefore never waits for an
+answer the ownership rule would drop, which would leave the shell with none. That other viewer has
 the bytes and answers the query, and its answer must be the one written. Everything else is
 accepted: a chunk the viewer parsed raw, a position no other viewer parsed raw, and the case where
 every viewer saw the query only through a snapshot, where the shared `(position, ordinal)` record

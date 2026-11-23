@@ -398,6 +398,17 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A terminal's reply owner still answers after a resync.** With an old client attached, the first
+  viewer to answer owns every reply. But another client that held the query's bytes raw could make
+  the owner's snapshot-only claim give way, and the old client's copy was dropped too, so the shell
+  received no answer at all. A claim now gives way only to a viewer that could actually be written
+  under the ownership rule: any viewer when all of them name positions, otherwise only the owner.
+  A positioned viewer that the owner rule blocks can no longer swallow the answer either.
+- **Closing a terminal never signals a pid that was already reaped.** On Unix `child.kill()` is a
+  SIGHUP to the shell's pid. When the close wait had reaped the shell during the hangup grace, that
+  signal could reach a process the system had since given the same pid. The handle kill now takes
+  the same reaped check as the pid fallbacks; Windows keeps its handle kill, which holds a process
+  handle rather than a bare pid.
 - **The PR watch keeps its promises under races and failures.** A re-watch read
   that a poll overtakes is discarded instead of moving the baseline backwards,
   and a poll read that a re-watch overtakes is discarded the same way, so the
