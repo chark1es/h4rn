@@ -3586,6 +3586,7 @@ mod tests {
 
     /// Records every pid-targeted signal and checks the invariant at the
     /// moment it is sent: the reap lock is held and the exit is unpublished.
+    #[cfg(unix)]
     #[derive(Default)]
     struct GuardedSignals {
         /// Set once the session exists (the recorder is built first so the
@@ -3596,6 +3597,7 @@ mod tests {
         violations: Mutex<Vec<String>>,
     }
 
+    #[cfg(unix)]
     impl GuardedSignals {
         fn record_pid_target(&self, what: &str) {
             let Some(session) = lock(&self.session).as_ref().and_then(|weak| weak.upgrade()) else {
@@ -3613,6 +3615,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl CloseSignals for GuardedSignals {
         fn hangup(&self, pid: i32) -> bool {
             self.record_pid_target("the opening hangup");
