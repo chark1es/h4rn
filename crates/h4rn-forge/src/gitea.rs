@@ -460,12 +460,20 @@ impl Forge for GiteaClient {
             ));
         }
         let url = format!("{}/pulls", self.repo_url(repo));
+        // Gitea's `CreatePullRequestOption` has no draft field. A pull request
+        // is a draft when its title starts with `WIP:` or `[WIP]`, so the flag
+        // travels in the title exactly as it does for GitLab.
+        let title = if request.draft {
+            crate::common::draft_title(&request.title, "WIP: ", &["WIP:", "[WIP]"])
+        } else {
+            request.title.clone()
+        };
         let value = self
             .http
             .post_json(
                 &url,
                 &json!({
-                    "title": request.title,
+                    "title": title,
                     "body": request.body,
                     "head": request.head,
                     "base": request.base,

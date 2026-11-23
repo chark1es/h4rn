@@ -92,12 +92,17 @@ pub(super) async fn handle(
             settings: conn.state.text_generation.settings().await,
         }),
         ClientRequest::SetTextGenerationSettings { settings } => {
-            let settings = conn.state.text_generation.set_settings(settings).await?;
+            let current = conn.state.text_generation.settings().await;
+            let merged = settings.merged_with(&current);
+            let settings = conn.state.text_generation.set_settings(merged).await?;
             conn.audit(
                 "text_generation.settings_changed",
                 Some("setting"),
                 Some("text_generation"),
-                serde_json::json!({ "title": settings.title }),
+                serde_json::json!({
+                    "title": settings.title,
+                    "source_control": settings.source_control.mode,
+                }),
             );
             Ok(ResponseBody::TextGenerationSettings { settings })
         }

@@ -647,6 +647,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
                     ? draft.model.trim()
                     : null,
               },
+              source_control: saved.source_control,
             });
           }}
         >

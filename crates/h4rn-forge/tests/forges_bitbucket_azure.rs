@@ -1931,6 +1931,7 @@ async fn bitbucket_writes_replies_comments_and_pull_requests() {
                 body: "Fixes the widget.".into(),
                 head: "alice/fix".into(),
                 base: "main".into(),
+                draft: false,
             },
         )
         .await
@@ -2012,6 +2013,7 @@ async fn azure_writes_replies_comments_and_pull_requests() {
                 body: "Fixes the widget.".into(),
                 head: "alice/fix".into(),
                 base: "main".into(),
+                draft: false,
             },
         )
         .await

@@ -638,6 +638,7 @@ impl Forge for BitbucketClient {
                     "source": {"branch": {"name": request.head}},
                     "destination": {"branch": {"name": request.base}},
                     "close_source_branch": false,
+                    "draft": request.draft,
                 }),
             )
             .await?;
