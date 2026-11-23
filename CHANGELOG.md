@@ -459,6 +459,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A queued message runs at most once, even when the agent hits a limit.** A prompt the agent has
+  accepted is never sent again automatically, whether or not it reported work: the turn settles as
+  limited with its trace, and the person can resend. Only a write that failed before acceptance is
+  handed back to the pause. While a promoted turn's write is in flight, its output is held and
+  released in order; a flood of tool updates can no longer push its completion out of the hold, and
+  an acceptance that lands between two events still releases the earlier output first, so the turn
+  can never stay Working forever. The ACP reader now bounds every event it queues, not only session
+  updates: a notification or stdout-garbage flood drops the excess like text does, a permission
+  backlog has its own small bound, and a permission flood can never delay the exit report. Below
+  that pressure the lanes keep their arrival order, so a permission request that arrives before an
+  update is not overtaken. A turn stopped while a closed session's write fails ends Interrupted with
+  no transport row, and a prompt is saved for a restart only once a schedule really owns it.
 - **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
   the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
   All four sources now show the active tab's file against the source on screen, and the wider

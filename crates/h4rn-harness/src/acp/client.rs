@@ -38,10 +38,20 @@ const DEFAULT_EVENT_CAPACITY: usize = 1_024;
 /// counted.
 ///
 /// The events that decide what a request means or report that the transport is
-/// gone do not share that queue: they have their own reserved path (see
-/// `is_reserved_event`), so a flood of text cannot park a permission handshake,
+/// gone do not share that queue: they have their own reserved paths (see
+/// `is_terminal_report`), so a flood of text cannot park a permission handshake,
 /// the close notice or the exit report behind it.
 const READER_QUEUE_MULTIPLE: usize = 4;
+/// How many permission requests the reserved reader queue may hold.
+///
+/// A permission handshake decides what a request means, so it must not wait
+/// behind a flood of session updates. An agent that asks thousands of times
+/// without waiting for answers would still grow the queue without limit, so the
+/// newest request is dropped and counted once this many are waiting. The
+/// terminal reports (`TransportClosed`, `Closed` and `Exited`) are not counted
+/// against this bound: a death is never dropped, and a permission backlog never
+/// delays it.
+const RESERVED_QUEUE_CAPACITY: usize = 64;
 const FRAME_CHANNEL_CAPACITY: usize = 256;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -376,29 +386,47 @@ struct Shared {
     /// the session's bounded channel in the same order, so delivery can lag
     /// without ever blocking a reply.
     ///
-    /// Ordinary events share one queue, in the reader's order. Ordinary session
-    /// updates are bounded by [`READER_QUEUE_MULTIPLE`] session queues (see
-    /// `publish`): when that many are waiting, the newest is dropped rather than
-    /// growing this queue.
-    reader_events: mpsc::UnboundedSender<AcpEvent>,
+    /// Ordinary events share one queue, in the reader's order. Every
+    /// non-settlement event (a session update, an unknown notification and an
+    /// unparseable frame's error alike) is counted against
+    /// [`READER_QUEUE_MULTIPLE`] session queues: when that many are waiting, the
+    /// newest is dropped rather than growing this queue. A settlement keeps its
+    /// place on this queue but is never counted or dropped.
+    reader_events: mpsc::UnboundedSender<(u64, AcpEvent)>,
     /// The reserved path: the events that decide what a request means or report
     /// the transport gone.
     ///
     /// A permission handshake, a transport close, stdout's close and the exit
     /// report are not updates, and they must not wait behind a flood of them.
     /// When the session channel is blocked or the update backlog is larger than
-    /// one session queue, the forwarder gives one of these the next slot. Such events are at most
-    /// a handful per turn, so this queue is not counted against the update
-    /// bound: the flood that can grow without limit is the update stream, which
-    /// is capped. While the session channel flows, both queues are delivered in
-    /// the reader's order, so a close never arrives before the words read ahead
-    /// of it.
-    reader_control: mpsc::UnboundedSender<AcpEvent>,
-    /// How many ordinary session updates are queued and not yet forwarded.
+    /// one session queue, the forwarder gives one of these the next slot. A
+    /// permission request is counted against [`RESERVED_QUEUE_CAPACITY`] so a
+    /// flood of handshakes cannot grow the queue without limit; the terminal
+    /// reports share this queue but are never counted or dropped.
+    reader_control: mpsc::UnboundedSender<(u64, AcpEvent)>,
+    /// The terminal reports: `TransportClosed`, `Closed` and `Exited`.
+    ///
+    /// Separate from [`Self::reader_control`] so a backlog of permission
+    /// requests can never delay the report that says the agent is gone. They
+    /// are naturally a handful per turn, so this queue is not bounded.
+    reader_terminal: mpsc::UnboundedSender<(u64, AcpEvent)>,
+    /// How many counted events are queued and not yet forwarded.
     queued_updates: Arc<AtomicUsize>,
-    /// How many ordinary session updates were dropped because that bound was
-    /// reached.
+    /// How many permission requests are queued and not yet forwarded.
+    queued_permissions: Arc<AtomicUsize>,
+    /// How many counted events were dropped because that bound was reached.
     dropped_updates: AtomicU64,
+    /// How many permission requests were dropped because that bound was
+    /// reached.
+    dropped_permissions: AtomicU64,
+    /// The arrival order every lane is merged by.
+    ///
+    /// The reader and the prompt/supervisor tasks publish from different tasks,
+    /// so the two lanes have no shared order of their own. Assigning the number
+    /// inside `publish` is what lets the forwarder deliver a permission request
+    /// before an update that arrived after it while there is room, and still
+    /// give a death the next slot under pressure.
+    next_sequence: AtomicU64,
     /// How many events the reader has published, in order.
     ///
     /// The load path uses it to know when the forwarder has moved everything
@@ -590,38 +618,48 @@ impl AcpClient {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (events_tx, events_rx) = mpsc::channel(config.event_capacity.max(16));
-        let (reader_events, mut reader_events_rx) = mpsc::unbounded_channel();
-        let (reader_control, mut reader_control_rx) = mpsc::unbounded_channel();
+        let (reader_events, mut reader_events_rx) = mpsc::unbounded_channel::<(u64, AcpEvent)>();
+        let (reader_control, mut reader_control_rx) = mpsc::unbounded_channel::<(u64, AcpEvent)>();
+        let (reader_terminal, mut reader_terminal_rx) =
+            mpsc::unbounded_channel::<(u64, AcpEvent)>();
         // One task owns the bounded channel: the reader only queues here, so a
         // slow consumer can never stop it from reading (and resolving) the
-        // agent's replies. Ordinary updates are counted against a bound in
-        // `publish`; the forwarder gives each one back as it moves on, so a
-        // stalled consumer drops updates instead of growing memory.
+        // agent's replies. The counted lanes are bounded in `publish`; the
+        // forwarder gives each one back as it moves on, so a stalled consumer
+        // drops events instead of growing memory.
         //
-        // The reserved queue is used when the session channel has no room or
-        // the waiting updates fill more than one session queue: a permission
-        // request, a close or the exit report then goes next instead of waiting
-        // behind all of them. While the consumer keeps up, delivery keeps the
-        // reader's order, so a close report cannot overtake the turn's last
-        // words that were read before it.
+        // Every event carries the sequence `publish` assigned it. The three
+        // lanes are merged by that number while there is room, so a permission
+        // handshake that arrived before an update is not overtaken, and a close
+        // never arrives before the words read ahead of it. Under pressure (the
+        // session channel is full, or more than one session queue of counted
+        // events is waiting) a reserved event or a terminal report goes next: a
+        // flood of updates can then never hide the event that decides what a
+        // request means or that the agent is gone. A terminal report also
+        // outranks a queued permission request, because a permission backlog
+        // must not delay an exit.
         let relay = events_tx.clone();
         let session_capacity = config.event_capacity.max(16);
         let forwarded = Arc::new(AtomicU64::new(0));
         let forwarded_count = Arc::clone(&forwarded);
         let queued = Arc::new(AtomicUsize::new(0));
         let queued_count = Arc::clone(&queued);
+        let permissions = Arc::new(AtomicUsize::new(0));
+        let permission_count = Arc::clone(&permissions);
         tokio::spawn(async move {
             let mut ordinary_open = true;
             let mut control_open = true;
-            let mut ordinary_slot: Option<AcpEvent> = None;
-            let mut control_slot: Option<AcpEvent> = None;
+            let mut terminal_open = true;
+            let mut ordinary_slot: Option<(u64, AcpEvent)> = None;
+            let mut control_slot: Option<(u64, AcpEvent)> = None;
+            let mut terminal_slot: Option<(u64, AcpEvent)> = None;
             loop {
-                // Fill both slots without blocking, so the choice below can see
-                // what each side has waiting.
+                // Fill every slot without blocking, so the choice below can see
+                // what each lane has waiting and merge by arrival order.
                 if ordinary_slot.is_none() && ordinary_open {
                     match reader_events_rx.try_recv() {
                         Ok(event) => {
-                            if is_ordinary_update(&event) {
+                            if is_counted_event(&event.1) {
                                 queued_count.fetch_sub(1, Ordering::SeqCst);
                             }
                             ordinary_slot = Some(event);
@@ -632,38 +670,91 @@ impl AcpClient {
                 }
                 if control_slot.is_none() && control_open {
                     match reader_control_rx.try_recv() {
-                        Ok(event) => control_slot = Some(event),
+                        Ok(event) => {
+                            permission_count.fetch_sub(1, Ordering::SeqCst);
+                            control_slot = Some(event);
+                        }
                         Err(mpsc::error::TryRecvError::Empty) => {}
                         Err(mpsc::error::TryRecvError::Disconnected) => control_open = false,
                     }
                 }
-                // The reserved path: a blocked session channel, or an update
-                // backlog larger than one session queue, gives the control
-                // event the next slot. A consumer that is keeping up keeps the
-                // reader's order instead, so a close never overtakes the words
-                // read before it.
-                let control_first = control_slot.is_some()
-                    && (relay.capacity() == 0
-                        || queued_count.load(Ordering::SeqCst) >= session_capacity);
-                let event = if control_first {
-                    control_slot.take()
-                } else if ordinary_slot.is_some() {
-                    ordinary_slot.take()
-                } else if control_slot.is_some() {
-                    control_slot.take()
+                if terminal_slot.is_none() && terminal_open {
+                    match reader_terminal_rx.try_recv() {
+                        Ok(event) => terminal_slot = Some(event),
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                        Err(mpsc::error::TryRecvError::Disconnected) => terminal_open = false,
+                    }
+                }
+                let reserved_first = relay.capacity() == 0
+                    || queued_count.load(Ordering::SeqCst) >= session_capacity;
+                let event = if reserved_first {
+                    // Under pressure the reserved lanes go next. A death first,
+                    // then a handshake: the agent is gone, so an answer can no
+                    // longer decide anything.
+                    terminal_slot
+                        .take()
+                        .or_else(|| control_slot.take())
+                        .or_else(|| ordinary_slot.take())
                 } else {
-                    if !ordinary_open && !control_open {
+                    // There is room: deliver in arrival order. A terminal
+                    // report still outranks a queued permission request (the
+                    // handshake it would answer can no longer be answered), but
+                    // it keeps its place against ordinary output, and a
+                    // permission request keeps its place against both while its
+                    // sequence is earlier.
+                    match (&ordinary_slot, &control_slot, &terminal_slot) {
+                        (Some(ordinary), Some(control), Some(terminal)) => {
+                            if ordinary.0 < terminal.0 {
+                                if control.0 < ordinary.0 {
+                                    control_slot.take()
+                                } else {
+                                    ordinary_slot.take()
+                                }
+                            } else {
+                                terminal_slot.take()
+                            }
+                        }
+                        (Some(ordinary), Some(control), None) => {
+                            if control.0 < ordinary.0 {
+                                control_slot.take()
+                            } else {
+                                ordinary_slot.take()
+                            }
+                        }
+                        (Some(ordinary), None, Some(terminal)) => {
+                            if ordinary.0 < terminal.0 {
+                                ordinary_slot.take()
+                            } else {
+                                terminal_slot.take()
+                            }
+                        }
+                        (Some(_), None, None) => ordinary_slot.take(),
+                        (None, Some(_), Some(_)) => terminal_slot.take(),
+                        (None, Some(_), None) => control_slot.take(),
+                        (None, None, Some(_)) => terminal_slot.take(),
+                        (None, None, None) => None,
+                    }
+                };
+                let Some(event) = event else {
+                    if !ordinary_open && !control_open && !terminal_open {
                         break;
                     }
                     tokio::select! {
                         biased;
+                        event = reader_terminal_rx.recv(), if terminal_open => match event {
+                            Some(event) => terminal_slot = Some(event),
+                            None => terminal_open = false,
+                        },
                         event = reader_control_rx.recv(), if control_open => match event {
-                            Some(event) => control_slot = Some(event),
+                            Some(event) => {
+                                permission_count.fetch_sub(1, Ordering::SeqCst);
+                                control_slot = Some(event);
+                            }
                             None => control_open = false,
                         },
                         event = reader_events_rx.recv(), if ordinary_open => match event {
                             Some(event) => {
-                                if is_ordinary_update(&event) {
+                                if is_counted_event(&event.1) {
                                     queued_count.fetch_sub(1, Ordering::SeqCst);
                                 }
                                 ordinary_slot = Some(event);
@@ -673,10 +764,7 @@ impl AcpClient {
                     }
                     continue;
                 };
-                let Some(event) = event else {
-                    break;
-                };
-                if relay.send(event).await.is_err() {
+                if relay.send(event.1).await.is_err() {
                     break;
                 }
                 forwarded_count.fetch_add(1, Ordering::SeqCst);
@@ -691,8 +779,12 @@ impl AcpClient {
             stdin_tx: Mutex::new(Some(stdin_tx)),
             reader_events,
             reader_control,
+            reader_terminal,
             queued_updates: queued,
+            queued_permissions: permissions,
             dropped_updates: AtomicU64::new(0),
+            dropped_permissions: AtomicU64::new(0),
+            next_sequence: AtomicU64::new(0),
             reader_published: AtomicU64::new(0),
             forwarded,
             events_rx: Mutex::new(Some(events_rx)),
@@ -1445,23 +1537,28 @@ impl Drop for AcpClient {
 /// task, so a slow bridge can delay delivery but never stop the reader from
 /// reading (and resolving) the agent's replies.
 ///
-/// Ordinary session updates are bounded: at most `READER_QUEUE_MULTIPLE` session
-/// queues may be waiting for the forwarder, and one that arrives with no room is
-/// dropped and counted. Dropping the newest update keeps the read side
-/// independent of how fast the bridge drains; it is the only loss this queue
-/// makes.
+/// Every non-settlement event is counted against one bound: at most
+/// `READER_QUEUE_MULTIPLE` session queues of session updates, unknown
+/// notifications and unparseable-frame errors may be waiting for the
+/// forwarder. One that arrives with no room is dropped and counted. Dropping
+/// the newest keeps the read side independent of how fast the bridge drains; it
+/// is the only loss this queue makes. A settlement (`PromptStarted`,
+/// `Settled`) stays in the same order but is never counted or dropped: losing
+/// one would leave a turn hanging.
 ///
-/// The events that decide what a request means or report the transport gone go
-/// on a reserved queue instead (see `is_reserved_event`). They are never counted
-/// against that bound and never dropped because of it. When the session channel
-/// is blocked, or more than one session queue of updates is waiting, the
-/// forwarder gives one of them the next slot, so a flood of text can never make
-/// a permission hand or the exit report wait behind all of it. While the
-/// consumer keeps up, delivery keeps the reader's order.
+/// Permission requests take the reserved queue, counted against
+/// [`RESERVED_QUEUE_CAPACITY`] and never dropped because of an update backlog.
+/// The terminal reports (`TransportClosed`, `Closed`, `Exited`) take their own
+/// queue and are never counted or dropped: they are naturally a handful per
+/// turn, and a permission backlog must not delay an exit. When the session
+/// channel is blocked, or more than one session queue of counted events is
+/// waiting, the forwarder gives a reserved event the next slot, so a flood of
+/// text can never make a permission handshake or the exit report wait behind
+/// all of it. While the consumer keeps up, the lanes are merged by the sequence
+/// assigned here, so delivery keeps the reader's order.
 fn publish(shared: &Arc<Shared>, event: AcpEvent) -> bool {
-    let ordinary = is_ordinary_update(&event);
-    let reserved = is_reserved_event(&event);
-    if ordinary {
+    let sequence = shared.next_sequence.fetch_add(1, Ordering::SeqCst);
+    if is_counted_event(&event) {
         let queued = shared.queued_updates.fetch_add(1, Ordering::SeqCst) + 1;
         if queued > reader_queue_capacity(&shared.config) {
             shared.queued_updates.fetch_sub(1, Ordering::SeqCst);
@@ -1469,46 +1566,68 @@ fn publish(shared: &Arc<Shared>, event: AcpEvent) -> bool {
             if dropped == 1 || dropped % 1_000 == 0 {
                 tracing::warn!(
                     dropped,
-                    "the ACP event consumer is not keeping up; dropping session updates"
+                    "the ACP event consumer is not keeping up; dropping events"
                 );
             }
             return false;
         }
+        let published = shared.reader_events.send((sequence, event)).is_ok();
+        if !published {
+            shared.queued_updates.fetch_sub(1, Ordering::SeqCst);
+        }
+        if published {
+            shared.reader_published.fetch_add(1, Ordering::SeqCst);
+        }
+        return published;
     }
-    let queue = if reserved {
+    let queue = if is_terminal_report(&event) {
+        &shared.reader_terminal
+    } else if matches!(event, AcpEvent::PermissionRequest { .. }) {
+        let queued = shared.queued_permissions.fetch_add(1, Ordering::SeqCst) + 1;
+        if queued > RESERVED_QUEUE_CAPACITY {
+            shared.queued_permissions.fetch_sub(1, Ordering::SeqCst);
+            let dropped = shared.dropped_permissions.fetch_add(1, Ordering::SeqCst) + 1;
+            if dropped == 1 || dropped % 1_000 == 0 {
+                tracing::warn!(
+                    dropped,
+                    "the ACP agent is asking faster than permission requests are answered; dropping them"
+                );
+            }
+            return false;
+        }
         &shared.reader_control
     } else {
         &shared.reader_events
     };
-    let published = queue.send(event).is_ok();
+    let permission = matches!(event, AcpEvent::PermissionRequest { .. });
+    let published = queue.send((sequence, event)).is_ok();
     if published {
         shared.reader_published.fetch_add(1, Ordering::SeqCst);
-    } else if ordinary {
-        shared.queued_updates.fetch_sub(1, Ordering::SeqCst);
+    } else if permission {
+        shared.queued_permissions.fetch_sub(1, Ordering::SeqCst);
     }
     published
 }
 
-/// Whether `event` is one of the session's ordinary updates, the only kind
-/// `publish` bounds and drops.
-fn is_ordinary_update(event: &AcpEvent) -> bool {
-    matches!(event, AcpEvent::SessionUpdate { .. })
-}
-
-/// Whether `event` takes the reserved path ahead of queued updates.
+/// Whether `event` is counted against the reader's one total bound.
 ///
-/// These are the events that decide what a request means or that the transport
-/// is gone: a permission handshake, a close and the exit report. A settlement
-/// deliberately stays on the ordinary queue: it must follow the updates the
-/// reader had already taken, or a turn's last text would land after its
-/// completion.
-fn is_reserved_event(event: &AcpEvent) -> bool {
+/// Every event that is neither a settlement nor one of the reserved events is
+/// counted, including unknown notifications and the error an unparseable stdout
+/// line produces: those can flood just as a chatty agent's text can.
+fn is_counted_event(event: &AcpEvent) -> bool {
     matches!(
         event,
-        AcpEvent::PermissionRequest { .. }
-            | AcpEvent::TransportClosed { .. }
-            | AcpEvent::Closed { .. }
-            | AcpEvent::Exited { .. }
+        AcpEvent::SessionUpdate { .. } | AcpEvent::Notification { .. } | AcpEvent::Error { .. }
+    )
+}
+
+/// Whether `event` reports that the transport is gone.
+///
+/// These take their own queue so a permission backlog can never delay them.
+fn is_terminal_report(event: &AcpEvent) -> bool {
+    matches!(
+        event,
+        AcpEvent::TransportClosed { .. } | AcpEvent::Closed { .. } | AcpEvent::Exited { .. }
     )
 }
 
@@ -3387,6 +3506,154 @@ mod tests {
         );
     }
 
+    /// A permission flood does not delay the exit report.
+    ///
+    /// The agent asks 5,000 times and then exits. The requests are bounded, but
+    /// the exit must never wait behind the backlog: it is on its own terminal
+    /// lane and is delivered as soon as there is room.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_permission_flood_does_not_delay_an_exit() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let request = "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"s-1\"}}';";
+        let body = format!("i=0; while [ \"$i\" -lt {FLOOD} ]; do {request} i=$((i+1)); done;");
+        let mut config = peer_after_initialize(workspace.path(), &body);
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        let mut events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        wait_for_exit_published(&client).await;
+        assert!(
+            client.shared.dropped_permissions.load(Ordering::SeqCst) > 0,
+            "a 5,000-request flood dropped nothing"
+        );
+        assert!(
+            client.shared.queued_permissions.load(Ordering::SeqCst) <= RESERVED_QUEUE_CAPACITY,
+            "the permission queue grew past its bound: {}",
+            client.shared.queued_permissions.load(Ordering::SeqCst)
+        );
+
+        let mut asked = 0usize;
+        let exited = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await {
+                    Some(AcpEvent::Exited { .. }) => return true,
+                    Some(AcpEvent::PermissionRequest { .. }) => asked += 1,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .expect("the exit report never reached a consumer behind the permission flood");
+        assert!(exited, "the event stream ended before the exit report");
+        assert!(
+            asked <= RESERVED_QUEUE_CAPACITY + 4,
+            "the exit report waited behind {asked} permission requests"
+        );
+    }
+
+    /// A notification flood is bounded like the update stream.
+    ///
+    /// An agent that keeps sending methods this client does not normalize can
+    /// stream just as fast as one that sends text. Every non-settlement event is
+    /// counted against the same reader bound, so the queue stays capped and the
+    /// excess is dropped.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_notification_flood_is_bounded() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let note =
+            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"custom/note\",\"params\":{}}';";
+        let body = format!("i=0; while [ \"$i\" -lt {FLOOD} ]; do {note} i=$((i+1)); done;");
+        let mut config = peer_after_initialize(workspace.path(), &body);
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        // The test never reads these: the reader queue stays full.
+        let _events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        wait_for_exit_published(&client).await;
+
+        let cap = reader_queue_capacity(&config);
+        let queued = client.shared.queued_updates.load(Ordering::SeqCst);
+        let dropped = client.shared.dropped_updates.load(Ordering::SeqCst);
+        assert!(
+            queued <= cap,
+            "the notification queue grew past its bound: {queued} > {cap}"
+        );
+        assert!(dropped > 0, "a 5,000-notification flood dropped nothing");
+    }
+
+    /// A flood of unparseable stdout lines is bounded too.
+    ///
+    /// Each garbage line becomes an `Error` event. Those are counted against the
+    /// same reader bound as updates and notifications, so an agent that writes
+    /// noise faster than the bridge drains cannot grow memory without limit.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_garbage_flood_is_bounded() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let garbage = "printf '%s\\n' 'not a frame {{{';";
+        let body = format!("i=0; while [ \"$i\" -lt {FLOOD} ]; do {garbage} i=$((i+1)); done;");
+        let mut config = peer_after_initialize(workspace.path(), &body);
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config.clone()).expect("spawn the agent");
+        let _events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+        wait_for_exit_published(&client).await;
+
+        let cap = reader_queue_capacity(&config);
+        let queued = client.shared.queued_updates.load(Ordering::SeqCst);
+        let dropped = client.shared.dropped_updates.load(Ordering::SeqCst);
+        assert!(
+            queued <= cap,
+            "the error queue grew past its bound: {queued} > {cap}"
+        );
+        assert!(dropped > 0, "a 5,000-line garbage flood dropped nothing");
+    }
+
+    /// Below the pressure threshold, a handshake keeps its arrival order.
+    ///
+    /// The agent asks for permission and then streams an update. With room in
+    /// the session channel, both lanes are merged by their arrival sequence, so
+    /// the request is not overtaken by the update that followed it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_permission_request_that_arrives_first_is_delivered_first() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let body = "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"s-1\"}}'; \
+                    printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"s-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"after\"}}}}';";
+        let config = peer_after_initialize(workspace.path(), body);
+        let client = AcpClient::spawn(config).expect("spawn the agent");
+        let mut events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+
+        let first = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the first event")
+            .expect("the event stream");
+        assert!(
+            matches!(first, AcpEvent::PermissionRequest { .. }),
+            "the update overtook the permission request that arrived first: {first:?}"
+        );
+        let second = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the second event")
+            .expect("the event stream");
+        assert!(
+            matches!(second, AcpEvent::SessionUpdate { .. }),
+            "the update did not follow its own arrival: {second:?}"
+        );
+        client.shutdown().await.expect("shutdown");
+    }
+
     /// Waits until the peer has exited *and* its exit report is published.
     ///
     /// `wait_for_exit` returns as soon as the report is stored; the supervisor
@@ -3419,6 +3686,18 @@ mod tests {
              done;"
         );
         let script = format!("read -r line; {flood} {tail} exit 0");
+        AcpClientConfig::new("/bin/sh", workspace).args(["-c", script.as_str()])
+    }
+
+    /// A shell peer that answers the first frame with initialize, then runs
+    /// `body`, then exits.
+    #[cfg(unix)]
+    fn peer_after_initialize(workspace: &std::path::Path, body: &str) -> AcpClientConfig {
+        let script = format!(
+            "read -r line; \
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1,\"agentInfo\":{{\"name\":\"Flood Peer\"}}}}}}'; \
+             {body} exit 0"
+        );
         AcpClientConfig::new("/bin/sh", workspace).args(["-c", script.as_str()])
     }
 

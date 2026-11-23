@@ -680,15 +680,16 @@ async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
 }
 
 /// The harder ordering, forced with a gate: the queued message is promoted and
-/// written while the transport is still healthy, and only then does the agent
-/// close stdout and exit with the limit on stderr.
+/// written while the transport is still healthy, the agent acts on it (an edit
+/// it never reports), and only then does it close stdout and exit with the
+/// limit on stderr.
 ///
-/// The daemon must hand the promoted turn back to the pause, not fail it and
-/// not replay an agent start: it produced no output, so the resumed attempt is
-/// the same prompt.
+/// The agent accepted the prompt, so the turn settles as limited and keeps its
+/// trace; it is never handed back to the pause. A reset must not send that
+/// prompt again: it may already have made the edit, and the person can resend.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_limit_after_a_promoted_turn_hands_it_back_to_the_queue() {
+async fn a_limit_after_a_promoted_turn_the_agent_read_settles_and_is_not_re_sent() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let Some(manager) = manager().await else {
         return skip_without_fixture();
@@ -712,7 +713,7 @@ async fn a_limit_after_a_promoted_turn_hands_it_back_to_the_queue() {
         )
         .await
         .expect("send");
-    let queued = manager
+    let _queued = manager
         .send_message(&thread_id, "queued".into(), Vec::new())
         .await
         .expect("queue");
@@ -733,6 +734,13 @@ async fn a_limit_after_a_promoted_turn_hands_it_back_to_the_queue() {
         "the promoted prompt reached the agent",
     )
     .await;
+    // The agent acted on the prompt without reporting a tool call, exactly what
+    // the daemon cannot see: acceptance is the only proof it may have worked.
+    wait_for_path(
+        &workspace.path().join(".agy-fixture-limit-after-queue-edit"),
+        "the agent acted on the promoted prompt",
+    )
+    .await;
     // Only now does the agent close stdout and exit with the reset.
     std::fs::write(
         workspace.path().join(".agy-fixture-limit-after-queue-gate"),
@@ -742,6 +750,22 @@ async fn a_limit_after_a_promoted_turn_hands_it_back_to_the_queue() {
 
     let ended = next_turn(&mut events).await;
     assert_eq!(ended.status, TurnStatus::Completed, "{:?}", ended.errors);
+
+    // The promoted turn is the third one; it settles as limited.
+    let limited = next_turn(&mut events).await;
+    assert_ne!(limited.turn_id, first.turn_id);
+    assert_ne!(limited.turn_id, ended.turn_id);
+    assert_eq!(
+        limited.status,
+        TurnStatus::Failed,
+        "an accepted prompt settles as limited; it is not re-sent: {:?}",
+        limited.errors
+    );
+    assert!(
+        !limited.limits.is_empty(),
+        "the exit report's limit was never published: {:?}",
+        limited.errors
+    );
 
     let scheduled = wait_for_scheduled(&manager, &thread_id).await;
     let meter = manager.meter().expect("the test manager has a meter");
@@ -753,25 +777,26 @@ async fn a_limit_after_a_promoted_turn_hands_it_back_to_the_queue() {
     assert_eq!(
         session_starts(workspace.path()),
         1,
-        "the promoted turn did not start a new agent"
+        "the accepted prompt started a second agent instead of settling"
     );
-    // Watch past the pump's bounded window for a closed completion (500 ms): a
-    // failed or promoted turn would be published inside it.
+    let meta = manager.thread_meta(&thread_id).await.expect("thread meta");
     assert!(
-        tokio::time::timeout(Duration::from_millis(800), next_turn(&mut events))
-            .await
-            .is_err(),
-        "the promoted turn ({}) was failed past a usage limit",
-        queued.turn_id
+        meta.parked.is_none(),
+        "the accepted prompt was parked for a second run"
     );
-    let summary = manager
-        .thread_summary(&thread_id)
+
+    // The reset fires the thread's resume, and the agent is never sent the
+    // queued prompt again. The fixture echoes every prompt it reads, so a
+    // repeat would show up in the resumed turn's text.
+    manager
+        .resume_now(&thread_id)
         .await
-        .expect("thread summary");
-    assert_eq!(
-        summary.agent_state,
-        AgentState::Scheduled,
-        "the promoted turn is still the thread's parked work"
+        .expect("the surviving schedule fires");
+    let resumed = next_turn(&mut events).await;
+    assert!(
+        !resumed.text.contains("queued"),
+        "the accepted prompt was sent again at reset: {:?}",
+        resumed.text
     );
 
     manager.shutdown().await;
