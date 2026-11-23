@@ -32,7 +32,26 @@ use crate::error::{ForgeError, Result};
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
 
 /// Default time one request may take, including a rate-limit wait.
+///
+/// Scaled down under `cfg(test)` so a timing test can make a reset outlast
+/// the transfer without sleeping for the production timeout. Integration
+/// tests and every release build get the real 30 seconds.
+#[cfg(not(test))]
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// [`DEFAULT_REQUEST_TIMEOUT`], scaled down for unit tests.
+#[cfg(test)]
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Longest rate-limit wait an ordinary request sleeps through before giving
+/// up with the seconds to retry.
+#[cfg(not(test))]
+const ORDINARY_WAIT_CAP: Duration = Duration::from_secs(60);
+
+/// [`ORDINARY_WAIT_CAP`], scaled down for unit tests so a reset that outlasts
+/// one transfer still keeps the test short.
+#[cfg(test)]
+const ORDINARY_WAIT_CAP: Duration = Duration::from_secs(5);
 
 /// How long a cached ETag response is trusted before an unconditional GET.
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -132,7 +151,9 @@ impl ForgeHttp {
     ///
     /// This is the path every ordinary call takes (a viewer, a repository
     /// lookup, a list). A documented rate limit is waited out first, as it
-    /// always was: only the pull-request call has a shared deadline to keep
+    /// always was, and the transfer's own timeout starts only once the wait is
+    /// over: a reset longer than one transfer does not make an ordinary
+    /// request fail. Only the pull-request call has a shared deadline to keep
     /// (see [`Self::request_within`]).
     pub async fn request(
         &self,
@@ -843,10 +864,11 @@ impl RateLimiter {
                         message: "the request budget cannot cover the rate-limit wait".into(),
                     });
                 }
-                // An ordinary request waits out a documented reset for up to a
-                // minute, then gives up with the seconds to retry, as it always
-                // did; a longer wait is a forge that is not coming back soon.
-                (Some(wait), None) if wait > Duration::from_secs(60) => {
+                // An ordinary request waits out a documented reset for up to
+                // `ORDINARY_WAIT_CAP`, then gives up with the seconds to
+                // retry, as it always did; a longer wait is a forge that is
+                // not coming back soon.
+                (Some(wait), None) if wait > ORDINARY_WAIT_CAP => {
                     return Err(ForgeError::RateLimited {
                         forge: self.forge,
                         retry_after_secs: Some(wait.as_secs()),
@@ -1409,6 +1431,55 @@ mod tests {
             started.elapsed() >= Duration::from_secs(1),
             "the request did not wait: {:?}",
             started.elapsed()
+        );
+    }
+
+    /// An ordinary request has two separate times: the wait for a documented
+    /// reset, and the transfer. A reset longer than one transfer's timeout is
+    /// still waited out, and the request that follows succeeds; a single
+    /// shared budget would have refused it before it sent anything. Both times
+    /// are scaled down under `cfg(test)`, so the reset outlasts the timeout
+    /// while the test stays short.
+    #[tokio::test]
+    async fn an_ordinary_request_waits_out_a_reset_longer_than_its_transfer_timeout() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    // Two whole seconds: longer than the test transfer timeout,
+                    // well inside the test wait cap.
+                    .append_header("retry-after", "2")
+                    .set_body_json(serde_json::json!({"login": "octocat"})),
+            )
+            .mount(&server)
+            .await;
+        let client = ForgeHttp::new(
+            ForgeKind::GitHub,
+            &server.uri(),
+            auth_header("authorization", "Bearer test-token-value"),
+            "application/json",
+            120,
+        )
+        .unwrap();
+
+        let url = format!("{}/user", server.uri());
+        // The first answer is fine and records the reset, so the limiter knows
+        // the wait before the next request starts.
+        client.get_json(&url).await.expect("first request");
+
+        let started = Instant::now();
+        let viewer = client
+            .get_json(&url)
+            .await
+            .expect("an ordinary request waits out the reset and then succeeds");
+        let elapsed = started.elapsed();
+        assert_eq!(viewer["login"], "octocat");
+        assert!(
+            elapsed > DEFAULT_REQUEST_TIMEOUT,
+            "the request gave up on a wait longer than its transfer timeout: {elapsed:?}"
         );
     }
 }
