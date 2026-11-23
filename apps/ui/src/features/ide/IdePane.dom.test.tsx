@@ -47,6 +47,8 @@ const mock = vi.hoisted(() => {
     phone: false,
     /** Makes the commit list empty, as a branch with nothing beyond its base. */
     emptyCommits: false,
+    /** Adds a file the reopened Branch list should notice. */
+    extraFile: false,
     /** The next request of this type waits for `promise` before it answers. */
     hold: null as { type: string; promise: Promise<void> } | null,
     subscribe: (listener: () => void) => {
@@ -313,6 +315,19 @@ function diffFiles(against?: FsDiff["against"]): FsDiffFiles {
         binary: false,
         counts_omitted: false,
       },
+      ...(mock.extraFile
+        ? [
+            {
+              path: "c.ts",
+              old_path: null,
+              status: "modified" as const,
+              added: 1,
+              removed: 1,
+              binary: false,
+              counts_omitted: false,
+            },
+          ]
+        : []),
     ],
     truncated: false,
     note: null,
@@ -453,6 +468,7 @@ beforeEach(() => {
   mock.requests = [];
   mock.phone = false;
   mock.emptyCommits = false;
+  mock.extraFile = false;
   mock.hold = null;
   seed();
   resetReviewComments();
@@ -668,15 +684,24 @@ describe("the diff pane stays on the file the person picked", () => {
     await waitFor(() =>
       expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
     );
+    // The repository gained a file while the pane was closed. Reopening in
+    // Branch mode re-reads the list; the follow effect must not supersede that
+    // read with its own diff.
+    mock.extraFile = true;
     const before = diffRequests().length;
+    const filesBefore = mock.requests.filter((request) => request.type === "fs_diff_files").length;
     fireEvent.click(screen.getByRole("tab", { name: "Diff" }));
     await waitFor(() => expect(diffRequests().length).toBeGreaterThan(before));
     await settle();
 
-    // Entering the pane already asks for the tab's file; the follow effect
-    // must not add a second read.
+    // Entering the pane already asks for the tab's file and the list; the
+    // follow effect must not add a second read of either.
     expect(diffRequests()).toHaveLength(before + 1);
+    expect(mock.requests.filter((request) => request.type === "fs_diff_files")).toHaveLength(
+      filesBefore + 1,
+    );
     expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "main" });
+    expect(screen.getByText("3 files")).toBeTruthy();
   });
 
   it("names the base Commit mode reuses", async () => {
