@@ -126,10 +126,10 @@ export function IdePane() {
   const [closing, setClosing] = useState(false);
   const [resolving, setResolving] = useState(false);
 
-  // The diff pane follows the editor tab, not the diff. A file picked inside
-  // the pane (the phone Turn and Branch pickers, a Branch or Commits file row)
-  // is the person's choice and must stay until they pick another one or switch
-  // tabs, so only a change of the active tab path re-opens the diff.
+  // The diff pane follows the editor tab in every mode. A file picked inside
+  // the pane (the phone Turn picker, a Branch or Commits row) is the person's
+  // choice and must stay until they pick another one or switch tabs; entries
+  // in a wider review's file list remain one click away.
   const diffTabPath = active?.path ?? null;
   const diffSource = state.diffSource;
   const openDiffSession = session.openDiff;
@@ -139,7 +139,7 @@ export function IdePane() {
   }, [state.diffPath]);
   const followedTabRef = useRef<string | null>(null);
   useEffect(() => {
-    if (panel !== "diff" || (diffSource !== "head" && diffSource !== "agent") || !diffTabPath) {
+    if (panel !== "diff" || !diffTabPath) {
       followedTabRef.current = null;
       return;
     }
@@ -200,6 +200,9 @@ export function IdePane() {
 
   const openDiff = useCallback(
     (path: string, source: DiffSource) => {
+      // Asking for this file directly is the follow this tab already had; the
+      // tab-follow effect must not ask a second time.
+      followedTabRef.current = path;
       setPanel("diff");
       void session.openDiff(path, source);
     },
@@ -502,6 +505,9 @@ export function IdePane() {
               aria-selected={showDiff}
               disabled={!active && !state.diffPath}
               onClick={() => {
+                // Entering the pane already asks for the tab's file; mark the
+                // tab as handled so the follow effect does not ask twice.
+                followedTabRef.current = active?.path ?? null;
                 setPanel("diff");
                 void session.selectDiffSource(state.diffSource);
               }}
@@ -518,6 +524,7 @@ export function IdePane() {
               hint: entry.hint,
             }))}
             onChange={(value) => {
+              followedTabRef.current = active?.path ?? null;
               setPanel("diff");
               void session.selectDiffSource(value);
             }}

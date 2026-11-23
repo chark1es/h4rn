@@ -42,6 +42,7 @@ const mock = vi.hoisted(() => {
       path?: string;
       workspace?: string;
       against?: unknown;
+      base?: unknown;
     }>,
     phone: false,
     /** The next request of this type waits for `promise` before it answers. */
@@ -75,6 +76,7 @@ vi.mock("@/lib/store/appStore", async () => {
         path?: string;
         workspace?: string;
         against?: unknown;
+        base?: unknown;
       }) => {
         mock.requests.push(request);
         if (mock.hold && mock.hold.type === request.type) {
@@ -105,7 +107,20 @@ vi.mock("@/lib/store/appStore", async () => {
           case "fs_diff_commits":
             return {
               type: "fs_diff_commits",
-              commits: { base: "main", merge_base: "abc", commits: [], truncated: false },
+              commits: {
+                base: (request.base as string | null) ?? "main",
+                merge_base: "abc",
+                commits: [
+                  {
+                    sha: "commit1",
+                    short_sha: "c1",
+                    subject: "first",
+                    author: "you",
+                    authored_at: "2026-03-04T12:00:00Z",
+                  },
+                ],
+                truncated: false,
+              },
             };
           case "fs_branches":
             return {
@@ -269,10 +284,11 @@ function changes(): FsTurnChanges {
 }
 
 function diffFiles(against?: FsDiff["against"]): FsDiffFiles {
+  const scope = against ?? { kind: "base", base: null };
   return {
-    against: against ?? { kind: "base", base: null },
+    against: scope,
     label: "vs main",
-    base: "main",
+    base: scope.kind === "base" ? (scope.base ?? "main") : null,
     merge_base: "abc",
     files: [
       {
@@ -474,6 +490,84 @@ describe("the diff pane stays on the file the person picked", () => {
       turn_id: turn,
     });
     expect(within(diffLines()).queryByRole("button", { name: /Line 1: anew/ })).toBeNull();
+  });
+
+  it("follows the editor tab in a Branch review", async () => {
+    await mount();
+    await openDiff();
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew branch/ })).toBeTruthy(),
+    );
+
+    // Every mode follows the tab with the source it is showing.
+    expect(diffRequests().at(-1)?.path).toBe("b.ts");
+    expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "main" });
+    expect(pathBar().textContent).toBe("b.ts");
+  });
+
+  it("follows the editor tab in a Commits review", async () => {
+    await mount();
+    await openDiff();
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew commit/ })).toBeTruthy(),
+    );
+
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew commit/ })).toBeTruthy(),
+    );
+
+    expect(diffRequests().at(-1)?.path).toBe("b.ts");
+    expect(diffRequests().at(-1)?.against).toEqual({ kind: "commit", sha: "commit1" });
+    expect(pathBar().textContent).toBe("b.ts");
+  });
+
+  it("names the base Commit mode reuses", async () => {
+    await mount();
+    await openDiff();
+
+    // Pick a non-default base in Branch mode.
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+    openChip(await screen.findByRole("button", { name: "Base branch: main" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "release" }));
+    await waitFor(() =>
+      expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "release" }),
+    );
+
+    // Commit mode reuses it; the header must name it rather than leave the
+    // range implicit.
+    openChip(screen.getByRole("button", { name: "Diff source: Branch" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+
+    await waitFor(() => expect(screen.getByText(/since release/)).toBeTruthy());
+    expect(mock.requests.filter((request) => request.type === "fs_diff_commits").at(-1)?.base).toBe(
+      "release",
+    );
   });
 
   it("follows a new editor tab while the pane is open", async () => {

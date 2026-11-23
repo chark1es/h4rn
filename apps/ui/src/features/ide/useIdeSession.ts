@@ -548,15 +548,21 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
    */
   const beginDiffRequest = useCallback(() => {
     diffRequestRef.current += 1;
-    // The dropped reply's spinner must not outlive it. A current list request
+    // The dropped reply's spinner must not outlive it. Clearing `diffLoading`
+    // matters as much as the lists: a Branch or Commits load supersedes the
+    // file diff that was still out, and the pane must show that load's own
+    // state instead of an abandoned "Loading diff…". Every current request
     // sets its own flag again in the same tick, before its first await.
+    //
+    // The branch list has its own generation: a file diff opening does not
+    // supersede it, so its spinner stays until that read answers (or fails).
     setState((current) =>
-      current.filesLoading || current.commitsLoading || current.branchesLoading
+      current.diffLoading || current.filesLoading || current.commitsLoading
         ? {
             ...current,
+            diffLoading: false,
             filesLoading: false,
             commitsLoading: false,
-            branchesLoading: false,
           }
         : current,
     );
@@ -742,9 +748,8 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         workspace: target.path,
       });
       if (branchesRequestRef.current !== token) {
-        // A newer read or another workspace owns the picker now. This reply
-        // must not paint over it, and its spinner must not outlive it.
-        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        // A newer read (or another workspace) owns the picker now. This reply
+        // must not paint over it, and must not clear the newer spinner either.
         return null;
       }
       if (response.type !== "fs_branches") {
@@ -761,7 +766,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       return branches;
     } catch (error) {
       if (branchesRequestRef.current !== token) {
-        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        // The newer read owns the spinner and the error.
         return null;
       }
       setState((current) => ({

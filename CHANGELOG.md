@@ -422,6 +422,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
+  the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
+  All four sources now show the active tab's file against the source on screen, and the wider
+  file lists stay one click away.
+- **Commit mode names the base it reuses.** The commit range has always followed the base chosen
+  for Branch (or the repository default), but the pane never said so. The diff header now reads
+  `since main` — or whichever base — beside the commit, so a review against a non-default base is
+  never implicit.
+- **A dropped diff reply never leaves a spinner behind, and a workspace change advances the branch
+  generation.** Starting a newer diff or list request clears the abandoned one's spinner, so
+  picking Branch while an Uncommitted diff is still out shows the Branch list loading instead of
+  the old diff. A disconnected diff, file list, commit list or branch list clears its spinner and
+  says what failed; a cached spinner from a workspace left mid-read is cleared when that workspace
+  is opened again. The branch list's generation moves with the workspace, so a branch list or file
+  list reply from the workspace you left is ignored.
 - **A terminal's reply owner still answers after a resync.** With an old client attached, the first
   viewer to answer owns every reply. But another client that held the query's bytes raw could make
   the owner's snapshot-only claim give way, and the old client's copy was dropped too, so the shell
