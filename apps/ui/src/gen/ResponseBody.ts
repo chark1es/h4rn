@@ -30,6 +30,9 @@ import type { FsFileContent } from "./FsFileContent";
 import type { FsListing } from "./FsListing";
 import type { FsTurnChanges } from "./FsTurnChanges";
 import type { FsWriteResult } from "./FsWriteResult";
+import type { GitCommitResult } from "./GitCommitResult";
+import type { GitPushResult } from "./GitPushResult";
+import type { GitThreadStatus } from "./GitThreadStatus";
 import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
@@ -363,7 +366,31 @@ comment: ForgeReviewComment, } | { "type": "forge_pr_opened",
 /**
  * The new PR.
  */
-pr: ForgePullRequest, } | { "type": "forge_handoff", 
+pr: ForgePullRequest, } | { "type": "git_status", 
+/**
+ * Branch, upstream, counts and paths.
+ */
+status: GitThreadStatus, } | { "type": "git_committed", 
+/**
+ * The commit, and the fresh status after it.
+ */
+result: GitCommitResult, } | { "type": "git_pushed", 
+/**
+ * The branch, its upstream and the fresh status.
+ */
+result: GitPushResult, } | { "type": "generated_commit_message", 
+/**
+ * The message, or an empty string when the mode is Off.
+ */
+message: string, } | { "type": "generated_pull_request_text", 
+/**
+ * One-line title.
+ */
+title: string, 
+/**
+ * Markdown body.
+ */
+body: string, } | { "type": "forge_handoff", 
 /**
  * Thread, turn and the exact markdown sent.
  */

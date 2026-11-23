@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -69,6 +68,9 @@ pub enum ForgeServiceError {
     /// The thread manager failed.
     #[error(transparent)]
     Threads(#[from] ManagerError),
+    /// A git action before the forge call failed.
+    #[error(transparent)]
+    Git(#[from] crate::git_actions::GitActionError),
     /// Local storage failed.
     #[error("{0}")]
     Local(String),
@@ -85,6 +87,7 @@ impl ForgeServiceError {
     pub fn into_proto(self) -> ProtoError {
         match self {
             Self::Threads(error) => error.into_proto(),
+            Self::Git(error) => error.into_proto(),
             Self::Forge(error) => forge_proto_error(error),
             other => ProtoError::new(
                 ProtoErrorCode::Internal,
@@ -653,9 +656,35 @@ impl ForgeService {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<ForgePullRequest, ForgeServiceError> {
+        self.get_pr_inner(account_id, repo, number, true).await
+    }
+
+    /// Fetches one PR without enrolling it in the checks poller.
+    ///
+    /// The PR watch reads every two minutes on its own and must not leave the
+    /// PR in the 30-second checks poll set. A client surface (the PR page)
+    /// still uses [`Self::get_pr`], so its registration is untouched.
+    pub async fn get_pr_quiet(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgePullRequest, ForgeServiceError> {
+        self.get_pr_inner(account_id, repo, number, false).await
+    }
+
+    async fn get_pr_inner(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        register: bool,
+    ) -> Result<ForgePullRequest, ForgeServiceError> {
         let (account, client) = self.resolve_client(account_id, repo)?;
         let pr = client.get_pr(repo, number).await?;
-        self.watch(&account, repo, number);
+        if register {
+            self.watch(&account, repo, number);
+        }
         Ok(pr)
     }
 
@@ -696,9 +725,33 @@ impl ForgeService {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<ForgeCommentPage, ForgeServiceError> {
+        self.list_comments_inner(account_id, repo, number, true)
+            .await
+    }
+
+    /// Fetches comments without enrolling the PR in the checks poller.
+    pub async fn list_comments_quiet(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeCommentPage, ForgeServiceError> {
+        self.list_comments_inner(account_id, repo, number, false)
+            .await
+    }
+
+    async fn list_comments_inner(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        register: bool,
+    ) -> Result<ForgeCommentPage, ForgeServiceError> {
         let (account, client) = self.resolve_client(account_id, repo)?;
         let page = client.list_comments(repo, number).await?;
-        self.watch(&account, repo, number);
+        if register {
+            self.watch(&account, repo, number);
+        }
         Ok(page)
     }
 
@@ -709,9 +762,32 @@ impl ForgeService {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<ForgeChecks, ForgeServiceError> {
+        self.list_checks_inner(account_id, repo, number, true).await
+    }
+
+    /// Fetches checks without enrolling the PR in the checks poller.
+    pub async fn list_checks_quiet(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeChecks, ForgeServiceError> {
+        self.list_checks_inner(account_id, repo, number, false)
+            .await
+    }
+
+    async fn list_checks_inner(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        register: bool,
+    ) -> Result<ForgeChecks, ForgeServiceError> {
         let (account, client) = self.resolve_client(account_id, repo)?;
         let checks = client.list_checks(repo, number).await?;
-        self.remember_checks(&account, repo, number, &checks);
+        if register {
+            self.remember_checks(&account, repo, number, &checks);
+        }
         Ok(checks)
     }
 
@@ -798,6 +874,7 @@ impl ForgeService {
     }
 
     /// Pushes a thread's branch and opens a PR.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_pr(
         &self,
         manager: &Arc<ThreadManager>,
@@ -806,6 +883,7 @@ impl ForgeService {
         title: &str,
         body: &str,
         base: &str,
+        draft: bool,
     ) -> Result<ForgePullRequest, ForgeServiceError> {
         let snapshot = manager.get_thread(thread_id, 0).await?;
         let workspace = PathBuf::from(&snapshot.summary.workspace_path);
@@ -819,9 +897,6 @@ impl ForgeService {
                     ForgeError::NotConfigured("no supported forge remote in this workspace".into())
                 })?,
         };
-        let branch = crate::fs::git::branch(&workspace).ok_or_else(|| {
-            ForgeError::Local("the workspace has a detached HEAD; check out a branch".into())
-        })?;
         let remote = remotes
             .iter()
             .find(|remote| remote.repo == repo)
@@ -829,17 +904,17 @@ impl ForgeService {
             .map(|remote| remote.remote.clone())
             .ok_or_else(|| ForgeError::NotConfigured("the workspace has no git remote".into()))?;
 
-        push_branch(&workspace, &remote, &branch).await?;
         let (account, client) = self.resolve_client(None, &repo)?;
-        let pr = client
-            .open_pr(
-                &repo,
-                &ForgeNewPr {
-                    title: title.to_owned(),
-                    body: body.to_owned(),
-                    head: branch,
-                    base: base.to_owned(),
-                },
+        let pr = self
+            .open_pr_in(
+                &workspace,
+                repo.clone(),
+                &remote,
+                title,
+                body,
+                base,
+                draft,
+                client.as_ref(),
             )
             .await?;
         self.watch(&account, &repo, pr.summary.number);
@@ -848,9 +923,44 @@ impl ForgeService {
             &account,
             &repo,
             pr.summary.number,
-            json!({"base": base, "thread": thread_id.as_ref()}),
+            json!({"base": base, "thread": thread_id.as_ref(), "draft": draft}),
         );
         Ok(pr)
+    }
+
+    /// Pushes when the remote needs it, then opens the PR with `client`.
+    ///
+    /// Split from [`Self::open_pr`] so a test can hand in a client pointed at
+    /// a local forge server while the push still runs against a real remote.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_pr_in(
+        &self,
+        workspace: &Path,
+        repo: ForgeRepoRef,
+        remote: &str,
+        title: &str,
+        body: &str,
+        base: &str,
+        draft: bool,
+        client: &dyn Forge,
+    ) -> Result<ForgePullRequest, ForgeServiceError> {
+        let branch = crate::fs::git::branch(workspace).ok_or_else(|| {
+            ForgeError::Local("the workspace has a detached HEAD; check out a branch".into())
+        })?;
+        crate::git_actions::push_for_pull_request(workspace, remote, &branch).await?;
+        client
+            .open_pr(
+                &repo,
+                &ForgeNewPr {
+                    title: title.to_owned(),
+                    body: body.to_owned(),
+                    head: branch,
+                    base: base.to_owned(),
+                    draft,
+                },
+            )
+            .await
+            .map_err(Into::into)
     }
 
     /// Renders a PR's context and hands it to an existing or new agent thread.
@@ -1025,6 +1135,17 @@ impl ForgeService {
             .or_insert(WatchState { signature: None });
     }
 
+    /// The PRs whose checks the 30-second poller reads, for daemon tests.
+    #[cfg(test)]
+    pub(crate) fn watched_prs(&self) -> Vec<(String, ForgeRepoRef, u32)> {
+        self.watches
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     fn remember_checks(
         &self,
         account_id: &str,
@@ -1164,29 +1285,6 @@ fn save_accounts(path: &Path, accounts: &[ForgeAccount]) -> Result<(), ForgeServ
         std::fs::set_permissions(&temporary, permissions)?;
     }
     std::fs::rename(&temporary, path)?;
-    Ok(())
-}
-
-async fn push_branch(
-    workspace: &Path,
-    remote: &str,
-    branch: &str,
-) -> Result<(), ForgeServiceError> {
-    let output = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args(["push", "-u", remote, branch])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|error| ForgeServiceError::Local(format!("run git push: {error}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ForgeServiceError::Local(format!(
-            "git push failed: {}",
-            h4rn_forge::redact(stderr.trim())
-        )));
-    }
     Ok(())
 }
 
@@ -1438,5 +1536,138 @@ mod tests {
             message: "slow down".into(),
         });
         assert_eq!(error.into_proto().code, ProtoErrorCode::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn opening_a_pull_request_pushes_the_branch_first_and_honours_draft() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let data = tempfile::tempdir().expect("data dir");
+        let service = ForgeService::open(data.path()).expect("forge service");
+        service.shutdown();
+
+        // A real repository whose origin is a local bare remote, rewritten
+        // from the GitHub URL so the push never leaves the machine.
+        let repo_dir = tempfile::tempdir().expect("repo");
+        let bare = tempfile::tempdir().expect("bare");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_dir.path())
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let bare_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(bare.path())
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(bare.path())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .expect("init bare");
+        assert!(status.success());
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "h4rn test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ]);
+        git(&[
+            "config",
+            &format!("url.file://{}.insteadOf", bare.path().display()),
+            "https://github.com/acme/widget.git",
+        ]);
+        std::fs::write(repo_dir.path().join("a.txt"), "one\n").expect("write");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-m", "Initial commit"]);
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/repos/acme/widget/pulls"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "number": 42,
+                "title": "Fix the widget",
+                "state": "open",
+                "draft": true,
+                "user": {"login": "alice"},
+                "head": {"ref": "main", "sha": "abc123"},
+                "base": {"ref": "main", "sha": "def456"},
+                "updated_at": "2024-05-01T12:00:00Z",
+                "html_url": "https://github.com/acme/widget/pull/42",
+                "body": "Fixes the widget.",
+            })))
+            .mount(&server)
+            .await;
+
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            owner: "acme".into(),
+            repo: "widget".into(),
+        };
+        let client = h4rn_forge::GitHubClient::new(&server.uri(), "", 120).expect("client");
+        // The remote has no branch before the call: the daemon pushes first.
+        let before = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                bare.path().to_str().unwrap(),
+                "rev-parse",
+                "--verify",
+                "main",
+            ])
+            .output()
+            .expect("rev-parse");
+        assert!(!before.status.success(), "the remote started without main");
+
+        let pr = service
+            .open_pr_in(
+                repo_dir.path(),
+                repo,
+                "origin",
+                "Fix the widget",
+                "Fixes the widget.",
+                "main",
+                true,
+                &client,
+            )
+            .await
+            .expect("open");
+        assert_eq!(pr.summary.number, 42);
+        assert_eq!(
+            bare_git(&["rev-parse", "main"]),
+            git(&["rev-parse", "HEAD"]),
+            "the branch reached the remote before the forge was asked"
+        );
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = requests[0].body_json().expect("json");
+        assert_eq!(body["draft"], true);
+        assert_eq!(body["head"], "main");
     }
 }

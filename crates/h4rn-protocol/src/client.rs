@@ -271,13 +271,18 @@ pub enum ClientRequest {
         /// Viewer height, when known.
         #[serde(default)]
         rows: Option<u16>,
-        /// Whether this client names the output position on every marked reply.
+        /// Whether this client names the output position on every marked reply
+        /// with protocol 2 numbering: the chunk where the query **starts**.
         ///
-        /// A client that omits it is an older build. While one is attached the
-        /// terminal keeps the legacy single-owner reply rule, because its
-        /// answers cannot be correlated with a query position.
+        /// The field is new rather than reused because the first version of
+        /// positioned replies numbered answers by the chunk where the query
+        /// *ended*. An older client sends no such field (or only
+        /// `reply_positions`), so it is treated as legacy and its answers are
+        /// never correlated with a position; an older daemon ignores the field
+        /// and applies its own single-owner rule. While one such viewer is
+        /// attached the terminal keeps that legacy rule.
         #[serde(default)]
-        reply_positions: bool,
+        reply_positions_v2: bool,
     },
     /// List terminals owned by this daemon.
     TerminalList {
@@ -947,6 +952,73 @@ pub enum ClientRequest {
         body: String,
         /// Target branch.
         base: String,
+        /// Open as a draft.
+        #[serde(default)]
+        draft: bool,
+    },
+    // ------------------------------------------------------------------
+    // Git actions for a thread.
+    // ------------------------------------------------------------------
+    /// Read the thread workspace's branch, upstream, counts and paths.
+    GitStatus {
+        /// Thread whose workspace is read.
+        thread_id: ThreadId,
+    },
+    /// Stage what was asked and commit it.
+    ///
+    /// Without `paths` the commit records the index. `include_unstaged` stages
+    /// tracked changes and new files first. With `paths`, only those paths are
+    /// committed (`git commit --only`): other staged work stays staged, and the
+    /// "nothing to commit" answer covers exactly the named paths. A detached
+    /// `HEAD`, an in-progress rebase, merge or cherry-pick, or an empty index is
+    /// refused with a message that names the reason.
+    GitCommit {
+        /// Thread whose workspace is committed.
+        thread_id: ThreadId,
+        /// Commit message, used verbatim.
+        message: String,
+        /// Stage unstaged changes before committing.
+        #[serde(default)]
+        include_unstaged: bool,
+        /// Workspace-relative paths to stage; `None` stages everything.
+        #[serde(default)]
+        paths: Option<Vec<String>>,
+    },
+    /// Push the thread branch to its upstream, or set one on `origin`.
+    ///
+    /// A push is never forced.
+    GitPush {
+        /// Thread whose branch is pushed.
+        thread_id: ThreadId,
+        /// Create an upstream on `origin` when the branch has none.
+        #[serde(default)]
+        set_upstream: bool,
+    },
+    /// Write a commit message from the staged diff and recent subjects.
+    ///
+    /// The mode lives in Settings → Source control. Off returns an empty
+    /// string and starts no model job; nothing is committed.
+    GenerateGitCommitMessage {
+        /// Thread whose workspace the diff comes from.
+        thread_id: ThreadId,
+        /// Describe the diff that would be committed with unstaged changes
+        /// included. Does not stage anything.
+        #[serde(default)]
+        include_unstaged: bool,
+        /// Workspace-relative paths the commit would include.
+        #[serde(default)]
+        paths: Option<Vec<String>>,
+    },
+    /// Write a pull request title and body from a thread's commits and diff.
+    ///
+    /// Nothing is pushed or opened.
+    GeneratePullRequestText {
+        /// Thread whose branch is summarised.
+        thread_id: ThreadId,
+        /// Branch the pull request would target; `None` uses the detected
+        /// default branch.
+        #[serde(default)]
+        base: Option<String>,
     },
     /// Hand a pull request's unresolved threads and failing checks to an agent.
     ///
@@ -1149,9 +1221,12 @@ pub enum ClientRequest {
     /// Read which model writes thread titles.
     GetTextGenerationSettings,
     /// Replace the title model. Needs the `admin` scope.
+    ///
+    /// A client that predates the Commit & PR mode omits `source_control`; the
+    /// daemon then keeps the mode already configured instead of resetting it.
     SetTextGenerationSettings {
         /// New settings.
-        settings: crate::text_generation::TextGenerationSettings,
+        settings: crate::text_generation::TextGenerationSettingsUpdate,
     },
     /// Rename a thread. A generated title never replaces this name.
     RenameThread {
@@ -1249,7 +1324,8 @@ impl ClientRequest {
             | Self::GetNetworkAccess
             | Self::ListDirectDevices
             | Self::ListTextGenerators
-            | Self::GetTextGenerationSettings => View,
+            | Self::GetTextGenerationSettings
+            | Self::GitStatus { .. } => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
             | Self::Interrupt { .. }
@@ -1267,6 +1343,10 @@ impl ClientRequest {
             | Self::CancelResume { .. }
             | Self::ResumeNow { .. }
             | Self::FailOver { .. }
+            | Self::GitCommit { .. }
+            | Self::GitPush { .. }
+            | Self::GenerateGitCommitMessage { .. }
+            | Self::GeneratePullRequestText { .. }
             | Self::ForgeRerunChecks { .. }
             | Self::ForgeReply { .. }
             | Self::ForgeComment { .. }
@@ -1692,6 +1772,54 @@ mod tests {
             panic!("expected forge_add_account");
         };
         assert_eq!(repository, Some(repo));
+    }
+
+    #[test]
+    fn an_older_positioned_attach_is_treated_as_legacy() {
+        // The first positioned-reply flag numbered answers by the chunk where
+        // the query ended. A client that still sends only that flag must not be
+        // trusted as a protocol 2 viewer, so the new field stays false.
+        let request: ClientRequest = serde_json::from_value(serde_json::json!({
+            "type": "terminal_attach",
+            "terminal_id": "term_1",
+            "reply_positions": true,
+        }))
+        .expect("an older client's attach still parses");
+        let ClientRequest::TerminalAttach {
+            reply_positions_v2, ..
+        } = request
+        else {
+            panic!("expected terminal_attach");
+        };
+        assert!(!reply_positions_v2, "an older reply flag is legacy");
+
+        // A client that omits every flag is legacy too.
+        let request: ClientRequest = serde_json::from_value(serde_json::json!({
+            "type": "terminal_attach",
+            "terminal_id": "term_1",
+        }))
+        .expect("an attach without flags parses");
+        let ClientRequest::TerminalAttach {
+            reply_positions_v2, ..
+        } = request
+        else {
+            panic!("expected terminal_attach");
+        };
+        assert!(!reply_positions_v2);
+
+        let request: ClientRequest = serde_json::from_value(serde_json::json!({
+            "type": "terminal_attach",
+            "terminal_id": "term_1",
+            "reply_positions_v2": true,
+        }))
+        .expect("a protocol 2 attach parses");
+        let ClientRequest::TerminalAttach {
+            reply_positions_v2, ..
+        } = request
+        else {
+            panic!("expected terminal_attach");
+        };
+        assert!(reply_positions_v2);
     }
 
     #[test]

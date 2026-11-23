@@ -19,8 +19,8 @@ use super::store::{StoredAccess, StoredWorktree};
 use super::{
     BEFORE_UPDATE_REF, ClearOne, ListInput, LiveUse, NESTED_SCAN_LIMIT, NESTED_SCAN_UNKNOWN,
     RECREATED, RepoCaches, ThreadInfo, ThreadWorkspace, WorktreeTracker, branch_tip, compute,
-    compute_listing, contained_worktree, delete_owned_branch, execute, git, is_busy,
-    nested_checkout, open_snapshot, preflight, prepare, run_clear_entry, select_entries,
+    compute_listing, delete_owned_branch, execute, git, is_busy, nested_checkout, open_snapshot,
+    preflight, prepare, run_clear_entry, select_entries,
 };
 use crate::harnesses::StaticHarnessCatalog;
 use crate::journal::SqliteJournal;
@@ -2356,6 +2356,8 @@ fn a_thread_in_a_checkout_named_with_a_trailing_space_is_attributed_to_it() {
 #[cfg(unix)]
 #[test]
 fn the_metadata_fallback_detects_a_newline_named_nested_worktree() {
+    use super::contained_worktree;
+
     let fixture = Fixture::new();
     let parent = fixture.add_worktree("parent-meta", "parent-meta-branch");
     let child = parent.join("\nchild");
@@ -5042,6 +5044,7 @@ fn a_paused_rebase_keeps_the_worktree_and_its_autostash() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_operation_started_after_prepare_is_caught_before_removal() {
     let fixture = Fixture::new();
@@ -5224,6 +5227,7 @@ fn a_gitdir_without_a_dot_git_suffix_names_the_checkout_like_git() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_clear_resolves_the_common_dir_once() {
     let fixture = Fixture::new();
@@ -5409,6 +5413,7 @@ fn a_timed_out_admin_enumeration_is_a_blocked_timeout() {
     assert!(git::timed_out(&reason), "{reason}");
 }
 
+#[cfg(unix)]
 #[test]
 fn bareness_is_asked_once_per_common_dir() {
     let fixture = Fixture::new();

@@ -251,32 +251,29 @@ pub(super) async fn handle(
             title,
             body,
             base,
+            draft,
         } => {
             let result = conn
                 .state
                 .forge
-                .open_pr(&conn.state.manager, &thread_id, repo, &title, &body, &base)
+                .open_pr(
+                    &conn.state.manager,
+                    &thread_id,
+                    repo,
+                    &title,
+                    &body,
+                    &base,
+                    draft,
+                )
                 .await;
             if let Ok(pr) = &result {
-                match conn.state.forge.resolve_account_id(None, &pr.summary.repo) {
-                    Ok(account_id) => {
-                        if let Err(error) = conn
-                            .state
-                            .pr_links
-                            .link_known(
-                                &thread_id,
-                                &account_id,
-                                &pr.summary.repo,
-                                pr.summary.number,
-                            )
-                            .await
-                        {
-                            tracing::warn!(%error, "could not link the PR just opened");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "could not resolve the PR just opened for linking");
-                    }
+                if let Err(error) = conn
+                    .state
+                    .pr_links
+                    .link_opened(&thread_id, &pr.summary.repo, pr.summary.number)
+                    .await
+                {
+                    tracing::warn!(%error, "could not link the PR just opened");
                 }
                 conn.audit(
                     "forge.open_pr",
@@ -286,7 +283,7 @@ pub(super) async fn handle(
                         pr.summary.repo.full_name(),
                         pr.summary.number
                     )),
-                    json!({"thread": thread_id, "base": base}),
+                    json!({"thread": thread_id, "base": base, "draft": draft}),
                 );
             }
             result

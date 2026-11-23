@@ -27,6 +27,21 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # The close path's Windows fallback (a cloned console handle) only runs on
+  # Windows, so its unit tests get their own job instead of the Linux suite.
+  rust-windows-terminal:
+    name: Windows terminal close
+    runs-on: windows-latest
+    env:
+      # Keep the Windows-only close path warning-free; a warning here would
+      # otherwise only surface as a failure on this job.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p h4rn-daemon --lib terminal::session
+
   bindings:
     name: TypeScript bindings are current
     runs-on: ubuntu-latest

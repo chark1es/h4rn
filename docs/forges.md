@@ -446,7 +446,10 @@ no summary rather than as stale state.
   the current state. `UnlinkPullRequest` removes the link and ends any watch.
 - `ListThreadPullRequests` fills the thread header badge and the linked-items
   panel. `ListPrThreads` is the reverse lookup on the Pull requests page.
-- `ForgeOpenPr` links the PR it just opened automatically.
+- `ForgeOpenPr` links the PR it just opened automatically. A draft travels in
+  the draft field on GitHub, Bitbucket and Azure DevOps; GitLab and Gitea have no
+  such field on their create endpoints, so a draft is a `Draft:` or `WIP:` title
+  prefix there, and a title that already carries one is not prefixed twice.
 - `WatchPullRequest` / `UnwatchPullRequest` start and stop the watch for one
   linked PR.
 
@@ -471,13 +474,36 @@ seen-failure state: a second thread watching the same PR, or a thread watching
 again, never replaces another watcher's baseline, so it can neither hide a
 change that watcher has not heard nor repeat one it has. A new watch starts
 from the current snapshot, and it never clears a rate-limit pause the poller
-recorded for that PR. A failure wake fires only for a failing check that was
-not already failing in that watcher's previous snapshot, so a re-run that
-passed and left other checks failing is not reported as a new failure. A watch
-ends after ten wakes in a row that brought only comments or reviews, after
-eight failed reads in a row, or when the thread is settled or archived. A rate
-limit only pauses the watch until the forge's `retry-after` (or two minutes
-when it does not say); it is not a failed read.
+recorded for that PR. While that pause is in effect a watch request spends no
+requests: the first poll after the pause takes the baseline. A re-watch is a
+fresh watch: changes that happened during a rate-limit pause before it are not
+replayed, and the watcher's seen-failure and comment-only state start again. A
+re-watch read that a poll overtakes is discarded, so a body from before a
+failure can never move the baseline back and cause the same failure to be
+reported twice; a poll read that a re-watch overtakes is discarded too, so a
+stale failing body cannot re-report a failure the re-watch already moved past.
+That guard applies to a terminal re-watch as well: when a poll has changed the
+watcher meanwhile, the re-watch does not delete it, so a watcher waiting to
+retry an undelivered merge wake still gets to deliver it. A failure wake fires
+only for a failing check that was not already failing in that watcher's
+previous snapshot, so a re-run that passed and left other checks failing is not
+reported as a new failure. A watch ends after ten wakes in a row that brought
+only comments or reviews, after eight failed reads in a row, or when the thread
+is settled or archived. A tenth comment-only wake that cannot be delivered is
+retried like a terminal one rather than dropped. A rate limit only pauses the
+watch until the forge's `retry-after` (or two minutes when it does not say); it
+is not a failed read.
+
+The watch reads the forge through the service's read paths without asking the
+30-second checks poller to take on the PR. That poller belongs to the screens
+that show a PR; a watch has its own two-minute poll and leaves no entry behind
+when the watch or the link goes away.
+
+A wake the daemon cannot deliver — the thread is busy, the daemon is shutting
+down — keeps that watcher's previous snapshot, and the next poll recomputes the
+same events and tries again. A terminal watch stays until its wake is
+delivered. Failed wakes are bounded like failed reads: after eight in a row the
+watch ends.
 
 Comments and reviews from the linked account itself never wake the agent. That
 needs the account's login, which some credentials do not report (a Bitbucket
@@ -489,7 +515,12 @@ linked-items panel. The other triggers (checks, conflicts, merge and close)
 still apply.
 
 Because the thread list is a client concern, a client that reconnects re-reads
-`ListThreadPullRequests`; watch changes do not add a journaled event.
+`ListThreadPullRequests`; watch changes do not add a journaled event. The badge
+also re-reads when it opens and when a wake message is appended to its thread,
+so a watch that ended (a merge, a close) stops offering "Stop watching" without
+waiting for a reconnect. A reconnect's replayed messages are history, not new
+wakes, so they do not cost a forge read each; the panel's open re-read covers
+anything a replay would have changed.
 
 ## Polling, rate limits and caching
 

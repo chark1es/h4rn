@@ -9,6 +9,26 @@ use serde_json::Value;
 
 use crate::error::{ForgeError, Result};
 
+/// Adds a forge's draft-title prefix unless the title already has one.
+///
+/// Gitea and Forgejo have no draft field on the create request: a pull request
+/// is a draft when its title starts with `WIP:` or `[WIP]`, compared without
+/// case as Gitea does. GitLab marks a merge request a draft the same way, with
+/// `Draft:`. A title that already carries a recognised prefix is sent as it is,
+/// so `Draft: fix` never becomes `Draft: Draft: fix`.
+pub fn draft_title(title: &str, prefix: &str, recognized: &[&str]) -> String {
+    let already = recognized.iter().any(|known| {
+        title
+            .get(..known.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(known))
+    });
+    if already {
+        title.to_owned()
+    } else {
+        format!("{prefix}{title}")
+    }
+}
+
 /// Validates a repository reference before it is used in a URL.
 ///
 /// Owners are single path segments everywhere except GitLab, where a namespace

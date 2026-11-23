@@ -18,6 +18,7 @@ import { useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { SidebarReveal } from "@/components/shell/Sidebar";
+import { GitActionsDialog } from "@/components/thread/GitActionsDialog";
 import { RenameThreadDialog } from "@/components/thread/RenameThreadDialog";
 import {
   DropdownMenu,
@@ -134,6 +135,7 @@ export function ThreadHeader({
   stale?: boolean;
 }) {
   const [renaming, setRenaming] = useState(false);
+  const [gitOpen, setGitOpen] = useState(false);
   const hostOnline = host?.online ?? false;
   const working = summary.tab === "working";
   const threadSettings = useThreadSettings();
@@ -171,6 +173,10 @@ export function ThreadHeader({
         <DropdownMenuItem onSelect={() => setRenaming(true)}>
           <PencilIcon aria-hidden />
           Rename…
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setGitOpen(true)}>
+          <GitBranchIcon aria-hidden />
+          Commit, push and PR…
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "done")}>
           Move to Done
@@ -227,10 +233,13 @@ export function ThreadHeader({
     />
   );
 
+  const gitDialog = <GitActionsDialog summary={summary} open={gitOpen} onOpenChange={setGitOpen} />;
+
   if (isPhone) {
     return (
       <>
         {renameDialog}
+        {gitDialog}
         <div className="q-ph-nav">
           <button type="button" className="navbtn" aria-label="Back to inbox" onClick={onBack}>
             <span aria-hidden className="q-ph-back-glyph">
@@ -297,6 +306,7 @@ export function ThreadHeader({
   return (
     <header className="q-th-head">
       {renameDialog}
+      {gitDialog}
       <SidebarReveal />
       <div className="q-th-titles">
         <h1>{summary.title}</h1>

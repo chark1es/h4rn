@@ -1655,6 +1655,7 @@ pub fn status(worktree: &Path, limit: Duration) -> Result<String, String> {
 }
 
 /// Forces git to compare executable bits and symlinks.
+#[cfg(unix)]
 const FULL_MODES: [&str; 4] = ["-c", "core.fileMode=true", "-c", "core.symlinks=true"];
 #[cfg(unix)]
 const FILE_MODE_ONLY: [&str; 2] = ["-c", "core.fileMode=true"];
