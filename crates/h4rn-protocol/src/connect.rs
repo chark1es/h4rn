@@ -541,31 +541,29 @@ pub enum PairScope {
     Terminal,
     /// Browse, read and edit workspace files.
     Files,
-    /// One thread, its events and a message that waits for the owner
-    /// (ADR-044). This is the scope a guest link carries; it is never granted
-    /// through device pairing.
-    Guest,
     /// Change configuration: MCP, skills, proxy, forge accounts and policy.
     Admin,
 }
 
 impl PairScope {
-    /// Every scope.
-    pub const ALL: [Self; 6] = [
+    /// Every scope a paired device can hold.
+    ///
+    /// A guest link is not one of them: it has no device identity and carries
+    /// its own token (ADR-044), so pairing never grants guest access.
+    pub const ALL: [Self; 5] = [
         Self::View,
         Self::Approve,
         Self::Terminal,
         Self::Files,
-        Self::Guest,
         Self::Admin,
     ];
 
     /// The set granted when a pairing request names none: everything but
-    /// `admin` and the guest scope.
+    /// `admin`.
     pub const DEFAULT: [Self; 4] = [Self::View, Self::Approve, Self::Terminal, Self::Files];
 
     /// The least authority a pairing gets when it names no scopes: read and
-    /// reply. Terminal, files, guest and admin need an explicit request.
+    /// reply. Terminal, files and admin need an explicit request.
     pub const MINIMAL: [Self; 2] = [Self::View, Self::Approve];
 
     /// The database/wire spelling.
@@ -575,7 +573,6 @@ impl PairScope {
             Self::Approve => "approve",
             Self::Terminal => "terminal",
             Self::Files => "files",
-            Self::Guest => "guest",
             Self::Admin => "admin",
         }
     }
@@ -1100,6 +1097,10 @@ mod tests {
         assert_eq!(PairScope::normalize([]), vec![PairScope::View]);
         assert_eq!(PairScope::parse("admin"), Some(PairScope::Admin));
         assert_eq!(PairScope::parse("root"), None);
+        // A guest link carries a token, not a device scope (ADR-044), so
+        // pairing can never grant one.
+        assert_eq!(PairScope::parse("guest"), None);
+        assert!(!PairScope::ALL.iter().any(|scope| scope.as_str() == "guest"));
         assert!(!PairScope::DEFAULT.contains(&PairScope::Admin));
     }
 

@@ -288,42 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_scope_reads_one_thread_but_cannot_act() {
-        let devices = DeviceRegistry::in_memory();
-        devices
-            .insert_scoped("guest", [7u8; KEY_LEN], vec![PairScope::Guest])
-            .expect("persist");
-        let origin = SessionOrigin::secure([7u8; KEY_LEN]);
-        assert!(authorize_scopes(&devices, &origin, &ClientRequest::ListHosts).is_ok());
-        // A guest never sends a turn, answers an approval, opens a terminal,
-        // reads a diff or changes the thread's model.
-        for request in [
-            approve(),
-            ClientRequest::SendMessage {
-                thread_id: h4rn_protocol::ThreadId::new("th_1"),
-                text: "run this".into(),
-                attachments: Vec::new(),
-            },
-            ClientRequest::TerminalList { thread_id: None },
-            ClientRequest::FsDiff {
-                host: h4rn_protocol::HostId::new("h"),
-                workspace: "/w".into(),
-                path: "a".into(),
-                against: h4rn_protocol::DiffAgainst::Head,
-            },
-            ClientRequest::SetThreadModel {
-                thread_id: h4rn_protocol::ThreadId::new("th_1"),
-                model: "other".into(),
-            },
-        ] {
-            assert!(
-                authorize_scopes(&devices, &origin, &request).is_err(),
-                "guest scope must not allow {request:?}"
-            );
-        }
-    }
-
-    #[test]
     fn a_direct_pairing_carries_the_armed_scopes() {
         let devices = DeviceRegistry::in_memory();
         devices.arm_direct(vec![PairScope::View]);
