@@ -76,14 +76,20 @@ function completed(itemId: string, text: string) {
   };
 }
 
-function plan(entries: string[]) {
+function plan(entries: string[], turnId = turn) {
   return {
     seq: 3,
     event: {
       type: "plan",
       thread_id: "th_1",
-      turn_id: turn,
-      entries: entries.map((title) => ({ title, status: "pending" })),
+      turn_id: turnId,
+      // The protocol's PlanStep is `content`, `status`, `priority`; a plan
+      // entry never carries a `title`.
+      entries: entries.map((content) => ({
+        content,
+        status: "pending",
+        priority: "medium",
+      })),
     },
   };
 }
@@ -184,19 +190,59 @@ describe("the guest page", () => {
     expect(page.document.querySelectorAll(".prose")).toHaveLength(1);
   });
 
-  it("replaces a plan update instead of appending another list", async () => {
+  it("renders the agent's own plan text and keys a list by its turn", async () => {
     const page = openPage([
       snapshot([plan(["Read the file", "Change it"])], 2),
       snapshot([plan(["Read the file", "Change it", "Test it"])], 3),
     ]);
     await page.domFlush();
-    expect(page.document.querySelectorAll("ol.plan")).toHaveLength(1);
-    expect(page.document.querySelectorAll("ol.plan li")).toHaveLength(2);
-
-    await page.nextPoll();
     const lists = page.document.querySelectorAll("ol.plan");
     expect(lists).toHaveLength(1);
-    expect(lists[0]?.querySelectorAll("li")).toHaveLength(3);
+    // The real protocol payload carries the step in `content`, so a generated
+    // "Step 1" would mean the text was dropped.
+    expect(lists[0]?.querySelectorAll("li")[0]?.textContent).toBe("Read the file");
+    expect(lists[0]?.querySelectorAll("li")).toHaveLength(2);
+
+    await page.nextPoll();
+    const updated = page.document.querySelectorAll("ol.plan");
+    expect(updated).toHaveLength(1);
+    expect(updated[0]?.querySelectorAll("li")).toHaveLength(3);
+    expect(updated[0]?.querySelectorAll("li")[2]?.textContent).toBe("Test it");
+  });
+
+  it("keeps each turn's plan under that turn", async () => {
+    const page = openPage([
+      snapshot(
+        [
+          {
+            seq: 1,
+            event: {
+              type: "turn_started",
+              thread_id: "th_1",
+              turn_id: "turn_a",
+              started_at: "2026-01-01T00:00:01Z",
+            },
+          },
+          plan(["First turn step"], "turn_a"),
+          {
+            seq: 3,
+            event: {
+              type: "turn_started",
+              thread_id: "th_1",
+              turn_id: "turn_b",
+              started_at: "2026-01-01T00:00:02Z",
+            },
+          },
+          plan(["Second turn step"], "turn_b"),
+        ],
+        4,
+      ),
+    ]);
+    await page.domFlush();
+    const turns = page.document.querySelectorAll("section.turn");
+    expect(turns).toHaveLength(2);
+    expect(turns[0]?.querySelector("ol.plan li")?.textContent).toBe("First turn step");
+    expect(turns[1]?.querySelector("ol.plan li")?.textContent).toBe("Second turn step");
   });
 
   it("keeps the waiting notice visible while it retries", async () => {
@@ -207,5 +253,12 @@ describe("the guest page", () => {
     expect(page.document.getElementById("notice-title")?.textContent).toBe(
       "Waiting for the connection",
     );
+  });
+
+  it("draws the attach control's focus ring on the visible label", () => {
+    // The file input is invisible (opacity 0, full label overlay), so the
+    // browser's default ring on it would never be seen.
+    expect(pageHtml).toContain(".attach:focus-within");
+    expect(pageHtml).toContain("outline: 2px solid var(--accent)");
   });
 });

@@ -362,6 +362,12 @@
         opacity: 0;
         cursor: pointer;
       }
+      /* The input is invisible, so the focus ring belongs on the label the
+         person can actually see. */
+      .attach:focus-within {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
       .files {
         display: flex;
         flex-wrap: wrap;
@@ -529,18 +535,46 @@
           return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
         }
 
-        function startTurn(startedAt) {
+        function findTurn(turnId) {
+          return Array.from(els.timeline.querySelectorAll("[data-turn-id]")).find(
+            (node) => node.dataset.turnId === turnId,
+          );
+        }
+
+        function startTurn(turnId, startedAt) {
+          if (turnId) {
+            const existing = findTurn(turnId);
+            if (existing) {
+              turn = existing;
+              return turn;
+            }
+          }
           turn = el("section", "turn");
+          // A plan belongs to the turn that produced it, so a replay or a
+          // late update replaces that turn's list, never another's.
+          if (turnId) turn.dataset.turnId = turnId;
           const head = el("div", "turn-head");
           head.append(el("span", "", "Agent"));
           head.append(el("span", "q-sep", "·"));
           head.append(el("span", "", timeText(startedAt) || "now"));
           turn.append(head);
           els.timeline.append(turn);
+          return turn;
         }
 
         function ensureTurn(event) {
-          if (!turn) startTurn(event.started_at || event.at || new Date().toISOString());
+          if (event.turn_id) {
+            const existing = findTurn(event.turn_id);
+            if (existing) {
+              turn = existing;
+              return existing;
+            }
+            return startTurn(
+              event.turn_id,
+              event.started_at || event.at || new Date().toISOString(),
+            );
+          }
+          if (!turn) startTurn(undefined, event.at || new Date().toISOString());
           return turn;
         }
 
@@ -628,7 +662,7 @@
         function applyEvent(event) {
           switch (event.type) {
             case "turn_started":
-              startTurn(event.started_at);
+              startTurn(event.turn_id, event.started_at);
               break;
             case "item_completed": {
               const item = event.item;
@@ -684,13 +718,14 @@
             case "plan": {
               const host = ensureTurn(event);
               // ACP sends the whole plan on every update: one list per turn,
-              // replaced rather than appended.
+              // replaced rather than appended. Each step is the agent's own
+              // text (`content`), never a generated "Step 1".
               const list = el("ol", "plan");
               (event.entries || []).forEach((entry, index) => {
                 const item = el(
                   "li",
                   "",
-                  entry.title || entry.step || entry.text || `Step ${index + 1}`,
+                  entry.content || entry.title || entry.text || `Step ${index + 1}`,
                 );
                 list.append(item);
               });
