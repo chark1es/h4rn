@@ -1,4 +1,4 @@
-import { ACTION_TIMEOUT_MS } from "@/features/git-actions/store";
+import { OPEN_PR_TIMEOUT_MS } from "@/features/git-actions/store";
 import type {
   ClientRequest,
   ForgeAccount,
@@ -187,7 +187,7 @@ export class ForgeApi {
     const response = await this.call(
       { type: "forge_open_pr", thread_id: threadId, repo, title, body, base, draft },
       "forge_pr_opened",
-      { timeoutMs: ACTION_TIMEOUT_MS },
+      { timeoutMs: OPEN_PR_TIMEOUT_MS },
     );
     return response.pr;
   }

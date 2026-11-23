@@ -336,7 +336,7 @@ describe("CreatePullRequestDialog", () => {
       expect(request.mock.calls.some(([body]) => body.type === "forge_open_pr")).toBe(true),
     );
     const openCall = request.mock.calls.find(([body]) => body.type === "forge_open_pr");
-    expect(openCall?.[1]).toEqual({ timeoutMs: 200_000 });
+    expect(openCall?.[1]).toEqual({ timeoutMs: 240_000 });
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   });
 

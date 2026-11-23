@@ -47,8 +47,9 @@ remote). It always names one non-forced refspec,
 `refs/heads/<branch>:refs/heads/<branch>`, so `push.default=matching` cannot move
 other branches and a `remote.<name>.push` beginning with `+` cannot force-update
 anything. A branch without one gets `origin/<branch>` created, because the
-panel's button always asks for it. "Ahead" is measured against
-`origin/<branch>`, not whatever upstream a branch happens to track: a branch
+panel's button always asks for it. The decision to push reads
+`origin/<branch>`, not whatever upstream a branch happens to track (the panel's
+ahead/behind counts still follow the branch's tracking upstream): a branch
 that tracks `origin/main` is still published as `origin/<branch>`, and a fork
 with two remotes pushes to `origin`. A push is **never forced**: when the remote
 has commits the branch does not, the panel says so and asks you to pull or

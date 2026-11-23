@@ -223,7 +223,7 @@ export function GitActionsDialog({
                 ? "This workspace has a detached HEAD; check out a branch before pushing or opening a pull request."
                 : status?.upstream
                   ? `Tracking ${status.upstream}`
-                  : "This branch has no upstream yet; Push creates one on origin."}
+                  : "This branch has no upstream yet; Push creates one on the remote."}
             </DialogDescription>
           </DialogHeader>
 

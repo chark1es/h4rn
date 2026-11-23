@@ -30,6 +30,12 @@ const GENERATE_TIMEOUT_MS = 40_000;
 /** A hook or a remote may take minutes; keep the socket open for it. */
 export const ACTION_TIMEOUT_MS = 200_000;
 
+/**
+ * Opening a pull request can push first (up to 180 s) and then calls the forge
+ * (up to 30 s), so it waits longer than a plain git action.
+ */
+export const OPEN_PR_TIMEOUT_MS = 240_000;
+
 export class GitActionsApi {
   constructor(private readonly request: GitActionsRequest) {}
 
