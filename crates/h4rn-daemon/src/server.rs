@@ -298,8 +298,8 @@ pub(crate) async fn serve_webhook_request(
         }
         Err(_) => {
             return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "the request body could not be read" })),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({ "error": "the body is larger than the webhook allows" })),
             )
                 .into_response();
         }

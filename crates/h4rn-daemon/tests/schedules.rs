@@ -242,7 +242,9 @@ async fn oversized_bodies_are_refused_before_they_reach_the_task() {
         .await
         .expect("create");
     let path = task.webhook_path.expect("path");
-    let body = "x".repeat(MAX_WEBHOOK_BODY_BYTES + 1);
+    // Twice the cap: the daemon must answer 413 whether the reader stops at
+    // the limit or the body arrives well past it.
+    let body = "x".repeat(MAX_WEBHOOK_BODY_BYTES * 2);
     let response = reqwest::Client::new()
         .post(format!("http://{}{path}", daemon.addr))
         .body(body)
