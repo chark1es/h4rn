@@ -1714,7 +1714,7 @@ impl ThreadRecord {
     /// window can belong to this turn: it is a finished turn's late output, and
     /// publishing it would attribute work to a turn that never ran (and would
     /// keep a promoted turn from going back to the queue).
-    fn active_turn_prompt_unwritten(&self) -> bool {
+    fn active_turn_prompt_not_on_the_wire(&self) -> bool {
         self.active
             .as_ref()
             .is_some_and(|active| !active.dispatch.is_on_the_wire())
@@ -5743,7 +5743,7 @@ impl Inner {
             // prompt was claimed but not written is handled where its write
             // fails: nothing it collected can be its own then
             // (`RequeueReason::WriteFailed`).
-            if record.active_turn_prompt_unwritten()
+            if record.active_turn_prompt_not_on_the_wire()
                 && matches!(
                     &event,
                     HarnessEvent::TextDelta { .. }
