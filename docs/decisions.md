@@ -1452,7 +1452,7 @@ the result names what is on disk, not what the registry promised. The registry c
 process runner are injectable seams, so no test touches the network or a real global CLI.
 
 
-## ADR-044: A guest link is a narrow HTTP scope bound to one thread and one browser
+## ADR-044: A guest link is a narrow HTTP surface bound to one thread and one browser
 
 **Status:** Accepted
 
@@ -1490,25 +1490,37 @@ A guest message is not a turn. It is a row in the journal and an event,
 `GuestRequested`, which raises a hand in the lifecycle and renders as a Request
 at the end of the thread; `SendGuestRequest` uploads its files, calls the normal
 `SendMessage` path with the thread's current permission mode, and
-`DismissGuestRequest` deletes the files. The submission reserves the pending
-budget (8 messages, 20 MB of text and files) and inserts the request in one
-transaction whose guard requires the link to still exist and the Labs switch to
-still be on; a racing Stop sharing, new link, archive or switch-off therefore
-leaves no request and no files. Send and Dismiss claim a request with one
-conditional update, so two actions can never run the same message twice.
+`DismissGuestRequest` deletes the files. A submission reserves the pending
+budget (8 messages, 20 MB of text and files) before it writes any file, then
+inserts the request in one transaction whose guard requires the link to still
+exist and the Labs switch to still be on; a racing Stop sharing, new link,
+settle or switch-off therefore leaves no request and no files. The row becomes
+visible to the owner, and its `GuestRequested` event is raised, only after the
+files are written; both steps happen while the submission lock is held, so
+ending a link can never race a card into existence. Send and Dismiss claim a
+request with one conditional update, so two actions can never run the same
+message twice.
+
+Every removal of a request raises `GuestRequestResolved` before its row is
+deleted, and the resolved event names its request. A crash between the claim and
+the event therefore leaves a row the startup sweep can resolve, and a repeated
+event from that sweep cannot clear another guest's hand. The periodic sweep
+leaves a `sending` or `reserving` row alone while a task may still be reading
+it; only the startup pass, where no reader can exist, recovers it.
 
 Ending access and deleting files are separate steps. Ending a link deletes its
 row first and removes its page-load cookies, then settles waiting messages; a
 disk error never leaves a token live. A periodic sweep (also run at startup)
-removes expired links, discards their files, and retries cleanup for requests
-whose link or turn is already gone. Settling a thread, stopping sharing,
-creating a new link, the 24-hour expiry and turning the Labs switch off all end
-a link; turning the switch back on does not revive one.
+removes expired links, ends any link whose thread has settled, discards their
+files, and retries cleanup for requests whose link or turn is already gone.
+Settling a thread (a person, the 24-hour idle rule, a merged branch), stopping
+sharing, creating a new link, the 24-hour expiry and turning the Labs switch off
+all end a link; a settled thread refuses a new link, a submission and a Send or
+Dismiss, and turning the switch back on does not revive one.
 
-The guest scope (`PairScope::Guest`) exists as the narrow server-side statement
-of what the surface may do: one thread's events and a waiting message. A device
-pairing never offers it, because a device has an identity and the guest surface
-has none.
+A guest link has no pairing scope. It carries its own token and no device
+identity, so `PairScope` has no guest variant and pairing can never grant one.
+The narrow surface is enforced by the token's single thread, not by a scope.
 
 When the machine is linked to Connect, the link names
 `<connect>/guest/<machine>/<token>`. Connect serves the guest page itself, from a
@@ -1520,9 +1532,11 @@ Bodies are split into bounded frames, so a 10 MB upload never grows a shared
 WebSocket frame; Connect refuses an exchange over the guest limit before it
 reaches the socket, and rebuilds every response header, including the binding
 cookie's path, which must name the public `/guest/<machine>/<token>` prefix.
-Guest routes are traced by template, never by raw URI. The payload is plaintext
-at that hop, as the rest of the relay path is TLS to Connect plus Noise only for
-device sessions; a guest has no Noise key.
+Every relayed answer carries `Content-Security-Policy: sandbox; default-src
+'none'`, and a PDF or opaque file is served as an attachment rather than opened
+in Connect's tab. Guest routes are traced by template, never by raw URI. The
+payload is plaintext at that hop, as the rest of the relay path is TLS to
+Connect plus Noise only for device sessions; a guest has no Noise key.
 
 Without Connect the daemon names its own loopback listener. A direct link is a
 bearer token and the daemon has no TLS listener, so it is not offered over a LAN

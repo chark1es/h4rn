@@ -438,6 +438,23 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A guest exchange never stalls the relay, and a guest request is one decision with its card.**
+  Guest work now runs in its own tasks behind a small concurrency cap, so a chunked 10 MB answer, a
+  snapshot or a file write can never block the loop that drains the relay socket or starve other
+  paired devices. A submission reserves the pending budget before writing any file and becomes
+  visible only once its files are written; ending a link, a new link, settling the thread and the
+  Labs switch all take the same lock, so a racing submission leaves no request and no directory. A
+  sweep and a Send or Dismiss raise `GuestRequestResolved` before deleting a row, and the event names
+  its request, so a crash between the claim and the event cannot leave a card nobody can answer and
+  a repeated event cannot clear another guest's hand. A settled thread now ends its guest link from
+  the lifecycle tick and from the sweep (including after a restart), and refuses a new link, a
+  submission, a Send or a Dismiss; its header hides **Share with guest…** like the row menu and
+  palette. The guest page reuses one node per streamed reply and one plan list per turn, so a live
+  stream, a reload replay and a plan update each render once, and its "Waiting for the connection"
+  notice stays up while it retries. Pairing lost the unused `guest` scope. Connect now sends
+  `Content-Security-Policy: sandbox; default-src 'none'` on every relayed answer, downloads PDFs and
+  opaque files, and forgets a guest waiter on every failure. Reading a guest link's URL is audited.
+  The custom-journal fallback uses one in-memory SQLite connection, so its tables do not vanish.
 - **A terminal's reply owner still answers after a resync.** With an old client attached, the first
   viewer to answer owns every reply. But another client that held the query's bytes raw could make
   the owner's snapshot-only claim give way, and the old client's copy was dropped too, so the shell

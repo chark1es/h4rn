@@ -22,8 +22,11 @@ not revive them. Share again to make a new link.
 
 Choose **Stop sharing** to end the link at once. Creating a new link, settling
 (archiving) the thread, turning the Labs setting off, or the 24 hours passing
-also ends it. An expired link and its waiting files are swept at daemon startup
-and every ten minutes after that.
+also ends it. A settled thread cannot be shared again until it is reopened: the
+menu, the command palette and the header hide **Share with guest…**, and the
+daemon refuses a new link, a submission or a Send on it. An expired link and its
+waiting files are swept at daemon startup and every ten minutes after that; the
+sweep also ends a link left on a thread that settled while the daemon was off.
 
 The link works through your Connect relay address when the machine is linked to
 Connect. Without Connect a direct link names the daemon's loopback address, so
@@ -90,13 +93,14 @@ you send them. Check them first, as you would anything pasted from a chat.
 The guest page is a small HTTP surface, not the device WebSocket protocol. Every
 request carries the link token; the daemon hashes it, compares in constant time,
 checks the 24-hour expiry, checks the browser cookie and then checks that the
-thread named by the link still has a live link. The client never sends a thread
-id, so there is nothing to tamper with. A message submission checks the token and
-binding from its headers before any of the body is read, requires a same-origin
-JSON POST, reserves the pending quota and inserts the request in one transaction,
-and deletes any files it wrote if the link ended meanwhile. Send and Dismiss each
-claim a request with one conditional update, so two actions can never run the
-same message.
+thread named by the link still has a live link and is not settled. The client
+never sends a thread id, so there is nothing to tamper with. A message
+submission checks the token and binding from its headers before any of the body
+is read, requires a same-origin JSON POST, reserves the pending quota before it
+writes any file, and publishes the request only once the files are written; if
+the link ended meanwhile, it deletes the files and the reservation. Send and
+Dismiss each claim a request with one conditional update, so two actions can
+never run the same message.
 
 A guest request can only read that thread's events, submit a waiting message,
 and fetch an attachment that belongs to a message in that thread. Events are
@@ -105,20 +109,22 @@ approvals, filesystem events, subagent threads or MCP administration. Tool calls
 lose their raw arguments, and a file-editing tool loses its output too, so a
 Codex file change's diff or a patch never reaches the guest. Everything else —
 another thread, a diff, a file, a terminal, an approval, a model change — has no
-route. The narrow `guest` scope exists in the protocol for completeness; a
-device pairing never grants it, because a guest has no device identity.
+route. A guest link carries its own token and no device identity, so pairing has
+no guest scope to grant.
 
 Only the machine's owner, or a paired device with the admin scope, may copy a
 link's URL; a view-only device sees that a link exists and when it expires, but
-the URL comes back `null`. The URL is the credential, so those requests are
-audited.
+the URL comes back `null`. The URL is the credential, so reading it is audited.
 
 Through Connect, the guest page itself is served by Connect from its own fixed,
 hash-checked CSP document; Connect never relays a daemon's HTML. Only JSON and
 an allow-list of media types come back from the daemon, and Connect rebuilds the
 headers it passes on, including the binding cookie's path, which must name the
-public `/guest/<machine>/<token>` prefix. Request and response bodies travel in
-bounded 512 KB frames, so a 10 MB upload never grows a shared relay socket frame;
-Connect refuses an exchange over the guest limit before it reaches the socket.
-Guest routes are traced by their template (`/guest/{token}/state`), never by the
-raw URI, so the token does not appear in logs.
+public `/guest/<machine>/<token>` prefix. Every relayed answer is sandboxed with
+`Content-Security-Policy: sandbox; default-src 'none'`, and a PDF or opaque file
+is sent as a download instead of opening in Connect's tab. Request and response
+bodies travel in bounded 512 KB frames, so a 10 MB upload never grows a shared
+relay socket frame; Connect refuses an exchange over the guest limit before it
+reaches the socket. Guest routes are traced by their template
+(`/guest/{token}/state`), never by the raw URI, so the token does not appear in
+logs.
