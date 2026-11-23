@@ -47,7 +47,11 @@ function tomorrowMorning(): string {
 }
 
 function statusFor(thread: ThreadSummary): { text: string; tone: string } {
-  if ((thread.pending_guest_requests ?? 0) > 0) {
+  const critical =
+    thread.agent_state === "awaiting_approval" ||
+    thread.agent_state === "error" ||
+    thread.agent_state === "unreachable";
+  if ((thread.pending_guest_requests ?? 0) > 0 && !critical) {
     return { text: "Request", tone: "you" };
   }
   switch (thread.agent_state) {

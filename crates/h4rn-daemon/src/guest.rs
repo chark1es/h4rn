@@ -501,6 +501,7 @@ impl GuestService {
     pub fn url_for(&self, prefix: &str, token: &str) -> String {
         format!("{}/{token}", prefix.trim_end_matches('/'))
     }
+
     // ------------------------------------------------------------------
     // Token resolution
     // ------------------------------------------------------------------
@@ -568,32 +569,6 @@ impl GuestService {
                     bind_cookie: Some(binding),
                 })
             }
-            (None, Some(_)) if !bind_allowed => Ok(Resolved {
-                link,
-                state: GuestLinkState::Unbound,
-                bind_cookie: None,
-            }),
-            (None, None)
-                if !bind_allowed
-                    && self
-                        .link_for_token(token)
-                        .await?
-                        .is_some_and(|row| row.binding_hash.is_none()) =>
-            {
-                // The page request is what claims a link, so its data requests
-                // can arrive before the cookie round trip only on a fresh
-                // browser that skipped the page. Do not leak thread data.
-                Ok(Resolved {
-                    link,
-                    state: GuestLinkState::Unbound,
-                    bind_cookie: None,
-                })
-            }
-            (None, None) => Ok(Resolved {
-                link,
-                state: GuestLinkState::Unbound,
-                bind_cookie: None,
-            }),
             (None, _) => Ok(Resolved {
                 link,
                 state: GuestLinkState::Unbound,
