@@ -170,10 +170,7 @@ pub fn branch(workspace: &Path) -> Option<String> {
     }
 }
 
-/// The `HEAD` blob for one workspace-relative path, or `None`.
-///
-/// `None` means the file is new, untracked, or the workspace is not a git
-/// repository; the caller turns that into a human note.
+/// Runs `git` in `workspace` and returns its stdout when it succeeds.
 fn run_git(workspace: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")

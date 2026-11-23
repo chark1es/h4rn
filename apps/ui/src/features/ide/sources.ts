@@ -51,13 +51,18 @@ export function againstForScope(scope: DiffScope): DiffAgainst | null {
   }
 }
 
-/** The phrase a review comment carries: "branch vs main", "commit 1a2b3c4". */
+/**
+ * The phrase a review comment carries: "branch vs main", "commit 1a2b3c4".
+ *
+ * A turn is named by its own label ("turn 3"), so a comment written during one
+ * turn is never mistaken for a comment on another.
+ */
 export function sourceDescription(source: DiffSource, label: string | null): string {
   switch (source) {
     case "head":
       return "uncommitted (HEAD)";
     case "agent":
-      return "agent turn";
+      return label ? label.toLowerCase() : "agent turn";
     case "branch":
       return label ? `branch ${label}` : "branch vs base";
     case "commit":

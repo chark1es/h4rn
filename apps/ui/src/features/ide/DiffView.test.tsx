@@ -7,6 +7,7 @@ import type { FsDiff, FsDiffFiles, ThreadId } from "@/gen";
 
 import { DiffView } from "./DiffView";
 import { addReviewComment, resetReviewComments } from "./reviewComments";
+import { sourceDescription } from "./sources";
 
 const thread = "th_1" as ThreadId;
 
@@ -261,6 +262,41 @@ describe("diff review", () => {
     expect(screen.getByText("Written against the branch.")).toBeTruthy();
     expect(screen.getByText(/another diff source/)).toBeTruthy();
     expect(screen.getByText(/branch vs main/)).toBeTruthy();
+  });
+
+  it("keeps a comment with the turn it was written in", () => {
+    // The pane names a turn by its label, so two turns are two sources.
+    const firstTurn = sourceDescription("agent", "Turn 1");
+    const secondTurn = sourceDescription("agent", "Turn 2");
+    addReviewComment({
+      threadId: thread,
+      path: "a.txt",
+      side: "new",
+      startLine: 2,
+      endLine: 2,
+      lines: [{ number: 2, sign: "+", text: "B" }],
+      text: "Written during the first turn.",
+      source: firstTurn,
+    });
+    render(
+      view({
+        source: "agent",
+        sourceLabel: secondTurn,
+        diff: {
+          ...diff,
+          against: {
+            kind: "agent_turn",
+            thread_id: thread,
+            turn_id: "turn_2" as never,
+          },
+          label: "Turn 2",
+        },
+      }),
+    );
+    const lines = screen.getByRole("region", { name: "Diff lines" });
+    expect(within(lines).queryByText("Written during the first turn.")).toBeNull();
+    expect(screen.getByText("Written during the first turn.")).toBeTruthy();
+    expect(screen.getByText(new RegExp(firstTurn))).toBeTruthy();
   });
 
   it("marks a binary or unread file in the list instead of fake counts", () => {

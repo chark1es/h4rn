@@ -9,7 +9,7 @@ import {
   WifiOffIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -126,19 +126,30 @@ export function IdePane() {
   const [closing, setClosing] = useState(false);
   const [resolving, setResolving] = useState(false);
 
-  // The diff pane belongs to the file the person is on. Clicking another tab
-  // while it is open follows that tab instead of leaving the previous file's
-  // diff under the new path.
+  // The diff pane follows the editor tab, not the diff. A file picked inside
+  // the pane (the phone Turn and Branch pickers, a Branch or Commits file row)
+  // is the person's choice and must stay until they pick another one or switch
+  // tabs, so only a change of the active tab path re-opens the diff.
   const diffTabPath = active?.path ?? null;
   const diffSource = state.diffSource;
-  const diffPath = state.diffPath;
   const openDiffSession = session.openDiff;
+  const diffPathRef = useRef(state.diffPath);
   useEffect(() => {
-    if (panel !== "diff" || !diffTabPath) return;
-    if (diffSource !== "head" && diffSource !== "agent") return;
-    if (diffPath === diffTabPath) return;
+    diffPathRef.current = state.diffPath;
+  }, [state.diffPath]);
+  const followedTabRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (panel !== "diff" || (diffSource !== "head" && diffSource !== "agent") || !diffTabPath) {
+      followedTabRef.current = null;
+      return;
+    }
+    if (followedTabRef.current === diffTabPath) return;
+    followedTabRef.current = diffTabPath;
+    // Entering the pane (or switching the source) already asked for the tab's
+    // file; only a tab that disagrees with what is shown needs a read.
+    if (diffPathRef.current === diffTabPath) return;
     void openDiffSession(diffTabPath, diffSource);
-  }, [panel, diffTabPath, diffSource, diffPath, openDiffSession]);
+  }, [panel, diffTabPath, diffSource, openDiffSession]);
 
   useEffect(() => {
     setCursor({ line: 1, column: 1 });
@@ -381,6 +392,9 @@ export function IdePane() {
   })();
 
   const showDiff = panel === "diff";
+  const shownPath = showDiff
+    ? (state.diffPath ?? active?.path ?? workspace.path)
+    : (active?.path ?? workspace.path);
   const projectName = workspaceName(workspace.path);
   const glyph = thread
     ? glyphForThread(thread, hosts[thread.host]?.online ?? false)
@@ -458,6 +472,9 @@ export function IdePane() {
         <div className="q-ebar">
           <span
             className="q-mono"
+            // The bar names what the main area shows: the diff's file while the
+            // diff is open (it can outlive its tab), the editor's file otherwise.
+            title={shownPath}
             style={{
               fontSize: 12,
               color: "var(--fg)",
@@ -467,7 +484,7 @@ export function IdePane() {
               whiteSpace: "nowrap",
             }}
           >
-            {active?.path ?? workspace.path}
+            {shownPath}
           </span>
           <span className="grow" />
           <div className="q-seg inline" role="tablist" aria-label="Editor mode">

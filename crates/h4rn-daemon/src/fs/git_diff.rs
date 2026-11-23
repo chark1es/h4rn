@@ -16,8 +16,9 @@
 //! size cap; an oversized side is reported as such instead of being loaded.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{FsDiffCommit, FsDiffCommitList, FsDiffFile, GitFileStatus};
@@ -435,25 +436,84 @@ fn tracked_changes(repo: &Path, range: &[&str], prefix: &str) -> Result<Vec<RawC
     Ok(changes)
 }
 
+/// Reads NUL-separated untracked paths, stopping as soon as one more than the
+/// cap is known.
+///
+/// `git ls-files --others` on a tree full of build output can be millions of
+/// entries long. Reading the whole listing into memory before noticing the cap
+/// spends the daemon's time and RAM on a list nobody will see, so the scan reads
+/// the stream in chunks and returns at the first entry past the cap; the caller
+/// then kills git instead of letting it finish.
+fn take_untracked_paths<R: Read>(
+    mut reader: R,
+    prefix: &str,
+) -> std::io::Result<(Vec<String>, bool)> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok((paths, false));
+        }
+        for byte in &buffer[..read] {
+            if *byte != 0 {
+                pending.push(*byte);
+                continue;
+            }
+            if pending.is_empty() {
+                continue;
+            }
+            let path = String::from_utf8_lossy(&pending).into_owned();
+            pending.clear();
+            if !in_scope(&path, prefix) {
+                continue;
+            }
+            if paths.len() == MAX_DIFF_FILES {
+                // One entry past the cap is enough to know the list was cut.
+                return Ok((paths, true));
+            }
+            paths.push(path);
+        }
+    }
+}
+
+/// The untracked files inside `prefix`, and whether the cap cut the list.
 fn untracked_changes(repo: &Path, prefix: &str) -> Result<(Vec<RawChange>, bool), FsError> {
-    let out = run_git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| FsError::Io(format!("run git: {error}")))?;
+    let scanned = child
+        .stdout
+        .take()
+        .ok_or_else(|| FsError::Io("git ls-files produced no output to read".into()))
+        .and_then(|stdout| {
+            take_untracked_paths(stdout, prefix)
+                .map_err(|error| FsError::Io(format!("read git ls-files: {error}")))
+        });
+    // Stop git as soon as the list is long enough; a huge tree is not worth
+    // walking to the end for a list that is already cut at the cap.
+    let _ = child.kill();
+    let status = child.wait();
+    let (paths, truncated) = scanned?;
+    if !truncated {
+        if let Ok(status) = status {
+            if !status.success() {
+                return Err(FsError::Invalid(
+                    "git ls-files --others failed in this repository.".into(),
+                ));
+            }
+        }
+    }
+
     let mut changes = Vec::new();
-    let mut truncated = false;
     let mut budget = MAX_UNTRACKED_BYTES;
-    for raw in out.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        let path = String::from_utf8_lossy(raw).into_owned();
-        if !in_scope(&path, prefix) {
-            continue;
-        }
-        if changes.len() == MAX_DIFF_FILES {
-            // The list is a review aid, not an inventory. Stop reading here and
-            // say so, rather than walking a tree that may hold a million files.
-            truncated = true;
-            break;
-        }
+    for path in paths {
         let absolute = repo.join(&path);
         // Never follow a symlink here: an untracked link can point outside the
         // workspace, and only its existence, not its target's bytes, is ours
@@ -746,6 +806,59 @@ pub fn short_sha(repo: &Path, full: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts the bytes the scan actually pulled out of the stream.
+    struct CountingReader {
+        inner: std::io::Cursor<Vec<u8>>,
+        read: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buffer)?;
+            self.read.set(self.read.get() + read);
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn the_untracked_scan_stops_reading_one_entry_past_the_cap() {
+        let total = MAX_DIFF_FILES + 20_000;
+        let mut data = Vec::new();
+        for index in 0..total {
+            data.extend_from_slice(format!("loose/file-{index:05}.txt\0").as_bytes());
+        }
+        let read = std::rc::Rc::new(std::cell::Cell::new(0));
+        let reader = CountingReader {
+            inner: std::io::Cursor::new(data.clone()),
+            read: std::rc::Rc::clone(&read),
+        };
+
+        let (paths, truncated) = take_untracked_paths(reader, "").expect("scan");
+
+        // Reading the whole listing before noticing the cap is the bug this
+        // guards: the scan must stop at the first entry past it.
+        assert!(
+            read.get() < data.len(),
+            "the scan read {} of {} bytes instead of stopping at the cap",
+            read.get(),
+            data.len()
+        );
+        assert_eq!(paths.len(), MAX_DIFF_FILES);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn the_untracked_scan_counts_only_paths_inside_the_workspace() {
+        let mut data = Vec::new();
+        for path in ["sub/a.txt", "other/b.txt", "sub/c.txt"] {
+            data.extend_from_slice(format!("{path}\0").as_bytes());
+        }
+        let reader = std::io::Cursor::new(data);
+        let (paths, truncated) = take_untracked_paths(reader, "sub").expect("scan");
+        assert_eq!(paths, vec!["sub/a.txt".to_owned(), "sub/c.txt".to_owned()]);
+        assert!(!truncated);
+    }
 
     #[test]
     fn branch_names_and_shas_are_validated_before_git_sees_them() {

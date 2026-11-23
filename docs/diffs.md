@@ -27,10 +27,12 @@ with HEAD**, which switches to Uncommitted. Choose another branch from the base 
 
 The file list comes from `git diff` against the merge base plus untracked files. It shows the git
 status letter, added and removed line counts, and the old path for a rename. Like every list in
-IDE mode it stops at 2,000 files and says when it did; untracked files stop at the same cap. An
-untracked file has no git numstat, so the daemon reads it to count lines, within a 2 MiB budget for
-the whole untracked pass. Files past that budget are still listed with `no counts`; a binary or
-unreadable file is marked `binary`. Neither is shown as an empty added file.
+IDE mode it stops at 2,000 files and says when it did; untracked files stop at the same cap, and
+the daemon stops reading `git ls-files` at the first entry past it and ends git, so a tree full of
+build output is never walked to the end. An untracked file has no git numstat, so the daemon reads
+it to count lines, within a 2 MiB budget for the whole untracked pass. Files past that budget are
+still listed with `no counts`; a binary or unreadable file is marked `binary`. Neither is shown as
+an empty added file.
 
 ## Commits
 
@@ -45,7 +47,9 @@ In a shallow clone the oldest commit has no parent object. Selecting it says tha
 in the clone instead of pretending every file was added; fetch more history and try again.
 
 Commit ids are validated before git sees them: full or abbreviated hex that resolves to a commit in
-this repository. A tag, tree or option-looking string is refused with a clear message.
+this repository. A tag or branch *name* is refused — paste the commit it points at — while an
+annotated tag's object id is peeled to the commit it names, and an option-looking string never
+reaches git.
 
 Both wider scopes re-read their lists when you enter them, and the **Refresh** button in the diff bar
 reads the branch and commit lists again. A commit the agent made a moment ago appears without a
@@ -57,9 +61,12 @@ Select a line in any diff mode. Shift-click or Shift+Arrow extends the range. Pr
 `c`) to write a comment; `Escape` closes it. Added lines are commented on the new side, removed
 lines on the old side, and a mixed range reports the side where it has line numbers.
 
-A comment sits inline under its line only while the pane shows the source it was written in.
-Comments for the same file but another source (or on lines hidden by collapsed context) are listed
-below the diff with the source each was written in, so nothing is silently moved to a line it never
+A comment sits inline under its line only while the pane shows the source it was written in. The
+source names itself in the comment: `turn 3` for a turn, `branch vs main` for the branch review,
+`commit 1a2b3c4` for a commit and `uncommitted (HEAD)` for the working tree. A comment written
+during one turn therefore stays with that turn and is not drawn on another turn's diff. Comments
+for the same file but another source (or on lines hidden by collapsed context) are listed below the
+diff with the source each was written in, so nothing is silently moved to a line it never
 described. Edit or delete one in place. The pane header counts the thread's pending comments, so
 switching files or modes never hides one. Comments live in page memory for the thread; a reload
 clears them, while diff contents are always re-read from git.
@@ -81,6 +88,10 @@ until you press Send. The comments then leave the pane.
 - A tree row is a keyboard target. `Tab` enters the diff, `ArrowUp`/`ArrowDown` move, `Enter`
   comments, and `Escape` clears the selection.
 - The sign column is mandatory: `+` for added lines, `−` for removed ones.
+- The path bar names what is on screen: the diff's file while the diff is open, the editor's file
+  otherwise. A diff outlives its tab, so closing the tab still shows the file it was comparing. A
+  file picked inside the pane (the phone File picker, a Branch or Commits row) stays until you pick
+  another one or switch editor tabs; switching tabs is what makes the pane follow.
 - Binary files and files over the 2 MiB read limit say so instead of showing mojibake, in the diff
   body only: the file list, source bar and comment actions stay usable, so another file or source
   is one click away. Both sides of `HEAD` and commit diffs are size-checked before they are read.

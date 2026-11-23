@@ -56,7 +56,8 @@ describe("diff sources", () => {
 
   it("names the source the way a review comment should carry it", () => {
     expect(sourceDescription("head", "HEAD")).toBe("uncommitted (HEAD)");
-    expect(sourceDescription("agent", "Turn 4")).toBe("agent turn");
+    expect(sourceDescription("agent", "Turn 4")).toBe("turn 4");
+    expect(sourceDescription("agent", null)).toBe("agent turn");
     expect(sourceDescription("branch", "vs main")).toBe("branch vs main");
     expect(sourceDescription("commit", "Commit 1a2b3c4")).toBe("commit 1a2b3c4");
   });
