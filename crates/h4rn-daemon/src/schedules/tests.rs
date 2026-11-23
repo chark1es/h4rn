@@ -1488,6 +1488,18 @@ async fn a_disarmed_task_is_paused_and_stops_keeping_its_thread() {
     let reopened = restarted.task(&task.task_id).await.expect("task");
     assert!(!reopened.enabled, "the disarm is durable");
     assert!(reopened.next_run_at.is_none());
+    let failure = reopened
+        .last_run
+        .expect("the failure that explains the pause survives the restart");
+    assert_eq!(failure.outcome, ScheduleRunOutcome::Failed);
+    assert!(
+        failure
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("no next run")),
+        "the reopened task still says why it cannot run: {:?}",
+        failure.detail
+    );
     fixture.clock.advance(chrono::Duration::days(1));
     restarted.run_due().await;
     assert_eq!(
@@ -1499,6 +1511,310 @@ async fn a_disarmed_task_is_paused_and_stops_keeping_its_thread() {
         1,
         "a disarmed task starts nothing after a restart"
     );
+}
+
+/// A task whose stored zone cannot name a slot, due now.
+async fn a_task_that_cannot_name_its_next_slot(fixture: &Fixture) -> ScheduleTask {
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("create");
+    // Model a row written by an older or corrupted daemon.
+    fixture
+        .service
+        .inner
+        .tasks
+        .lock()
+        .await
+        .get_mut(&task.task_id)
+        .expect("task")
+        .timezone = "Mars/Olympus_Mons".into();
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.task(&task.task_id).await.expect("task")
+}
+
+#[tokio::test]
+async fn a_disarm_whose_write_fails_lands_its_pause_with_the_failure() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = a_task_that_cannot_name_its_next_slot(&fixture).await;
+
+    fixture.service.fail_next_commit();
+    fixture.service.run_due().await;
+    wait_pending(&fixture.service, &task.task_id).await;
+    let waiting = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        waiting.enabled,
+        "the pause is not shown before the failure that explains it is saved"
+    );
+    assert_eq!(
+        waiting.next_run_at, task.next_run_at,
+        "the task keeps its slot while its write waits"
+    );
+    assert!(waiting.last_run.is_none());
+
+    // The retry writes the pause and the Failed run together.
+    fixture.clock.advance(chrono::Duration::seconds(31));
+    fixture.service.run_due().await;
+    let disarmed = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(!disarmed.enabled, "the retried write pauses the task");
+    assert!(disarmed.next_run_at.is_none());
+    let failure = disarmed
+        .last_run
+        .expect("the pause arrives with its failure");
+    assert_eq!(failure.outcome, ScheduleRunOutcome::Failed);
+    assert!(
+        failure
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("no next run")),
+        "the reason is visible: {:?}",
+        failure.detail
+    );
+    assert_eq!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .len(),
+        1,
+        "one refusal, not one per retry"
+    );
+    fixture.clock.advance(chrono::Duration::days(1));
+    fixture.service.run_due().await;
+    assert_eq!(
+        fixture
+            .service
+            .runs(&task.task_id)
+            .await
+            .expect("runs")
+            .len(),
+        1,
+        "a paused task starts nothing more"
+    );
+}
+
+#[tokio::test]
+async fn a_pause_that_cannot_be_saved_is_never_stored_without_its_failure() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = a_task_that_cannot_name_its_next_slot(&fixture).await;
+
+    fixture.service.fail_next_commit();
+    fixture.service.run_due().await;
+    wait_pending(&fixture.service, &task.task_id).await;
+
+    // The person corrects the zone while the failed write waits, and the
+    // editor saves the state it was given.
+    let waiting = fixture.service.task(&task.task_id).await.expect("task");
+    let mut edit = waiting.draft();
+    edit.timezone = "Europe/Berlin".into();
+    fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("edit");
+
+    // A restart before the retry loses the pending failure. What was saved is
+    // the edit, so it stands, and no pause is left behind without its reason.
+    let reopened = ScheduleService::open(
+        Arc::clone(&fixture.journal),
+        Arc::clone(&fixture.manager),
+        HostId::new("host_schedule_test"),
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("reopen");
+    let live = reopened.task(&task.task_id).await.expect("task");
+    match (live.enabled, live.last_run.as_ref()) {
+        // The person's edit stands: they fixed the schedule, and nothing paused
+        // the task behind their back.
+        (true, None) => assert!(
+            live.next_run_at.is_some(),
+            "the corrected schedule has its next run"
+        ),
+        // Or the pause is stored together with the failure that explains it.
+        (false, Some(failure)) => {
+            assert_eq!(failure.outcome, ScheduleRunOutcome::Failed);
+            assert!(
+                failure
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("no next run")),
+                "a pause never outlives its reason: {:?}",
+                failure.detail
+            );
+            assert!(live.next_run_at.is_none());
+        }
+        other => panic!("a pause must never be stored without the failure behind it: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_pending_disarm_keeps_the_edit_the_person_saved() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = a_task_that_cannot_name_its_next_slot(&fixture).await;
+
+    fixture.service.fail_next_commit();
+    fixture.service.run_due().await;
+    wait_pending(&fixture.service, &task.task_id).await;
+
+    let waiting = fixture.service.task(&task.task_id).await.expect("task");
+    let mut edit = waiting.draft();
+    edit.timezone = "Europe/Berlin".into();
+    let edited = fixture
+        .service
+        .update(&task.task_id, edit)
+        .await
+        .expect("edit");
+    assert!(edited.enabled);
+    assert!(edited.next_run_at.is_some());
+
+    // The retry records the failure but does not pause a task the person has
+    // already moved to another slot.
+    fixture.clock.advance(chrono::Duration::seconds(31));
+    fixture.service.run_due().await;
+    let live = fixture.service.task(&task.task_id).await.expect("task");
+    assert!(
+        live.enabled,
+        "an edit that fixed the schedule wins over the staged pause"
+    );
+    assert!(live.next_run_at.is_some());
+    assert_eq!(
+        live.last_run
+            .expect("the failure is still recorded")
+            .outcome,
+        ScheduleRunOutcome::Failed
+    );
+}
+
+#[tokio::test]
+async fn a_row_disarmed_before_the_pause_existed_opens_paused() {
+    let clock = Arc::new(ManualClock::at(Utc::now()));
+    let fixture = fixture(FakeHarness::new(), clock).await;
+    let task = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            every_minute(),
+            ScheduleDestination::ContinueThread,
+        ))
+        .await
+        .expect("create");
+    fixture.clock.advance(chrono::Duration::seconds(61));
+    fixture.service.run_due().await;
+    let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
+    let thread_id = runs[0].thread_id.clone().expect("thread");
+    let live = fixture.service.task(&task.task_id).await.expect("task");
+
+    // A row disarmed by the daemon before the pause existed: the schedule could
+    // not name a slot, so `next_run_at` was cleared, but `enabled` stayed on.
+    let mut legacy = live.clone();
+    legacy.enabled = true;
+    legacy.next_run_at = None;
+    fixture
+        .journal
+        .upsert_schedule(&legacy)
+        .await
+        .expect("write the legacy row");
+    let mut refusal = ScheduleRun {
+        run_id: 0,
+        task_id: task.task_id.clone(),
+        scheduled_for: live.next_run_at,
+        started_at: fixture.clock.now(),
+        thread_id: None,
+        outcome: ScheduleRunOutcome::Failed,
+        detail: Some(
+            "Its schedule has no next run: the task has an invalid time zone. Fix the schedule to run it again."
+                .into(),
+        ),
+    };
+    fixture
+        .journal
+        .append_schedule_run(&mut refusal, HISTORY_LIMIT)
+        .await
+        .expect("write the refusal");
+
+    // A webhook task has no clock slot by design, and a spent Once task already
+    // shows as spent: neither is a disarm.
+    let webhook = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Webhook,
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("webhook task");
+    let once = fixture
+        .service
+        .create(draft(
+            &fixture.workspace_path,
+            ScheduleSpec::Once {
+                date: "2030-01-01".into(),
+                time: "09:00".into(),
+            },
+            ScheduleDestination::NewThread,
+        ))
+        .await
+        .expect("once task");
+    let mut spent = fixture.service.task(&once.task_id).await.expect("once");
+    spent.next_run_at = None;
+    spent.once_consumed = true;
+    spent.once_consumed_slot = spent.schedule.once_slot(&spent.timezone);
+    fixture
+        .journal
+        .upsert_schedule(&spent)
+        .await
+        .expect("write the spent once row");
+
+    let reopened = ScheduleService::open(
+        Arc::clone(&fixture.journal),
+        Arc::clone(&fixture.manager),
+        HostId::new("host_schedule_test"),
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("reopen");
+    let opened = reopened.task(&task.task_id).await.expect("task");
+    assert!(
+        !opened.enabled,
+        "a task disarmed on upgrade opens paused, so the toggle offers Resume"
+    );
+    assert!(opened.next_run_at.is_none());
+    assert!(
+        !reopened.kept_threads().await.contains(&thread_id),
+        "a disarmed task releases its checkout"
+    );
+    let stored = fixture
+        .journal
+        .schedule(&task.task_id)
+        .await
+        .expect("journal row")
+        .expect("task row");
+    assert!(
+        !stored.enabled,
+        "the normalized pause is saved, not recomputed on every open"
+    );
+    assert!(
+        reopened
+            .task(&webhook.task_id)
+            .await
+            .expect("webhook")
+            .enabled,
+        "a webhook task is enabled without a clock slot"
+    );
+    let reopened_once = reopened.task(&once.task_id).await.expect("once");
+    assert!(reopened_once.enabled, "a spent Once task keeps its state");
+    assert!(reopened_once.once_consumed);
+    assert!(reopened_once.next_run_at.is_none());
 }
 
 #[tokio::test]
@@ -1557,8 +1873,15 @@ async fn a_legacy_once_marker_is_migrated_and_keeps_the_slot_spent() {
             "a spent slot is not left armed"
         );
 
-        // The slot never runs, even while the daemon keeps running.
-        fixture.clock.advance(chrono::Duration::minutes(15));
+        // The slot never runs, even while the daemon keeps running: cross the
+        // original 02:30 slot itself, not just a few minutes after the clock
+        // started.
+        let cross = slot - fixture.clock.now() + chrono::Duration::minutes(1);
+        fixture.clock.advance(cross);
+        assert!(
+            fixture.clock.now() > slot,
+            "the clock is past the slot the legacy row still named"
+        );
         reopened.run_due().await;
         assert_eq!(
             reopened.runs(&task.task_id).await.expect("runs").len(),
@@ -2356,6 +2679,7 @@ async fn a_late_skip_does_not_erase_the_busy_thread() {
             late_skip,
             Trigger::Webhook,
             fixture.clock.now(),
+            AfterRun::Advance,
         )
         .await
         .expect("record the late skip");

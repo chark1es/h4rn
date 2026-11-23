@@ -34,9 +34,11 @@ All notable changes to h4rn are recorded here. The format follows
   and a run is refused until that marker is durable, so a crash cannot re-arm
   it; a spent marker written before time zones joined that identity is migrated
   when the daemon opens it. A schedule that cannot name its next slot is
-  disarmed and paused — it records the reason, offers **Resume** instead of
-  **Pause**, and releases its thread's checkout — instead of starting a thread
-  on every backoff. Daily and weekly times
+  disarmed and paused in the same write — it records the reason, offers
+  **Resume** instead of **Pause**, and releases its thread's checkout — instead
+  of starting a thread on every backoff; a task disarmed that way by an older
+  daemon is paused when it opens, and an edit that fixes the schedule before the
+  pause is saved wins. Daily and weekly times
   run only at the first occurrence in a fall-back hour, cron returns the
   earliest UTC instant among that hour's jobs, and the editor's default zone
   comes from the daemon. The editor also says why when it cannot reveal a

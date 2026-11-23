@@ -96,11 +96,16 @@ run does not acquire a clock time. A slot whose write is still retrying is not
 treated as due: the runner wakes on the retry deadline instead of checking the
 past slot over and over. If the stored schedule cannot produce the slot after
 the current one (an invalid time zone, for example), the run is not
-dispatched. The task is disarmed and paused together: a **Failed** run records
-the reason, so no thread is started for a run that could never be recorded and
+dispatched. The task is disarmed and paused in one write: a **Failed** run
+records the reason, and it is committed together with the pause, so the failure
+can never be lost while the task stays paused — or, if the schedule is fixed and
+the task re-enabled before that write is retried, the person's edit wins and the
+pause is dropped. No thread is started for a run that could never be recorded and
 no backoff starts another; the toggle reads **Resume** instead of offering to
 pause a task that will never run, and the thread's checkout stops being held
-for worktree cleanup. Fix the schedule and resume the task to run it again. A
+for worktree cleanup. A task an older daemon disarmed without pausing is paused
+when the task is opened, so an upgrade offers **Resume** and releases the
+checkout too. Fix the schedule and resume the task to run it again. A
 **Once** task whose run started is spent even when its write is still
 retrying.
 
