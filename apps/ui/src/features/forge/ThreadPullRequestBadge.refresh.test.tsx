@@ -154,6 +154,8 @@ describe("the linked pull request badge follows the daemon", () => {
 
     // The PR merged while the client was offline. The replay arrives as one
     // burst; the badge must read once, not once per replayed message.
+    // (`burstReload.test.ts` pins the coalescer itself, which React's own
+    // batching would otherwise hide here.)
     mock.state.pulls = [pull("merged", false)];
     await act(async () => {
       mock.emit({ ...userMessage("th_1"), seq: 3, replayed: true });
@@ -163,6 +165,49 @@ describe("the linked pull request badge follows the daemon", () => {
     await waitFor(() => expect(mock.state.calls).toBe(2));
     await waitFor(() => expect(badge.textContent).toContain("#7 Merged"));
     expect(mock.state.calls).toBe(2);
+  });
+
+  it("does not read for another thread's replayed history", async () => {
+    render(<ThreadPullRequestBadge threadId="th_1" />);
+    await screen.findByRole("button", { name: "Linked pull requests" });
+    expect(mock.state.calls).toBe(1);
+
+    // A reconnect replays every thread's history. Only this thread's wakes
+    // say anything about its linked PRs.
+    await act(async () => {
+      mock.emit({ ...userMessage("th_other"), seq: 3, replayed: true });
+      mock.emit({ ...userMessage("th_other"), seq: 4, replayed: true });
+    });
+    await Promise.resolve();
+    expect(mock.state.calls).toBe(1);
+  });
+
+  it("does not read for replayed history that is not a user message", async () => {
+    render(<ThreadPullRequestBadge threadId="th_1" />);
+    await screen.findByRole("button", { name: "Linked pull requests" });
+    expect(mock.state.calls).toBe(1);
+
+    const assistant: EventEnvelope = {
+      seq: 3,
+      replayed: true,
+      event: {
+        type: "item_completed",
+        thread_id: "th_1",
+        turn_id: "turn_1",
+        item: {
+          kind: "message",
+          item_id: "item_1",
+          role: "assistant",
+          text: "PR #7 was merged.",
+          attachments: [],
+        },
+      },
+    };
+    await act(async () => {
+      mock.emit(assistant);
+    });
+    await Promise.resolve();
+    expect(mock.state.calls).toBe(1);
   });
 
   it("re-reads when the panel opens", async () => {

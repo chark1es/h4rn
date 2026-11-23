@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ThreadPullRequest } from "@/gen";
 import { getClient, onAppEvent } from "@/lib/store/appStore";
 
+import { createBurstReload } from "./burstReload";
 import { ForgeApi } from "./store";
 
 const listeners = new Map<string, Set<() => void>>();
@@ -62,24 +63,20 @@ export function useThreadPullRequests(
   // A reconnect replays the history the client missed. Those messages are not
   // new wakes, so they must not each cost a forge read — but a PR that merged
   // while the client was offline is only visible if the badge reads again.
-  // The whole replay arrives as one burst, so the first replayed event
-  // schedules one coalesced reload and the rest of the burst joins it.
+  // Only a replayed user message for this thread is a wake; another thread's
+  // replay, or any other replayed event, costs no read.
   useEffect(() => {
     if (!threadId) return;
-    let replayReloadScheduled = false;
-    return onAppEvent(({ event, replayed }) => {
-      if (replayed) {
-        if (replayReloadScheduled) return;
-        replayReloadScheduled = true;
-        queueMicrotask(() => {
-          replayReloadScheduled = false;
-          reload();
-        });
-        return;
-      }
+    const replayReload = createBurstReload(reload);
+    return onAppEvent((envelope) => {
+      const { event } = envelope;
       if (event.type !== "item_completed") return;
       if (event.thread_id !== threadId) return;
       if (event.item.kind !== "message" || event.item.role !== "user") return;
+      if (envelope.replayed) {
+        replayReload();
+        return;
+      }
       reload();
     });
   }, [threadId, reload]);
