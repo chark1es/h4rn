@@ -25,6 +25,41 @@ All notable changes to h4rn are recorded here. The format follows
   button and lists connected agents with Revoke. Redirects are admitted only to `https` or
   localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client. See
   [docs/outside-agents.md](docs/outside-agents.md) and [ADR-044](docs/decisions.md).
+- **A prompt can run on a schedule or when a webhook fires.** Settings →
+  Scheduled tasks creates a task with a workspace, harness, model, permissions
+  and prompt, then runs it once, every N minutes or hours, daily or weekly at a
+  local time, or on a five-field cron expression in a chosen time zone. A run
+  can start a new thread, continue one thread, or keep one thread with a fresh
+  session each time. The daemon owns the timer and stores tasks and the newest
+  100 runs in the journal, so they survive a restart; a slot missed while the
+  daemon was down runs once, and a slot whose previous run is still working is
+  skipped and recorded. **Run now** starts a task by hand, even while it is
+  paused, and History links to the threads it created. A webhook task gets a random path with Copy and Rotate;
+  the path is a secret, so lists and change events carry only a "has a URL" flag
+  and an admin request reveals it. It accepts POST only, checks the path before
+  reading the body, caps the body at 64 KiB, allows 30 deliveries a minute and
+  answers 202 before the run starts. Prompts can use `{{body.path}}`,
+  `{{headers.name}}`, `{{query.name}}`, `{{body}}` and `{{request}}`; each value
+  is wrapped as untrusted request data, and the secret path and credential
+  headers are redacted from everything a prompt or transcript sees. Admission is
+  atomic, so one slot starts one run even across a pause or two simultaneous
+  deliveries; run history and the advanced clock commit together; and a failed
+  journal write retries only that run while the real next slot is kept, so a
+  retry never becomes a second run and a slot waiting for its retry is never
+  read as due again. A once slot is taken when it is admitted, so a pause
+  during the run cannot arm it again, and a spent Once task stays spent across
+  edits and resumes; only a different date, time or time zone names a new slot,
+  and a run is refused until that marker is durable, so a crash cannot re-arm
+  it. A schedule that cannot name its next slot is disarmed and records the
+  reason instead of starting a thread on every backoff. Daily and weekly times
+  run only at the first occurrence in a fall-back hour, cron returns the
+  earliest UTC instant among that hour's jobs, and the editor's default zone
+  comes from the daemon. The editor also says why when it cannot reveal a
+  webhook URL.
+  Webhooks follow the configured `--bind` and any extra bind, never the tailnet
+  or LAN listeners.
+  A thread with an enabled task keeps its worktree through a clear. See
+  [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the
@@ -460,6 +495,22 @@ All notable changes to h4rn are recorded here. The format follows
   waiting sign-ins are capped per client and in total. The token endpoint checks
   RFC 8707 `resource` against the code's binding, and an approval keeps its
   one-time code in memory only, so the store file never holds a live code.
+- **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
+  the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
+  All four sources now show the active tab's file against the source on screen, and the wider
+  file lists stay one click away.
+- **Commit mode names the base it reuses.** The commit range has always followed the base chosen
+  for Branch (or the repository default), but the pane never said so. The diff header now reads
+  `since main` — or whichever base — beside the commit, so a review against a non-default base is
+  never implicit.
+- **A superseded diff never speaks for the newer choice.** Starting a newer diff or list request
+  drops the abandoned one's body as well as its spinner, so changing the base, the commit or the
+  lists while a file is still loading never shows the previous comparison's lines under the new
+  one. A Branch or Commits tab switch keeps the scope and re-reads its file list when that list is
+  still out, so the list and the empty commit range survive the switch. A stale branch-list reply
+  no longer stops the newer read's spinner. The revisited-workspace spinner reset and the branch
+  generation's move with the workspace already shipped on main; tests now cover them, so a reply
+  from the workspace you left is still ignored.
 - **Commit, push and pull request follow what git and the forge really say.** A
   branch deleted on the forge no longer skips the push a pull request needs just
   because the local remote-tracking ref is stale: the daemon asks the remote with

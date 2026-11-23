@@ -548,15 +548,25 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
    */
   const beginDiffRequest = useCallback(() => {
     diffRequestRef.current += 1;
-    // The dropped reply's spinner must not outlive it. A current list request
+    // The dropped reply's spinner must not outlive it. Clearing `diffLoading`
+    // matters as much as the lists: a Branch or Commits load supersedes the
+    // file diff that was still out, and the pane must show that load's own
+    // state instead of an abandoned "Loading diff…". Every current request
     // sets its own flag again in the same tick, before its first await.
+    //
+    // The branch list has its own generation: a file diff opening does not
+    // supersede it, so its spinner stays until that read answers (or fails).
     setState((current) =>
-      current.filesLoading || current.commitsLoading || current.branchesLoading
+      current.diffLoading || current.filesLoading || current.commitsLoading
         ? {
             ...current,
+            // A body that was still on its way must not stand in for the newer
+            // choice: the abandoned request will never answer, so its half-
+            // open diff (or the previous file's) is cleared with its spinner.
+            ...(current.diffLoading ? { diff: null } : {}),
+            diffLoading: false,
             filesLoading: false,
             commitsLoading: false,
-            branchesLoading: false,
           }
         : current,
     );
@@ -742,9 +752,8 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         workspace: target.path,
       });
       if (branchesRequestRef.current !== token) {
-        // A newer read or another workspace owns the picker now. This reply
-        // must not paint over it, and its spinner must not outlive it.
-        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        // A newer read (or another workspace) owns the picker now. This reply
+        // must not paint over it, and must not clear the newer spinner either.
         return null;
       }
       if (response.type !== "fs_branches") {
@@ -761,7 +770,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       return branches;
     } catch (error) {
       if (branchesRequestRef.current !== token) {
-        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        // The newer read owns the spinner and the error.
         return null;
       }
       setState((current) => ({
@@ -800,15 +809,19 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
 
   /** Loads the branch review: the branch list for its picker, then the files. */
   const loadBranch = useCallback(
-    async (preferred: string | null, overrides: { base?: string | null } = {}) => {
+    async (
+      preferred: string | null,
+      overrides: { base?: string | null; branches?: boolean } = {},
+    ) => {
       const token = beginDiffRequest();
       // A caller that restores another workspace's state passes its base: the
       // restored state has not rendered yet, so `stateRef` still holds the
       // previous workspace's choice.
       const base = overrides.base !== undefined ? overrides.base : stateRef.current.diffBase;
-      // Always refetch: the agent may have fetched, committed or renamed a
-      // branch since this pane last read the list.
-      void fetchBranches();
+      // Refetch on entry: the agent may have fetched, committed or renamed a
+      // branch since this pane last read the list. A tab follow keeps the list
+      // it already has (or is reading) and passes `branches: false`.
+      if (overrides.branches !== false) void fetchBranches();
       const files = await fetchDiffFiles({ kind: "base", base });
       if (!diffRequestCurrent(token)) return;
       // The list resolves the base (the default included); ask for that name so
@@ -865,6 +878,64 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const resumeDiffRef = useRef({ openDiff, loadBranch, loadCommit });
   resumeDiffRef.current = { openDiff, loadBranch, loadCommit };
 
+  /**
+   * Moves the open scope to another file without dropping the scope's list.
+   *
+   * A tab switch in Branch or Commits must keep the base or commit the person
+   * is reviewing: opening the tab as a plain diff would drop the in-flight
+   * list, and a commit scope with no sha would answer with an error instead of
+   * the list's own empty state. When the scope's list is not on screen yet, ask
+   * for it again with the tab as its preferred file.
+   */
+  const followDiffTab = useCallback(
+    async (path: string) => {
+      const current = stateRef.current;
+      const listing = current.filesLoading || current.commitsLoading;
+      // With no list read out, `diffPath` is the newest request's file (a
+      // direct open names it at once), so a tab that matches it is already
+      // shown or loading. While a list is out, `diffPath` still names the file
+      // from before that load, and the load will open its own preferred file:
+      // a tab switch must take over, even back to the file still on screen.
+      if (!listing && current.diffPath === path) return;
+      // The list on screen answers for the scope only when it was read for the
+      // current choice and nothing newer is still loading: `setDiffBase`,
+      // `selectDiffSource` and a refresh keep the previous scope's list up
+      // while the new one loads.
+      const against = current.diffFiles?.against;
+      // A follow keeps the base picker's list; it only re-reads one that has
+      // never arrived and is not on its way.
+      const branches = !current.diffBranches && !current.branchesLoading;
+      if (current.diffSource === "branch") {
+        // The person's choice wins; the list's resolved base fills in only
+        // when no base has been named yet.
+        const base = current.diffBase ?? current.diffFiles?.base ?? null;
+        const listed =
+          against?.kind === "base" &&
+          (against.base === base || current.diffFiles?.base === base) &&
+          !listing;
+        if (listed) await openDiff(path, "branch", { base });
+        else await loadBranch(path, { base, branches });
+        return;
+      }
+      if (current.diffSource === "commit") {
+        const base = current.diffBase;
+        const commit = current.diffCommit;
+        // Only `loadCommit` names a commit and then reads its files, so with
+        // no list out, a commit and a commit-scope file list on screen belong
+        // together; while the commit list is out, both are from before it.
+        const listed = commit !== null && against?.kind === "commit" && !listing;
+        if (listed) {
+          await openDiff(path, "commit", { base, commit });
+        } else {
+          await loadCommit(path, { base, commit });
+        }
+        return;
+      }
+      await openDiff(path, current.diffSource);
+    },
+    [loadBranch, loadCommit, openDiff],
+  );
+
   /** Switches the pane's scope and loads whatever that scope needs. */
   const selectDiffSource = useCallback(
     async (source: DiffSource) => {
@@ -915,6 +986,10 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         diffBase: base,
         diffCommit: null,
         diffCommits: null,
+        // The body on screen was compared against the old base; keep it off
+        // the screen while the new comparison's list loads.
+        diff: null,
+        diffError: null,
       }));
       const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "base", base });
@@ -928,7 +1003,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const setDiffCommit = useCallback(
     async (sha: string) => {
       const token = beginDiffRequest();
-      setState((current) => ({ ...current, diffCommit: sha }));
+      setState((current) => ({ ...current, diffCommit: sha, diff: null, diffError: null }));
       const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "commit", sha });
       if (!diffRequestCurrent(token)) return;
@@ -1260,6 +1335,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     moveTab,
     toggleDirectory,
     openDiff,
+    followDiffTab,
     selectDiffSource,
     setDiffBase,
     setDiffCommit,

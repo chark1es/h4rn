@@ -42,6 +42,7 @@ mod ids;
 pub mod mcp;
 pub mod projects;
 mod proxy;
+mod schedules;
 mod server;
 pub mod skills;
 mod subagents;
@@ -82,7 +83,8 @@ pub use harness::{
     HarnessOutputStream, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo,
 };
 pub use ids::{
-    AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, TerminalId, ThreadId, TurnId,
+    AttachmentId, AttachmentIdError, DeviceId, HostId, ScheduleTaskId, SubagentId, TerminalId,
+    ThreadId, TurnId,
 };
 pub use mcp::{
     AgentToolSettings, McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle,
@@ -93,6 +95,11 @@ pub use mcp::{
 };
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;
+pub use schedules::{
+    IntervalUnit, MAX_WEBHOOK_BODY_BYTES, MAX_WEBHOOK_PLACEHOLDERS, ScheduleDestination,
+    ScheduleDraft, ScheduleEvent, ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask,
+    WEBHOOK_RATE_LIMIT_PER_MINUTE, parse_once_date, parse_schedule_time,
+};
 pub use server::{
     DirectDevice, Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame,
 };

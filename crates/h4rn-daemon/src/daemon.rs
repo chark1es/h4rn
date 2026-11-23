@@ -28,6 +28,7 @@ use crate::remote::{
         read_direct_pairing, remove_direct_pairing,
     },
 };
+use crate::schedules::ScheduleService;
 use crate::server::{self, AppState};
 use crate::subagents::{SubagentManager, SubagentOptions, SubagentProvider};
 use crate::supervisor::ProcessSupervisor;
@@ -270,6 +271,21 @@ impl DaemonBuilder {
             )
             .await
             .map_err(|error| anyhow::anyhow!("open thread manager: {error}"))?,
+        );
+
+        // Scheduled tasks share the journal so the timer, secrets and run
+        // history survive a restart. The runner starts once the worktree
+        // tracker exists, so a task that protects a checkout is wired before
+        // it can fire.
+        let schedules = Arc::new(
+            ScheduleService::open(
+                Arc::clone(&journal),
+                Arc::clone(&manager),
+                hosts.local_id().clone(),
+                Arc::new(crate::threads::SystemClock),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open scheduled tasks: {error:?}"))?,
         );
 
         // Profiles and their keys are daemon-global; sessions pick them up
@@ -530,7 +546,9 @@ impl DaemonBuilder {
             .await
             .map_err(|error| anyhow::anyhow!("open the worktree tracker: {error}"))?,
         );
+        worktrees.set_schedule_service(Arc::clone(&schedules));
         worktrees.start();
+        schedules.start();
 
         let harness_versions = Arc::new(crate::harness_versions::HarnessVersionService::new(
             Arc::clone(&catalog),
@@ -568,6 +586,7 @@ impl DaemonBuilder {
             meter,
             network_access_enabled,
             text_generation,
+            schedules,
         })
     }
 }
@@ -601,6 +620,7 @@ pub struct Daemon {
     acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     projects: Arc<crate::projects::ProjectService>,
     text_generation: Arc<crate::text_generation::TextGenerationService>,
+    schedules: Arc<ScheduleService>,
     /// The network-listener setting resolved at build time.
     network_access_enabled: bool,
 }
@@ -619,6 +639,11 @@ impl Daemon {
     /// Thread manager handle (tests and diagnostics).
     pub fn manager(&self) -> Arc<ThreadManager> {
         Arc::clone(&self.manager)
+    }
+
+    /// The host id this daemon reports for its own machine.
+    pub fn local_host(&self) -> h4rn_protocol::HostId {
+        self.hosts.local_id().clone()
     }
 
     /// Subagent supervisor handle (tests and diagnostics).
@@ -656,6 +681,11 @@ impl Daemon {
         Arc::clone(&self.meter)
     }
 
+    /// Scheduled tasks (tests and diagnostics).
+    pub fn schedules(&self) -> Arc<ScheduleService> {
+        Arc::clone(&self.schedules)
+    }
+
     /// Binds the primary and optional extra listener.
     pub async fn bind(self) -> anyhow::Result<BoundDaemon> {
         let mut listeners = Vec::new();
@@ -665,7 +695,7 @@ impl Daemon {
             .await
             .map_err(|error| anyhow::anyhow!("bind {}: {error}", self.config.bind))?;
         addrs.push(primary.local_addr()?);
-        listeners.push(primary);
+        listeners.push((primary, server::ListenerKind::Loopback));
 
         if let Some(extra) = self.config.extra_bind
             && extra != self.config.bind
@@ -674,12 +704,13 @@ impl Daemon {
                 .await
                 .map_err(|error| anyhow::anyhow!("bind extra address {extra}: {error}"))?;
             addrs.push(listener.local_addr()?);
-            listeners.push(listener);
+            listeners.push((listener, server::ListenerKind::ExtraBind));
         }
 
         // The secure transport is the only remote path worth exposing on a
-        // tailnet, so the extra listener shares the primary port. A bind
-        // failure is not fatal: the relay and any LAN address still work.
+        // tailnet, so the extra listener shares the primary port. It does not
+        // serve webhook paths: those stay on the loopback and explicit binds.
+        // A bind failure is not fatal: the relay and any LAN address still work.
         if self.config.tailscale == TailscaleMode::Auto
             && let Some(ip) = crate::remote::tailscale::tailnet_ip_async().await
         {
@@ -688,7 +719,7 @@ impl Daemon {
                 match TcpListener::bind(addr).await {
                     Ok(listener) => {
                         addrs.push(listener.local_addr()?);
-                        listeners.push(listener);
+                        listeners.push((listener, server::ListenerKind::Tailnet));
                         tracing::info!(%addr, "listening on the tailnet address");
                     }
                     Err(error) => tracing::warn!(
@@ -758,6 +789,7 @@ impl Daemon {
             acp_agents: Arc::clone(&self.acp_agents),
             projects: Arc::clone(&self.projects),
             text_generation: Arc::clone(&self.text_generation),
+            schedules: Arc::clone(&self.schedules),
         };
 
         // The network listener serves a restricted router: liveness and the
@@ -818,14 +850,9 @@ impl Daemon {
         }
 
         Ok(BoundDaemon {
-            listeners: listeners
-                .into_iter()
-                .map(|listener| {
-                    let addr = listener.local_addr().unwrap_or(addrs[0]);
-                    (listener, server::router_for(&state, addr))
-                })
-                .collect(),
+            state,
             network,
+            listeners,
             addrs,
             manager: self.manager,
             subagents: self.subagents,
@@ -834,6 +861,7 @@ impl Daemon {
             terminals: self.terminals,
             forge: self.forge,
             pr_links: self.pr_links,
+            schedules: self.schedules,
             mcp: self.mcp,
             outside: self.outside,
             supervisor: self.supervisor,
@@ -845,13 +873,12 @@ impl Daemon {
 
 /// A daemon with sockets bound, ready for [`BoundDaemon::serve`].
 pub struct BoundDaemon {
-    /// One listener and the router that listener serves.
-    ///
-    /// Only a loopback listener gets OAuth and `/mcp`; a LAN or tailnet
-    /// listener serves liveness and the encrypted routes.
-    listeners: Vec<(TcpListener, axum::Router)>,
+    state: AppState,
     /// The dedicated LAN/tailnet listener, when network access is on.
     network: Arc<NetworkAccess>,
+    /// One socket and the routes it serves. OAuth and `/mcp` exist only where
+    /// [`server::ListenerKind::router`] says they are safe.
+    listeners: Vec<(TcpListener, server::ListenerKind)>,
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
@@ -860,6 +887,7 @@ pub struct BoundDaemon {
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
     pr_links: Arc<crate::pr_links::PrLinkService>,
+    schedules: Arc<ScheduleService>,
     mcp: Arc<McpService>,
     outside: Arc<crate::mcp_server::OutsideAgents>,
     supervisor: Arc<ProcessSupervisor>,
@@ -920,8 +948,9 @@ impl BoundDaemon {
         shutdown: impl std::future::Future<Output = ()>,
     ) -> anyhow::Result<()> {
         let Self {
-            listeners,
+            state,
             network,
+            listeners,
             addrs,
             manager,
             subagents,
@@ -930,6 +959,7 @@ impl BoundDaemon {
             terminals,
             forge,
             pr_links,
+            schedules,
             mcp,
             outside: _,
             supervisor,
@@ -943,7 +973,11 @@ impl BoundDaemon {
             "h4rn daemon listening"
         );
 
-        server::serve_all(listeners, shutdown).await?;
+        let routes: Vec<(TcpListener, axum::Router)> = listeners
+            .into_iter()
+            .map(|(listener, kind)| (listener, kind.router(state.clone())))
+            .collect();
+        server::serve_all(routes, shutdown).await?;
         // Close the LAN/tailnet listener before the services it routes to go
         // away, so no new remote session starts during shutdown.
         network.shutdown().await;
@@ -952,6 +986,7 @@ impl BoundDaemon {
         for task in remote_tasks {
             task.abort();
         }
+        schedules.shutdown().await;
         forge.shutdown();
         pr_links.shutdown();
         mcp.shutdown().await;

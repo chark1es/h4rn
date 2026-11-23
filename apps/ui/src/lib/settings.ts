@@ -1,5 +1,6 @@
 import {
   BellIcon,
+  CalendarClockIcon,
   CommandIcon,
   GitBranchIcon,
   GitCommitHorizontalIcon,
@@ -29,6 +30,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { key: "notifications", label: "Notifications", icon: BellIcon },
   { key: "shortcuts", label: "Shortcuts", icon: CommandIcon },
   { key: "threads", label: "Threads", icon: MessageSquareIcon },
+  { key: "schedules", label: "Scheduled tasks", icon: CalendarClockIcon },
   { key: "source-control", label: "Source control", icon: GitCommitHorizontalIcon },
   { key: "hosts", label: "Hosts & devices", icon: ServerIcon, group: "Machines" },
   { key: "harnesses", label: "Harnesses", icon: TerminalIcon, group: "Machines" },
