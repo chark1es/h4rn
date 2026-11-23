@@ -4,7 +4,7 @@
 //! frame must keep parsing exactly as before. The draft's optional ACP agent
 //! id is the one new field a hand-written request may omit.
 
-use h4rn_protocol::{ClientFrame, ClientRequest, ScheduleDraft, ScheduleSpec};
+use h4rn_protocol::{ClientFrame, ClientRequest, ScheduleDraft, ScheduleSpec, ScheduleTask};
 
 #[test]
 fn an_older_client_frame_still_parses() {
@@ -44,4 +44,44 @@ fn an_unknown_schedule_kind_is_a_clean_parse_error() {
         "kind": "whenever",
     }));
     assert!(error.is_err());
+}
+
+#[test]
+fn a_task_body_keeps_the_wire_field_and_hides_the_slot_identity() {
+    // An older daemon sends `once_consumed` as a boolean. The slot identity is
+    // daemon state, so it never crosses the wire in either direction.
+    let mut task: ScheduleTask = serde_json::from_value(serde_json::json!({
+        "task_id": "sch_1",
+        "name": "Nightly review",
+        "host": "host_1",
+        "workspace_path": "/home/atlas/code/api",
+        "harness": "claude_code",
+        "agent_id": null,
+        "model": "claude-sonnet",
+        "runtime_mode": "approval_required",
+        "prompt": "Review the diff.",
+        "schedule": { "kind": "once", "date": "2026-12-01", "time": "09:30" },
+        "timezone": "Europe/Berlin",
+        "destination": "new_thread",
+        "enabled": true,
+        "thread_id": null,
+        "webhook_path_set": false,
+        "once_consumed": false,
+        "next_run_at": null,
+        "last_run": null,
+        "created_at": "2026-11-20T10:00:00Z",
+        "updated_at": "2026-11-20T10:00:00Z"
+    }))
+    .expect("an older task body still parses");
+    assert!(!task.once_consumed);
+    assert!(task.once_consumed_slot.is_none());
+
+    task.once_consumed = true;
+    task.once_consumed_slot = Some("2026-12-01T09:30".into());
+    let json = serde_json::to_string(&task).expect("serialise");
+    assert!(json.contains("\"once_consumed\":true"));
+    assert!(
+        !json.contains("once_consumed_slot"),
+        "the spent slot identity must stay daemon-side"
+    );
 }

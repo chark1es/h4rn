@@ -1020,7 +1020,11 @@ async fn a_completed_once_task_is_never_run_again_in_the_repeated_hour() {
     let runs = wait_runs(&fixture.service, &task.task_id, 1).await;
     assert_eq!(runs[0].outcome, ScheduleRunOutcome::Started);
     let spent = fixture.service.task(&task.task_id).await.expect("task");
-    assert_eq!(spent.once_consumed.as_deref(), Some("2026-10-25T02:30"));
+    assert!(spent.once_consumed);
+    assert_eq!(
+        spent.once_consumed_slot.as_deref(),
+        Some("2026-10-25T02:30")
+    );
     assert!(spent.next_run_at.is_none());
 
     // The second 02:30 (CET) is 01:30 UTC. It must not match again.
@@ -1051,7 +1055,6 @@ async fn a_completed_once_task_is_never_run_again_in_the_repeated_hour() {
             .await
             .expect("task")
             .once_consumed
-            .is_some()
     );
     fixture
         .service
@@ -1733,7 +1736,7 @@ async fn a_paused_once_task_cannot_run_the_same_slot_twice() {
             .task(&task.task_id)
             .await
             .expect("task")
-            .once_consumed
+            .once_consumed_slot
             .as_deref(),
         Some("2026-10-25T02:30")
     );
@@ -1744,7 +1747,7 @@ async fn a_paused_once_task_cannot_run_the_same_slot_twice() {
             .await
             .expect("journal row")
             .expect("task row")
-            .once_consumed
+            .once_consumed_slot
             .as_deref(),
         Some("2026-10-25T02:30"),
         "the spent slot survives a restart from the moment of admission"

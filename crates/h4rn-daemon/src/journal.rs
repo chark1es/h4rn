@@ -1038,8 +1038,8 @@ async fn upsert_schedule_row(
     .bind(task.enabled as i64)
     .bind(task.thread_id.as_ref().map(ThreadId::as_str))
     .bind(webhook_secret_of(task))
-    .bind(task.once_consumed.is_some() as i64)
-    .bind(task.once_consumed.as_deref())
+    .bind(task.once_consumed as i64)
+    .bind(task.once_consumed_slot.as_deref())
     .bind(task.next_run_at.map(|at| at.to_rfc3339()))
     .bind(task.created_at.to_rfc3339())
     .bind(task.updated_at.to_rfc3339())
@@ -1085,13 +1085,14 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
     // stored schedule names the slot it spent.
     let once_slot: Option<String> = row.try_get("once_slot")?;
     let legacy_consumed: i64 = row.try_get("once_consumed")?;
-    let once_consumed = once_slot.or_else(|| {
+    let once_consumed_slot = once_slot.or_else(|| {
         if legacy_consumed == 0 {
             None
         } else {
             schedule.once_slot()
         }
     });
+    let once_consumed = once_consumed_slot.is_some();
     Ok(ScheduleTask {
         task_id: ScheduleTaskId::new(task_id),
         name: row.try_get("name")?,
@@ -1119,6 +1120,7 @@ fn schedule_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ScheduleTask, 
             .map(|secret| format!("/webhooks/{secret}")),
         webhook_path_set,
         once_consumed,
+        once_consumed_slot,
         next_run_at: next_run_at.and_then(|at| {
             DateTime::parse_from_rfc3339(&at)
                 .ok()

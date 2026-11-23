@@ -235,7 +235,9 @@ impl ScheduleService {
         // A once slot that is already spent must not stay armed, even if a
         // daemon stopped between admitting it and recording its run.
         for task in &mut stored {
-            if task.once_consumed.is_some() && task.once_consumed == task.schedule.once_slot() {
+            if task.once_consumed_slot.is_some()
+                && task.once_consumed_slot == task.schedule.once_slot()
+            {
                 task.next_run_at = None;
             }
         }
@@ -426,7 +428,7 @@ impl ScheduleService {
         task.enabled = enabled;
         task.updated_at = now;
         if enabled && !task.schedule.is_webhook() {
-            if task.once_consumed.is_some() && matches!(task.schedule, ScheduleSpec::Once { .. }) {
+            if task.once_consumed && matches!(task.schedule, ScheduleSpec::Once { .. }) {
                 return Err(ScheduleServiceError::Invalid(
                     "This once task has already run and cannot run again.".into(),
                 ));
@@ -846,7 +848,7 @@ impl ScheduleService {
         if matches!(trigger, Trigger::Scheduled)
             && let Some(slot_id) = task.schedule.once_slot()
         {
-            if task.once_consumed.as_deref() == Some(slot_id.as_str()) {
+            if task.once_consumed_slot.as_deref() == Some(slot_id.as_str()) {
                 // A restart between admission and the run's own write leaves
                 // the spent marker with the old slot still armed. Clear it so
                 // it can never be dispatched again.
@@ -862,7 +864,8 @@ impl ScheduleService {
                 lock(&self.inner.in_flight).remove(task_id);
                 return Err(AdmissionError::StaleSlot);
             }
-            task.once_consumed = Some(slot_id);
+            task.once_consumed_slot = Some(slot_id);
+            task.once_consumed = true;
             task.updated_at = self.inner.clock.now();
             self.inner
                 .tasks
@@ -1143,7 +1146,8 @@ impl ScheduleService {
             && task.next_run_at == run.scheduled_for
         {
             if matches!(task.schedule, ScheduleSpec::Once { .. }) {
-                task.once_consumed = task.schedule.once_slot();
+                task.once_consumed_slot = task.schedule.once_slot();
+                task.once_consumed = task.once_consumed_slot.is_some();
                 task.next_run_at = None;
             } else {
                 match self.advance(&task, now) {
@@ -1338,7 +1342,8 @@ impl ScheduleService {
         if task.schedule.once_slot().is_some() {
             // The run already started a thread. Re-arming the same once slot
             // would start a second thread for it.
-            task.once_consumed = task.schedule.once_slot();
+            task.once_consumed_slot = task.schedule.once_slot();
+            task.once_consumed = task.once_consumed_slot.is_some();
             task.next_run_at = None;
         } else {
             task.next_run_at = Some(now + backoff_for(failures));
@@ -1363,7 +1368,7 @@ impl ScheduleService {
         task: &ScheduleTask,
         now: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, ScheduleServiceError> {
-        if task.once_consumed.is_some() && matches!(task.schedule, ScheduleSpec::Once { .. }) {
+        if task.once_consumed && matches!(task.schedule, ScheduleSpec::Once { .. }) {
             return Ok(None);
         }
         let tz = parse_timezone(&task.timezone).map_err(|error| {
@@ -1481,11 +1486,12 @@ impl ScheduleService {
         // A spent once slot stays spent when the task is edited or resumed;
         // only naming a different once date/time arms it again.
         let once_slot = draft.schedule.once_slot();
-        let once_consumed = existing
-            .and_then(|task| task.once_consumed.clone())
+        let once_consumed_slot = existing
+            .and_then(|task| task.once_consumed_slot.clone())
             .filter(|slot| once_slot.as_deref() == Some(slot.as_str()));
+        let once_consumed = once_consumed_slot.is_some();
         let schedule_is_webhook = draft.schedule.is_webhook();
-        let computed_next = if schedule_is_webhook || once_consumed.is_some() {
+        let computed_next = if schedule_is_webhook || once_consumed {
             None
         } else {
             next_after(
@@ -1496,7 +1502,7 @@ impl ScheduleService {
             )
             .map_err(|error| ScheduleServiceError::Invalid(error.message().to_owned()))?
         };
-        if !schedule_is_webhook && once_consumed.is_none() && computed_next.is_none() {
+        if !schedule_is_webhook && !once_consumed && computed_next.is_none() {
             return Err(ScheduleServiceError::Invalid(
                 "This once task's date and time are in the past. Choose a future time.".into(),
             ));
@@ -1522,6 +1528,7 @@ impl ScheduleService {
             webhook_path_set: webhook_path.is_some(),
             webhook_path,
             once_consumed,
+            once_consumed_slot,
             next_run_at,
             last_run: existing.and_then(|task| task.last_run.clone()),
             created_at,
