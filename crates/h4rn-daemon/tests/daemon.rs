@@ -3371,6 +3371,224 @@ async fn a_slow_acp_probe_does_not_block_the_connection() {
     daemon.stop().await;
 }
 
+/// A workspace on `main` whose `origin` looks like GitHub and pushes to a
+/// local bare repository, so opening a PR never touches the network.
+fn forge_workspace() -> (tempfile::TempDir, tempfile::TempDir) {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let remote = tempfile::tempdir().expect("remote");
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("--bare")
+        .arg(remote.path())
+        .output()
+        .expect("init the bare remote");
+    assert!(status.status.success(), "the bare remote must exist");
+    git_in(workspace.path(), &["init", "-b", "main"]);
+    git_in(
+        workspace.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git_in(workspace.path(), &["config", "user.name", "Test"]);
+    std::fs::write(workspace.path().join("README.md"), "test\n").expect("write a file");
+    git_in(workspace.path(), &["add", "README.md"]);
+    git_in(workspace.path(), &["commit", "-m", "initial"]);
+    git_in(
+        workspace.path(),
+        &["remote", "add", "origin", "https://github.com/acme/widget"],
+    );
+    git_in(
+        workspace.path(),
+        &[
+            "config",
+            "remote.origin.pushurl",
+            &remote.path().display().to_string(),
+        ],
+    );
+    (workspace, remote)
+}
+
+/// Boots a daemon whose data directory already holds one GitHub account that
+/// points at `forge_base`.
+async fn boot_with_forge_account(forge_base: &str) -> (TestDaemon, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let accounts = serde_json::json!([{
+        "account_id": "acct_1",
+        "forge": "github",
+        "base_url": forge_base,
+        "username": "alice",
+        "display_name": null,
+        "scopes": [],
+        "source": "pat",
+        "created_at": "2026-01-01T00:00:00Z",
+    }]);
+    std::fs::write(
+        dir.path().join("forge-accounts.json"),
+        serde_json::to_vec(&accounts).expect("accounts"),
+    )
+    .expect("write accounts");
+    std::fs::write(
+        dir.path().join("forge-hosts.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "hosts": [{"host": "github.com", "forge": "github", "base_url": forge_base}]
+        }))
+        .expect("hosts"),
+    )
+    .expect("write hosts");
+    h4rn_transport::keys::write_secret_file(&dir.path().join("forge-token-acct_1"), b"test-token")
+        .expect("store the token");
+
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        bind: "127.0.0.1:0".parse().expect("bind"),
+        extra_bind: None,
+        log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
+    };
+    let daemon = DaemonBuilder::new(config)
+        .without_title_agents()
+        .with_harness_registry(Arc::new(OfflineRegistry))
+        .with_update_runner(Arc::new(RefusingRunner))
+        .with_lifecycle(ThreadManagerOptions {
+            tick_interval: Duration::from_millis(20),
+            ..ThreadManagerOptions::default()
+        })
+        .with_catalog(Arc::new(
+            h4rn_daemon::harnesses::StaticHarnessCatalog::with(Arc::new(FakeHarness::new())),
+        ))
+        .build()
+        .await
+        .expect("build daemon");
+    let token = TokenStore::new(dir.path())
+        .load()
+        .expect("read token")
+        .expect("token exists");
+    let bound = daemon.bind().await.expect("bind daemon");
+    let addr = bound.local_addr();
+    let (shutdown, rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        bound
+            .serve(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+    (
+        TestDaemon {
+            addr,
+            token,
+            _dir: None,
+            shutdown: Some(shutdown),
+            task,
+        },
+        dir,
+    )
+}
+
+#[tokio::test]
+async fn opening_a_pr_from_a_thread_links_it() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let pr = serde_json::json!({
+        "number": 7,
+        "title": "Add PR watch",
+        "state": "open",
+        "merged": false,
+        "merged_at": null,
+        "draft": false,
+        "user": {"login": "alice"},
+        "head": {"ref": "main", "sha": "sha-1", "repo": {"full_name": "acme/widget"}},
+        "base": {"ref": "main", "sha": "base"},
+        "updated_at": "2026-01-01T00:00:01Z",
+        "html_url": "https://github.com/acme/widget/pull/7",
+        "body": "",
+        "mergeable": true,
+        "additions": 1,
+        "deletions": 0,
+        "changed_files": 1,
+        "commits": 1,
+        "created_at": "2026-01-01T00:00:00Z"
+    });
+    Mock::given(method("POST"))
+        .and(path("/api/v3/repos/acme/widget/pulls"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(pr.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/pulls/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(pr))
+        .mount(&server)
+        .await;
+
+    let (daemon, _data_dir) = boot_with_forge_account(&server.uri()).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let host = host_id_for(&daemon).await;
+    let (workspace, _remote) = forge_workspace();
+
+    let created = client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: workspace.path().display().to_string(),
+            model: "fake-model".into(),
+            prompt: "first".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create thread");
+    let summary = match created {
+        ResponseBody::ThreadCreated { summary, .. } => summary,
+        other => panic!("unexpected CreateThread response: {other:?}"),
+    };
+
+    let repo = h4rn_protocol::ForgeRepoRef {
+        forge: h4rn_protocol::ForgeKind::GitHub,
+        base_url: server.uri(),
+        owner: "acme".into(),
+        repo: "widget".into(),
+    };
+    let opened = client
+        .request(ClientRequest::ForgeOpenPr {
+            thread_id: summary.thread_id.clone(),
+            repo: Some(repo.clone()),
+            title: "Add PR watch".into(),
+            body: String::new(),
+            base: "main".into(),
+            draft: false,
+        })
+        .await
+        .expect("open the PR");
+    match opened {
+        ResponseBody::ForgePrOpened { pr } => assert_eq!(pr.summary.number, 7),
+        other => panic!("unexpected ForgeOpenPr response: {other:?}"),
+    }
+
+    let listed = client
+        .request(ClientRequest::ListThreadPullRequests {
+            thread_id: summary.thread_id.clone(),
+        })
+        .await
+        .expect("list the thread's pull requests");
+    match listed {
+        ResponseBody::ThreadPullRequests { pulls, .. } => {
+            assert_eq!(pulls.len(), 1, "opening a PR must link it: {pulls:?}");
+            assert_eq!(pulls[0].number, 7);
+            assert_eq!(pulls[0].repo, repo);
+            assert!(pulls[0].summary.is_some());
+        }
+        other => panic!("unexpected ListThreadPullRequests response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
 /// `git_status` and `git_commit` over a real connection, with a slow hook
 /// proving the socket keeps answering other requests while git works.
 #[cfg(unix)]

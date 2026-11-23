@@ -389,6 +389,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The PR watch keeps its promises under races and failures.** A re-watch read
+  that a poll overtakes is discarded instead of moving the baseline backwards,
+  and a poll read that a re-watch overtakes is discarded the same way, so the
+  same failed check is not reported twice in either order. Watch reads no
+  longer add the PR to the 30-second checks poller that the PR screens use, so
+  ending a watch or a link leaves no poll behind. A watch request during a
+  rate-limit pause spends no requests and takes its baseline from the first
+  poll after the pause. A wake the daemon cannot deliver keeps the watcher's
+  previous snapshot so the next poll retries the same events (bounded like
+  failed reads), and both a terminal watch and one at the ten-comment cap wait
+  for their wake instead of ending unheard. The thread header badge re-reads
+  when the daemon's watch state can have changed — when a wake message is
+  appended and when its panel opens — so a merged PR stops offering "Stop
+  watching", and messages replayed on reconnect do not each cost a forge read.
 - **Git actions only ever move the branch you asked for, and drafts are real on every forge.**
   Push names one refspec (`refs/heads/<branch>` to the same name on the forge remote) instead of
   relying on `push.default` or `remote.<name>.push`, so a `matching` configuration cannot push other
