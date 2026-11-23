@@ -108,6 +108,8 @@ pub struct AppState {
     pub acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     /// Registered sidebar projects.
     pub projects: Arc<crate::projects::ProjectService>,
+    /// Discovery and import of other harnesses' saved conversations.
+    pub import: Arc<crate::import::ImportService>,
     /// Title generation: coding-agent CLI or a configured text generator.
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// Scheduled tasks and webhook automations.

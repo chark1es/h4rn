@@ -190,6 +190,9 @@ pub struct FakeHarness {
     starts_seen: Arc<AtomicUsize>,
     /// A test-only message: after the start gate, `start_session` fails.
     start_failure: Option<String>,
+    /// A test-only message: a startup asked to resume fails with it, while a
+    /// fresh startup succeeds. Models a harness that cannot find the session.
+    resume_failure: Option<String>,
     /// How many startups fail before one succeeds; `None` fails every one.
     start_failure_budget: Option<usize>,
     /// Startups attempted so far, so a budget can count down.
@@ -550,6 +553,7 @@ impl Default for FakeHarness {
             start_gate_after: None,
             starts_seen: Arc::new(AtomicUsize::new(0)),
             start_failure: None,
+            resume_failure: None,
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
@@ -733,6 +737,15 @@ impl FakeHarness {
         self.start_failure = Some(message.into());
         self.start_failure_budget = Some(1);
         self.start_attempts = Some(Arc::new(AtomicUsize::new(0)));
+        self
+    }
+
+    /// Fails a startup that asks to resume, while a fresh startup succeeds.
+    ///
+    /// Models a harness that cannot find the saved session, so the daemon's
+    /// fallback to a handoff is what the test observes.
+    pub fn with_resume_failure(mut self, message: impl Into<String>) -> Self {
+        self.resume_failure = Some(message.into());
         self
     }
 
@@ -1070,7 +1083,14 @@ impl Harness for FakeHarness {
                 });
             }
         }
-
+        if let Some(message) = &self.resume_failure
+            && spec.resume_id.is_some()
+        {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: message.clone(),
+            });
+        }
         let (sender, receiver): (EventSink, BoxStream<'static, HarnessEvent>) =
             match self.event_queue_capacity {
                 Some(capacity) => {

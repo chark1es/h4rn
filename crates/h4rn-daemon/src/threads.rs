@@ -189,6 +189,44 @@ pub struct CreatedThread {
     pub seq: u64,
 }
 
+/// One saved message of a conversation being imported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedThreadMessage {
+    /// Who authored it.
+    pub role: h4rn_protocol::MessageRole,
+    /// Text, already redacted.
+    pub text: String,
+    /// When it was written in the source conversation.
+    pub at: DateTime<Utc>,
+}
+
+/// A thread built from a saved conversation instead of a first prompt.
+#[derive(Clone, Debug)]
+pub struct NewImportedThread {
+    /// Host that will run the continuation.
+    pub host: HostId,
+    /// Harness the conversation came from.
+    pub harness: HarnessKind,
+    /// Working directory the conversation used.
+    pub workspace_path: String,
+    /// Model recorded by the source, when it named one.
+    pub model: String,
+    /// Title shown in the list.
+    pub title: String,
+    /// When the conversation started.
+    pub created_at: DateTime<Utc>,
+    /// Newest message time.
+    pub last_active: DateTime<Utc>,
+    /// Harness-native session id for a native resume.
+    pub resume_id: Option<String>,
+    /// Which harness saved it.
+    pub source: h4rn_protocol::ImportSource,
+    /// Transcript path, read-only.
+    pub source_path: String,
+    /// Kept messages, oldest first.
+    pub messages: Vec<ImportedThreadMessage>,
+}
+
 /// Result of appending a user message.
 #[derive(Clone, Debug)]
 pub struct AcceptedMessage {
@@ -699,7 +737,11 @@ impl SessionSlot {
 struct TurnDispatch {
     turn_id: TurnId,
     /// The prompt this turn will write once it is claimed.
-    input: UserInput,
+    ///
+    /// Interior mutability lets a failed native resume replace the plain
+    /// request with the same request behind a handoff of imported history,
+    /// still before any writer claims it.
+    input: std::sync::Mutex<UserInput>,
     state: std::sync::Mutex<DispatchState>,
     /// The session generation that was started for this turn, once one was.
     ///
@@ -1006,7 +1048,7 @@ impl TurnDispatch {
     fn new(turn_id: TurnId, input: UserInput) -> Self {
         Self {
             turn_id,
-            input,
+            input: std::sync::Mutex::new(input),
             state: std::sync::Mutex::new(DispatchState::Pending),
             started_generation: AtomicU64::new(NO_GENERATION),
             on_the_wire: AtomicBool::new(false),
@@ -1192,7 +1234,21 @@ impl TurnDispatch {
 
     /// The prompt, cloned for the one writer that claimed it.
     fn input(&self) -> UserInput {
-        self.input.clone()
+        self.input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replaces the prompt text before any writer claims it.
+    ///
+    /// Used when a native resume failed and the turn must fall back to a
+    /// handoff of the imported history. The attachments stay as they were.
+    fn replace_text(&self, text: String) {
+        self.input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .text = text;
     }
 }
 
@@ -1345,6 +1401,26 @@ impl ThreadRecord {
 
     fn signature(&self, settings: &LifecycleSettings, now: DateTime<Utc>) -> SummarySignature {
         SummarySignature::of(&self.summary(settings, now))
+    }
+
+    /// The bounded handoff for an imported thread that cannot resume natively.
+    ///
+    /// `None` once the thread has a native session id, or when it was not
+    /// imported: an ordinary thread's history is already in the harness.
+    fn handoff_block(&self) -> Option<String> {
+        let imported = self.meta.imported.as_ref()?;
+        if self.meta.resume_id.is_some() {
+            return None;
+        }
+        let messages: Vec<crate::handoff::HandoffMessage<'_>> = imported
+            .messages
+            .iter()
+            .map(|message| crate::handoff::HandoffMessage {
+                role: message.role,
+                text: &message.text,
+            })
+            .collect();
+        crate::handoff::build(&messages, crate::handoff::budget_from_env())
     }
 
     /// Records a new turn and returns its dispatch.
@@ -2461,6 +2537,7 @@ impl ThreadManager {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            imported: None,
         };
         let title_workspace = meta.workspace_path.clone();
 
@@ -2557,6 +2634,157 @@ impl ThreadManager {
             summary,
             seq,
         })
+    }
+
+    /// Creates a thread from a saved conversation, with no live session.
+    ///
+    /// The transcript is journaled as ordinary message items so it replays in
+    /// every client. The first new message starts the harness: a native resume
+    /// when the source names a session the harness can take, otherwise a
+    /// bounded handoff of the saved messages. No title job runs: the source
+    /// already named the conversation.
+    pub async fn import_thread(
+        &self,
+        request: NewImportedThread,
+    ) -> Result<ThreadId, ManagerError> {
+        if self.inner.harnesses.get(request.harness).is_none() {
+            return Err(ManagerError::Unsupported(format!(
+                "no {:?} adapter is available in this daemon build",
+                request.harness
+            )));
+        }
+        if !self.inner.local_host_is(&request.host) {
+            return Err(ManagerError::Unsupported(format!(
+                "threads can only run on this daemon's host ({}) in phase 1b",
+                self.inner.local_host
+            )));
+        }
+        let workspace_path = expand_home(&request.workspace_path);
+        if workspace_path.trim().is_empty() || !std::path::Path::new(&workspace_path).is_absolute()
+        {
+            return Err(ManagerError::InvalidRequest(
+                "workspace_path must be an absolute path on the host".into(),
+            ));
+        }
+        let now = self.now();
+        let thread_id = ThreadId::new_uuid_v7();
+        let last_active = request.last_active.min(now);
+        let created_at = request.created_at.min(now);
+        let native_resume = request.resume_id.is_some();
+        let branch = crate::fs::git::branch(std::path::Path::new(&workspace_path));
+        let meta = ThreadMeta {
+            thread_id: thread_id.clone(),
+            parent_thread_id: None,
+            subagent_id: None,
+            host: request.host,
+            harness: request.harness,
+            agent_id: None,
+            title: request.title,
+            title_source: TitleSource::Prompt,
+            workspace_path,
+            model: request.model,
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+            created_at,
+            usage: Usage::default(),
+            resume_id: request.resume_id.clone(),
+            agent_fingerprint: None,
+            parked: None,
+            imported: Some(crate::journal::ImportedOrigin {
+                source: request.source,
+                source_path: request.source_path,
+                session_id: request.resume_id,
+                native_resume,
+                messages: request
+                    .messages
+                    .iter()
+                    .map(|message| crate::journal::ImportedMessage {
+                        role: message.role,
+                        text: message.text.clone(),
+                        at: message.at,
+                    })
+                    .collect(),
+            }),
+        };
+        let mut state = ThreadState::new(created_at);
+        state.last_activity = last_active;
+        state.last_user_activity = last_active;
+        state.last_event_at = last_active;
+        state.phase = h4rn_core::Phase::Completed {
+            status: TurnStatus::Completed,
+        };
+        state.agent_state = AgentState::Done;
+        state.last_turn_completed_at = Some(last_active);
+        state.last_turn_status = Some(TurnStatus::Completed);
+        // The import is history, not a finished turn the person has to
+        // acknowledge: it lands in Done without raising a hand.
+        state.acknowledged = true;
+        state.manual = Some(h4rn_core::ManualOverride {
+            tab: ThreadTab::Done,
+            pinned: false,
+            set_at: created_at,
+        });
+        let mut wire = Vec::with_capacity(request.messages.len());
+        for message in &request.messages {
+            let turn_id = TurnId::new_uuid_v7();
+            let role = match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::System => "system",
+            };
+            wire.push(Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id,
+                item: Item::Message {
+                    item_id: fresh_item_id(role),
+                    role: message.role,
+                    text: message.text.clone(),
+                    attachments: Vec::new(),
+                },
+            });
+        }
+        let record = ThreadRecord {
+            meta,
+            state,
+            active: None,
+            last_turn_id: None,
+            session: SessionSlot::None,
+            session_gen: 0,
+            pump: None,
+            pending_approvals: BTreeMap::new(),
+            queued: VecDeque::new(),
+            last_signature: None,
+            transport_error_reported: None,
+            transport_report: None,
+            dying_sessions: BTreeMap::new(),
+            #[cfg(test)]
+            dying_notify: Arc::new(tokio::sync::Notify::new()),
+            scheduled_limit: None,
+            resume_at: None,
+            limit: None,
+            advertised_efforts: Vec::new(),
+            advertised_models: Vec::new(),
+            session_settings: None,
+            settings_lock: Arc::new(Mutex::new(())),
+            ttft_ms: None,
+            context_window: None,
+            branch,
+            restored_parked: false,
+            closed: false,
+        };
+        let handle: ThreadHandle = Arc::new(Mutex::new(record));
+        {
+            let mut record = handle.lock().await;
+            self.inner.emit(&mut record, Vec::new(), wire).await?;
+        }
+        self.inner
+            .threads
+            .lock()
+            .await
+            .insert(thread_id.as_str().to_owned(), handle);
+        Ok(thread_id)
     }
 
     /// Renames a thread by hand. The name sticks; generation never replaces it.
@@ -2678,10 +2906,14 @@ impl ThreadManager {
             });
         }
 
+        let handoff = record.handoff_block();
         let dispatch = record.begin_turn(
             now,
             UserInput {
-                text: text.clone(),
+                text: match handoff {
+                    Some(block) => crate::handoff::with_request(&block, &text),
+                    None => text.clone(),
+                },
                 attachments: harness_attachments,
             },
         );
@@ -4894,6 +5126,12 @@ impl Inner {
         let mut session = match harness.start_session_with(spec, snapshot).await {
             Ok(session) => session,
             Err(error) => {
+                // An imported conversation prefers its harness-native resume.
+                // A resume the harness cannot honour falls back to a bounded
+                // handoff on this same turn instead of failing it.
+                if self.fall_back_to_handoff(&handle, &turn, generation).await {
+                    return;
+                }
                 self.fail_session(handle, Some(generation), turn, error.to_string())
                     .await;
                 return;
@@ -4997,6 +5235,61 @@ impl Inner {
         // Whatever is waiting now (a queued turn, or none) is delivered on this
         // live session.
         self.advance_queue(handle).await;
+    }
+
+    /// Retries a turn whose imported native resume the harness refused.
+    ///
+    /// The resume id is dropped for good, the turn's prompt becomes a bounded
+    /// handoff of the saved messages, and a fresh session is started for the
+    /// same turn. `false` when this turn was not an imported native resume, or
+    /// no longer owns the startup slot: the ordinary failure path then runs.
+    async fn fall_back_to_handoff(
+        self: &Arc<Self>,
+        handle: &ThreadHandle,
+        turn: &Arc<TurnDispatch>,
+        generation: u64,
+    ) -> bool {
+        let meta = {
+            let mut record = handle.lock().await;
+            if !record.session.is_starting(generation) {
+                return false;
+            }
+            let applies =
+                record.meta.imported.as_ref().is_some_and(|imported| {
+                    imported.native_resume && record.meta.resume_id.is_some()
+                });
+            if !applies || record.dispatch_for(&turn.turn_id).is_none() {
+                return false;
+            }
+            record.meta.resume_id = None;
+            if let Some(imported) = record.meta.imported.as_mut() {
+                imported.native_resume = false;
+            }
+            record.session = SessionSlot::None;
+            record.meta.clone()
+        };
+        // Persist the cleared id before the retry: a startup that fails again
+        // must not leave the next daemon run trying the same dead session.
+        if let Err(error) = self.journal.upsert_thread(&meta).await {
+            tracing::warn!(%error, "could not clear a failed imported resume id");
+        }
+        let block = meta.imported.as_ref().and_then(|imported| {
+            let messages: Vec<crate::handoff::HandoffMessage<'_>> = imported
+                .messages
+                .iter()
+                .map(|message| crate::handoff::HandoffMessage {
+                    role: message.role,
+                    text: &message.text,
+                })
+                .collect();
+            crate::handoff::build(&messages, crate::handoff::budget_from_env())
+        });
+        if let Some(block) = block {
+            let request = turn.input().text;
+            turn.replace_text(crate::handoff::with_request(&block, &request));
+        }
+        self.spawn_session(handle.clone());
+        true
     }
 
     /// Ends the turn a failed startup captured.
@@ -8506,6 +8799,20 @@ mod tests {
             limit: usize,
         ) -> Result<Vec<h4rn_protocol::ScheduleRun>, crate::journal::JournalError> {
             self.inner.schedule_runs(task_id, limit).await
+        }
+
+        async fn list_imported_sources(
+            &self,
+        ) -> Result<Vec<crate::journal::ImportedSourceRecord>, crate::journal::JournalError>
+        {
+            self.inner.list_imported_sources().await
+        }
+
+        async fn record_imported_source(
+            &self,
+            record: &crate::journal::ImportedSourceRecord,
+        ) -> Result<(), crate::journal::JournalError> {
+            self.inner.record_imported_source(record).await
         }
     }
 

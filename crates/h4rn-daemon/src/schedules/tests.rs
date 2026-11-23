@@ -1511,6 +1511,7 @@ fn idle_thread_meta(
         resume_id: None,
         agent_fingerprint: None,
         parked: None,
+        imported: None,
     }
 }
 

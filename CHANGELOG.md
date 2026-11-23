@@ -37,6 +37,26 @@ All notable changes to h4rn are recorded here. The format follows
   linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
   `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and
   `LinkIssue`/`UnlinkIssue`/`ListThreadIssues`. See [docs/forges.md](docs/forges.md).
+- **Claude Code and Codex conversations can be imported and continued.** Add
+  project → Import finds the conversations those harnesses already saved on this
+  machine, grouped by git checkout with GitHub remotes named `owner/name` and
+  other folders under "Other folders". Git repositories with three or more
+  conversations active in the last 30 days are checked by default; Review all
+  shows everything with Select all and Select none. Importing registers new
+  projects and creates one thread per conversation with its title, harness,
+  model, working folder and kept messages (the first request plus the newest
+  user and assistant messages, 200 in total, each with its timestamp; tool
+  activity, attachments and setup context are left out). Each source session id
+  is recorded, so running the import again only adds what is new. Progress is
+  visible and the import keeps running if you leave the view. An imported thread
+  starts a session when you send its first message: it prefers the harness's own
+  resume and falls back to a bounded handoff of the saved history (16,000 bytes
+  by default, `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000) before your exact,
+  unshortened request. Discovery is read-only, skips `~/Downloads`, caps an
+  attempt at 100 conversations and 4 GiB per project, and skips transcripts over
+  4 GiB, conversations over 32 MiB of kept text or 100,000 records. Message text
+  is never logged and token shapes are redacted before storage. See
+  [docs/import.md](docs/import.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a

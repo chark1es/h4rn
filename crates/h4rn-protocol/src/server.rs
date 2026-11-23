@@ -79,6 +79,14 @@ pub enum ServerFrame {
         /// The task that was created, changed or deleted.
         event: crate::ScheduleEvent,
     },
+    /// An ephemeral conversation-import progress frame, outside the durable log.
+    ///
+    /// A reconnecting client asks again with
+    /// [`crate::ClientRequest::SessionImportStatus`]; progress is not replayed.
+    ImportEvent {
+        /// The latest state of the run.
+        event: crate::import::ImportEvent,
+    },
 }
 
 /// A device paired directly (LAN/tailnet) with this computer.
@@ -735,6 +743,16 @@ pub enum ResponseBody {
     Directories {
         /// The listing.
         listing: crate::projects::DirectoryListing,
+    },
+    /// One scan for importable conversations.
+    SessionImports {
+        /// What was found.
+        scan: crate::import::ImportScan,
+    },
+    /// An import run after it was started or asked about.
+    SessionImportStatus {
+        /// The run, or `None` when no import has run on this daemon.
+        progress: Option<crate::import::ImportProgress>,
     },
     /// Configured text generators. Keys are never included.
     TextGenerators {

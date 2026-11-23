@@ -1519,4 +1519,20 @@ host: HostId,
 /**
  * Directory to list; `None` or `~` lists the home directory.
  */
-path: string | null, };
+path: string | null, } | { "type": "scan_session_imports", 
+/**
+ * Host to scan.
+ */
+host: HostId, } | { "type": "import_sessions", 
+/**
+ * Host to import on.
+ */
+host: HostId, 
+/**
+ * `ImportProject::key` values the person checked.
+ */
+projects: Array<string>, } | { "type": "session_import_status", 
+/**
+ * Host to ask.
+ */
+host: HostId, };

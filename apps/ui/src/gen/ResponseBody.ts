@@ -44,6 +44,8 @@ import type { GitThreadStatus } from "./GitThreadStatus";
 import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
+import type { ImportProgress } from "./ImportProgress";
+import type { ImportScan } from "./ImportScan";
 import type { LimitsReport } from "./LimitsReport";
 import type { LinearAccount } from "./LinearAccount";
 import type { LinearIssue } from "./LinearIssue";
@@ -694,7 +696,15 @@ project: Project, } | { "type": "directories",
 /**
  * The listing.
  */
-listing: DirectoryListing, } | { "type": "text_generators", 
+listing: DirectoryListing, } | { "type": "session_imports", 
+/**
+ * What was found.
+ */
+scan: ImportScan, } | { "type": "session_import_status", 
+/**
+ * The run, or `None` when no import has run on this daemon.
+ */
+progress: ImportProgress | null, } | { "type": "text_generators", 
 /**
  * Generators, oldest first.
  */
