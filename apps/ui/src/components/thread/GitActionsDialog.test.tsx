@@ -221,6 +221,11 @@ describe("GitActionsDialog", () => {
       result: { branch: "feature/widget", upstream: "origin/feature/widget", status: STATUS },
     });
     await waitFor(() => expect(screen.getByRole("button", { name: "Commit & push" })).toBeTruthy());
+    // The reply keeps the protocol 1 key `upstream`; the toast names the
+    // remote branch the push wrote rather than showing "undefined".
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Pushed feature/widget to origin/feature/widget." }),
+    );
   });
 
   it("commits with the keyboard shortcut and refreshes the counts", async () => {
