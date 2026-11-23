@@ -501,7 +501,10 @@
         let state = "active";
         let threadModel = "";
         let threadTitle = "";
-        let streaming = null;
+        // Streaming messages by item id, and the ids already completed, so a
+        // streamed reply is replaced once and a replay never renders it twice.
+        const streaming = new Map();
+        const completed = new Set();
         let turn = null;
         let files = [];
         let busy = false;
@@ -534,7 +537,6 @@
           head.append(el("span", "", timeText(startedAt) || "now"));
           turn.append(head);
           els.timeline.append(turn);
-          streaming = null;
         }
 
         function ensureTurn(event) {
@@ -617,6 +619,12 @@
           return details;
         }
 
+        function findTool(host, toolId) {
+          return Array.from(host.querySelectorAll("[data-tool-id]")).find(
+            (node) => node.dataset.toolId === toolId,
+          );
+        }
+
         function applyEvent(event) {
           switch (event.type) {
             case "turn_started":
@@ -626,13 +634,23 @@
               const item = event.item;
               const host = ensureTurn(event);
               if (item.kind === "message") {
-                streaming = null;
-                host.append(messageEl(item));
-              } else if (item.kind === "tool_call") {
-                streaming = null;
-                host.append(toolEl(item.tool_call));
-              } else if (item.kind === "delegated") {
-                streaming = null;
+                if (completed.has(item.item_id)) break;
+                completed.add(item.item_id);
+                const node = messageEl(item);
+                const existing = streaming.get(item.item_id);
+                if (existing && existing.isConnected) existing.replaceWith(node);
+                else host.append(node);
+                streaming.delete(item.item_id);
+                break;
+              }
+              if (item.kind === "tool_call") {
+                const node = toolEl(item.tool_call, true);
+                const existing = findTool(host, item.tool_call.tool_call_id);
+                if (existing) existing.replaceWith(node);
+                else host.append(node);
+                break;
+              }
+              if (item.kind === "delegated") {
                 const card = el("div", "guest-card");
                 card.append(el("div", "tag", "Subagent"));
                 card.append(el("p", "prose", item.task || "Delegated work"));
@@ -642,19 +660,22 @@
             }
             case "message_delta": {
               const host = ensureTurn(event);
-              if (!streaming) {
-                streaming = el("p", "prose");
-                host.append(streaming);
+              // Every delta names its item, so a reply is one node however
+              // many frames it takes; the completion replaces that node.
+              let node = streaming.get(event.item_id);
+              if (!node || !node.isConnected) {
+                node = el("p", "prose");
+                node.dataset.itemId = event.item_id;
+                host.append(node);
+                streaming.set(event.item_id, node);
               }
-              streaming.textContent += event.text || "";
+              node.textContent += event.text || "";
               break;
             }
             case "tool_call": {
               const host = ensureTurn(event);
               const call = event.tool_call;
-              const existing = host.querySelector(
-                `[data-tool-id="${CSS.escape(call.tool_call_id)}"]`,
-              );
+              const existing = findTool(host, call.tool_call_id);
               const node = toolEl(call, true);
               if (existing) existing.replaceWith(node);
               else host.append(node);
@@ -662,6 +683,8 @@
             }
             case "plan": {
               const host = ensureTurn(event);
+              // ACP sends the whole plan on every update: one list per turn,
+              // replaced rather than appended.
               const list = el("ol", "plan");
               (event.entries || []).forEach((entry, index) => {
                 const item = el(
@@ -671,7 +694,9 @@
                 );
                 list.append(item);
               });
-              host.append(list);
+              const existing = host.querySelector(".plan");
+              if (existing) existing.replaceWith(list);
+              else host.append(list);
               break;
             }
             case "approval_requested": {
@@ -686,7 +711,7 @@
             }
             case "turn_completed": {
               const host = ensureTurn(event);
-              streaming = null;
+              streaming.clear();
               const label =
                 event.status === "completed"
                   ? "Turn finished"
@@ -699,7 +724,7 @@
             }
             case "error": {
               const host = ensureTurn(event);
-              streaming = null;
+              streaming.clear();
               host.append(el("p", "error", event.message || "Something went wrong."));
               break;
             }
@@ -746,18 +771,20 @@
           state = next;
           const active = next === "active";
           els.composerWrap.hidden = !active;
-          if (!active) {
-            showNotice(
-              next === "expired"
-                ? "This link expired"
-                : next === "revoked"
-                  ? "Sharing stopped"
-                  : next === "unbound"
-                    ? "Open this link in the browser that first used it"
-                    : "Guest links are off",
-              notice || "Ask the owner for a new link.",
-            );
+          if (active) {
+            els.notice.hidden = true;
+            return;
           }
+          showNotice(
+            next === "expired"
+              ? "This link expired"
+              : next === "revoked"
+                ? "Sharing stopped"
+                : next === "unbound"
+                  ? "Open this link in the browser that first used it"
+                  : "Guest links are off",
+            notice || "Ask the owner for a new link.",
+          );
         }
 
         function merge(snapshot) {
@@ -785,7 +812,11 @@
             const empty = els.timeline.querySelector(".guest-empty");
             if (empty) empty.remove();
           }
-          events.forEach(applyEvent);
+          events.forEach((entry) => {
+            // A snapshot carries `{seq, event}`; a live frame may carry the
+            // event alone.
+            applyEvent(entry && entry.event ? entry.event : entry);
+          });
           if (snapshot.next_seq && snapshot.next_seq > lastSeq) lastSeq = snapshot.next_seq;
           if (els.timeline.children.length === 0) {
             els.timeline.append(
@@ -817,11 +848,12 @@
             if (state === "active") window.setTimeout(poll, POLL_MS);
           } catch (error) {
             if (state === "active") {
+              // Keep the notice up while the page retries: it is the
+              // explanation for the frozen timeline, not a transient toast.
               showNotice(
                 "Waiting for the connection",
                 "This page keeps trying. If the message repeats, the machine may be offline.",
               );
-              els.notice.hidden = true;
               window.setTimeout(poll, POLL_MS * 2);
             }
           } finally {

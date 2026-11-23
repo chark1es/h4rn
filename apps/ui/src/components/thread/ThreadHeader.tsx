@@ -193,10 +193,12 @@ export function ThreadHeader({
           Snooze for 1 h
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => openGuestShare(summary.thread_id)}>
-          <Share2Icon aria-hidden />
-          Share with guest…
-        </DropdownMenuItem>
+        {summary.tab !== "settled" ? (
+          <DropdownMenuItem onSelect={() => openGuestShare(summary.thread_id)}>
+            <Share2Icon aria-hidden />
+            Share with guest…
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem
           onSelect={() => {
             void navigator.clipboard
