@@ -47,6 +47,7 @@ import {
   getClient,
   interruptThread,
   navigate,
+  openLinkPullRequest,
   openNewThread,
   openShortcuts,
   openThread,
@@ -213,6 +214,10 @@ export function CommandPalette() {
               <WorkflowIcon aria-hidden />
               Open subagents
               <CommandShortcut command="panel.subagents" />
+            </CommandItem>
+            <CommandItem value="link pull request pr url" onSelect={() => openLinkPullRequest()}>
+              <GitPullRequestIcon aria-hidden />
+              Link pull request…
             </CommandItem>
             <CommandItem
               value="pin keep working"

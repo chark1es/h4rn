@@ -662,6 +662,16 @@ impl ForgeService {
         Ok(pr)
     }
 
+    /// The account id a repository resolves to, for callers that store it.
+    pub fn resolve_account_id(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+    ) -> Result<String, ForgeServiceError> {
+        self.resolve_client(account_id, repo)
+            .map(|(account_id, _client)| account_id)
+    }
+
     /// Fetches one page of a PR diff.
     pub async fn get_diff(
         &self,

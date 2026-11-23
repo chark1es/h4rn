@@ -441,6 +441,27 @@ pub enum ResponseBody {
         /// Thread, turn and the exact markdown sent.
         handoff: crate::forge::ForgeHandoff,
     },
+    /// One thread's linked pull requests, with their latest forge state.
+    ThreadPullRequests {
+        /// Thread the links belong to.
+        thread_id: crate::ThreadId,
+        /// Linked PRs, oldest link first.
+        pulls: Vec<crate::forge::ThreadPullRequest>,
+    },
+    /// One linked pull request after a link or watch change.
+    ThreadPullRequest {
+        /// The link and its latest state.
+        pull: crate::forge::ThreadPullRequest,
+    },
+    /// Threads that link to one pull request.
+    PrThreads {
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+        /// Linking threads.
+        threads: Vec<crate::forge::PrLinkedThread>,
+    },
     /// MCP servers known to this daemon, with the status of each (ADR-006).
     McpServers {
         /// Servers in configuration order.

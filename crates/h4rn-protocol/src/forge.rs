@@ -157,6 +157,11 @@ pub struct ForgeCapabilities {
     /// pipelines). Gitea, Forgejo, Bitbucket Cloud and Azure DevOps expose no
     /// equivalent for the PR surface.
     pub rerun_checks: bool,
+    /// PR detail is revalidated with a conditional GET (`ETag`/`304`) on every
+    /// read, so an unchanged PR costs no extra request. The watch relies on it
+    /// to stay inside the rate limit.
+    #[serde(default)]
+    pub conditional_poll: bool,
 }
 
 /// One configured forge account.
@@ -215,6 +220,22 @@ impl ForgeRepoRef {
             format!("{base}/{}/_git/{}", self.owner, self.repo)
         } else {
             format!("{base}/{}/{}", self.owner, self.repo)
+        }
+    }
+
+    /// Browser URL for one pull request or merge request.
+    ///
+    /// GitHub, Gitea/Forgejo, Bitbucket Cloud and Azure DevOps use a
+    /// `/pull…` path; GitLab nests merge requests under
+    /// `/-/merge_requests/`.
+    pub fn pr_web_url(&self, number: u32) -> String {
+        let base = self.web_url();
+        match self.forge {
+            ForgeKind::GitHub => format!("{base}/pull/{number}"),
+            ForgeKind::GitLab => format!("{base}/-/merge_requests/{number}"),
+            ForgeKind::Gitea | ForgeKind::Forgejo => format!("{base}/pulls/{number}"),
+            ForgeKind::Bitbucket => format!("{base}/pull-requests/{number}"),
+            ForgeKind::AzureDevOps => format!("{base}/pullrequest/{number}"),
         }
     }
 }
@@ -728,6 +749,49 @@ pub struct ForgeHandoff {
     pub pr: ForgePrSummary,
 }
 
+/// A pull request linked to a thread.
+///
+/// The link itself is durable metadata (account, repository and number). The
+/// summary is the state last read from the forge, so a failed read is visible
+/// as `summary: None` with `error` set rather than as stale or invented state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ThreadPullRequest {
+    /// Repository the PR belongs to.
+    pub repo: ForgeRepoRef,
+    /// PR/MR number.
+    pub number: u32,
+    /// Forge account the daemon reads it with.
+    pub account_id: String,
+    /// Latest state read from the forge.
+    pub summary: Option<ForgePrSummary>,
+    /// Why the latest read failed, when it did.
+    pub error: Option<String>,
+    /// The thread is watching this PR for changes.
+    pub watching: bool,
+    /// Something the watch cannot do, said plainly so the UI can show it
+    /// beside the watch state. `None` when the watch covers every trigger.
+    ///
+    /// Today this is set when the account's login is unknown: comment and
+    /// review triggers need it to tell the person's own words from someone
+    /// else's, and pretending every author is someone else would wake the
+    /// agent for its own comments.
+    #[serde(default)]
+    pub watch_notice: Option<String>,
+    /// When the link was created.
+    pub linked_at: DateTime<Utc>,
+}
+
+/// One thread that links to a pull request, for the PR page's reverse lookup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PrLinkedThread {
+    /// Thread that holds the link.
+    pub thread_id: crate::ids::ThreadId,
+    /// Thread title, so the PR page can render a row without listing threads.
+    pub title: String,
+    /// The thread is watching this PR.
+    pub watching: bool,
+}
+
 /// A capabilities row for one forge kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ForgeCapabilityEntry {
@@ -836,6 +900,46 @@ mod tests {
         };
         assert_eq!(repo.full_name(), "team/platform/api");
         assert_eq!(repo.web_url(), "https://gitlab.com/team/platform/api");
+        assert_eq!(
+            repo.pr_web_url(7),
+            "https://gitlab.com/team/platform/api/-/merge_requests/7"
+        );
+    }
+
+    #[test]
+    fn pr_web_urls_follow_each_forges_shape() {
+        let repo = |forge| ForgeRepoRef {
+            forge,
+            base_url: "https://example.test".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        assert_eq!(
+            repo(ForgeKind::GitHub).pr_web_url(12),
+            "https://example.test/owner/repo/pull/12"
+        );
+        assert_eq!(
+            repo(ForgeKind::Gitea).pr_web_url(12),
+            "https://example.test/owner/repo/pulls/12"
+        );
+        assert_eq!(
+            repo(ForgeKind::Forgejo).pr_web_url(12),
+            "https://example.test/owner/repo/pulls/12"
+        );
+        assert_eq!(
+            repo(ForgeKind::Bitbucket).pr_web_url(12),
+            "https://example.test/owner/repo/pull-requests/12"
+        );
+        let azure = ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://dev.azure.com/acme".into(),
+            owner: "project".into(),
+            repo: "api".into(),
+        };
+        assert_eq!(
+            azure.pr_web_url(12),
+            "https://dev.azure.com/acme/project/_git/api/pullrequest/12"
+        );
     }
 
     #[test]

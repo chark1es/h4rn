@@ -4,6 +4,7 @@ import {
   CircleDashedIcon,
   CircleXIcon,
   ExternalLinkIcon,
+  EyeIcon,
   GitPullRequestIcon,
   HandIcon,
   LoaderCircleIcon,
@@ -58,6 +59,7 @@ import type {
   ForgeRemote,
   ForgeRepoRef,
   ForgeReviewThread,
+  PrLinkedThread,
   ThreadSummary,
 } from "@/gen";
 import { glyphForThread } from "@/lib/agent";
@@ -830,17 +832,25 @@ function PrDetail({
   const [commentBusy, setCommentBusy] = useState(false);
   const [handoff, setHandoff] = useState<string | null>(null);
   const [handBusy, setHandBusy] = useState(false);
+  const [linkedThreads, setLinkedThreads] = useState<PrLinkedThread[]>([]);
 
   const account = accountForRepo(accounts, repo);
   const caps = capabilities.find((entry) => entry.forge === repo.forge)?.capabilities ?? null;
   const hosts = useApp((state) => state.hosts);
-  const linkedThread = useMemo(
+  const branchThread = useMemo(
     () =>
       threads.find((thread) => thread.branch && thread.branch === pr?.summary.head_branch) ??
       threads[0] ??
       null,
     [threads, pr],
   );
+  // The daemon's links decide which thread gets the PR context; a branch match
+  // is only the fallback when no thread has linked it yet.
+  const linkedThread = useMemo(() => {
+    const first = linkedThreads[0];
+    if (!first) return branchThread;
+    return threads.find((thread) => thread.thread_id === first.thread_id) ?? branchThread;
+  }, [linkedThreads, threads, branchThread]);
 
   useEffect(() => {
     void detailNonce;
@@ -861,6 +871,24 @@ function PrDetail({
         if (cancelled) return;
         setError(errorMessage(cause));
         setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repo, number, detailNonce]);
+
+  // Linked threads are their own read: a forge failure there must not hide the
+  // PR header, and the reverse lookup can lag without the page looking broken.
+  useEffect(() => {
+    void detailNonce;
+    let cancelled = false;
+    api()
+      .prThreads(repo, number)
+      .then((links) => {
+        if (!cancelled) setLinkedThreads(links);
+      })
+      .catch(() => {
+        if (!cancelled) setLinkedThreads([]);
       });
     return () => {
       cancelled = true;
@@ -1819,9 +1847,47 @@ function PrDetail({
                 ))
               )}
             </div>
+            <div className="q-side-sec">
+              <h3>
+                <span>Linked threads</span>
+              </h3>
+              {linkedThreads.length === 0 ? (
+                <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
+                  No thread has linked this pull request. Link it from a thread with ⌘K.
+                </p>
+              ) : (
+                linkedThreads.map((link) => {
+                  const thread = threads.find((item) => item.thread_id === link.thread_id);
+                  return (
+                    <button
+                      type="button"
+                      className="q-chk"
+                      key={link.thread_id}
+                      style={{ width: "100%", textAlign: "left" }}
+                      onClick={() => openThread(link.thread_id)}
+                    >
+                      {thread ? (
+                        <AgentGlyph
+                          glyph={glyphForThread(thread, hosts[thread.host]?.online ?? false)}
+                          size={14}
+                        />
+                      ) : null}
+                      <span className="grow">{link.title}</span>
+                      {link.watching ? (
+                        <EyeIcon
+                          className="q-icon s12 q-faint"
+                          strokeWidth={1.5}
+                          aria-label="Watching this pull request"
+                        />
+                      ) : null}
+                    </button>
+                  );
+                })
+              )}
+            </div>
             <div className="q-side-sec" style={{ border: 0 }}>
               <h3>
-                <span>Linked thread</span>
+                <span>Agent thread</span>
               </h3>
               {linkedThread ? (
                 <button

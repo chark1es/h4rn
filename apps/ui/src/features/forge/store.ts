@@ -23,7 +23,9 @@ import type {
   ForgeReviewComment,
   ForgeReviewState,
   ForgeReviewThread,
+  PrLinkedThread,
   ResponseBody,
+  ThreadPullRequest,
 } from "@/gen";
 
 /**
@@ -252,6 +254,44 @@ export class ForgeApi {
       "forge_device_flow_status",
     );
     return response.status;
+  }
+
+  async threadPullRequests(threadId: string): Promise<ThreadPullRequest[]> {
+    const response = await this.call(
+      { type: "list_thread_pull_requests", thread_id: threadId },
+      "thread_pull_requests",
+    );
+    return response.pulls;
+  }
+
+  async prThreads(repo: ForgeRepoRef, number: number): Promise<PrLinkedThread[]> {
+    const response = await this.call({ type: "list_pr_threads", repo, number }, "pr_threads");
+    return response.threads;
+  }
+
+  async linkPullRequest(
+    threadId: string,
+    repo: ForgeRepoRef,
+    number: number,
+    accountId: string | null = null,
+  ): Promise<ThreadPullRequest> {
+    const response = await this.call(
+      { type: "link_pull_request", thread_id: threadId, account_id: accountId, repo, number },
+      "thread_pull_request",
+    );
+    return response.pull;
+  }
+
+  async unlinkPullRequest(threadId: string, repo: ForgeRepoRef, number: number): Promise<void> {
+    await this.call({ type: "unlink_pull_request", thread_id: threadId, repo, number }, "ack");
+  }
+
+  async watchPullRequest(threadId: string, repo: ForgeRepoRef, number: number): Promise<void> {
+    await this.call({ type: "watch_pull_request", thread_id: threadId, repo, number }, "ack");
+  }
+
+  async unwatchPullRequest(threadId: string, repo: ForgeRepoRef, number: number): Promise<void> {
+    await this.call({ type: "unwatch_pull_request", thread_id: threadId, repo, number }, "ack");
   }
 }
 
@@ -518,4 +558,152 @@ export function requiredMark(check: ForgeChecks["checks"][number]): string | nul
 /** First 7 characters of a commit id, the way forges abbreviate it. */
 export function shortSha(sha: string): string {
   return sha.slice(0, 7);
+}
+
+/** The browser URL of one pull request or merge request. */
+export function prWebUrl(repo: ForgeRepoRef, number: number): string {
+  const root = repo.base_url.replace(/\/$/, "");
+  const base =
+    repo.forge === "azure_devops"
+      ? `${root}/${repo.owner}/_git/${repo.repo}`
+      : `${root}/${repo.owner}/${repo.repo}`;
+  switch (repo.forge) {
+    case "github":
+      return `${base}/pull/${number}`;
+    case "gitlab":
+      return `${base}/-/merge_requests/${number}`;
+    case "gitea":
+    case "forgejo":
+      return `${base}/pulls/${number}`;
+    case "bitbucket":
+      return `${base}/pull-requests/${number}`;
+    case "azure_devops":
+      return `${base}/pullrequest/${number}`;
+  }
+}
+
+/** A pull request named by a pasted URL. */
+export type LinkedPullReference = { repo: ForgeRepoRef; number: number };
+
+function publicForgeForHost(host: string): ForgeKind | null {
+  if (host === "bitbucket.org") return "bitbucket";
+  if (host === "dev.azure.com" || host.endsWith(".visualstudio.com")) return "azure_devops";
+  switch (host) {
+    case "github.com":
+      return "github";
+    case "gitlab.com":
+      return "gitlab";
+    case "gitea.com":
+      return "gitea";
+    case "codeberg.org":
+      return "forgejo";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The workspace repository a URL belongs to, when its host is already known.
+ *
+ * Azure DevOps needs the organization path to match as well, because every
+ * organization shares `dev.azure.com`.
+ */
+function detectedRepo(known: ForgeRepoRef[], url: URL, host: string): ForgeRepoRef | undefined {
+  return known.find((repo) => {
+    try {
+      const base = new URL(repo.base_url);
+      if (base.hostname.toLowerCase() !== host) return false;
+      if (repo.forge !== "azure_devops") return true;
+      const prefix = base.pathname.replace(/\/$/, "").toLowerCase();
+      return prefix === "" || url.pathname.toLowerCase().startsWith(`${prefix}/`);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Parses a forge pull request URL.
+ *
+ * Public hosts are recognised without configuration. A custom host works when
+ * the workspace's detected repository names it, so an ssh alias or a
+ * self-hosted forge is never guessed. Unknown hosts return `null` rather than
+ * pointing a link at the wrong server.
+ */
+export function parsePullRequestUrl(
+  value: string,
+  known: ForgeRepoRef[] = [],
+): LinkedPullReference | null {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+
+  const host = url.hostname.toLowerCase();
+  const origin = `${url.protocol}//${url.host}`;
+  const detected = detectedRepo(known, url, host);
+  const forge = detected?.forge ?? publicForgeForHost(host);
+  if (!forge) return null;
+
+  const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  const baseUrl = (detected?.base_url ?? origin).replace(/\/$/, "");
+
+  if (forge === "azure_devops") {
+    const git = segments.indexOf("_git");
+    if (git < 1 || segments[git + 2] !== "pullrequest") return null;
+    const repo = segments[git + 1];
+    const owner = segments[git - 1];
+    const number = Number(segments[git + 3]);
+    if (!owner || !repo || !Number.isInteger(number) || number <= 0) return null;
+    const organization = segments.slice(0, git - 1).join("/");
+    const base = detected ? baseUrl : organization ? `${origin}/${organization}` : origin;
+    return { repo: { forge, base_url: base, owner, repo }, number };
+  }
+
+  const marker =
+    forge === "gitlab"
+      ? "merge_requests"
+      : forge === "github"
+        ? "pull"
+        : forge === "bitbucket"
+          ? "pull-requests"
+          : "pulls";
+  const index = segments.indexOf(marker);
+  if (index < 2) return null;
+
+  if (forge === "gitlab") {
+    if (segments[index - 1] !== "-" || index < 3) return null;
+    const owner = segments.slice(0, index - 2).join("/");
+    const repo = segments[index - 2];
+    const number = Number(segments[index + 1]);
+    if (!owner || !repo || !Number.isInteger(number) || number <= 0) return null;
+    return { repo: { forge, base_url: baseUrl, owner, repo }, number };
+  }
+
+  if (index !== 2) return null;
+  const [owner, repo] = segments;
+  const number = Number(segments[index + 1]);
+  if (!owner || !repo || !Number.isInteger(number) || number <= 0) return null;
+  return { repo: { forge, base_url: baseUrl, owner, repo }, number };
+}
+
+/** `#7 Open` for a linked PR, or `#7` when the last read failed. */
+export function linkedPullLabel(pull: ThreadPullRequest): string {
+  if (!pull.summary) return `#${pull.number}`;
+  return `#${pull.number} ${stateLabel(pull.summary.state).label}`;
+}
+
+/** A badge tone: only a closed PR earns colour; open and merged stay quiet. */
+export function linkedPullTone(pull: ThreadPullRequest): string {
+  switch (pull.summary?.state) {
+    case "closed":
+      return "danger";
+    case "merged":
+      return "ok";
+    default:
+      return "";
+  }
 }
