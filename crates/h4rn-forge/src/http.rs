@@ -162,8 +162,25 @@ impl ForgeHttp {
         body: Option<&Value>,
         conditional: bool,
     ) -> Result<HttpResponse> {
+        self.request_with_content_type(method, url, body, conditional, None)
+            .await
+    }
+
+    /// Performs a request with an explicit JSON content type.
+    ///
+    /// Azure Boards only accepts JSON Patch as
+    /// `application/json-patch+json`; every other client keeps the default.
+    pub async fn request_with_content_type(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        conditional: bool,
+        content_type: Option<&str>,
+    ) -> Result<HttpResponse> {
         self.limiter.acquire().await?;
-        self.send(method, url, body, conditional, None).await
+        self.send(method, url, body, conditional, content_type, None)
+            .await
     }
 
     /// Performs a request that must finish inside `budget`.
@@ -190,7 +207,7 @@ impl ForgeHttp {
             ));
         }
         let timeout = left.min(DEFAULT_REQUEST_TIMEOUT);
-        self.send(method, url, body, conditional, Some(timeout))
+        self.send(method, url, body, conditional, None, Some(timeout))
             .await
     }
 
@@ -201,6 +218,7 @@ impl ForgeHttp {
         url: &str,
         body: Option<&Value>,
         conditional: bool,
+        content_type: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<HttpResponse> {
         let mut request = self.client.request(method.clone(), url).header(
@@ -223,7 +241,15 @@ impl ForgeHttp {
         }
 
         if let Some(body) = body {
-            request = request.json(body);
+            if let Some(content_type) = content_type {
+                request = request
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(serde_json::to_vec(body).map_err(|error| {
+                        ForgeError::InvalidRequest(format!("could not encode the request: {error}"))
+                    })?);
+            } else {
+                request = request.json(body);
+            }
         }
 
         let response = match timeout {
@@ -340,6 +366,26 @@ impl ForgeHttp {
     /// PATCHes JSON and maps the response.
     pub async fn patch_json(&self, url: &str, body: &Value) -> Result<Value> {
         let response = self.request(Method::PATCH, url, Some(body), false).await?;
+        self.json(response)
+    }
+
+    /// PUTs JSON and maps the response.
+    pub async fn put_json(&self, url: &str, body: &Value) -> Result<Value> {
+        let response = self.request(Method::PUT, url, Some(body), false).await?;
+        self.json(response)
+    }
+
+    /// PATCHes a JSON Patch document and maps the response.
+    pub async fn patch_json_patch(&self, url: &str, body: &Value) -> Result<Value> {
+        let response = self
+            .request_with_content_type(
+                Method::PATCH,
+                url,
+                Some(body),
+                false,
+                Some("application/json-patch+json"),
+            )
+            .await?;
         self.json(response)
     }
 
@@ -561,7 +607,7 @@ fn retry_at(headers: &HeaderMap) -> Option<DateTime<Utc>> {
         .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
 }
 
-fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
+pub(crate) fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
@@ -593,10 +639,18 @@ fn redact_json_strings(value: &mut Value, sanitize: &dyn Fn(&str) -> String) {
     }
 }
 
-/// Token prefixes that identify a forge credential. Azure DevOps personal
+/// Token prefixes that identify a tracker credential. Azure DevOps personal
 /// access tokens have no prefix of their own, so they cannot be recognised by
-/// shape; the Atlassian and GitHub/GitLab forms can.
-const TOKEN_PREFIXES: [&str; 6] = ["ghp_", "gho_", "glpat-", "github_pat_", "ATBB", "ATATT"];
+/// shape; the Atlassian, GitHub/GitLab and Linear forms can.
+const TOKEN_PREFIXES: [&str; 7] = [
+    "ghp_",
+    "gho_",
+    "glpat-",
+    "github_pat_",
+    "ATBB",
+    "ATATT",
+    "lin_api_",
+];
 
 /// Removes anything that looks like a token from a forge message.
 ///
@@ -638,6 +692,19 @@ fn token_run_len(value: &str) -> usize {
         })
         .map(|(index, _)| index)
         .unwrap_or(value.len())
+}
+
+/// Redacts a configured credential in every spelling an upstream body can
+/// echo: raw, percent-encoded (either hex case), Base64 or JSON-escaped.
+///
+/// The pattern pass stays as a second layer for a token this account does not
+/// own.
+pub(crate) fn redact_configured(value: &str, secret: &str) -> String {
+    let mut output = value.to_owned();
+    for form in secret_forms(secret) {
+        output = redact_secret(&output, &form);
+    }
+    redact(&output)
 }
 
 /// Replaces every copy of one configured secret, matching percent escapes
@@ -991,6 +1058,23 @@ mod tests {
         assert_eq!(redact("glpat-xyz"), "[redacted]");
         assert_eq!(redact("ATBBtoken"), "[redacted]");
         assert_eq!(redact("ATATT3xFfGF0abc"), "[redacted]");
+        // Linear personal API keys are recognisable by their prefix too.
+        let linear = format!("{}_abc123", "lin_api");
+        assert_eq!(redact(&format!("bad key {linear}")), "bad key [redacted]");
+    }
+
+    #[test]
+    fn a_configured_secret_is_redacted_even_without_a_known_prefix() {
+        // The exact-secret pass is what protects a key Linear accepts in any
+        // shape, including the percent-encoded spelling an upstream body can
+        // quote.
+        let secret = ["fixture", "/linear", "+key"].concat();
+        let escaped = encode_path_segment(&secret);
+        let body = format!("the upstream said {secret} and also {escaped}");
+        let message = redact_configured(&body, &secret);
+        assert!(!message.contains(&secret), "{message}");
+        assert!(!message.contains(&escaped), "{message}");
+        assert_eq!(message.matches("[redacted]").count(), 2, "{message}");
     }
 
     #[test]

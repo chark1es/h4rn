@@ -1,4 +1,4 @@
-import { ExternalLinkIcon, EyeIcon, GitPullRequestIcon, XIcon } from "lucide-react";
+import { CircleDotIcon, ExternalLinkIcon, EyeIcon, GitPullRequestIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -9,35 +9,58 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { ThreadPullRequest } from "@/gen";
+import { IssueApi, issueStateLabel } from "@/features/issues/store";
+import { notifyThreadIssueLinks, useThreadIssues } from "@/features/issues/threadLinks";
+import type { ThreadIssue, ThreadPullRequest } from "@/gen";
 import { getClient, pushToast } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
 import { ForgeApi, linkedPullLabel, linkedPullTone, prWebUrl, stateLabel } from "./store";
 import { notifyThreadLinks, useThreadPullRequests } from "./threadLinks";
 
 const resolveApi = () => new ForgeApi((request) => getClient().request(request));
+const resolveIssueApi = () => new IssueApi((request) => getClient().request(request));
 
-/** Opens a pull request in the browser from a menu row. */
+/** Opens a pull request or issue in the browser from a menu row. */
 function openPull(url: string): void {
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function issueLabel(issue: ThreadIssue): string {
+  const state = issue.state;
+  if (!state) return issue.issue_id;
+  if (state.tracker === "forge") {
+    return `#${state.issue.number} ${issueStateLabel(state.issue.state)}`;
+  }
+  return `${state.issue.identifier} ${state.issue.state_name}`;
+}
+
+function issueTitle(issue: ThreadIssue): string {
+  return issue.state ? issue.state.issue.title : "Issue unavailable";
+}
+
+function issueUrl(issue: ThreadIssue): string {
+  const state = issue.state;
+  if (!state) return "";
+  return state.tracker === "forge" ? state.issue.web_url : state.issue.url;
 }
 
 /** The quiet header badge and its linked-items popover. */
 export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
   const { pulls, reload } = useThreadPullRequests(threadId, resolveApi);
+  const { issues, reload: reloadIssues } = useThreadIssues(threadId, resolveIssueApi);
   const [busy, setBusy] = useState<string | null>(null);
 
-  if (pulls.length === 0) return null;
+  if (pulls.length === 0 && issues.length === 0) return null;
 
   const run = async (key: string, action: () => Promise<void>) => {
     setBusy(key);
     try {
       await action();
       notifyThreadLinks(threadId);
+      notifyThreadIssueLinks(threadId);
     } catch (cause) {
       pushToast({
-        title: "The pull request link did not change.",
+        title: "The linked item did not change.",
         description: cause instanceof Error ? cause.message : String(cause),
         variant: "error",
       });
@@ -49,8 +72,12 @@ export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
   return (
     <LinkedPullRequestsMenu
       pulls={pulls}
+      issues={issues}
       busy={busy}
-      onOpen={reload}
+      onOpen={() => {
+        reload();
+        reloadIssues();
+      }}
       onUnlink={(pull) =>
         run(`unlink:${pull.number}`, () =>
           resolveApi().unlinkPullRequest(threadId, pull.repo, pull.number),
@@ -66,6 +93,11 @@ export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
           resolveApi().unwatchPullRequest(threadId, pull.repo, pull.number),
         )
       }
+      onUnlinkIssue={(issue) =>
+        run(`unlink-issue:${issue.issue_id}`, () =>
+          resolveIssueApi().unlinkIssue(threadId, issue.scope, issue.issue_id),
+        )
+      }
     />
   );
 }
@@ -73,40 +105,51 @@ export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
 /** Presentational badge + panel, so markup can be tested without a socket. */
 export function LinkedPullRequestsMenu({
   pulls,
+  issues = [],
   busy = null,
   onOpen,
   onUnlink,
   onWatch,
   onUnwatch,
+  onUnlinkIssue,
 }: {
   pulls: ThreadPullRequest[];
+  issues?: ThreadIssue[];
   busy?: string | null;
   /** Reads the daemon again when the panel opens. */
   onOpen?: () => void;
   onUnlink: (pull: ThreadPullRequest) => void;
   onWatch: (pull: ThreadPullRequest) => void;
   onUnwatch: (pull: ThreadPullRequest) => void;
+  onUnlinkIssue?: (issue: ThreadIssue) => void;
 }) {
   const primary = pulls[0];
-  if (!primary) return null;
-  const extra = pulls.length - 1;
+  const primaryIssue = issues[0];
+  if (!primary && !primaryIssue) return null;
+  const extra = pulls.length + issues.length - 1;
 
   return (
     <DropdownMenu onOpenChange={(open) => open && onOpen?.()}>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className={cn("q-badge q-pr-badge", linkedPullTone(primary))}
-          aria-label="Linked pull requests"
-          title="Linked pull requests"
+          className={cn("q-badge q-pr-badge", primary ? linkedPullTone(primary) : "")}
+          aria-label="Linked items"
+          title="Linked items"
         >
-          <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          <span>{linkedPullLabel(primary)}</span>
+          {primary ? (
+            <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          ) : (
+            <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          )}
+          <span>
+            {primary ? linkedPullLabel(primary) : primaryIssue ? issueLabel(primaryIssue) : ""}
+          </span>
           {extra > 0 ? <span className="q-pr-more">+{extra}</span> : null}
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80 max-h-80 overflow-y-auto">
-        <DropdownMenuLabel>Linked pull requests</DropdownMenuLabel>
+        <DropdownMenuLabel>Linked items</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {pulls.map((pull, index) => {
           const url = pull.summary?.web_url || prWebUrl(pull.repo, pull.number);
@@ -156,6 +199,31 @@ export function LinkedPullRequestsMenu({
                 <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
                 Unlink
               </DropdownMenuItem>
+            </div>
+          );
+        })}
+        {issues.map((issue, index) => {
+          const url = issueUrl(issue);
+          return (
+            <div className="q-pr-links" key={`issue:${issue.issue_id}`}>
+              {pulls.length > 0 || index > 0 ? <DropdownMenuSeparator /> : null}
+              <DropdownMenuItem
+                className="q-pr-row"
+                disabled={busy !== null || !url}
+                onSelect={() => url && openPull(url)}
+              >
+                <CircleDotIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                <span className="q-num">{issueLabel(issue)}</span>
+                <span className="q-pr-link-name">{issueTitle(issue)}</span>
+                <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              </DropdownMenuItem>
+              {issue.error ? <p className="q-pr-note q-danger">{issue.error}</p> : null}
+              {onUnlinkIssue ? (
+                <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlinkIssue(issue)}>
+                  <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  Unlink issue
+                </DropdownMenuItem>
+              ) : null}
             </div>
           );
         })}
