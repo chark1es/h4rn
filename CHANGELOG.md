@@ -51,7 +51,9 @@ All notable changes to h4rn are recorded here. The format follows
   `--no-verify`) and reports a hook's output. Push creates an upstream on `origin` when asked and
   is never forced: a non-fast-forward rejection or a bad credential is reported as exactly that.
   **Create pull request…** offers title, body, base branch (the default branch is preselected) and
-  a draft flag; the daemon pushes first when the branch needs it and then opens the request.
+  a draft flag; the daemon checks the remote without running any hook (or submodule recursion) and
+  then pushes first when the branch needs it and opens the request. When the real push does run,
+  its hooks run as usual and a hook failure stops the open, exactly as a push from the panel.
   **Generate** can fill the commit message or the pull request text from a model chosen under
   Settings → Source control (Off by default, coding agent, or text generator, plus custom
   instructions); it fills the field only and never commits, pushes or opens anything. Only the
@@ -440,6 +442,51 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Commit, push and pull request follow what git and the forge really say.** A
+  branch deleted on the forge no longer skips the push a pull request needs just
+  because the local remote-tracking ref is stale: the daemon asks the remote with
+  a dry run of the exact push the real push will run, so a separate `pushurl` or
+  an `insteadOf` rewrite cannot make it check a different repository. Every
+  `pushurl` must report the branch up to date before the push is skipped. That
+  dry run skips the pre-push hook, so a failing, slow or side-effecting hook
+  cannot block or delay opening the request; the real push still runs it. A
+  failing lookup is classified and redacted like a push, so a 403 that echoes a
+  credential shows "sign in to the git remote" without the credential, whatever
+  the URL's shape (IPv4, IPv6, hostname or port, userinfo or query): the URL is
+  parsed and its userinfo, query and fragment removed, with a conservative
+  fallback when it cannot be parsed. A URL git prints with raw whitespace inside
+  its quoted field is replaced whole — no real URL contains whitespace, and
+  splitting at it would leave the rest of the token in the message. A rejected
+  non-fast-forward is still named as one when git's advice is turned off,
+  because the push's porcelain record is read. A path-limited commit message
+  describes the working-tree content `--only` will record, including an edit
+  that was never staged, and works in a repository with no commits yet. A push
+  result names the remote branch it wrote (still sent as `upstream`, so older
+  clients read it) and no longer claims the branch's tracking upstream changed
+  when `set_upstream` was false. Opening a pull request gives the lookup, the
+  push and the forge call one 220-second budget, inside the dialog's 240-second
+  wait, and the forge call fails fast with "rate limited; try again in Ns"
+  rather than sleeping past it. An ordinary request keeps its own timing: a
+  documented rate-limit reset is waited out before the transfer's timeout
+  starts, so a wait longer than one transfer no longer fails a viewer or a
+  lookup. See [docs/git-actions.md](docs/git-actions.md).
+- **A terminal's reply owner still answers after a resync.** With an old client attached, the first
+  viewer to answer owns every reply. But another client that held the query's bytes raw could make
+  the owner's snapshot-only claim give way, and the old client's copy was dropped too, so the shell
+  received no answer at all. A claim now gives way only to a viewer that could actually be written
+  under the ownership rule: any viewer when all of them name positions, otherwise only the owner.
+  A positioned viewer that the owner rule blocks can no longer swallow the answer either.
+- **Closing a terminal never signals a pid that another process may own, and still ends a shell that
+  ignores the hangup.** On Unix a pid is freed the moment the shell is reaped, so a close that ran
+  between the reap and the exit report could SIGHUP or SIGKILL whatever process reused it. The
+  reader thread now waits for the shell with `waitid(WNOWAIT)`, which reports the exit but leaves
+  the shell a zombie, and every real reap publishes the exit under a lock the close holds around
+  each pid-targeted signal: the opening hangup, the primary kill (a SIGHUP by pid on Unix) and the
+  pid fallback. While that lock shows no published exit, the pid is still this shell's live process
+  or its unreaped zombie, never a reused pid. A shell that survives the hangup and has no usable
+  process group is still ended, and the session's internal `alive` flag is never taken for a reap
+  confirmation. The group's TERM and KILL still go out on purpose, to end the shell's jobs, and
+  Windows keeps its handle kill, which holds a process handle rather than a bare pid.
 - **Thread settings always describe the session that will run the next turn.** The model list a
   Codex session reports survives the session ending, so an idle thread still offers the models its
   CLI really has (and a new Codex thread starts on the first of them, not on a static default the

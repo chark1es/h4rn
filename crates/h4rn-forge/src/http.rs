@@ -31,6 +31,28 @@ use crate::error::{ForgeError, Result};
 /// Default local request budget per account, requests per minute.
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
 
+/// Default time one request may take, including a rate-limit wait.
+///
+/// Scaled down under `cfg(test)` so a timing test can make a reset outlast
+/// the transfer without sleeping for the production timeout. Integration
+/// tests and every release build get the real 30 seconds.
+#[cfg(not(test))]
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// [`DEFAULT_REQUEST_TIMEOUT`], scaled down for unit tests.
+#[cfg(test)]
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Longest rate-limit wait an ordinary request sleeps through before giving
+/// up with the seconds to retry.
+#[cfg(not(test))]
+const ORDINARY_WAIT_CAP: Duration = Duration::from_secs(60);
+
+/// [`ORDINARY_WAIT_CAP`], scaled down for unit tests so a reset that outlasts
+/// one transfer still keeps the test short.
+#[cfg(test)]
+const ORDINARY_WAIT_CAP: Duration = Duration::from_secs(5);
+
 /// How long a cached ETag response is trusted before an unconditional GET.
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -86,7 +108,7 @@ impl ForgeHttp {
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("h4rn-forge/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
             .map_err(|error| ForgeError::Network(error.to_string()))?;
         let auth = match auth {
@@ -111,7 +133,7 @@ impl ForgeHttp {
             secrets,
             accept: accept.to_owned(),
             cache: Mutex::new(HashMap::new()),
-            limiter: RateLimiter::new(requests_per_minute.max(1)),
+            limiter: RateLimiter::new(forge, requests_per_minute.max(1)),
         })
     }
 
@@ -126,6 +148,13 @@ impl ForgeHttp {
     }
 
     /// Performs a request, applying conditional GET and rate limiting.
+    ///
+    /// This is the path every ordinary call takes (a viewer, a repository
+    /// lookup, a list). A documented rate limit is waited out first, as it
+    /// always was, and the transfer's own timeout starts only once the wait is
+    /// over: a reset longer than one transfer does not make an ordinary
+    /// request fail. Only the pull-request call has a shared deadline to keep
+    /// (see [`Self::request_within`]).
     pub async fn request(
         &self,
         method: Method,
@@ -134,7 +163,46 @@ impl ForgeHttp {
         conditional: bool,
     ) -> Result<HttpResponse> {
         self.limiter.acquire().await?;
+        self.send(method, url, body, conditional, None).await
+    }
 
+    /// Performs a request that must finish inside `budget`.
+    ///
+    /// The budget covers the rate-limit wait as well as the transfer, so a
+    /// caller with a shared deadline (opening a pull request) cannot have a
+    /// wait sleep past it. A wait the budget cannot cover fails at once with
+    /// [`ForgeError::RateLimited`] naming when the forge resets, rather than
+    /// sleeping into the transport timeout.
+    pub async fn request_within(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        conditional: bool,
+        budget: Duration,
+    ) -> Result<HttpResponse> {
+        let started = Instant::now();
+        self.limiter.acquire_within(budget).await?;
+        let left = budget.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Err(ForgeError::Network(
+                "the forge request had no time left in its budget".into(),
+            ));
+        }
+        let timeout = left.min(DEFAULT_REQUEST_TIMEOUT);
+        self.send(method, url, body, conditional, Some(timeout))
+            .await
+    }
+
+    /// Sends one prepared request, applying conditional GET and caching.
+    async fn send(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        conditional: bool,
+        timeout: Option<Duration>,
+    ) -> Result<HttpResponse> {
         let mut request = self.client.request(method.clone(), url).header(
             reqwest::header::ACCEPT,
             if self.accept.is_empty() {
@@ -158,10 +226,13 @@ impl ForgeHttp {
             request = request.json(body);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
+        let response = match timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        }
+        .send()
+        .await
+        .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
 
         let status = response.status();
         let headers = response.headers().clone();
@@ -250,6 +321,19 @@ impl ForgeHttp {
     /// POSTs JSON and maps the response.
     pub async fn post_json(&self, url: &str, body: &Value) -> Result<Value> {
         let response = self.request(Method::POST, url, Some(body), false).await?;
+        self.json(response)
+    }
+
+    /// POSTs JSON inside `budget`, for a caller with a shared deadline.
+    pub async fn post_json_within(
+        &self,
+        url: &str,
+        body: &Value,
+        budget: Duration,
+    ) -> Result<Value> {
+        let response = self
+            .request_within(Method::POST, url, Some(body), false, budget)
+            .await?;
         self.json(response)
     }
 
@@ -681,6 +765,7 @@ fn json_escaped(secret: &str) -> String {
 
 /// A local token bucket plus the forge's documented remaining quota.
 struct RateLimiter {
+    forge: ForgeKind,
     budget: Mutex<Budget>,
     capacity: f64,
     refill_per_second: f64,
@@ -694,9 +779,10 @@ struct Budget {
 }
 
 impl RateLimiter {
-    fn new(requests_per_minute: u32) -> Self {
+    fn new(forge: ForgeKind, requests_per_minute: u32) -> Self {
         let capacity = f64::from(requests_per_minute);
         Self {
+            forge,
             budget: Mutex::new(Budget {
                 tokens: capacity,
                 last_refill: Instant::now(),
@@ -708,8 +794,32 @@ impl RateLimiter {
         }
     }
 
+    /// Takes one request's token, waiting out any documented rate limit first.
+    ///
+    /// The ordinary path: a reset up to a minute away is slept through, and a
+    /// further one is refused with [`ForgeError::RateLimited`]. The transfer's
+    /// own timeout starts once the wait is over, so a slow reset never eats
+    /// the time a request has to run.
     async fn acquire(&self) -> Result<()> {
+        self.acquire_bounded(None).await
+    }
+
+    /// Takes one request's token, waiting no longer than `budget` in total.
+    ///
+    /// A documented reset further away than the budget is not slept through:
+    /// the request fails at once with [`ForgeError::RateLimited`] and the
+    /// seconds until the reset, so the caller's deadline is kept and the person
+    /// is told when to try again.
+    async fn acquire_within(&self, budget: Duration) -> Result<()> {
+        self.acquire_bounded(Some(budget)).await
+    }
+
+    /// [`Self::acquire`] and [`Self::acquire_within`] in one loop; `None`
+    /// keeps the ordinary wait-then-send timing.
+    async fn acquire_bounded(&self, budget: Option<Duration>) -> Result<()> {
+        let started = Instant::now();
         loop {
+            let left = budget.map(|budget| budget.saturating_sub(started.elapsed()));
             let wait = {
                 let Ok(mut budget) = self.budget.lock() else {
                     return Err(ForgeError::Network("rate limiter poisoned".into()));
@@ -727,16 +837,7 @@ impl RateLimiter {
                             budget.reset_at = None;
                         }
                         Some(reset) => {
-                            let wait = reset.saturating_duration_since(Instant::now());
-                            if wait > Duration::from_secs(60) {
-                                return Err(ForgeError::RateLimited {
-                                    forge: ForgeKind::GitHub,
-                                    retry_after_secs: Some(wait.as_secs()),
-                                    retry_at: None,
-                                    message: "the request budget is exhausted".into(),
-                                });
-                            }
-                            retry_wait = Some(wait);
+                            retry_wait = Some(reset.saturating_duration_since(Instant::now()));
                         }
                         None => {}
                     }
@@ -754,8 +855,28 @@ impl RateLimiter {
                 }
             };
 
-            match wait {
-                Some(wait) if !wait.is_zero() => tokio::time::sleep(wait).await,
+            match (wait, left) {
+                (Some(wait), Some(left)) if wait >= left => {
+                    return Err(ForgeError::RateLimited {
+                        forge: self.forge,
+                        retry_after_secs: Some(wait.as_secs().max(1)),
+                        retry_at: None,
+                        message: "the request budget cannot cover the rate-limit wait".into(),
+                    });
+                }
+                // An ordinary request waits out a documented reset for up to
+                // `ORDINARY_WAIT_CAP`, then gives up with the seconds to
+                // retry, as it always did; a longer wait is a forge that is
+                // not coming back soon.
+                (Some(wait), None) if wait > ORDINARY_WAIT_CAP => {
+                    return Err(ForgeError::RateLimited {
+                        forge: self.forge,
+                        retry_after_secs: Some(wait.as_secs()),
+                        retry_at: None,
+                        message: "the request budget is exhausted".into(),
+                    });
+                }
+                (Some(wait), _) if !wait.is_zero() => tokio::time::sleep(wait).await,
                 _ => tokio::task::yield_now().await,
             }
         }
@@ -1174,5 +1295,191 @@ mod tests {
             "a credential that is not this account's is still hidden: {message}"
         );
         assert!(!message.contains(&outsider), "{message}");
+    }
+
+    /// A rate-limit reset further away than the caller's budget is refused at
+    /// once, naming the wait, instead of sleeping past the deadline or into the
+    /// transport timeout.
+    #[tokio::test]
+    async fn a_rate_limit_wait_longer_than_the_budget_fails_at_once() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(429).append_header("retry-after", "10"))
+            .mount(&server)
+            .await;
+        let client = ForgeHttp::new(
+            ForgeKind::GitHub,
+            &server.uri(),
+            auth_header("authorization", "Bearer test-token-value"),
+            "application/json",
+            120,
+        )
+        .unwrap();
+        let url = format!("{}/repos/acme/widget/pulls", server.uri());
+
+        // The first answer is the 429 itself and records the reset in the
+        // limiter, so the next call knows the wait before it starts.
+        let error = client.post_json(&url, &Value::Null).await.expect_err("429");
+        assert!(matches!(error, ForgeError::RateLimited { .. }), "{error:?}");
+
+        let started = Instant::now();
+        let error = client
+            .post_json_within(&url, &Value::Null, Duration::from_secs(1))
+            .await
+            .expect_err("the wait does not fit the budget");
+        assert!(
+            matches!(
+                error,
+                ForgeError::RateLimited {
+                    retry_after_secs: Some(seconds),
+                    ..
+                } if seconds >= 9
+            ),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("rate limited"), "{message}");
+        assert!(message.contains("try again in"), "{message}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the request slept instead of failing fast: {:?}",
+            started.elapsed()
+        );
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1, "the second call never reached the forge");
+    }
+
+    /// Ordinary requests keep the old wait-then-send timing: a documented
+    /// reset is slept through even when it is longer than one transfer's
+    /// timeout. Only the pull-request call's shared budget refuses it.
+    #[tokio::test]
+    async fn an_ordinary_request_waits_out_a_rate_limit_beyond_its_timeout() {
+        let limiter = RateLimiter::new(ForgeKind::GitHub, 120);
+        {
+            let mut budget = limiter.budget.lock().expect("limiter");
+            budget.remaining = Some(0);
+            budget.reset_at = Some(Instant::now() + Duration::from_millis(250));
+        }
+        let error = limiter
+            .acquire_within(Duration::from_millis(50))
+            .await
+            .expect_err("the budget cannot cover the wait");
+        assert!(matches!(error, ForgeError::RateLimited { .. }), "{error:?}");
+
+        let started = Instant::now();
+        limiter
+            .acquire()
+            .await
+            .expect("an ordinary request waits instead of failing fast");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the ordinary path did not wait: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A viewer request that follows a `429` waits out `Retry-After` and then
+    /// succeeds, without the wait eating the transfer's own timeout.
+    #[tokio::test]
+    async fn a_viewer_request_after_a_rate_limit_waits_and_succeeds() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        #[derive(Clone)]
+        struct OnceRateLimited(Arc<AtomicBool>);
+
+        impl Respond for OnceRateLimited {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                if self.0.swap(true, Ordering::SeqCst) {
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"login": "octocat"}))
+                } else {
+                    ResponseTemplate::new(429).append_header("retry-after", "1")
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/user"))
+            .respond_with(OnceRateLimited(Arc::new(AtomicBool::new(false))))
+            .mount(&server)
+            .await;
+        let client = ForgeHttp::new(
+            ForgeKind::GitHub,
+            &server.uri(),
+            auth_header("authorization", "Bearer test-token-value"),
+            "application/json",
+            120,
+        )
+        .unwrap();
+
+        let url = format!("{}/user", server.uri());
+        let error = client.get_json(&url).await.expect_err("first 429");
+        assert!(matches!(error, ForgeError::RateLimited { .. }), "{error:?}");
+
+        let started = Instant::now();
+        let viewer = client
+            .get_json(&url)
+            .await
+            .expect("the viewer request waits and then succeeds");
+        assert_eq!(viewer["login"], "octocat");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "the request did not wait: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// An ordinary request has two separate times: the wait for a documented
+    /// reset, and the transfer. A reset longer than one transfer's timeout is
+    /// still waited out, and the request that follows succeeds; a single
+    /// shared budget would have refused it before it sent anything. Both times
+    /// are scaled down under `cfg(test)`, so the reset outlasts the timeout
+    /// while the test stays short.
+    #[tokio::test]
+    async fn an_ordinary_request_waits_out_a_reset_longer_than_its_transfer_timeout() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    // Two whole seconds: longer than the test transfer timeout,
+                    // well inside the test wait cap.
+                    .append_header("retry-after", "2")
+                    .set_body_json(serde_json::json!({"login": "octocat"})),
+            )
+            .mount(&server)
+            .await;
+        let client = ForgeHttp::new(
+            ForgeKind::GitHub,
+            &server.uri(),
+            auth_header("authorization", "Bearer test-token-value"),
+            "application/json",
+            120,
+        )
+        .unwrap();
+
+        let url = format!("{}/user", server.uri());
+        // The first answer is fine and records the reset, so the limiter knows
+        // the wait before the next request starts.
+        client.get_json(&url).await.expect("first request");
+
+        let started = Instant::now();
+        let viewer = client
+            .get_json(&url)
+            .await
+            .expect("an ordinary request waits out the reset and then succeeds");
+        let elapsed = started.elapsed();
+        assert_eq!(viewer["login"], "octocat");
+        assert!(
+            elapsed > DEFAULT_REQUEST_TIMEOUT,
+            "the request gave up on a wait longer than its transfer timeout: {elapsed:?}"
+        );
     }
 }

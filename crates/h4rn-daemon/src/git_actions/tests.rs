@@ -111,6 +111,94 @@ fn bare_head(path: &Path, name: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// Advances a bare remote from another clone, so a local branch is behind it.
+/// Returns the remote's new head.
+fn advance_remote(bare: &Bare) -> String {
+    let clone = tempfile::tempdir().expect("clone dir");
+    let path = clone.path().join("clone");
+    let output = Command::new("git")
+        .args(["clone"])
+        .arg(bare.path())
+        .arg(&path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("clone");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["config", "user.name", "Someone Else"]);
+    git(&["config", "user.email", "else@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(path.join("remote.txt"), "from the other clone\n").expect("write");
+    git(&["add", "remote.txt"]);
+    git(&["commit", "-m", "Remote change"]);
+    git(&["push", "origin", "main"]);
+    git(&["rev-parse", "HEAD"])
+}
+
+/// Writes an executable hook in a repository.
+fn write_hook(repo: &Path, name: &str, body: &str) {
+    write_hook_in(&repo.join(".git/hooks"), name, body);
+}
+
+/// Writes an executable hook in a hooks directory (a submodule's hooks live in
+/// its own git dir).
+fn write_hook_in(hooks: &Path, name: &str, body: &str) {
+    std::fs::create_dir_all(hooks).expect("hooks dir");
+    let hook = hooks.join(name);
+    std::fs::write(&hook, body).expect("hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+/// A throwaway HTTP server that answers every request with 403, so git echoes
+/// the whole push URL in its failure.
+fn forbidden_server(address: &str) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind(address).expect("bind");
+    let address = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        // git may open one connection for the ref advertisement and another
+        // for the push; answer each until the test process ends.
+        for stream in listener.incoming().take(8) {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            let _ = stream.flush();
+        }
+    });
+    address
+}
+
+/// The throwaway 403 server on the IPv6 loopback.
+fn ipv6_forbidden_server() -> std::net::SocketAddr {
+    forbidden_server("[::1]:0")
+}
+
 #[test]
 fn status_counts_staged_unstaged_and_untracked_paths() {
     let repo = Repo::new();
@@ -243,6 +331,29 @@ fn commit_input_covers_exactly_the_requested_paths() {
     );
 }
 
+/// `--only -- paths` records each named path's working-tree content, so the
+/// message input has to describe `HEAD -- paths`, not just the index.
+#[test]
+fn commit_input_for_named_paths_includes_edits_that_were_not_staged() {
+    let repo = Repo::new();
+    repo.write("a.txt", "staged version\n");
+    repo.git(&["add", "a.txt"]);
+    repo.write("a.txt", "unstaged version\n");
+
+    let input =
+        commit_input_blocking(repo.path(), false, Some(&["a.txt".to_owned()])).expect("input");
+    assert!(
+        input.diff.contains("+unstaged version"),
+        "the edit that will be committed is described: {}",
+        input.diff
+    );
+    assert!(
+        !input.diff.contains("+staged version"),
+        "an intermediate index state is not what the commit records: {}",
+        input.diff
+    );
+}
+
 #[test]
 fn paths_outside_the_workspace_and_option_shaped_names_are_refused() {
     let repo = Repo::new();
@@ -367,7 +478,7 @@ async fn push_needs_an_upstream_unless_asked_to_set_one() {
 
     let pushed = push_blocking(repo.path(), true).expect("push");
     assert_eq!(pushed.branch, "main");
-    assert_eq!(pushed.upstream, "origin/main");
+    assert_eq!(pushed.remote_branch, "origin/main");
     assert_eq!(pushed.status.ahead, 0);
     let remote_head = Command::new("git")
         .args(["rev-parse", "main"])
@@ -495,7 +606,7 @@ async fn a_branch_tracking_origin_main_pushes_under_its_own_name() {
 
     let pushed = push_blocking(repo.path(), true).expect("push");
     assert_eq!(pushed.branch, "feature/widget");
-    assert_eq!(pushed.upstream, "origin/feature/widget");
+    assert_eq!(pushed.remote_branch, "origin/feature/widget");
     assert_eq!(bare_head(bare.path(), "feature/widget"), feature_head);
     assert_eq!(
         bare_head(bare.path(), "main"),
@@ -530,7 +641,7 @@ async fn a_fork_layout_pushes_to_origin_not_the_upstream_remote() {
     let head = repo.head();
 
     let pushed = push_blocking(repo.path(), true).expect("push");
-    assert_eq!(pushed.upstream, "origin/main");
+    assert_eq!(pushed.remote_branch, "origin/main");
     assert_eq!(bare_head(fork.path(), "main"), head);
     assert_eq!(
         bare_head(upstream.path(), "main"),
@@ -709,6 +820,81 @@ async fn a_pull_request_push_only_pushes_when_it_must() {
     );
 }
 
+/// The local remote-tracking ref is only what the last fetch saw. A branch
+/// deleted on the forge must still be pushed before its pull request opens.
+#[tokio::test]
+async fn a_deleted_remote_branch_is_pushed_again_despite_a_stale_tracking_ref() {
+    let (repo, bare) = repo_with_remote();
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.write("feature.txt", "feature\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Feature work"]);
+    let head = repo.head();
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "feature/widget")
+            .await
+            .expect("first push"),
+    );
+
+    // Delete the branch on the remote, without a fetch --prune here: the local
+    // ref still names the same commit as HEAD.
+    let deleted = Command::new("git")
+        .args([
+            "--git-dir",
+            bare.path().to_str().unwrap(),
+            "update-ref",
+            "-d",
+            "refs/heads/feature/widget",
+        ])
+        .output()
+        .expect("delete remote branch");
+    assert!(
+        deleted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", "refs/remotes/origin/feature/widget"]),
+        head,
+        "the stale ref still matches HEAD"
+    );
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "feature/widget")
+        .await
+        .expect("push a deleted branch again");
+    assert!(pushed, "a branch missing on the remote is pushed");
+    assert_eq!(bare_head(bare.path(), "feature/widget"), head);
+}
+
+/// A push names the remote branch it wrote; it never claims the branch's
+/// tracking upstream changed when it was not asked to.
+#[tokio::test]
+async fn a_push_names_the_remote_branch_without_changing_tracking() {
+    let (repo, bare) = repo_with_remote();
+    push_blocking(repo.path(), true).expect("publish main");
+
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.write("feature.txt", "feature\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Feature work"]);
+    push_blocking(repo.path(), true).expect("publish feature");
+    repo.git(&["branch", "--set-upstream-to=origin/main"]);
+
+    repo.write("more.txt", "more\n");
+    repo.git(&["add", "more.txt"]);
+    repo.git(&["commit", "-m", "More work"]);
+    let head = repo.head();
+
+    let pushed = push_blocking(repo.path(), false).expect("push without -u");
+    assert_eq!(pushed.remote_branch, "origin/feature/widget");
+    assert_eq!(
+        pushed.status.upstream.as_deref(),
+        Some("origin/main"),
+        "set_upstream=false leaves tracking alone"
+    );
+    assert_eq!(bare_head(bare.path(), "feature/widget"), head);
+}
+
 #[test]
 fn commit_input_sends_the_diff_and_recent_subjects() {
     let repo = Repo::new();
@@ -829,4 +1015,764 @@ fn a_path_is_kept_verbatim() {
         "src/with space.rs"
     );
     assert!(validate_path(&workspace, "src/../with space.rs").is_err());
+}
+
+/// A push URL may carry a credential in its query. Git echoes the whole URL
+/// when the remote answers 403, so neither the lookup nor the push may pass
+/// that text on, and the failure is a credential problem, not an internal one.
+#[tokio::test]
+async fn a_credential_in_the_push_url_never_reaches_the_client() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    // Built at runtime so no credential-shaped literal lives in the tree.
+    let credential = format!("{}{}", "fake", "credential-4f9c");
+    let repo = Repo::new();
+    let url = format!("{}/repo.git?access_token={credential}", server.uri());
+    repo.git(&["remote", "add", "origin", &url]);
+
+    let error = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect_err("403");
+    assert!(
+        matches!(error, GitActionError::Unauthorized(_)),
+        "{error:?}"
+    );
+    let shown = error.to_string();
+    assert!(
+        !shown.contains(&credential),
+        "the credential is removed: {shown}"
+    );
+    assert!(
+        !shown.contains("access_token"),
+        "the query is removed: {shown}"
+    );
+    assert!(shown.contains("[redacted]"), "{shown}");
+}
+
+/// The lookup must ask the repository the push will write. `get-url --push`
+/// expands `insteadOf` once, and passing that result to `ls-remote` can expand
+/// a second rule and query another repository. A dry-run push resolves the
+/// push URL exactly once, so it sees the real target; the decoy stays on its
+/// older commit, so a push that lands there is caught.
+#[tokio::test]
+async fn the_lookup_asks_the_actual_push_target() {
+    let repo = Repo::new();
+    let real = Bare::new();
+    let decoy = Bare::new();
+    repo.git(&["remote", "add", "origin", decoy.path().to_str().unwrap()]);
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.write("feature.txt", "first\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "First feature"]);
+    let first = repo.head();
+    // Both repositories hold the first commit; the local branch then moves to
+    // a second one, so the decoy is genuinely behind.
+    repo.git(&[
+        "push",
+        real.path().to_str().unwrap(),
+        "refs/heads/feature/widget:refs/heads/feature/widget",
+    ]);
+    repo.git(&["push", "origin", "feature/widget"]);
+    assert_eq!(bare_head(decoy.path(), "feature/widget"), first);
+    repo.write("feature.txt", "second\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Second feature"]);
+    let head = repo.head();
+    // The local tracking ref claims the pushed head, as a fetch-less push does.
+    repo.git(&["update-ref", "refs/remotes/origin/feature/widget", &head]);
+
+    // The push URL is one rewrite away from the real target, and the expanded
+    // path is another rewrite away from the decoy.
+    let real_path = real.path().to_str().unwrap();
+    let decoy_path = decoy.path().to_str().unwrap();
+    repo.git(&["config", "remote.origin.pushurl", "h4rn-push:"]);
+    repo.git(&[
+        "config",
+        &format!("url.{real_path}.insteadOf"),
+        "h4rn-push:",
+    ]);
+    repo.git(&["config", &format!("url.{decoy_path}.insteadOf"), real_path]);
+    assert_eq!(
+        repo.git(&["remote", "get-url", "--push", "origin"]),
+        real_path,
+        "the expanded push URL is the real target"
+    );
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "feature/widget")
+        .await
+        .expect("push");
+    assert!(pushed, "the real target is behind, so the branch is pushed");
+    assert_eq!(
+        bare_head(real.path(), "feature/widget"),
+        head,
+        "the push went to the repository the push URL names"
+    );
+    assert_eq!(
+        bare_head(decoy.path(), "feature/widget"),
+        first,
+        "the decoy stayed on its older commit"
+    );
+}
+
+/// The lookup must ask the repository the push will write, not the one a
+/// second `insteadOf` rewrite would name. Here the decoy is at `HEAD` and the
+/// real push target is behind: a lookup that queried the decoy would think
+/// the branch is published and skip the push.
+#[tokio::test]
+async fn the_lookup_does_not_stop_at_an_up_to_date_decoy() {
+    let repo = Repo::new();
+    let real = Bare::new();
+    let decoy = Bare::new();
+    let real_path = real.path().to_str().unwrap();
+    let decoy_path = decoy.path().to_str().unwrap();
+    repo.git(&["remote", "add", "origin", decoy_path]);
+    repo.git(&["checkout", "-b", "feature/widget"]);
+    repo.write("feature.txt", "first\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "First feature"]);
+    repo.git(&[
+        "push",
+        real_path,
+        "refs/heads/feature/widget:refs/heads/feature/widget",
+    ]);
+    repo.write("feature.txt", "second\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "Second feature"]);
+    let head = repo.head();
+    // The decoy holds `HEAD`; the real push target is a commit behind.
+    repo.git(&[
+        "push",
+        decoy_path,
+        "refs/heads/feature/widget:refs/heads/feature/widget",
+    ]);
+    repo.git(&["update-ref", "refs/remotes/origin/feature/widget", &head]);
+
+    // `get-url --push` resolves to the real path, and the decoy rewrite claims
+    // that path, so a lookup that re-expanded it would ask the decoy.
+    repo.git(&["config", "remote.origin.pushurl", "h4rn-push:"]);
+    repo.git(&[
+        "config",
+        &format!("url.{real_path}.insteadOf"),
+        "h4rn-push:",
+    ]);
+    repo.git(&["config", &format!("url.{decoy_path}.insteadOf"), real_path]);
+    assert_eq!(
+        repo.git(&["remote", "get-url", "--push", "origin"]),
+        real_path,
+        "the expanded push URL is the real target"
+    );
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "feature/widget")
+        .await
+        .expect("push");
+    assert!(pushed, "the real target is behind, so the branch is pushed");
+    assert_eq!(
+        bare_head(real.path(), "feature/widget"),
+        head,
+        "the push went to the real target, not the decoy"
+    );
+}
+
+/// The lookup, the push and the forge request share one budget that is
+/// shorter than the dialog waits, and no step can outlive it.
+#[test]
+fn the_open_pull_request_budget_fits_inside_the_client_wait() {
+    let deadline = Deadline::after(OPEN_PR_BUDGET);
+    assert!(deadline.remaining() <= OPEN_PR_BUDGET);
+    assert_eq!(deadline.step(PR_LOOKUP_TIMEOUT), PR_LOOKUP_TIMEOUT);
+    assert_eq!(pr_push_budget(&deadline), Duration::from_secs(160));
+    assert_eq!(
+        PR_LOOKUP_TIMEOUT + pr_push_budget(&deadline) + PR_FORGE_RESERVE,
+        OPEN_PR_BUDGET,
+        "lookup, push and forge request fill one budget"
+    );
+    assert!(
+        OPEN_PR_BUDGET < Duration::from_secs(240),
+        "the daemon answers before the dialog stops waiting"
+    );
+
+    // No step may run past the deadline, even a generous cap.
+    let expired = Deadline::after(Duration::ZERO);
+    assert_eq!(expired.step(PUSH_TIMEOUT), Duration::ZERO);
+    assert_eq!(pr_push_budget(&expired), Duration::ZERO);
+}
+
+/// A credential with no recognisable token shape is still removed from an
+/// echoed URL: both the userinfo and the query can carry one.
+#[test]
+fn a_plain_credential_in_a_url_is_redacted() {
+    let credential = format!("{}{}", "plain", "secret-2b7e");
+    let message = format!(
+        "fatal: unable to access 'https://user:{credential}@example.invalid/acme/widget.git?token={credential}': The requested URL returned error: 403"
+    );
+    let error = classify_push_error(&message);
+    assert!(
+        matches!(error, GitActionError::Unauthorized(_)),
+        "{error:?}"
+    );
+    let shown = error.to_string();
+    assert!(!shown.contains(&credential), "{shown}");
+    assert!(!shown.contains("token="), "{shown}");
+    assert!(shown.contains("[redacted]@"), "{shown}");
+}
+
+/// A real 403 from an IPv6 push URL is a credential problem, and neither the
+/// userinfo nor the query token reaches the client.
+#[tokio::test]
+async fn an_ipv6_push_url_never_leaks_its_credential() {
+    let address = ipv6_forbidden_server();
+    // Built at runtime so no credential-shaped literal lives in the tree.
+    let credential = format!("{}{}", "fake", "credential-9a4d");
+    let repo = Repo::new();
+    let url = format!(
+        "http://git:{credential}@[{ip}]:{port}/repo.git?access_token={credential}",
+        ip = address.ip(),
+        port = address.port()
+    );
+    repo.git(&["remote", "add", "origin", &url]);
+
+    let error = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect_err("403");
+    assert!(
+        matches!(error, GitActionError::Unauthorized(_)),
+        "{error:?}"
+    );
+    let shown = error.to_string();
+    assert!(
+        !shown.contains(&credential),
+        "the credential is removed: {shown}"
+    );
+    assert!(
+        !shown.contains("access_token"),
+        "the query is removed: {shown}"
+    );
+    assert!(shown.contains("::1"), "the host is still named: {shown}");
+}
+
+/// A real 403 from every remote shape gives up its whole URL even when the
+/// query or fragment holds a quote. Git prints the URL raw inside its
+/// single-quoted field, so a quote is not where the URL ends.
+#[tokio::test]
+async fn a_403_from_any_host_shape_redacts_quotes_inside_the_url() {
+    // Built at runtime so no credential-shaped literal lives in the tree.
+    let credential = format!("{}{}", "fake", "credential-r4c1");
+    let ipv4 = forbidden_server("127.0.0.1:0");
+    let ipv6 = forbidden_server("[::1]:0");
+    let hostname = forbidden_server("127.0.0.1:0");
+    let cases = [
+        (
+            format!(
+                "http://git:{credential}@127.0.0.1:{port}/repo.git?token=ab'{credential}&x=cd#part=\"{credential}",
+                port = ipv4.port()
+            ),
+            "127.0.0.1",
+        ),
+        (
+            format!(
+                "http://git:{credential}@[::1]:{port}/repo.git?token=ab\"{credential}&x=cd#part='{credential}",
+                port = ipv6.port()
+            ),
+            "::1",
+        ),
+        (
+            format!(
+                "http://git:{credential}@localhost:{port}/repo.git?token=ab'{credential}&x=cd#part=\"{credential}",
+                port = hostname.port()
+            ),
+            "localhost",
+        ),
+    ];
+    for (url, host) in cases {
+        let repo = Repo::new();
+        repo.git(&["remote", "add", "origin", &url]);
+        let error = push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect_err("403");
+        assert!(
+            matches!(error, GitActionError::Unauthorized(_)),
+            "{host}: {error:?}"
+        );
+        let shown = error.to_string();
+        assert!(
+            !shown.contains(&credential),
+            "{host}: the credential survived: {shown}"
+        );
+        assert!(
+            !shown.contains("token="),
+            "{host}: the query survived: {shown}"
+        );
+        assert!(
+            shown.contains(host),
+            "{host}: the host stayed named: {shown}"
+        );
+        assert!(shown.contains("[redacted]"), "{host}: {shown}");
+    }
+}
+
+/// Real git prints the field it opened with a quote whole, raw whitespace
+/// inside the URL included. A real URL never contains whitespace, so the whole
+/// field is replaced: nothing after the whitespace — where git puts the rest of
+/// a token — reaches the client, and a 403 is still a credential problem.
+#[tokio::test]
+async fn a_403_url_with_raw_whitespace_is_replaced_whole() {
+    // Built at runtime so no credential-shaped literal lives in the tree.
+    let credential = format!("{}{}", "fake", "credential-8k2m");
+    let tail = &credential[4..];
+    // A no-break space, an ideographic space and an ASCII space. Git prints
+    // each one raw inside the quoted field; an ASCII space makes git reject the
+    // URL locally, so only an answer that really is a 403 is a 403.
+    for separator in ["\u{00a0}", "\u{3000}", " "] {
+        let address = forbidden_server("127.0.0.1:0");
+        let repo = Repo::new();
+        let url = format!(
+            "http://git:{credential}@127.0.0.1:{port}/repo.git?token=ab{separator}{credential}#f{separator}{credential}",
+            port = address.port()
+        );
+        repo.git(&["remote", "add", "origin", &url]);
+
+        let error = push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect_err("the push fails");
+        let shown = error.to_string();
+        assert!(
+            !shown.contains(&credential) && !shown.contains(tail),
+            "{separator:?}: the credential survived: {shown}"
+        );
+        assert!(
+            !shown.contains("token="),
+            "{separator:?}: the query survived: {shown}"
+        );
+        assert!(
+            shown.contains("[redacted URL]"),
+            "{separator:?}: the field was not replaced whole: {shown}"
+        );
+        if shown.contains("403") {
+            assert!(
+                matches!(error, GitActionError::Unauthorized(_)),
+                "{separator:?}: a 403 is a credential problem: {error:?}"
+            );
+        }
+    }
+}
+
+/// Every host shape a remote URL can use gives up its userinfo, query and
+/// fragment, while the host and port stay readable.
+#[test]
+fn every_url_shape_loses_its_credentials() {
+    let credential = format!("{}{}", "plain", "secret-7c1f");
+    let ipv4 = format!(
+        "fatal: unable to access 'https://user:{credential}@192.0.2.10:8443/acme/widget.git?token={credential}'"
+    );
+    let ipv6 = format!(
+        "fatal: unable to access 'http://[2001:db8::7]:8080/acme/widget.git?token={credential}#part-{credential}'"
+    );
+    let ipv6_userinfo = format!(
+        "fatal: unable to access 'https://user:{credential}@[::1]:1234/acme/widget.git?access_token={credential}'"
+    );
+    let hostname = format!(
+        "fatal: unable to access 'https://git.example.invalid/acme/widget.git?private_token={credential}'"
+    );
+
+    let cases = [
+        (ipv4, "192.0.2.10:8443", true),
+        (ipv6.clone(), "[2001:db8::7]:8080", false),
+        (ipv6_userinfo, "[::1]:1234", true),
+        (hostname, "git.example.invalid", false),
+    ];
+    for (text, host, userinfo) in cases {
+        let redacted = redact_url_credentials(&text);
+        assert!(!redacted.contains(&credential), "{redacted}");
+        assert!(!redacted.contains("token="), "{redacted}");
+        assert!(
+            redacted.contains(host),
+            "the host {host} is kept: {redacted}"
+        );
+        assert_eq!(
+            redacted.contains("[redacted]@"),
+            userinfo,
+            "userinfo marker: {redacted}"
+        );
+        assert!(redacted.contains("?[redacted]"), "{redacted}");
+    }
+
+    let fragment = redact_url_credentials(&ipv6);
+    assert!(fragment.contains("#[redacted]"), "{fragment}");
+}
+
+/// A quote inside a URL is not where the URL ends.
+#[test]
+fn a_quote_inside_a_url_does_not_end_the_redaction() {
+    let credential = format!("{}{}", "plain", "secret-6d2a");
+    let cases = [
+        format!(
+            "fatal: unable to access 'https://user:{credential}@192.0.2.10:8443/acme/widget.git?token=ab'{credential}&x=cd#part-{credential}': The requested URL returned error: 403"
+        ),
+        format!(
+            "fatal: unable to access 'https://user:{credential}@[2001:db8::7]:8080/acme/widget.git?private_token=ab\"{credential}&x=\"cd': The requested URL returned error: 403"
+        ),
+        format!(
+            "fatal: unable to access 'https://user:{credential}@git.example.invalid/acme/widget.git?token='{credential}'&x='{credential}#frag\"{credential}': The requested URL returned error: 403"
+        ),
+    ];
+    for text in cases {
+        let redacted = redact_url_credentials(&text);
+        assert!(!redacted.contains(&credential), "{redacted}");
+        assert!(!redacted.contains("token="), "{redacted}");
+        assert!(redacted.contains("?[redacted]"), "{redacted}");
+        assert!(redacted.contains("[redacted]@"), "{redacted}");
+    }
+
+    // A URL that is not in a quoted field ends at whitespace, quotes and all.
+    let unquoted =
+        format!("failed for http://git.example.invalid/repo.git?token=ab'{credential} now");
+    let redacted = redact_url_credentials(&unquoted);
+    assert!(!redacted.contains(&credential), "{redacted}");
+    assert!(redacted.contains("?[redacted]"), "{redacted}");
+    assert!(redacted.contains(" now"), "{redacted}");
+
+    // A field whose closing quote is missing is still one URL to whitespace:
+    // an internal quote must not cut it and leave the rest of the token behind.
+    let unclosed = format!(
+        "fatal: unable to access 'http://git.example.invalid/repo.git?token=ab'{credential} more"
+    );
+    let redacted = redact_url_credentials(&unclosed);
+    assert!(!redacted.contains(&credential), "{redacted}");
+    assert!(redacted.contains(" more"), "{redacted}");
+}
+
+/// Text the URL parser cannot read is replaced whole: guessing where an
+/// unparseable URL ends is how a token used to survive.
+#[test]
+fn an_unparseable_url_is_replaced_whole() {
+    let credential = format!("{}{}", "plain", "secret-3e58");
+    let text = format!(
+        "fatal: cannot access https://user:{credential}@host:notaport/acme/widget.git?token={credential}"
+    );
+    let redacted = redact_url_credentials(&text);
+    assert!(!redacted.contains(&credential), "{redacted}");
+    assert!(!redacted.contains("token="), "{redacted}");
+    assert!(redacted.contains("[redacted URL]"), "{redacted}");
+}
+
+/// The dry-run check before a pull request skips the pre-push hook. A hook
+/// that fails, or is slow, must not stop an already-published branch from
+/// opening its request.
+#[tokio::test]
+async fn a_failing_pre_push_hook_does_not_stop_an_up_to_date_pull_request() {
+    let (repo, _bare) = repo_with_remote();
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect("first push")
+    );
+    write_hook(
+        repo.path(),
+        "pre-push",
+        "#!/bin/sh\necho 'the hook says no' >&2\nexit 1\n",
+    );
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect("the check does not run hooks");
+    assert!(!pushed, "the branch is already published");
+}
+
+#[tokio::test]
+async fn a_slow_pre_push_hook_cannot_delay_an_up_to_date_pull_request() {
+    let (repo, _bare) = repo_with_remote();
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect("first push")
+    );
+    write_hook(repo.path(), "pre-push", "#!/bin/sh\nsleep 8\n");
+
+    let started = Instant::now();
+    let pushed = push_for_pull_request_until(
+        repo.path(),
+        "origin",
+        "main",
+        Deadline::after(Duration::from_secs(2)),
+    )
+    .await
+    .expect("the check does not run hooks");
+    assert!(!pushed, "the branch is already published");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the hook did not run: {:?}",
+        started.elapsed()
+    );
+}
+
+/// The pre-PR probe runs no submodule's pre-push hook. With
+/// `push.recurseSubmodules=on-demand` a dry run would otherwise push
+/// unpublished submodule commits for real and run the nested hook, even
+/// though the outer push asked `--no-verify`. The real push keeps whatever
+/// recursion the repository configured.
+#[tokio::test]
+async fn the_probe_runs_no_submodule_hook_but_the_push_still_recurses() {
+    let repo = Repo::new();
+    let super_remote = Bare::new();
+    let sub_remote = Bare::new();
+    let sub_source = Repo::new();
+    let sub_path = repo.path().join("sub");
+    let sub = sub_path.to_str().unwrap();
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        super_remote.path().to_str().unwrap(),
+    ]);
+    repo.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        sub_source.path().to_str().unwrap(),
+        "sub",
+    ]);
+    repo.git(&["commit", "-m", "Add the submodule"]);
+    repo.git(&["push", "origin", "main"]);
+    repo.git(&[
+        "-C",
+        sub,
+        "remote",
+        "set-url",
+        "origin",
+        sub_remote.path().to_str().unwrap(),
+    ]);
+    repo.git(&["-C", sub, "config", "user.name", "h4rn test"]);
+    repo.git(&["-C", sub, "config", "user.email", "test@example.invalid"]);
+
+    // An unpublished submodule commit that the next superproject commit
+    // records, so `on-demand` has something to push recursively.
+    std::fs::write(sub_path.join("a.txt"), "second\n").expect("write");
+    repo.git(&["-C", sub, "commit", "-am", "Submodule change"]);
+    let sub_commit = repo.git(&["-C", sub, "rev-parse", "HEAD"]);
+    repo.git(&["add", "sub"]);
+    repo.git(&["commit", "-m", "Bump the submodule"]);
+
+    let marker = super_remote.path().join("subhook.log");
+    let gitdir =
+        std::path::PathBuf::from(repo.git(&["-C", sub, "rev-parse", "--absolute-git-dir"]));
+    write_hook_in(
+        &gitdir.join("hooks"),
+        "pre-push",
+        &format!("#!/bin/sh\necho ran >> \"{}\"\nexit 0\n", marker.display()),
+    );
+    repo.git(&["config", "push.recurseSubmodules", "on-demand"]);
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect("push");
+    assert!(pushed, "the branch is ahead of the remote");
+
+    let runs = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        runs.lines().count(),
+        1,
+        "only the real push runs the submodule hook: {runs:?}"
+    );
+    assert_eq!(
+        bare_head(sub_remote.path(), "main"),
+        sub_commit,
+        "the real push still recurses per config"
+    );
+}
+
+/// A push writes every configured `pushurl`. One destination missing the
+/// branch means the push must run, even when another already has it.
+#[tokio::test]
+async fn a_branch_missing_at_any_push_destination_is_pushed() {
+    let repo = Repo::new();
+    let first = Bare::new();
+    let second = Bare::new();
+    let first_path = first.path().to_str().unwrap();
+    let second_path = second.path().to_str().unwrap();
+    repo.git(&["remote", "add", "origin", first_path]);
+    repo.git(&["config", "--add", "remote.origin.pushurl", first_path]);
+    assert!(
+        push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect("first push")
+    );
+
+    // A second destination appears after the branch was published to the first.
+    repo.git(&["config", "--add", "remote.origin.pushurl", second_path]);
+    let pushed = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect("push to the new destination");
+    assert!(pushed, "one destination lacks the branch, so the push runs");
+    assert_eq!(bare_head(second.path(), "main"), repo.head());
+    assert_eq!(bare_head(first.path(), "main"), repo.head());
+
+    let pushed = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect("no-op");
+    assert!(!pushed, "every destination is up to date");
+}
+
+/// A porcelain record classifies a rejection even when stderr says only
+/// "failed to push some refs": the record is what names the reason.
+#[test]
+fn a_porcelain_rejected_record_is_a_conflict() {
+    let stdout = "!\trefs/heads/main:refs/heads/main\t[rejected] (non-fast-forward)";
+    let stderr = "error: failed to push some refs to 'x'";
+    let error = classify_push_failure(stdout, stderr);
+    assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+    let detail = error.to_string();
+    assert!(
+        detail.contains("[rejected] (non-fast-forward)"),
+        "the porcelain record is shown: {detail}"
+    );
+}
+
+/// A non-ASCII character before the scheme (git's localized quotes) never
+/// splits a character, and the URL inside is still redacted.
+#[test]
+fn a_localized_quote_before_a_url_is_handled_without_panicking() {
+    let secret = format!("{}-{}", "tok", "m4p8");
+    let text = format!("fatal: \u{ab}http://git:{secret}@example.invalid/r.git?k={secret}\u{bb}");
+    let redacted = redact_url_credentials(&text);
+    assert!(!redacted.contains(&secret), "{redacted}");
+    assert!(redacted.starts_with("fatal: \u{ab}"), "{redacted}");
+}
+
+/// Every git call runs in the C locale, so the messages h4rn parses keep the
+/// English shape the redactor and classifier expect.
+#[test]
+fn git_commands_run_in_the_c_locale() {
+    let mut command = std::process::Command::new("git");
+    crate::worktrees::git::sanitize(&mut command);
+    let envs: Vec<(String, Option<String>)> = command
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    assert!(
+        envs.contains(&("LC_ALL".to_owned(), Some("C".to_owned()))),
+        "{envs:?}"
+    );
+    assert!(envs.contains(&("LANGUAGE".to_owned(), None)), "{envs:?}");
+}
+
+/// The `To <url>` line of a push's output is unquoted and keeps the query raw,
+/// whitespace included; nothing after that whitespace may reach the message.
+#[test]
+fn the_unquoted_to_line_never_leaks_a_query_past_whitespace() {
+    let secret = format!("{}-{}", "tail", "q7x2");
+    for separator in ['\u{a0}', '\u{3000}', ' '] {
+        let stdout = format!(
+            "To https://example.invalid/repo.git?token=ab{separator}{secret}#f{separator}{secret}\n\
+             !\trefs/heads/main:refs/heads/main\t[rejected] (non-fast-forward)\nDone"
+        );
+        let stderr = "error: failed to push some refs to 'x'";
+        let error = classify_push_failure(&stdout, stderr);
+        assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+        let detail = error.to_string();
+        assert!(
+            !detail.contains(&secret),
+            "no part of the query survives after {separator:?}: {detail}"
+        );
+        assert!(detail.contains("To [redacted URL]"), "{detail}");
+    }
+}
+
+/// A non-fast-forward rejection is still named when `advice.pushUpdateRejected`
+/// is off: git then prints the record on stdout, not stderr.
+#[tokio::test]
+async fn a_rejected_push_is_named_even_when_git_advice_is_off() {
+    let (repo, bare) = repo_with_remote();
+    push_blocking(repo.path(), true).expect("first push");
+    let remote_head = advance_remote(&bare);
+
+    repo.write("local.txt", "local\n");
+    repo.git(&["add", "local.txt"]);
+    repo.git(&["commit", "-m", "Local change"]);
+    repo.git(&["config", "advice.pushUpdateRejected", "false"]);
+
+    let error = push_blocking(repo.path(), false).expect_err("rejected");
+    assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+    assert!(error.to_string().contains("never force-pushes"), "{error}");
+    assert_eq!(
+        bare_head(bare.path(), "main"),
+        remote_head,
+        "the remote was not moved"
+    );
+
+    let error = push_for_pull_request(repo.path(), "origin", "main")
+        .await
+        .expect_err("the lookup is rejected too");
+    assert!(matches!(error, GitActionError::Conflict(_)), "{error:?}");
+}
+
+/// A repository with no commits has no `HEAD`; a path-limited message still
+/// describes what the first commit would record, in either object format. The
+/// empty tree is the repository's own, so a SHA-256 repository is not handed
+/// the SHA-1 id (which git there cannot resolve).
+#[test]
+fn a_message_for_named_paths_works_before_the_first_commit() {
+    for (format, id_len) in [("sha1", 40), ("sha256", 64)] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(workspace)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let init = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["init", "-b", "main", &format!("--object-format={format}")])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git init");
+        if !init.status.success() {
+            // An older git cannot create every format; that is a skip, not a
+            // failure of this repository's behaviour.
+            eprintln!(
+                "skipping {format}: {}",
+                String::from_utf8_lossy(&init.stderr).trim()
+            );
+            continue;
+        }
+        git(&["config", "user.name", "h4rn test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        assert_eq!(
+            git(&["rev-parse", "--show-object-format"]),
+            format,
+            "the repository was created in the requested format"
+        );
+        let tree = empty_tree(workspace).expect("empty tree");
+        assert_eq!(tree.chars().count(), id_len, "{format}: {tree}");
+
+        std::fs::write(workspace.join("first.txt"), "hello\n").expect("write");
+        git(&["add", "first.txt"]);
+
+        let input = commit_input_blocking(workspace, false, Some(&["first.txt".to_owned()]))
+            .expect("input");
+        assert!(input.diff.contains("+hello"), "{format}: {}", input.diff);
+        assert!(input.recent_subjects.is_empty());
+    }
 }
