@@ -739,6 +739,61 @@ describe("a tab switch follows the scope being loaded, not the one before it", (
   });
 });
 
+describe("a refreshed commit list is not dropped by a tab switch", () => {
+  it("re-lists the same commit when the tab changes during a refresh", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+
+    // The commit and its file list on screen match; only the refresh of the
+    // commit list is out.
+    const releaseCommits = holdNext("fs_diff_commits");
+    await act(async () => {
+      void latest?.refreshDiffLists();
+    });
+    await waitFor(() => latest?.state.commitsLoading === true);
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "commit", sha: "commit-1" });
+
+    const commitReads = state.requests.filter(
+      (request) => request.type === "fs_diff_commits",
+    ).length;
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await releaseHold(releaseCommits);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+
+    // The follow asked for the commit list again instead of dropping the
+    // refresh, and nothing is left loading.
+    expect(state.requests.filter((request) => request.type === "fs_diff_commits")).toHaveLength(
+      commitReads + 1,
+    );
+    expect(latest?.state.commitsLoading).toBe(false);
+    expect(latest?.state.diffCommits).not.toBeNull();
+  });
+});
+
+describe("a tab the pane already shows needs no read", () => {
+  it("skips a follow to the file that is open with no list out", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts" && !latest?.state.filesLoading);
+
+    const before = state.requests.length;
+    await act(async () => {
+      await latest?.followDiffTab("a.ts");
+    });
+    await flush();
+    expect(state.requests).toHaveLength(before);
+  });
+});
+
 describe("a new comparison takes the finished body off the screen", () => {
   it("clears a loaded Branch diff when the base changes", async () => {
     await mount();

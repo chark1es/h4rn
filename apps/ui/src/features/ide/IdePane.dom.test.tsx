@@ -666,6 +666,51 @@ describe("the diff pane stays on the file the person picked", () => {
     expect(diffRequests()).toHaveLength(2);
   });
 
+  it("follows a switch back to the first tab while the list is still out", async () => {
+    await mount();
+    await openDiff();
+
+    // Entering Branch and the follow to b.ts both wait on their file lists.
+    // The mock holds one request at a time: arm the second hold once the
+    // entry's list read has taken the first.
+    const releaseEntry = holdNext("fs_diff_files");
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(mock.requests.some((request) => request.type === "fs_diff_files")).toBe(true),
+    );
+    expect(mock.hold).toBeNull();
+    const releaseFollow = holdNext("fs_diff_files");
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(mock.requests.filter((request) => request.type === "fs_diff_files")).toHaveLength(2),
+    );
+    expect(mock.hold).toBeNull();
+
+    // Back to a.ts before either list answers: the pane still names a.ts from
+    // before the Branch load, but the pending load would open b.ts.
+    act(() => {
+      mock.state.ui.pendingIdePath = "a.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "a.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+
+    await releaseHold(releaseFollow);
+    await releaseHold(releaseEntry);
+    expect(pathBar().textContent).toBe("a.ts");
+    expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy();
+    // The follows keep the base picker's list: one branch read, from entry.
+    expect(mock.requests.filter((request) => request.type === "fs_branches")).toHaveLength(1);
+  });
+
   it("reopening the pane in Branch mode asks for the diff once", async () => {
     await mount();
     await openDiff();

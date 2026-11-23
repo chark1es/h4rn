@@ -809,15 +809,19 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
 
   /** Loads the branch review: the branch list for its picker, then the files. */
   const loadBranch = useCallback(
-    async (preferred: string | null, overrides: { base?: string | null } = {}) => {
+    async (
+      preferred: string | null,
+      overrides: { base?: string | null; branches?: boolean } = {},
+    ) => {
       const token = beginDiffRequest();
       // A caller that restores another workspace's state passes its base: the
       // restored state has not rendered yet, so `stateRef` still holds the
       // previous workspace's choice.
       const base = overrides.base !== undefined ? overrides.base : stateRef.current.diffBase;
-      // Always refetch: the agent may have fetched, committed or renamed a
-      // branch since this pane last read the list.
-      void fetchBranches();
+      // Refetch on entry: the agent may have fetched, committed or renamed a
+      // branch since this pane last read the list. A tab follow keeps the list
+      // it already has (or is reading) and passes `branches: false`.
+      if (overrides.branches !== false) void fetchBranches();
       const files = await fetchDiffFiles({ kind: "base", base });
       if (!diffRequestCurrent(token)) return;
       // The list resolves the base (the default included); ask for that name so
@@ -886,11 +890,21 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const followDiffTab = useCallback(
     async (path: string) => {
       const current = stateRef.current;
+      const listing = current.filesLoading || current.commitsLoading;
+      // With no list read out, `diffPath` is the newest request's file (a
+      // direct open names it at once), so a tab that matches it is already
+      // shown or loading. While a list is out, `diffPath` still names the file
+      // from before that load, and the load will open its own preferred file:
+      // a tab switch must take over, even back to the file still on screen.
+      if (!listing && current.diffPath === path) return;
       // The list on screen answers for the scope only when it was read for the
       // current choice and nothing newer is still loading: `setDiffBase`,
       // `selectDiffSource` and a refresh keep the previous scope's list up
       // while the new one loads.
       const against = current.diffFiles?.against;
+      // A follow keeps the base picker's list; it only re-reads one that has
+      // never arrived and is not on its way.
+      const branches = !current.diffBranches && !current.branchesLoading;
       if (current.diffSource === "branch") {
         // The person's choice wins; the list's resolved base fills in only
         // when no base has been named yet.
@@ -898,20 +912,18 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         const listed =
           against?.kind === "base" &&
           (against.base === base || current.diffFiles?.base === base) &&
-          !current.filesLoading;
+          !listing;
         if (listed) await openDiff(path, "branch", { base });
-        else await loadBranch(path, { base });
+        else await loadBranch(path, { base, branches });
         return;
       }
       if (current.diffSource === "commit") {
         const base = current.diffBase;
         const commit = current.diffCommit;
-        const listed =
-          commit !== null &&
-          against?.kind === "commit" &&
-          against.sha === commit &&
-          !current.commitsLoading &&
-          !current.filesLoading;
+        // Only `loadCommit` names a commit and then reads its files, so with
+        // no list out, a commit and a commit-scope file list on screen belong
+        // together; while the commit list is out, both are from before it.
+        const listed = commit !== null && against?.kind === "commit" && !listing;
         if (listed) {
           await openDiff(path, "commit", { base, commit });
         } else {

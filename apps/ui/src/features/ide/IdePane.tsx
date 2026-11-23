@@ -132,10 +132,6 @@ export function IdePane() {
   // in a wider review's file list remain one click away.
   const diffTabPath = active?.path ?? null;
   const followDiffTab = session.followDiffTab;
-  const diffPathRef = useRef(state.diffPath);
-  useEffect(() => {
-    diffPathRef.current = state.diffPath;
-  }, [state.diffPath]);
   const followedTabRef = useRef<string | null>(null);
   useEffect(() => {
     if (panel !== "diff" || !diffTabPath) {
@@ -145,8 +141,8 @@ export function IdePane() {
     if (followedTabRef.current === diffTabPath) return;
     followedTabRef.current = diffTabPath;
     // Entering the pane (or switching the source) already asked for the tab's
-    // file; only a tab that disagrees with what is shown needs a read.
-    if (diffPathRef.current === diffTabPath) return;
+    // file. `followDiffTab` itself skips a tab the pane is already showing,
+    // and takes over a list load that would open another file.
     void followDiffTab(diffTabPath);
   }, [panel, diffTabPath, followDiffTab]);
 
