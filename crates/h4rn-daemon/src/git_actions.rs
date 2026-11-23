@@ -894,7 +894,10 @@ fn classify_push_error(error: &str) -> GitActionError {
 /// whitespace, or to the quote that closes git's `'…'` field. A quote inside
 /// the query or fragment is not where the URL ends: git prints it raw, so
 /// stopping there would leave the rest of the URL (and its token) in the
-/// message.
+/// message. Nor does whitespace inside the quote end the URL: git prints the
+/// field whole, and a URL with raw whitespace in it cannot be parsed, so the
+/// whole field becomes a marker instead of being split at the whitespace and
+/// leaving what follows it (often the rest of a token) in the message.
 fn redact_url_credentials(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
@@ -912,40 +915,77 @@ fn redact_url_credentials(text: &str) -> String {
             .chars()
             .next_back()
             .filter(|ch| matches!(ch, '\'' | '"'));
-        let (candidate, trailing) = split_url_field(after, open_quote);
-        output.push_str(&redact_one_url(candidate));
+        let (field, trailing) = split_url_field(after, open_quote);
+        match field {
+            UrlField::Url(candidate) => output.push_str(&redact_one_url(candidate)),
+            UrlField::Whitespace => output.push_str("[redacted URL]"),
+        }
         rest = trailing;
     }
     output.push_str(rest);
     output
 }
 
+/// One URL field as [`split_url_field`] found it.
+enum UrlField<'a> {
+    /// A URL with no raw whitespace; its parts can be redacted.
+    Url(&'a str),
+    /// A quoted field that contains raw whitespace. No real URL does, so the
+    /// field cannot be split into a URL and prose, and is replaced whole.
+    Whitespace,
+}
+
 /// Splits one URL field off the start of `text`, returning it and the rest.
 ///
-/// The field ends at the first whitespace, or at the quote that opened it
-/// (the last such quote before that whitespace, which is the closing one even
-/// when the query or fragment itself contains quotes). Sentence punctuation
-/// after the URL is left in the trailing text.
-fn split_url_field(text: &str, open_quote: Option<char>) -> (&str, &str) {
-    let mut end = text.find(char::is_whitespace).unwrap_or(text.len());
-    if let Some(quote) = open_quote
-        && let Some(closing) = text[..end].rfind(quote)
-    {
-        // Only a quote the message treats as the field's end may close it: if
-        // printable text follows it, the quote was inside the URL (or the
-        // field was never closed), and the whole run to whitespace is the URL.
-        let after_quote = &text[closing + quote.len_utf8()..end];
-        if after_quote
-            .chars()
-            .all(|ch| matches!(ch, ')' | ']' | '}' | ',' | ';' | ':' | '.' | '!' | '?'))
-        {
-            end = closing;
-        }
+/// An unquoted field ends at the first whitespace (ASCII or Unicode), with
+/// sentence punctuation after the URL left in the trailing text. A field git
+/// opened with a quote runs to its closing quote — the last matching quote on
+/// that line that a message follows with `:`, `)`, `.`, `,` or a line end —
+/// and whitespace before that quote does not end it: git prints the field
+/// whole, so cutting at a whitespace inside it would leave the rest of the URL
+/// (and its token) in the message. Such a field is reported as
+/// [`UrlField::Whitespace`] because a URL never contains raw whitespace.
+fn split_url_field(text: &str, open_quote: Option<char>) -> (UrlField<'_>, &str) {
+    let Some(quote) = open_quote else {
+        let end = text.find(char::is_whitespace).unwrap_or(text.len());
+        let trimmed = trim_prose_end(&text[..end]);
+        return (UrlField::Url(&text[..trimmed]), &text[trimmed..]);
+    };
+
+    let line_end = text.find('\n').unwrap_or(text.len());
+    let line = &text[..line_end];
+    let closing = line
+        .char_indices()
+        .filter(|(_, ch)| *ch == quote)
+        .map(|(index, _)| index)
+        .rfind(|index| {
+            let after = &line[index + quote.len_utf8()..];
+            after.is_empty()
+                || after.starts_with([':', ')', '.', ','])
+                || after.trim_start_matches([' ', '\t', '\r']).is_empty()
+        });
+    let Some(closing) = closing else {
+        // No closing quote on this line: keep the run to the next whitespace
+        // as one URL, as before, so an internal quote cannot cut it short.
+        let end = text.find(char::is_whitespace).unwrap_or(text.len());
+        let trimmed = trim_prose_end(&text[..end]);
+        return (UrlField::Url(&text[..trimmed]), &text[trimmed..]);
+    };
+    let field = &text[..closing];
+    if field.chars().any(char::is_whitespace) {
+        return (UrlField::Whitespace, &text[closing..]);
     }
-    // A URL echoed in prose can be followed by `)`, `,` or a full stop. A
-    // closing `]` is kept when the URL opens an IPv6 literal with `[`, because
-    // it is part of the host there.
-    let mut trimmed = end;
+    let trimmed = trim_prose_end(field);
+    (UrlField::Url(&text[..trimmed]), &text[trimmed..])
+}
+
+/// Trims sentence punctuation that a message puts after a URL.
+///
+/// A URL echoed in prose can be followed by `)`, `,` or a full stop. A
+/// closing `]` is kept when the URL opens an IPv6 literal with `[`, because
+/// it is part of the host there.
+fn trim_prose_end(text: &str) -> usize {
+    let mut trimmed = text.len();
     while let Some((index, ch)) = text[..trimmed].char_indices().next_back() {
         let prose = match ch {
             ')' | ',' | ';' | ':' | '.' | '}' | '!' | '?' => true,
@@ -957,7 +997,7 @@ fn split_url_field(text: &str, open_quote: Option<char>) -> (&str, &str) {
         }
         trimmed = index;
     }
-    (&text[..trimmed], &text[trimmed..])
+    trimmed
 }
 
 /// One URL without its userinfo, query and fragment.

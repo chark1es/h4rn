@@ -1316,6 +1316,52 @@ async fn a_403_from_any_host_shape_redacts_quotes_inside_the_url() {
     }
 }
 
+/// Real git prints the field it opened with a quote whole, raw whitespace
+/// inside the URL included. A real URL never contains whitespace, so the whole
+/// field is replaced: nothing after the whitespace — where git puts the rest of
+/// a token — reaches the client, and a 403 is still a credential problem.
+#[tokio::test]
+async fn a_403_url_with_raw_whitespace_is_replaced_whole() {
+    // Built at runtime so no credential-shaped literal lives in the tree.
+    let credential = format!("{}{}", "fake", "credential-8k2m");
+    let tail = &credential[4..];
+    // A no-break space, an ideographic space and an ASCII space. Git prints
+    // each one raw inside the quoted field; an ASCII space makes git reject the
+    // URL locally, so only an answer that really is a 403 is a 403.
+    for separator in ["\u{00a0}", "\u{3000}", " "] {
+        let address = forbidden_server("127.0.0.1:0");
+        let repo = Repo::new();
+        let url = format!(
+            "http://git:{credential}@127.0.0.1:{port}/repo.git?token=ab{separator}{credential}#f{separator}{credential}",
+            port = address.port()
+        );
+        repo.git(&["remote", "add", "origin", &url]);
+
+        let error = push_for_pull_request(repo.path(), "origin", "main")
+            .await
+            .expect_err("the push fails");
+        let shown = error.to_string();
+        assert!(
+            !shown.contains(&credential) && !shown.contains(tail),
+            "{separator:?}: the credential survived: {shown}"
+        );
+        assert!(
+            !shown.contains("token="),
+            "{separator:?}: the query survived: {shown}"
+        );
+        assert!(
+            shown.contains("[redacted URL]"),
+            "{separator:?}: the field was not replaced whole: {shown}"
+        );
+        if shown.contains("403") {
+            assert!(
+                matches!(error, GitActionError::Unauthorized(_)),
+                "{separator:?}: a 403 is a credential problem: {error:?}"
+            );
+        }
+    }
+}
+
 /// Every host shape a remote URL can use gives up its userinfo, query and
 /// fragment, while the host and port stay readable.
 #[test]

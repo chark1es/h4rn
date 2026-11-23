@@ -436,17 +436,22 @@ All notable changes to h4rn are recorded here. The format follows
   credential shows "sign in to the git remote" without the credential, whatever
   the URL's shape (IPv4, IPv6, hostname or port, userinfo or query): the URL is
   parsed and its userinfo, query and fragment removed, with a conservative
-  fallback when it cannot be parsed. A rejected non-fast-forward is still named
-  as one when git's advice is turned off, because the push's porcelain record is
-  read. A path-limited commit message describes the working-tree content
-  `--only` will record, including an edit that was never staged, and works in a
-  repository with no commits yet. A push result names the remote branch it wrote
-  (still sent as `upstream`, so older clients read it) and no longer claims the
-  branch's tracking upstream changed when `set_upstream` was false. Opening a
-  pull request gives the lookup, the push and the forge call one 220-second
-  budget, inside the dialog's 240-second wait, and the forge call fails fast
-  with "rate limited; try again in Ns" rather than sleeping past it. See
-  [docs/git-actions.md](docs/git-actions.md).
+  fallback when it cannot be parsed. A URL git prints with raw whitespace inside
+  its quoted field is replaced whole — no real URL contains whitespace, and
+  splitting at it would leave the rest of the token in the message. A rejected
+  non-fast-forward is still named as one when git's advice is turned off,
+  because the push's porcelain record is read. A path-limited commit message
+  describes the working-tree content `--only` will record, including an edit
+  that was never staged, and works in a repository with no commits yet. A push
+  result names the remote branch it wrote (still sent as `upstream`, so older
+  clients read it) and no longer claims the branch's tracking upstream changed
+  when `set_upstream` was false. Opening a pull request gives the lookup, the
+  push and the forge call one 220-second budget, inside the dialog's 240-second
+  wait, and the forge call fails fast with "rate limited; try again in Ns"
+  rather than sleeping past it. An ordinary request keeps its own timing: a
+  documented rate-limit reset is waited out before the transfer's timeout
+  starts, so a wait longer than one transfer no longer fails a viewer or a
+  lookup. See [docs/git-actions.md](docs/git-actions.md).
 - **Thread settings always describe the session that will run the next turn.** The model list a
   Codex session reports survives the session ending, so an idle thread still offers the models its
   CLI really has (and a new Codex thread starts on the first of them, not on a static default the

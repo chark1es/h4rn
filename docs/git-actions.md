@@ -64,7 +64,10 @@ request asked for it (`set_upstream`). A push is **never forced**: when the
 remote has commits the branch does not, the panel says so and asks you to pull
 or rebase. A rejected credential is reported as a credential problem, not a
 generic failure, and any credential-shaped text git prints — including the
-userinfo or query of an echoed URL — is redacted.
+userinfo or query of an echoed URL — is redacted. A URL git prints with raw
+whitespace inside its quoted field is replaced whole: no real URL contains raw
+whitespace, and splitting at it would leave the rest of the token in the
+message.
 
 ## Pull request
 
@@ -96,7 +99,11 @@ the push and the forge call share one 220-second budget — the lookup may use a
 most 30 seconds and the push at most 160. The forge call gets whatever is left
 and includes its wait for a rate limit in that time: a wait the remaining budget
 cannot cover fails at once with "rate limited; try again in Ns" instead of
-outliving the dialog's 240-second wait. The dialog cannot submit twice. A PR
+outliving the dialog's 240-second wait. An ordinary request — a viewer, a
+repository lookup, a list — keeps the older timing: a documented rate-limit
+reset is waited out before the transfer's timeout starts, so a reset longer than
+one transfer does not fail it, and only a wait beyond a minute is refused. The
+dialog cannot submit twice. A PR
 opened this way is linked to its thread, so the header badge, the PR page and a
 watch all find it. Opening a request is never done silently from Generate.
 
