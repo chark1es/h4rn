@@ -686,17 +686,22 @@ async fn linear_issue_owned(
 }
 
 /// Whether a Linear team is attached to a project that still exists.
+///
+/// One team can be attached to several projects, so every matching mapping is
+/// checked: removing the first project must not take write access away while
+/// another project on the same host still uses that team.
 async fn linear_team_owned(conn: &Connection, account_id: &str, team_id: &str) -> bool {
-    let mapping = conn
-        .state
+    let projects = conn.state.projects.list().await;
+    conn.state
         .linear
         .project_teams()
         .into_iter()
-        .find(|team| team.account_id == account_id && team.team_id == team_id);
-    match mapping {
-        Some(team) => project_is_known(conn, &team.project_id).await,
-        None => false,
-    }
+        .filter(|mapping| mapping.account_id == account_id && mapping.team_id == team_id)
+        .any(|mapping| {
+            projects
+                .iter()
+                .any(|project| project.id == mapping.project_id)
+        })
 }
 
 /// Whether a registered project still exists.

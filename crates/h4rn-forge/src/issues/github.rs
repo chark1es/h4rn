@@ -84,9 +84,11 @@ pub(crate) async fn list(
             "is:issue".into(),
         ];
         match filter {
-            ForgeIssueFilter::Open | ForgeIssueFilter::Assigned => terms.push("is:open".into()),
             ForgeIssueFilter::Closed => terms.push("is:closed".into()),
-            _ => {}
+            // Opened and mentioning are involvement filters like assigned:
+            // they answer "my open work", so they close the state too.
+            ForgeIssueFilter::All => {}
+            _ => terms.push("is:open".into()),
         }
         if let Some(involvement) = involvement {
             terms.push(involvement.into());
@@ -156,11 +158,7 @@ pub(crate) async fn get(
     }
     let summary = map_summary(repo, &value)
         .ok_or_else(|| ForgeError::Parse("GitHub returned an incomplete issue".into()))?;
-    let linked_pull_requests = http
-        .get_json(&format!("{repo_url}/issues/{number}/timeline?per_page=100"))
-        .await
-        .map(|value| map_linked_prs(repo, &value))
-        .unwrap_or_default();
+    let linked_pull_requests = linked_pull_requests(http, &repo_url, number, repo).await;
     Ok(ForgeIssue {
         summary,
         body: text(&value, "body"),
@@ -316,11 +314,7 @@ pub(crate) async fn update(
         .await?;
     let summary = map_summary(repo, &value)
         .ok_or_else(|| ForgeError::Parse("GitHub returned an incomplete issue".into()))?;
-    let linked_pull_requests = http
-        .get_json(&format!("{repo_url}/issues/{number}/timeline?per_page=100"))
-        .await
-        .map(|value| map_linked_prs(repo, &value))
-        .unwrap_or_default();
+    let linked_pull_requests = linked_pull_requests(http, &repo_url, number, repo).await;
     Ok(ForgeIssue {
         summary,
         body: text(&value, "body"),
@@ -359,6 +353,46 @@ fn map_comment(value: &Value) -> Option<ForgeIssueComment> {
             .flatten(),
         web_url: optional_text(value, "html_url"),
     })
+}
+
+/// Reads every timeline page that carries a cross-referenced pull request.
+///
+/// GitHub pages the timeline with a `Link` header; one request only sees the
+/// first hundred events, so an older cross-reference would never appear. The
+/// walk stops after ten pages even if the server keeps advertising a next
+/// one, and a failed later page keeps the links already found.
+const TIMELINE_PAGE_LIMIT: u32 = 10;
+
+async fn linked_pull_requests(
+    http: &ForgeHttp,
+    repo_url: &str,
+    number: u32,
+    repo: &ForgeRepoRef,
+) -> Vec<ForgeIssueLinkedPr> {
+    let mut linked: Vec<ForgeIssueLinkedPr> = Vec::new();
+    let mut next = Some(format!("{repo_url}/issues/{number}/timeline?per_page=100"));
+    let mut pages = 0;
+    while let Some(url) = next {
+        if pages >= TIMELINE_PAGE_LIMIT {
+            break;
+        }
+        pages += 1;
+        let response = match http.request(Method::GET, &url, None, false).await {
+            Ok(response) => response,
+            Err(_) => break,
+        };
+        let following = next_link(&response.headers);
+        let Ok(value) = http.json(response) else {
+            break;
+        };
+        for pull in map_linked_prs(repo, &value) {
+            if !linked.iter().any(|existing| existing.number == pull.number) {
+                linked.push(pull);
+            }
+        }
+        next = following;
+    }
+    linked
 }
 
 fn map_linked_prs(repo: &ForgeRepoRef, value: &Value) -> Vec<ForgeIssueLinkedPr> {

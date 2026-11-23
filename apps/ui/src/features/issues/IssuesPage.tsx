@@ -22,7 +22,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { accountsForRepo } from "@/features/forge/store";
+import { accountsForRepo, forgeLabel } from "@/features/forge/store";
 import { useProjects } from "@/features/projects/store";
 import type {
   ForgeAccount,
@@ -165,6 +165,7 @@ export function IssuesPage() {
   const connection = useApp((state) => state.connection.status);
 
   const [accounts, setAccounts] = useState<ForgeAccount[]>([]);
+  const [accountsReady, setAccountsReady] = useState(false);
   const [forgeCapabilities, setForgeCapabilities] = useState<ForgeCapabilityEntry[]>([]);
   // Linear is not a forge, so its capabilities come in their own field.
   const [linearCapabilities, setLinearCapabilities] = useState<ForgeCapabilities | null>(null);
@@ -193,6 +194,10 @@ export function IssuesPage() {
   // Bumped whenever the query changes, so a page that arrives late for a
   // superseded search or filter is discarded instead of spliced in.
   const queryToken = useRef(0);
+  // The set of sources the current pages were read from. A page that arrives
+  // after a project was hidden or an account changed belongs to a listing that
+  // no longer exists and is dropped.
+  const sourceSignature = useRef<string | null>(null);
 
   // Choosing the filter or search already applied is not a new query: it
   // must leave the list alone instead of blanking it with no effect to rerun.
@@ -221,9 +226,13 @@ export function IssuesPage() {
         setLinearCapabilities(forge.linear);
         setLinearAccounts(linear);
         setMappings(teams);
+        setAccountsReady(true);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(issueError(cause));
+        if (!cancelled) {
+          setError(issueError(cause));
+          setAccountsReady(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -278,7 +287,6 @@ export function IssuesPage() {
   useEffect(() => {
     void refresh;
     if (connection === "connecting") return;
-    const token = queryToken.current;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -323,6 +331,15 @@ export function IssuesPage() {
       }
     }
     const sources = [...forgeSources, ...linearSources];
+    // A different set of sources starts a new generation. Pages still in
+    // flight for the old set are discarded when they land, so a hidden
+    // project's delayed page cannot add its rows back to the list.
+    const signature = sources.map(sourceKey).join("|");
+    if (sourceSignature.current !== signature) {
+      sourceSignature.current = signature;
+      queryToken.current += 1;
+    }
+    const token = queryToken.current;
     if (sources.length === 0) {
       setGroups([]);
       setLoading(false);
@@ -490,7 +507,9 @@ export function IssuesPage() {
           } catch (cause) {
             return {
               rows: [] as IssueRow[],
-              source: { ...source, hasMore: false } as Source,
+              // A failed page is temporary: the source keeps its continuation
+              // so Load more can try the same page again.
+              source,
               error: issueError(cause),
             };
           }
@@ -549,6 +568,17 @@ export function IssuesPage() {
   const unavailableProjects = projects
     .filter((project) => !hidden.has(project.id))
     .filter((project) => repos[project.id]?.forge === "bitbucket");
+  // A project whose repository no connected account serves is named like the
+  // pull request page names it, instead of silently missing from the list.
+  // Wait for the account list before saying an account is missing.
+  const unmatchedProjects = !accountsReady
+    ? []
+    : projects
+        .filter((project) => !hidden.has(project.id))
+        .filter((project) => {
+          const repo = repos[project.id];
+          return repo !== undefined && accountsForRepo(accounts, repo).length === 0;
+        });
 
   return (
     <main className="q-main" aria-label="Issues">
@@ -668,7 +698,21 @@ export function IssuesPage() {
               it in August 2026, so this project shows pull requests only.
             </div>
           ))}
-          {!loading && !error && groups.length === 0 && unavailableProjects.length === 0 ? (
+          {unmatchedProjects.map((project) => {
+            const repo = repos[project.id];
+            if (!repo) return null;
+            return (
+              <div key={project.id} className="q-issues-note" role="note">
+                <strong>{project.name}</strong>: No {forgeLabel(repo.forge)} account matches this
+                repository.
+              </div>
+            );
+          })}
+          {!loading &&
+          !error &&
+          groups.length === 0 &&
+          unavailableProjects.length === 0 &&
+          unmatchedProjects.length === 0 ? (
             <div className="q-empty q-issues-empty">
               <CircleDotIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
               <h3>No issues to show</h3>
@@ -723,7 +767,10 @@ export function IssuesPage() {
         <div className="q-issues-detail">
           {selected ? (
             <IssueDetail
-              key={`${selected.row.key}:${refresh}`}
+              // The pane stays mounted for the same issue and account, so a
+              // comment draft survives saving an edit anywhere in the pane.
+              // The list is refreshed separately.
+              key={`${selected.row.key}:${selected.row.accountId}`}
               row={selected.row}
               capabilities={selected.capabilities}
               threadId={threadId}

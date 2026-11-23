@@ -254,7 +254,7 @@ pub(crate) async fn update(
     // Gitea replaces labels through their own endpoint, by repository label
     // id; the issue PATCH body does not carry them.
     if let Some(names) = &update.labels {
-        let ids = label_ids(http, &base, names).await?;
+        let ids = label_ids(http, api, repo, names).await?;
         http.put_json(
             &format!("{base}/issues/{number}/labels"),
             &json!({"labels": ids}),
@@ -264,20 +264,74 @@ pub(crate) async fn update(
     get(http, api, repo, number).await
 }
 
-/// Resolves label names to repository label ids, paging through the
-/// catalogue until every requested label has been seen.
-async fn label_ids(http: &ForgeHttp, repo: &str, names: &[String]) -> Result<Vec<u64>> {
+/// Resolves label names to label ids from the repository catalogue and, for
+/// names it does not carry, the organization's own catalogue.
+///
+/// Gitea accepts a label that belongs to the repository or to the
+/// organization that owns it (`ReplaceIssueLabels` checks both), so a label
+/// created for the organization would otherwise never resolve. Each
+/// catalogue is read page by page, because a Gitea server may clamp `limit`
+/// below the 50 rows this client asks for.
+async fn label_ids(
+    http: &ForgeHttp,
+    api: &str,
+    repo: &ForgeRepoRef,
+    names: &[String],
+) -> Result<Vec<u64>> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
     let mut resolved: HashMap<String, u64> = HashMap::new();
+    read_label_catalogue(
+        http,
+        &format!("{}/labels", repo_url(api, repo)),
+        names,
+        &mut resolved,
+        false,
+    )
+    .await?;
+    if resolved.len() < names.len() {
+        // A repository whose owner is not an organization answers 404; that
+        // means there is no second catalogue, not that the label request
+        // failed.
+        let org = format!(
+            "{api}/orgs/{}/labels",
+            form_urlencoded::byte_serialize(repo.owner.as_bytes()).collect::<String>()
+        );
+        read_label_catalogue(http, &org, names, &mut resolved, true).await?;
+    }
+    names
+        .iter()
+        .map(|name| {
+            resolved.get(name).copied().ok_or_else(|| {
+                ForgeError::InvalidRequest(format!(
+                    "the repository has no label called {name}; create it on the forge first"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Reads one label catalogue until every requested name resolves or the
+/// catalogue ends. Repository labels win: a name already resolved is not
+/// looked up again in the organization's catalogue.
+async fn read_label_catalogue(
+    http: &ForgeHttp,
+    catalog: &str,
+    names: &[String],
+    resolved: &mut HashMap<String, u64>,
+    missing_is_empty: bool,
+) -> Result<()> {
     let mut page = 1u32;
     let mut seen = 0u64;
     loop {
-        let url = format!("{repo}/labels?limit={PAGE_LIMIT}&page={page}");
+        let url = format!("{catalog}?limit={PAGE_LIMIT}&page={page}");
         let response = http
             .request(reqwest::Method::GET, &url, None, false)
             .await?;
+        if missing_is_empty && response.status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
         let total = header_u64(&response.headers, "x-total-count");
         let value = http.json(response)?;
         let available = value.as_array().cloned().unwrap_or_default();
@@ -309,16 +363,7 @@ async fn label_ids(http: &ForgeHttp, repo: &str, names: &[String]) -> Result<Vec
             break;
         }
     }
-    names
-        .iter()
-        .map(|name| {
-            resolved.get(name).copied().ok_or_else(|| {
-                ForgeError::InvalidRequest(format!(
-                    "the repository has no label called {name}; create it on the forge first"
-                ))
-            })
-        })
-        .collect()
+    Ok(())
 }
 
 fn map_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgeIssueSummary> {

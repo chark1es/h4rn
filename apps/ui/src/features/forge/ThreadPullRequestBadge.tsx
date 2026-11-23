@@ -25,13 +25,34 @@ function openPull(url: string): void {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+/** The scope that tells two same-numbered issues apart. */
+function issueScopeLabel(issue: ThreadIssue): string {
+  if (issue.scope.tracker === "forge") {
+    const { owner, repo } = issue.scope.repo;
+    return `${owner}/${repo}#${issue.issue_id}`;
+  }
+  const state = issue.state;
+  const identifier = state?.tracker === "linear" ? state.issue.identifier : issue.issue_id;
+  return `${identifier} (${issue.scope.team_id})`;
+}
+
+function issueScopeKey(issue: ThreadIssue): string {
+  if (issue.scope.tracker === "forge") {
+    const { base_url, owner, repo } = issue.scope.repo;
+    return `forge:${base_url}:${owner}/${repo}#${issue.issue_id}`;
+  }
+  const state = issue.state;
+  const identifier = state?.tracker === "linear" ? state.issue.identifier : issue.issue_id;
+  return `linear:${identifier}:${issue.scope.team_id}`;
+}
+
 function issueLabel(issue: ThreadIssue): string {
   const state = issue.state;
-  if (!state) return issue.issue_id;
+  if (!state) return issueScopeLabel(issue);
   if (state.tracker === "forge") {
-    return `#${state.issue.number} ${issueStateLabel(state.issue.state)}`;
+    return `${issueScopeLabel(issue)} ${issueStateLabel(state.issue.state)}`;
   }
-  return `${state.issue.identifier} ${state.issue.state_name}`;
+  return `${issueScopeLabel(issue)} ${state.issue.state_name}`;
 }
 
 function issueTitle(issue: ThreadIssue): string {
@@ -205,7 +226,7 @@ export function LinkedPullRequestsMenu({
         {issues.map((issue, index) => {
           const url = issueUrl(issue);
           return (
-            <div className="q-pr-links" key={`issue:${issue.issue_id}`}>
+            <div className="q-pr-links" key={`issue:${issueScopeKey(issue)}`}>
               {pulls.length > 0 || index > 0 ? <DropdownMenuSeparator /> : null}
               <DropdownMenuItem
                 className="q-pr-row"

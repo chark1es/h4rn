@@ -386,11 +386,21 @@ chosen one. Open/Closed and involvement filters (assigned, opened by you, mentio
 the provider's own query where it has one: GitHub's issue search, GitLab's
 `scope`, Gitea/Forgejo's `assigned_by`/`created_by`/`mentioned_by` login
 parameters (the login is read from `/user`), and Azure Boards' WIQL `@Me`
-clauses. A tracker that cannot support a filter or action does not advertise
+clauses. On GitHub every involvement search also carries `is:open`, the way
+Assigned already did, so "Opened by me" and "Mentioning me" answer the same
+kind of question rather than mixing in closed issues. A tracker that cannot
+support a filter or action does not advertise
 it: the page hides the Mentions tab, the labels editor and the close-reason
 picker rather than sending a request the tracker will refuse. The search box
 asks the tracker (`is:issue`, `search=`, `q=`, WIQL `CONTAINS`), and **Load
-more** reads the next page.
+more** reads the next page. A page that fails leaves its continuation alone,
+so **Load more** can try the same page again; hiding a project or changing an
+account starts a new listing, and a page that arrives late for the old one is
+dropped instead of adding rows from a project that is no longer shown. A
+project whose repository no connected account serves is named in the page
+("No GitHub account matches this repository") rather than silently missing.
+Saving an edit refreshes the list behind the open issue but keeps the pane
+mounted, so a comment draft typed before the edit is still there.
 
 Bitbucket Cloud exposes no issues: Atlassian removed its native issue tracker
 API in August 2026, so its capability row is false, a request answers
@@ -398,7 +408,10 @@ API in August 2026, so its capability row is false, a request answers
 shows that note in the Issues page instead of sending a request. Azure DevOps
 has no issue collection separate from Boards, so this surface reads work items
 of type `Issue` and `Bug`, discovered from the project's own type catalogue
-(`_apis/wit/workitemtypes`). A process need not define both: Basic has no
+(`_apis/wit/workitemtypes`). A team project's name may contain a space, so it
+is percent-encoded as one path segment (`Platform%20Team`) in every API path
+and in the fallback browser link; form encoding's `+` is a literal plus in a
+path and would 404. A process need not define both: Basic has no
 `Bug`, Scrum has no `Issue`, and a type whose states endpoint answers 404 is
 skipped as long as one type remains. States are read per type from
 `_apis/wit/workitemtypes/{type}/states`; the state's category, not its name,
@@ -413,7 +426,10 @@ Each row comes from the tracker. GitHub's `/issues` list also returns pull
 requests, so those rows are removed. Issue detail shows the body, state,
 labels, assignees, comments and the pull requests the tracker reports
 (GitHub's timeline, GitLab's related merge requests, Azure's
-`vstfs:///Git/PullRequestId` artifact links). An Azure link names its own
+`vstfs:///Git/PullRequestId` artifact links). GitHub's timeline is paged: the
+read follows its `Link` header for up to ten pages and keeps every
+cross-referenced pull request it finds, so an older link on a later page is not
+lost. An Azure link names its own
 project and repository ids, which are resolved to that repository's web URL,
 so a pull request in another repository links there rather than to the
 checked-out one. Comment paging carries the provider's continuation through
@@ -435,8 +451,11 @@ last row.
 Writes are `ForgeCommentIssue` and `ForgeUpdateIssue`: comment, title, body,
 labels, assignees, and close/reopen. Gitea/Forgejo replace labels through
 `PUT /repos/{owner}/{repo}/issues/{index}/labels` with label ids, not through
-the issue PATCH body; the daemon reads the label catalogue page by page until
-every requested name resolves. The daemon only sends the fields the caller
+the issue PATCH body. Gitea accepts a label owned by the repository or by the
+organization that owns it, so the daemon resolves requested names from the
+repository catalogue and then from `GET /orgs/{org}/labels`; the daemon reads
+each catalogue page by page until every requested name resolves. The daemon
+only sends the fields the caller
 named, so an edit never clears the others. GitHub closes with a
 `state_reason`, and a duplicate close also sends `duplicate_issue_id`; the UI
 collects the duplicate's number, and the daemon reads that issue so it can
@@ -467,19 +486,27 @@ closed family, like completed and canceled. Linear issues can be linked to
 threads like forge issues. Opening an issue makes one detail read; that read
 already carries its team, so the ownership check needs no second request, and
 a comment checks ownership with a one-field `issue { team { id } }` query.
+A team may be attached to more than one project, so write access survives
+removing one of them: the check asks whether any matching mapping belongs to a
+project that still exists, not just the first mapping.
 What Linear can do arrives in `ForgeAccounts.linear` (a `ForgeCapabilities`),
 separate from the forge rows, so the page reads it like a forge row instead of
 assuming a fixed set of actions without widening the forge list for older
 clients. A Linear issue whose team is not attached to a project is read-only;
 the UI says so and points at the project's team setting, while a forge issue in
-a repository no project owns keeps the repository-ownership note.
+a repository no project owns keeps the repository-ownership note. Settings →
+Source control keeps a failed account or team load on the page and names the
+reason, the way the forge settings do, rather than showing it as "no workspace
+connected".
 
 ### Thread links
 
 `LinkIssue` stores the tracker scope and provider issue id in the journal, so
 a link survives a restart; `ThreadIssues` reads each linked issue live and
 reports a failed read as an error rather than a stale row. The thread header's
-linked-items panel shows issues beside pull requests with open and unlink.
+linked-items panel shows issues beside pull requests with open and unlink, and
+names each issue by its scope (`owner/repo#12`, or Linear's identifier and
+team), so two issues numbered `#12` in different repositories never look alike.
 
 ## Checks, logs, re-run and commits
 

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -129,11 +130,15 @@ const mock = vi.hoisted(() => {
     hasMore: {} as Record<string, boolean>,
     /** Blocks the second page until the test resolves it. */
     page2Gate: null as Promise<void> | null,
+    /** Blocks one repository's first page, for a superseded listing. */
+    page1Gate: null as { repo: string; promise: Promise<void> } | null,
     /** Details that differ from the list row. */
     detailLabels: null as { name: string; color: string | null }[] | null,
     detailAssignees: null as { login: string; name: string | null }[] | null,
     /** Simulates an issue leaving the list after a write. */
     hideRow: false,
+    /** Makes the next non-first page fail once, for a temporary tracker error. */
+    failPage2: false,
     /** The tracker's state after the last update. */
     closed: false,
     /** Whether the read reported a repository no project owns. */
@@ -221,7 +226,13 @@ const mock = vi.hoisted(() => {
         };
       }
       case "forge_list_issues": {
+        if (request.page === 1 && state.page1Gate && state.page1Gate.repo === request.repo.repo) {
+          await state.page1Gate.promise;
+        }
         if (request.page > 1 && state.page2Gate) await state.page2Gate;
+        if (request.page > 1 && state.failPage2) {
+          throw new Error("the tracker is briefly unavailable");
+        }
         return {
           type: "forge_issues",
           issues:
@@ -438,15 +449,20 @@ function resetTracker(
   mock.state.linearAccounts = options.linearAccounts ?? [];
   mock.state.hasMore = options.hasMore ?? {};
   mock.state.page2Gate = null;
+  mock.state.page1Gate = null;
   mock.state.linked = false;
   mock.state.detailLabels = options.detailLabels ?? null;
   mock.state.detailAssignees = options.detailAssignees ?? null;
   mock.state.hideRow = false;
+  mock.state.failPage2 = false;
   mock.state.closed = false;
   mock.state.readOnly = options.readOnly ?? false;
 }
 
 beforeEach(() => {
+  // Hidden projects and account choices are stored per browser; a test that
+  // hides one must not change what the next test sees.
+  window.localStorage.clear();
   mock.request.mockReset();
   mock.request.mockImplementation(mock.defaultRequest);
   resetTracker();
@@ -550,6 +566,106 @@ describe("the Issues page", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it("keeps the comment draft after a title edit is saved", async () => {
+    await openIssue();
+    const comment = screen.getByLabelText("New comment");
+    fireEvent.change(comment, { target: { value: "Still here after the edit" } });
+    const title = screen.getByLabelText("Issue title");
+    fireEvent.change(title, { target: { value: "Dark mode flickers on load" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(requestsOfType("forge_update_issue")).toHaveLength(1));
+    // The pane stayed mounted, so the draft the person typed is untouched;
+    // only the list behind it was refreshed.
+    const draft = await screen.findByLabelText("New comment");
+    expect((draft as HTMLTextAreaElement).value).toBe("Still here after the edit");
+  });
+
+  it("names a project whose repository no connected account serves", async () => {
+    resetTracker({
+      accounts: [
+        account({
+          account_id: "acct_gl",
+          forge: "gitlab",
+          base_url: "https://gitlab.com",
+          username: "alice",
+        }),
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText(/No GitHub account matches this repository/)).toBeTruthy();
+    expect(requestsOfType("forge_list_issues")).toHaveLength(0);
+  });
+
+  it("reads no Linear source when the accounts response has no linear field", async () => {
+    resetTracker({
+      linearCapabilities: null,
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    await screen.findByText("No issues to show");
+    expect(screen.queryByText("Linear · Acme")).toBeNull();
+    expect(requestsOfType("linear_list_issues")).toHaveLength(0);
+  });
+
+  it("drives Linear's comment box and filters from the accounts response", async () => {
+    resetTracker({
+      linearCapabilities: linearCapabilities({ mentioning_filter: true }),
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText("Linear · Acme")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Mentioning me" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
+    expect(await screen.findByLabelText("New comment")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Comment" })).toBeTruthy();
+  });
+
+  it("hides Linear's comment box and mention filter when the field says so", async () => {
+    resetTracker({
+      linearCapabilities: linearCapabilities({ comments: false, mentioning_filter: false }),
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText("Linear · Acme")).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Mentioning me" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
+    expect(await screen.findByRole("button", { name: /Link to this thread/ })).toBeTruthy();
+    expect(screen.queryByLabelText("New comment")).toBeNull();
   });
 
   it("links the issue to the open thread and unlinks it again", async () => {
@@ -942,6 +1058,88 @@ describe("issue paging", () => {
     await waitFor(() => expect(screen.queryByText("Stale page row")).toBeNull());
   });
 
+  it("keeps Load more when a page fails temporarily", async () => {
+    resetTracker({ hasMore: { widget: true } });
+    mock.state.failPage2 = true;
+    render(<IssuesPage />);
+    await screen.findByText("#12");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("the tracker is briefly unavailable")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+
+    // The same page can be tried again once the tracker answers.
+    mock.state.failPage2 = false;
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Stale page row")).toBeTruthy();
+  });
+
+  it("drops a page that arrives after its project is hidden", async () => {
+    resetTracker({
+      projects: [
+        {
+          id: "proj_1",
+          host: "host_local",
+          path: "/work/widget",
+          name: "widget",
+          created_at: "2026-01-01T00:00:00Z",
+          git: true,
+        },
+        {
+          id: "proj_2",
+          host: "host_local",
+          path: "/work/other",
+          name: "other",
+          created_at: "2026-01-01T00:00:00Z",
+          git: true,
+        },
+      ],
+      repos: {
+        "/work/widget": repo,
+        "/work/other": { ...repo, repo: "other" },
+      },
+      hasMore: { widget: true, other: true },
+    });
+    let release = () => {};
+    mock.state.page2Gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    render(<IssuesPage />);
+    await screen.findAllByText("#12");
+    const before = requestsOfType("forge_list_issues").filter(
+      (value) => value.type === "forge_list_issues" && value.page === 1,
+    ).length;
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    // Hold the relisting that follows hiding the project, so the delayed page
+    // lands first.
+    let releaseList = () => {};
+    mock.state.page1Gate = {
+      repo: "other",
+      promise: new Promise<void>((resolve) => {
+        releaseList = resolve;
+      }),
+    };
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Projects" }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "widget" }));
+    // It must not add the hidden project's rows back.
+    await waitFor(() => {
+      const now = requestsOfType("forge_list_issues").filter(
+        (value) => value.type === "forge_list_issues" && value.page === 1,
+      ).length;
+      expect(now).toBeGreaterThan(before);
+    });
+    release();
+    // The relisting is still held, so the hidden project's delayed page has
+    // landed and there has been time to render it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText("Stale page row")).toBeNull();
+    releaseList();
+    await waitFor(() => expect(screen.queryByText("Reading trackers…")).toBeNull());
+  });
+
   it("pages a Linear discussion with comments_after and keeps both pages", async () => {
     resetTracker({
       mappings: [
@@ -1006,5 +1204,17 @@ describe("Linear state families", () => {
       url: "https://linear.app/acme/issue/ENG-9",
     });
     expect(row.state).toBe("closed");
+  });
+});
+
+describe("the phone layout", () => {
+  it("lets the issue filters wrap with thumb-sized targets", () => {
+    const css = readFileSync("src/styles/quiet.css", "utf8");
+    const start = css.indexOf("@media (max-width: 560px)");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const block = css.slice(start, css.indexOf("\n}", start) + 2);
+    // Five involvement tabs do not fit across a 390 px screen in one row.
+    expect(block).toMatch(/\.q-issues-head \.q-seg \{[^}]*flex-wrap: wrap;/);
+    expect(block).toMatch(/\.q-issues-head \.q-seg > button \{[^}]*min-height: 32px;/);
   });
 });

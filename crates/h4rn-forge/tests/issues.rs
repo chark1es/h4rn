@@ -301,6 +301,121 @@ async fn github_search_carries_the_involvement_qualifier() {
     assert_eq!(page.issues.len(), 1);
 }
 
+#[tokio::test]
+async fn github_involvement_searches_only_open_issues() {
+    // "Opened by me" and "Mentioning me" are work views like "Assigned to
+    // me": each search closes the state, so closed issues do not crowd them.
+    let server = MockServer::start().await;
+    let base = server.uri();
+    for qualifier in ["author:@me", "mentions:@me"] {
+        Mock::given(method("GET"))
+            .and(path("/api/v3/search/issues"))
+            .and(query_param(
+                "q",
+                format!("repo:acme/widget is:issue is:open {qualifier}"),
+            ))
+            .respond_with(ok(json!({"total_count": 0, "items": []})))
+            .mount(&server)
+            .await;
+    }
+    let client = GitHubClient::new(&base, &token(), 600).unwrap();
+    let repo = repo(ForgeKind::GitHub, &base);
+    for filter in [ForgeIssueFilter::Created, ForgeIssueFilter::Mentioning] {
+        let page = client.list_issues(&repo, filter, 1, None).await.unwrap();
+        assert!(page.issues.is_empty(), "{filter:?}");
+    }
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/v3/search/issues")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn github_timeline_follows_a_cross_reference_on_the_second_page() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12"))
+        .respond_with(ok(github_issue()))
+        .mount(&server)
+        .await;
+    // GitHub pages the timeline with `Link`; the first page holds no
+    // cross-reference, so only the second page carries the PR.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .and(query_param_is_missing("page"))
+        .respond_with(ok(json!([])).insert_header(
+            "link",
+            format!(
+                "<{base}/api/v3/repos/acme/widget/issues/12/timeline?per_page=100&page=2>; rel=\"next\""
+            ),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .and(query_param("page", "2"))
+        .respond_with(ok(json!([{
+            "event": "cross-referenced",
+            "source": {"issue": {
+                "number": 7,
+                "title": "Fix flicker",
+                "state": "open",
+                "html_url": "https://github.com/acme/widget/pull/7",
+                "pull_request": {"merged_at": null}
+            }}
+        }])))
+        .mount(&server)
+        .await;
+
+    let client = GitHubClient::new(&base, &token(), 600).unwrap();
+    let detail = client
+        .get_issue(&repo(ForgeKind::GitHub, &base), 12)
+        .await
+        .unwrap();
+    assert_eq!(detail.linked_pull_requests.len(), 1);
+    assert_eq!(detail.linked_pull_requests[0].number, 7);
+}
+
+#[tokio::test]
+async fn github_timeline_stops_after_ten_pages() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12"))
+        .respond_with(ok(github_issue()))
+        .mount(&server)
+        .await;
+    // A server that never stops offering a next page must not make the read
+    // walk forever.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/issues/12/timeline"))
+        .respond_with(ok(json!([])).insert_header(
+            "link",
+            format!(
+                "<{base}/api/v3/repos/acme/widget/issues/12/timeline?per_page=100>; rel=\"next\""
+            ),
+        ))
+        .expect(10)
+        .mount(&server)
+        .await;
+
+    let client = GitHubClient::new(&base, &token(), 600).unwrap();
+    let detail = client
+        .get_issue(&repo(ForgeKind::GitHub, &base), 12)
+        .await
+        .unwrap();
+    assert!(detail.linked_pull_requests.is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // GitLab
 // ---------------------------------------------------------------------------
@@ -856,6 +971,125 @@ async fn gitea_finds_a_label_past_a_smaller_catalogue_page() {
     assert_eq!(
         label_pages, 2,
         "the short first page did not end the catalogue"
+    );
+}
+
+#[tokio::test]
+async fn gitea_replaces_a_label_from_the_organisation_catalogue() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    // The repository carries one label; the requested one belongs to the
+    // organisation that owns it. `ReplaceIssueLabels` accepts both.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "1"))
+        .respond_with(ok_with_total(json!([{"id": 1, "name": "feature"}]), 1))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orgs/acme/labels"))
+        .and(query_param("page", "1"))
+        .respond_with(ok_with_total(json!([{"id": 51, "name": "release"}]), 1))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/repos/acme/widget/issues/4/labels"))
+        .and(body_json(json!({"labels": [51]})))
+        .respond_with(ok(json!([{"id": 51, "name": "release"}])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/issues/4"))
+        .respond_with(ok(json!({
+            "number": 4,
+            "title": "Export CSV",
+            "state": "open",
+            "user": {"login": "alice"},
+            "labels": [{"id": 51, "name": "release"}],
+            "updated_at": "2026-03-02T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
+    let updated = client
+        .update_issue(
+            &repo(ForgeKind::Gitea, &base),
+            4,
+            &ForgeIssueUpdate {
+                labels: Some(vec!["release".into()]),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.summary.labels[0].name, "release");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path() == "/api/v1/orgs/acme/labels"),
+        "the organisation catalogue was read"
+    );
+}
+
+#[tokio::test]
+async fn gitea_stops_label_paging_at_an_empty_page_without_a_count() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    // No `X-Total-Count`: the client asks for 50 rows, the server returns 30,
+    // so only an empty page proves the catalogue ended. A missing label must
+    // not page forever.
+    for (page, start) in [(1u32, 1u32), (2, 31)] {
+        let rows: Vec<Value> = (start..start + 30)
+            .map(|id| json!({"id": id, "name": format!("label-{id}")}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/acme/widget/labels"))
+            .and(query_param("page", page.to_string()))
+            .respond_with(ok(Value::Array(rows)))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widget/labels"))
+        .and(query_param("page", "3"))
+        .respond_with(ok(json!([])))
+        .mount(&server)
+        .await;
+
+    let client = GiteaClient::new(ForgeKind::Gitea, &base, &token(), 600).unwrap();
+    let error = client
+        .update_issue(
+            &repo(ForgeKind::Gitea, &base),
+            4,
+            &ForgeIssueUpdate {
+                labels: Some(vec!["missing".into()]),
+                ..ForgeIssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("no label called missing"),
+        "{error}"
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    let pages = requests
+        .iter()
+        .filter(|request| request.url.path() == "/api/v1/repos/acme/widget/labels")
+        .count();
+    assert_eq!(pages, 3, "the empty page ends the catalogue");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.method.as_str() == "PUT"),
+        "no replacement is sent without every id"
     );
 }
 
@@ -1436,6 +1670,82 @@ async fn azure_closes_each_type_with_its_own_finished_state() {
         .await
         .expect("a work item reopens with its own type's state");
     assert_eq!(reopened.summary.number, 41);
+}
+
+#[tokio::test]
+async fn azure_percent_encodes_a_project_name_with_a_space() {
+    let server = MockServer::start().await;
+    let base = format!("{}/acme", server.uri());
+
+    // A team project may contain a space. A path segment encodes it as `%20`;
+    // form encoding's `+` is a literal plus in a path, so the request 404s.
+    let project = "/acme/Platform%20Team";
+    Mock::given(method("GET"))
+        .and(path(format!("{project}/_apis/wit/workitemtypes")))
+        .respond_with(ok(json!({
+            "count": 1,
+            "value": [
+                {"name": "Bug", "referenceName": "Microsoft.VSTS.WorkItemTypes.Bug"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "{project}/_apis/wit/workitemtypes/Bug/states"
+        )))
+        .respond_with(ok(azure_states()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("{project}/_apis/wit/wiql")))
+        .respond_with(ok(json!({"workItems": [{"id": 21}]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{project}/_apis/wit/workitems")))
+        .and(query_param("ids", "21"))
+        .respond_with(ok(json!({
+            "count": 1,
+            "value": [{
+                "id": 21,
+                "fields": {
+                    "System.Title": "Crash on save",
+                    "System.State": "Active",
+                    "System.WorkItemType": "Bug",
+                    "System.ChangedDate": "2026-05-02T00:00:00Z"
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AzureDevOpsClient::new(&base, &token(), 600).unwrap();
+    let repo = ForgeRepoRef {
+        forge: ForgeKind::AzureDevOps,
+        base_url: base.clone(),
+        owner: "Platform Team".into(),
+        repo: "widget".into(),
+    };
+    let page = client
+        .list_issues(&repo, ForgeIssueFilter::Open, 1, None)
+        .await
+        .expect("a project with a space reads through encoded paths");
+    assert_eq!(page.issues.len(), 1);
+    // The fallback browser link encodes the same name the same way.
+    assert_eq!(
+        page.issues[0].web_url,
+        format!("{base}/Platform%20Team/_workitems/edit/21")
+    );
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path().contains("Platform+Team")),
+        "a path never carries form encoding"
+    );
 }
 
 // ---------------------------------------------------------------------------

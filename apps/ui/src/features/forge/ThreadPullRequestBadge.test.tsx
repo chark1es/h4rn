@@ -228,12 +228,57 @@ describe("linked pull request badge and panel", () => {
         onUnlinkIssue={onUnlinkIssue}
       />,
     );
-    expect(screen.getByRole("button", { name: "Linked items" }).textContent).toContain("#12 Open");
+    expect(screen.getByRole("button", { name: "Linked items" }).textContent).toContain(
+      "h4rn/api#12 Open",
+    );
     openBadge();
     expect(screen.getByText("Dark mode flickers")).toBeTruthy();
-    expect(screen.getAllByText("#12 Open").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("h4rn/api#12 Open").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("menuitem", { name: /Unlink issue/ }));
     expect(onUnlinkIssue).toHaveBeenCalledWith(issues[0]);
+  });
+
+  it("keys and labels two issues with the same number by their repository", () => {
+    const otherRepo: ForgeRepoRef = { ...repo, owner: "other", repo: "web" };
+    const otherSummary: ForgeIssueSummary = {
+      ...issueSummary,
+      repo: otherRepo,
+      title: "Other flicker",
+      web_url: "https://github.com/other/web/issues/12",
+    };
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const onUnlinkIssue = vi.fn();
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[
+          issues[0] as ThreadIssue,
+          {
+            scope: { tracker: "forge", repo: otherRepo },
+            issue_id: "12",
+            account_id: "a1",
+            state: { tracker: "forge", issue: otherSummary },
+            error: null,
+            linked_at: "2026-01-02T00:00:00Z",
+          },
+        ]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+        onUnlinkIssue={onUnlinkIssue}
+      />,
+    );
+    openBadge();
+    expect(screen.getByText("Dark mode flickers")).toBeTruthy();
+    expect(screen.getByText("Other flicker")).toBeTruthy();
+    expect(screen.getAllByText("h4rn/api#12 Open").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("other/web#12 Open").length).toBeGreaterThan(0);
+    const duplicateKey = error.mock.calls.some((call) => String(call[0]).includes("same key"));
+    expect(duplicateKey).toBe(false);
+    fireEvent.click(screen.getAllByRole("menuitem", { name: /Unlink issue/ })[1] as HTMLElement);
+    expect(onUnlinkIssue).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scope: { tracker: "forge", repo: otherRepo } }),
+    );
   });
 
   it("says what a watch cannot cover when the forge has no login", () => {

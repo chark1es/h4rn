@@ -25,10 +25,11 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     AgentState, ApprovalDecision, AutoResumePolicy, ClientFrame, ClientRequest, DeviceId,
-    DeviceInfo, Event, ForgeCredentialSource, ForgeKind, HarnessKind, HostId, Item, MessageRole,
-    ProtoError, ProtoErrorCode, ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame,
-    TextGenerationSettings, ThreadFilter, ThreadId, ThreadTab, TitleModelMode, TitleModelSetting,
-    ToolCallStatus, Topic, TurnStatus, UsageGroupBy, UsageRange, UsageScope,
+    DeviceInfo, Event, ForgeCredentialSource, ForgeKind, HarnessKind, HostId, Item,
+    LinearProjectTeam, MessageRole, ProtoError, ProtoErrorCode, ProxyProfileDraft, ResponseBody,
+    ResumeState, ServerFrame, TextGenerationSettings, ThreadFilter, ThreadId, ThreadTab,
+    TitleModelMode, TitleModelSetting, ToolCallStatus, Topic, TurnStatus, UsageGroupBy, UsageRange,
+    UsageScope,
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -3637,6 +3638,121 @@ async fn opening_a_linear_issue_reads_it_once() {
             .map(|request| request.url.as_str())
             .collect::<Vec<_>>()
     );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_linear_team_another_project_uses_stays_writable_after_one_is_removed() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    // One superset response serves the connect, team list, ownership and
+    // comment documents; GraphQL clients read only the keys they asked for.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "viewer": {
+                    "name": "Acme",
+                    "email": "alice@example.test",
+                    "organization": {"name": "Acme"}
+                },
+                "teams": {"nodes": [{"id": "team_1", "key": "ENG", "name": "Engineering"}]},
+                "issue": {"id": "iss_1", "team": {"id": "team_1"}},
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "c_1",
+                        "body": "On it.",
+                        "createdAt": "2026-01-03T00:00:00Z",
+                        "updatedAt": null,
+                        "user": {"displayName": "Alice"}
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let daemon = boot_with_linear_endpoint(format!("{}/graphql", server.uri())).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let host = host_id_for(&daemon).await;
+
+    let account = match client
+        .request(ClientRequest::LinearConnect {
+            api_key: "fixture-linear-key".into(),
+        })
+        .await
+        .expect("connect Linear")
+    {
+        ResponseBody::LinearAccounts { accounts } => {
+            accounts.into_iter().next().expect("one connected account")
+        }
+        other => panic!("unexpected connect response: {other:?}"),
+    };
+
+    let first_dir = tempfile::tempdir().expect("first workspace");
+    let second_dir = tempfile::tempdir().expect("second workspace");
+    let mut project_ids = Vec::new();
+    for dir in [&first_dir, &second_dir] {
+        let project = match client
+            .request(ClientRequest::AddProject {
+                host: host.clone(),
+                source: h4rn_protocol::ProjectSource::Existing {
+                    path: dir.path().to_string_lossy().into_owned(),
+                },
+                name: None,
+            })
+            .await
+            .expect("register the workspace")
+        {
+            ResponseBody::Project { project } => project,
+            other => panic!("unexpected project response: {other:?}"),
+        };
+        project_ids.push(project.id);
+    }
+
+    // Both projects use the same team; the first mapping is the one that will
+    // be removed, so a check that stops at the first mapping goes stale.
+    for project_id in &project_ids {
+        client
+            .request(ClientRequest::LinearSetProjectTeam {
+                project_id: project_id.clone(),
+                team: Some(LinearProjectTeam {
+                    project_id: project_id.clone(),
+                    account_id: account.account_id.clone(),
+                    team_id: "team_1".into(),
+                    team_key: "ENG".into(),
+                    team_name: "Engineering".into(),
+                }),
+            })
+            .await
+            .expect("attach the team");
+    }
+    client
+        .request(ClientRequest::RemoveProject {
+            host,
+            project_id: project_ids[0].clone(),
+        })
+        .await
+        .expect("remove the first project");
+
+    match client
+        .request(ClientRequest::LinearCommentIssue {
+            account_id: account.account_id.clone(),
+            issue_id: "iss_1".into(),
+            body: "On it.".into(),
+        })
+        .await
+    {
+        Ok(ResponseBody::LinearIssueCommentPosted { comment }) => {
+            assert_eq!(comment.body, "On it.");
+        }
+        other => panic!("the second project still makes the team writable: {other:?}"),
+    }
 
     daemon.stop().await;
 }
