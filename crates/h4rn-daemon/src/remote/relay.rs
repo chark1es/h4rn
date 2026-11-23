@@ -59,6 +59,19 @@ struct PendingGuest {
     request: h4rn_protocol::GuestHttpRequest,
     body: Vec<u8>,
     next_seq: u64,
+    /// When the first frame arrived, so an abandoned upload cannot pin memory.
+    started: std::time::Instant,
+}
+
+/// How long a guest body may take to finish before it is dropped.
+const GUEST_UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+impl GuestExchanges {
+    /// Drops uploads whose browser went away before the last frame.
+    fn expire(&mut self) {
+        self.pending
+            .retain(|_, guest| guest.started.elapsed() < GUEST_UPLOAD_TIMEOUT);
+    }
 }
 
 /// In-flight relay connections, keyed by `conn_id`. It holds both sessions
@@ -461,6 +474,7 @@ async fn handle_event(
                             request,
                             body: Vec::new(),
                             next_seq: 0,
+                            started: std::time::Instant::now(),
                         },
                     );
                     return Ok(());
@@ -536,7 +550,11 @@ async fn handle_event(
                 )
                 .await;
             }
-            RelayFrameKind::Ping => {}
+            RelayFrameKind::Ping => {
+                // The relay echoes the daemon's ping; use the quiet moment to
+                // drop uploads a browser abandoned.
+                guests.expire();
+            }
         },
         RelayServerEvent::Snapshot { devices, .. } => {
             apply_snapshot(service, registry, &devices);
