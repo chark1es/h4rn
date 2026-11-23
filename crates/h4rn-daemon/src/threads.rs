@@ -1850,6 +1850,17 @@ impl ThreadManager {
         Some(record.summary(&self.inner.options.settings, self.now()))
     }
 
+    /// How many user messages are waiting behind the running turn.
+    ///
+    /// A turn in flight is not counted: [`Self::turn_in_flight`] answers that.
+    /// The pair is what `thread_status` reports, so an agent can tell "working"
+    /// from "working with three messages queued".
+    pub async fn thread_queue_len(&self, thread_id: &ThreadId) -> Option<usize> {
+        let handle = self.inner.handle(thread_id).await.ok()?;
+        let record = handle.lock().await;
+        Some(record.queued.len())
+    }
+
     /// The turn a thread would attach a new item to.
     pub async fn thread_turn_id(&self, thread_id: &ThreadId) -> Option<TurnId> {
         let handle = self.inner.handle(thread_id).await.ok()?;

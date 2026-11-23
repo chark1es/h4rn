@@ -160,6 +160,8 @@ pub struct FakeHarness {
     session_count: Option<SessionCount>,
     /// The settings each session started with, and every live switch applied.
     session_settings: Option<SessionSettings>,
+    /// The MCP endpoint and bearer token each session was started with.
+    session_mcp: Option<SessionMcp>,
     /// Model ids the fake session advertises, when a test asks for a catalogue.
     advertised_models: Option<Vec<String>>,
     /// The model a session reports it is running, when a test models an agent
@@ -399,6 +401,36 @@ impl SessionSettings {
     }
 }
 
+/// One session's MCP injection, as the adapter received it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpInjection {
+    /// The endpoint handed to the harness.
+    pub endpoint: Option<String>,
+    /// The bearer token, when the daemon minted one.
+    pub token: Option<String>,
+}
+
+/// A log of every session's MCP injection.
+#[derive(Clone, Debug, Default)]
+pub struct SessionMcp(Arc<Mutex<Vec<McpInjection>>>);
+
+impl SessionMcp {
+    /// Every injection, in startup order.
+    pub fn get(&self) -> Vec<McpInjection> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn note(&self, injection: McpInjection) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(injection);
+    }
+}
+
 /// A shared count of cancels a fake session was asked to send.
 ///
 /// A test reads it to prove a Stop either dropped the prompt or cancelled one
@@ -505,6 +537,7 @@ impl Default for FakeHarness {
             start_attempts: None,
             session_models: None,
             session_settings: None,
+            session_mcp: None,
             advertised_models: None,
             restored_model: None,
             default_models: Vec::new(),
@@ -686,6 +719,17 @@ impl FakeHarness {
         let settings = SessionSettings::default();
         self.session_settings = Some(settings.clone());
         (self, settings)
+    }
+
+    /// Records the MCP endpoint and token every session is started with.
+    ///
+    /// The daemon mints a token per harness session and passes it through the
+    /// adapter; a test reads this to prove the injection happened and that the
+    /// token is bound to the thread (ADR-044).
+    pub fn with_mcp_injection(mut self) -> (Self, SessionMcp) {
+        let mcp = SessionMcp::default();
+        self.session_mcp = Some(mcp.clone());
+        (self, mcp)
     }
 
     /// A live session that refuses in-place setting changes.
@@ -954,6 +998,12 @@ impl Harness for FakeHarness {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(spec.model.clone());
+        }
+        if let Some(mcp) = &self.session_mcp {
+            mcp.note(McpInjection {
+                endpoint: spec.mcp_endpoint.clone(),
+                token: spec.env_overrides.get(crate::ENV_MCP_AUTH_TOKEN).cloned(),
+            });
         }
         if let Some(settings) = &self.session_settings {
             settings.note(SettingChange::Started {

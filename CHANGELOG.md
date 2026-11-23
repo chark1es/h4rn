@@ -7,6 +7,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Agents can link pull requests from inside a thread, and outside agents can work with h4rn
+  over MCP.** Every harness session now gets h4rn's own tools through its existing per-session
+  token: `link_pull_request`, `unlink_pull_request`, `list_thread_pull_requests`,
+  `watch_pull_request`, `unwatch_pull_request`, `thread_status` and
+  `list_forge_pull_requests`. They act on the calling thread and accept no thread id, so a token
+  cannot reach another thread; Settings → Sharing & access turns them off per harness. Agents
+  h4rn did not start — Claude Code or Codex in your terminal, ChatGPT, a bot — can connect to
+  `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). The
+  daemon's approval page names the client and offers **Read only**, **Supervised** (threads run
+  at approval-required) or **Full access**; tokens are scoped, expiring, revocable and stored
+  only as digests. The same page shows the MCP URL with a Copy button and lists connected agents
+  with Revoke. Redirects are admitted only to `https` or localhost, and the OAuth and MCP
+  endpoints are rate-limited. See [docs/outside-agents.md](docs/outside-agents.md) and
+  [ADR-044](docs/decisions.md).
 - **Threads can change permission mode, model and reasoning effort mid-thread.**
   The model chip in the composer now opens a thread-controls panel: permission
   mode, model, reasoning effort and (on Codex) fast mode. A change applies to the

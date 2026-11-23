@@ -472,6 +472,38 @@ impl DaemonBuilder {
         // `None` and a session starts without MCP rather than with a bogus URL.
         manager.set_mcp_provider(Arc::clone(&mcp) as Arc<dyn McpSessionProvider>);
 
+        // h4rn's own tools for the agents it runs act on the calling thread
+        // (ADR-044); the hub's per-session token names that thread.
+        let agent_tool_settings = Arc::new(crate::mcp_server::AgentToolSettingsStore::open(
+            &self.config.data_dir,
+            hosts.local_id().clone(),
+        ));
+        mcp.set_agent_tools(Arc::clone(&agent_tool_settings));
+        mcp.hub()
+            .register_provider(Arc::new(crate::mcp_server::AgentToolsProvider::new(
+                Arc::clone(&manager),
+                Arc::clone(&pr_links),
+                Arc::clone(&forge),
+                agent_tool_settings,
+                hosts.local_id().clone(),
+            )));
+
+        // Outside agents connect through OAuth to `/mcp`; they never
+        // see the person's own upstream servers.
+        let oauth = Arc::new(
+            crate::mcp_server::OAuthStore::open(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open outside-agent grants: {error}"))?,
+        );
+        let outside = Arc::new(crate::mcp_server::OutsideAgents::new(
+            oauth,
+            Arc::clone(&manager),
+            Arc::clone(&projects),
+            Arc::clone(&hosts),
+            Arc::clone(&proxy),
+            hosts.local_id().clone(),
+        ));
+        mcp.set_outside_agents(Arc::clone(&outside));
+
         // Delegation rides the same hub and namespace as the diagnostic tools;
         // each session's bearer token scopes a call to its own thread.
         let subagents = Arc::new(
@@ -529,6 +561,7 @@ impl DaemonBuilder {
             remote,
             devices,
             mcp,
+            outside,
             relay_dialer: Arc::new(crate::remote::RelayDialer::new()),
             supervisor: self.supervisor,
             proxy,
@@ -557,6 +590,8 @@ pub struct Daemon {
     remote: Option<Arc<RemoteState>>,
     devices: Arc<DeviceRegistry>,
     mcp: Arc<McpService>,
+    /// Outside-agent OAuth and its MCP endpoint.
+    outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Multiplexes peer MCP sessions over the daemon's one relay socket.
     relay_dialer: Arc<crate::remote::RelayDialer>,
     supervisor: Arc<ProcessSupervisor>,
@@ -667,11 +702,12 @@ impl Daemon {
 
         // The hub endpoint is always loopback: harness children run on this
         // machine and must not expose the token over a LAN interface.
-        let mcp_url = format!(
-            "http://{}/mcp",
-            SocketAddr::from(([127, 0, 0, 1], addrs[0].port()))
-        );
+        let loopback = SocketAddr::from(([127, 0, 0, 1], addrs[0].port()));
+        let mcp_url = format!("http://{loopback}/mcp");
         self.mcp.set_endpoint(mcp_url).await;
+        // Outside agents use the same loopback address: OAuth only finishes
+        // over https or localhost, and this listener is loopback-only.
+        self.outside.set_base_url(format!("http://{loopback}"));
         // With a secure transport this daemon can reach its peers' shared MCP
         // servers, authenticating as its own daemon key.
         if let Some(service) = &self.secure {
@@ -686,6 +722,7 @@ impl Daemon {
         let devices = self.devices;
         let secure = self.secure;
         let mcp = Arc::clone(&self.mcp);
+        let outside = Arc::clone(&self.outside);
         let config = self.config.clone();
         let (network, network_commands) = NetworkAccess::new(
             config.data_dir.clone(),
@@ -710,6 +747,7 @@ impl Daemon {
             devices: Arc::clone(&devices),
             network: Arc::clone(&network),
             mcp: Arc::clone(&mcp),
+            outside: Arc::clone(&outside),
             started: std::time::Instant::now(),
             proxy: Arc::clone(&self.proxy),
             meter: Arc::clone(&self.meter),
@@ -784,10 +822,12 @@ impl Daemon {
             manager: self.manager,
             subagents: self.subagents,
             worktrees: self.worktrees,
+            hosts: self.hosts,
             terminals: self.terminals,
             forge: self.forge,
             pr_links: self.pr_links,
             mcp: self.mcp,
+            outside: self.outside,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
             remote_tasks,
@@ -805,10 +845,12 @@ pub struct BoundDaemon {
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
     pr_links: Arc<crate::pr_links::PrLinkService>,
     mcp: Arc<McpService>,
+    outside: Arc<crate::mcp_server::OutsideAgents>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
     remote_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -850,6 +892,16 @@ impl BoundDaemon {
         Arc::clone(&self.mcp)
     }
 
+    /// Outside-agent access for in-process tests and diagnostics.
+    pub fn outside_agents(&self) -> Arc<crate::mcp_server::OutsideAgents> {
+        Arc::clone(&self.outside)
+    }
+
+    /// Host inventory for in-process tests.
+    pub fn host_inventory(&self) -> Arc<HostInventory> {
+        Arc::clone(&self.hosts)
+    }
+
     /// Serves until `shutdown` resolves, then interrupts turns and kills
     /// registered harness process groups (ADR-021).
     pub async fn serve(
@@ -864,10 +916,12 @@ impl BoundDaemon {
             manager,
             subagents,
             worktrees,
+            hosts: _,
             terminals,
             forge,
             pr_links,
             mcp,
+            outside: _,
             supervisor,
             data_dir,
             remote_tasks,

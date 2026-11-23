@@ -85,10 +85,11 @@ pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, TerminalId, ThreadId, TurnId,
 };
 pub use mcp::{
-    McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle, McpImportCandidate,
-    McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest, McpSecretInput,
-    McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval, McpSharePolicy,
-    McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
+    AgentToolSettings, McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle,
+    McpImportCandidate, McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest,
+    McpSecretInput, McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval,
+    McpSharePolicy, McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput,
+    McpTransportView, OutsideAgentLevel, OutsideAgentView,
 };
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;

@@ -76,6 +76,10 @@ pub struct McpService {
     devices: std::sync::RwLock<Option<Arc<crate::remote::DeviceRegistry>>>,
     peers: Arc<PeerDirectory>,
     peering: std::sync::Mutex<Option<(tokio::sync::watch::Sender<bool>, JoinHandle<()>)>>,
+    /// Outside-agent OAuth, wired after the daemon's other services exist.
+    outside: std::sync::OnceLock<Arc<crate::mcp_server::OutsideAgents>>,
+    /// Per-harness switches for h4rn's own tools.
+    agent_tools: std::sync::OnceLock<Arc<crate::mcp_server::AgentToolSettingsStore>>,
 }
 
 impl McpService {
@@ -145,6 +149,8 @@ impl McpService {
             devices: std::sync::RwLock::new(None),
             peers: Arc::new(PeerDirectory::new()),
             peering: std::sync::Mutex::new(None),
+            outside: std::sync::OnceLock::new(),
+            agent_tools: std::sync::OnceLock::new(),
         };
         service.start_background();
         Ok(service)
@@ -199,6 +205,29 @@ impl McpService {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(endpoint.clone());
         self.hub.set_endpoint(endpoint).await;
+    }
+
+    /// The loopback hub endpoint, once the listener is bound.
+    pub fn endpoint(&self) -> Option<String> {
+        self.endpoint
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Wires the outside-agent surface. Called once by the daemon builder.
+    pub fn set_outside_agents(&self, outside: Arc<crate::mcp_server::OutsideAgents>) {
+        let _ = self.outside.set(outside);
+    }
+
+    /// The outside-agent surface, when this daemon has one.
+    pub fn outside_agents(&self) -> Option<Arc<crate::mcp_server::OutsideAgents>> {
+        self.outside.get().cloned()
+    }
+
+    /// Wires h4rn's own tool switches. Called once by the daemon builder.
+    pub fn set_agent_tools(&self, settings: Arc<crate::mcp_server::AgentToolSettingsStore>) {
+        let _ = self.agent_tools.set(settings);
     }
 
     /// Starts the periodic upstream health and token-expiry pass.
@@ -284,6 +313,56 @@ impl McpService {
                 .await
                 .map(|server| ResponseBody::McpServer { server })
                 .map_err(HubError::into_proto),
+            McpRequest::ListOutsideAgents => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgents {
+                    agents: outside.store().connected_agents(),
+                    mcp_url: outside.mcp_url(),
+                })
+            }
+            McpRequest::RevokeOutsideAgent { client_id } => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                outside.store().revoke_client(&client_id).map_err(|error| {
+                    ProtoError::plain(h4rn_protocol::ProtoErrorCode::NotFound, error.description())
+                })?;
+                Ok(ResponseBody::Ack)
+            }
+            McpRequest::AgentTools => {
+                let settings = self.agent_tools.get().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not expose h4rn's own tool switches",
+                    )
+                })?;
+                Ok(ResponseBody::AgentTools {
+                    settings: settings.settings(),
+                })
+            }
+            McpRequest::SetAgentToolsEnabled { harness, enabled } => {
+                let settings = self.agent_tools.get().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not expose h4rn's own tool switches",
+                    )
+                })?;
+                let settings = settings.set_harness(harness, enabled).map_err(|error| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Internal,
+                        format!("could not save the h4rn tool switch: {error}"),
+                    )
+                })?;
+                Ok(ResponseBody::AgentTools { settings })
+            }
             other => self
                 .hub
                 .handle_request(other)

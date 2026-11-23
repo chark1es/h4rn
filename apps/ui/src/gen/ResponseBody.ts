@@ -2,6 +2,7 @@
 import type { AcpAgent } from "./AcpAgent";
 import type { AcpAgentProbe } from "./AcpAgentProbe";
 import type { AcpAgentSpec } from "./AcpAgentSpec";
+import type { AgentToolSettings } from "./AgentToolSettings";
 import type { BlobDownload } from "./BlobDownload";
 import type { BlobInfo } from "./BlobInfo";
 import type { DeviceId } from "./DeviceId";
@@ -45,6 +46,7 @@ import type { McpServerView } from "./McpServerView";
 import type { McpShareApproval } from "./McpShareApproval";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
+import type { OutsideAgentView } from "./OutsideAgentView";
 import type { PairScope } from "./PairScope";
 import type { PairingConfirmation } from "./PairingConfirmation";
 import type { PrLinkedThread } from "./PrLinkedThread";
@@ -461,7 +463,19 @@ result: McpTestCallResult, } | { "type": "mcp_approvals",
 /**
  * Pending requests, oldest first.
  */
-approvals: Array<McpShareApproval>, } | { "type": "usage_report", 
+approvals: Array<McpShareApproval>, } | { "type": "outside_agents", 
+/**
+ * Connected agents, newest first.
+ */
+agents: Array<OutsideAgentView>, 
+/**
+ * Streamable-HTTP MCP endpoint an outside agent connects to.
+ */
+mcp_url: string, } | { "type": "agent_tools", 
+/**
+ * Current settings.
+ */
+settings: AgentToolSettings, } | { "type": "usage_report", 
 /**
  * The report.
  */

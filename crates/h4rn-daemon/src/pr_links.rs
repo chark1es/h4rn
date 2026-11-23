@@ -387,6 +387,17 @@ impl PrLinkService {
         Ok(())
     }
 
+    /// The links a thread holds, without reading the forge.
+    ///
+    /// The agent tools use this to resolve a repository for unlink/unwatch and
+    /// to answer "what is linked" without a forge round trip per link.
+    pub async fn records(&self, thread_id: &ThreadId) -> Result<Vec<PrLinkRecord>, PrLinkError> {
+        self.journal
+            .pr_links_for_thread(thread_id)
+            .await
+            .map_err(PrLinkError::from)
+    }
+
     /// Lists a thread's links with the latest state from the forge.
     pub async fn list(&self, thread_id: &ThreadId) -> Result<Vec<ThreadPullRequest>, PrLinkError> {
         if self.sink.thread_title(thread_id).await.is_none() {

@@ -2,6 +2,7 @@ import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
 
 import { ShortcutCaps } from "@/components/common/Kbd";
+import { AccessSettings } from "@/features/access/AccessSettings";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import {
@@ -637,6 +638,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   worktrees: WorktreeSettings,
   resume: AutoResumeSettings,
   forges: ForgeSettings,
+  access: AccessSettings,
   "source-control": SourceControlSettings,
   general: GeneralForm,
   appearance: AppearanceForm,

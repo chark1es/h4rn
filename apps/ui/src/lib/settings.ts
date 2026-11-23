@@ -9,6 +9,7 @@ import {
   PlugIcon,
   ServerIcon,
   SettingsIcon,
+  Share2Icon,
   SunIcon,
   TerminalIcon,
   TimerIcon,
@@ -36,6 +37,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { key: "resume", label: "Auto-resume", icon: TimerIcon, group: "Machines" },
   { key: "forges", label: "Forges", icon: GitPullRequestIcon, group: "Machines" },
   { key: "account", label: "Account & relay", icon: UserIcon, group: "Account" },
+  { key: "access", label: "Sharing & access", icon: Share2Icon, group: "Account" },
 ];
 
 export const TOOLS_SECTION = {

@@ -452,6 +452,72 @@ pub struct McpTestCallResult {
     pub duration_ms: u64,
 }
 
+/// What an outside agent (an MCP client h4rn did not start) may do.
+///
+/// The level is chosen on the approval page and enforced by the daemon for
+/// every tool call, never trusted from the client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OutsideAgentLevel {
+    /// Read projects, threads, providers and models.
+    ReadOnly,
+    /// Read, and start or message threads, which run at approval-required.
+    Supervised,
+    /// Read, start and message threads at the mode the caller chooses.
+    FullAccess,
+}
+
+impl OutsideAgentLevel {
+    /// Stable scope string used in OAuth responses.
+    pub fn scope(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read",
+            Self::Supervised => "supervised",
+            Self::FullAccess => "full",
+        }
+    }
+
+    /// Parses the level the approval page submits.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read_only" | "read" => Some(Self::ReadOnly),
+            "supervised" => Some(Self::Supervised),
+            "full_access" | "full" => Some(Self::FullAccess),
+            _ => None,
+        }
+    }
+
+    /// Whether this level may change anything.
+    pub fn can_write(self) -> bool {
+        !matches!(self, Self::ReadOnly)
+    }
+}
+
+/// One outside agent with a live OAuth grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct OutsideAgentView {
+    /// Public OAuth client id (never a token).
+    pub client_id: String,
+    /// Name the client registered with.
+    pub name: String,
+    /// Highest level any live token for this client carries.
+    pub level: OutsideAgentLevel,
+    /// When the client first connected.
+    pub connected_at: DateTime<Utc>,
+    /// When the client last used a token, when it has.
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
+    /// When the longest-lived token for this client expires.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// The h4rn tools every harness session sees, and their per-harness switches.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AgentToolSettings {
+    /// Per-harness overrides; a missing entry means enabled.
+    pub enabled: McpEnabledMatrix,
+}
+
 /// One MCP operation from the UI.
 ///
 /// Every mutation is idempotent by name: adding an existing name updates it,
@@ -553,6 +619,22 @@ pub enum McpRequest {
         /// JSON arguments.
         #[ts(type = "unknown")]
         arguments: Value,
+    },
+    /// List outside agents connected through OAuth, and the URL they use.
+    ListOutsideAgents,
+    /// Revoke every token issued to one outside agent.
+    RevokeOutsideAgent {
+        /// Client id from [`OutsideAgentView::client_id`].
+        client_id: String,
+    },
+    /// Read h4rn's own tool switches.
+    AgentTools,
+    /// Turn h4rn's own tools on or off for one harness.
+    SetAgentToolsEnabled {
+        /// Harness whose sessions get the tools.
+        harness: HarnessKind,
+        /// New value.
+        enabled: bool,
     },
 }
 

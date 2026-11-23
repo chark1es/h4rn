@@ -131,6 +131,11 @@ impl HostInventory {
     pub fn available_harnesses(&self) -> Vec<HarnessKind> {
         self.catalog.available()
     }
+
+    /// Detection information for one harness on this host.
+    pub fn install(&self, kind: HarnessKind) -> Option<h4rn_harness::HarnessInstall> {
+        self.catalog.detect(kind)
+    }
 }
 
 /// The id a daemon derives for a host that another daemon reported to connect

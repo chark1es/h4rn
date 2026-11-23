@@ -1428,3 +1428,43 @@ with no shell and its arguments as an array, streams output as transient `Harnes
 the result names what is on disk, not what the registry promised. The registry client and the
 process runner are injectable seams, so no test touches the network or a real global CLI.
 
+
+## ADR-044: Two token populations for the two MCP audiences
+
+**Status:** Accepted
+
+h4rn is an MCP server twice, and the two callers must not share a credential.
+
+**Agents h4rn runs** already reach the hub through a token minted for one harness session (ADR-006).
+That token lives in memory, is bound to a thread and a scope, expires with a monotonic liveness
+window and dies with the daemon. The tools it unlocks are h4rn's own (`link_pull_request`,
+`thread_status`, the PR watch). A provider reads the thread id from the token's scope and accepts
+no thread argument, so a token for thread A has no syntax that names thread B. The per-harness
+switch is a second gate, stored beside the hub's own enable matrix.
+
+**Outside agents** are not h4rn's sessions. They connect with OAuth 2.1 over the daemon's loopback
+HTTP listener. The authorization code flow uses PKCE (S256 only) and dynamic client registration
+for public clients, because a hosted assistant cannot be given a pre-shared secret and a local
+client should not need one either. The person approves a level on a page the daemon serves:
+read-only, supervised (writes run at approval-required) or full access (the mode the caller asks
+for). That level is copied into every token and checked server-side on every call, not trusted
+from the request.
+
+Outside tokens are opaque random values, not JWTs. They last one hour (refresh: thirty days,
+rotating) and are stored only as BLAKE3 digests in `outside_agents.json`, so the file is not a
+credential dump and revocation is a lookup, not a key rotation. A signed token would avoid the
+lookup but would make "revoke now" depend on a denylist that can drift between restarts; the
+daemon already has the store open for every request.
+
+The alternatives were considered and rejected: reusing the local access token would give any
+outside client the owner's full authority; giving outside agents the same in-memory session tokens
+as harnesses would let a restart silently invalidate a thirty-day sign-in (and would make the
+harness token's thread scope meaningless); accepting any redirect would let a code be posted
+anywhere. The redirect allow-list (`https` or loopback `http`, no credentials, no fragment) and
+PKCE are therefore part of the model, not conveniences.
+
+The endpoint shares `/mcp` with the hub and dispatches on the token prefix: a harness token
+(`h4rn_mcp_`) reaches the hub, an outside token (`h4rn_at_`) reaches the outside tool set. An
+outside agent therefore sees a small, fixed tool set and never the person's upstream servers. It
+is loopback-only, and the Connect relay does not yet carry HTTP, so the copied URL is the local
+address and a hosted agent has no path in this phase.

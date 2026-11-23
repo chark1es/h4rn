@@ -1369,6 +1369,14 @@ impl McpHub {
             McpRequest::PendingApprovals | McpRequest::RespondApproval { .. } => Err(
                 HubError::Invalid("share approvals are handled by the daemon".into()),
             ),
+            // Outside-agent grants and h4rn's own per-harness switches belong
+            // to the daemon, which answers them before dispatch.
+            McpRequest::ListOutsideAgents
+            | McpRequest::RevokeOutsideAgent { .. }
+            | McpRequest::AgentTools
+            | McpRequest::SetAgentToolsEnabled { .. } => Err(HubError::Invalid(
+                "outside-agent grants are held by the daemon".into(),
+            )),
             McpRequest::TestCall {
                 name,
                 tool,

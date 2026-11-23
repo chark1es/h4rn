@@ -96,6 +96,8 @@ pub struct AppState {
     pub proxy: Arc<h4rn_proxy::ProxyService>,
     /// The daemon-owned MCP hub (ADR-006).
     pub mcp: Arc<McpService>,
+    /// Outside-agent OAuth and its MCP endpoint (ADR-044).
+    pub outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Durable metering, limits and auto-resume (ADR-024).
     pub meter: Arc<h4rn_meter::MeterHub>,
     /// Harness CLI versions and updates (ADR-043).
@@ -116,6 +118,7 @@ pub struct AppState {
 /// response instead of a 404, while plain WebSocket access stays loopback-only
 /// (ADR-009).
 pub fn router(state: AppState) -> Router {
+    let outside = Arc::clone(&state.outside);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
@@ -128,6 +131,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(mcp_http_delete),
         )
         .with_state(state)
+        .merge(crate::mcp_server::router(outside))
 }
 
 /// Router for the network listener: liveness plus the encrypted routes only.
@@ -145,14 +149,23 @@ pub fn network_router(state: AppState) -> Router {
 
 /// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
 async fn mcp_http_post(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return state.outside.handle_mcp(headers, body).await;
+    }
     crate::mcp::http_post(state.mcp.http_state(), headers, body).await
 }
 
-async fn mcp_http_get(State(state): State<AppState>) -> Response {
+async fn mcp_http_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return crate::mcp_server::http::outside_get(&state.outside, headers).await;
+    }
     crate::mcp::http_get(state.mcp.http_state()).await
 }
 
 async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return crate::mcp_server::http::outside_delete(&state.outside, headers).await;
+    }
     crate::mcp::http_delete(state.mcp.http_state(), headers).await
 }
 

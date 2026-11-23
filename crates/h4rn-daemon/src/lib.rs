@@ -38,6 +38,7 @@ pub mod hosts;
 pub mod journal;
 pub mod mcp;
 pub mod mcp_peers;
+pub mod mcp_server;
 pub mod network_access;
 pub mod pr_links;
 pub mod projects;

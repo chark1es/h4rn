@@ -112,4 +112,16 @@ tool: string,
 /**
  * JSON arguments.
  */
-arguments: unknown, };
+arguments: unknown, } | { "type": "list_outside_agents" } | { "type": "revoke_outside_agent", 
+/**
+ * Client id from [`OutsideAgentView::client_id`].
+ */
+client_id: string, } | { "type": "agent_tools" } | { "type": "set_agent_tools_enabled", 
+/**
+ * Harness whose sessions get the tools.
+ */
+harness: HarnessKind, 
+/**
+ * New value.
+ */
+enabled: boolean, };
