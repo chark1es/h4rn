@@ -4,6 +4,7 @@ import type { HarnessUpdateEvent } from "./HarnessUpdateEvent";
 import type { ProtoError } from "./ProtoError";
 import type { ProxyEvent } from "./ProxyEvent";
 import type { ResponseBody } from "./ResponseBody";
+import type { ScheduleEvent } from "./ScheduleEvent";
 import type { TerminalExitNotice } from "./TerminalExitNotice";
 import type { UsageStreamEvent } from "./UsageStreamEvent";
 
@@ -45,4 +46,8 @@ event: UsageStreamEvent, } | { "kind": "harness_event",
 /**
  * One output line or the final result.
  */
-event: HarnessUpdateEvent, };
+event: HarnessUpdateEvent, } | { "kind": "schedule_event", 
+/**
+ * The task that was created, changed or deleted.
+ */
+event: ScheduleEvent, };

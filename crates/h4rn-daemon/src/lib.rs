@@ -42,6 +42,7 @@ pub mod network_access;
 pub mod pr_links;
 pub mod projects;
 pub mod remote;
+pub mod schedules;
 pub mod secrets;
 pub mod server;
 pub mod service;

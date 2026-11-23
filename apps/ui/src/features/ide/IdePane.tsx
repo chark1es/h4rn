@@ -126,30 +126,25 @@ export function IdePane() {
   const [closing, setClosing] = useState(false);
   const [resolving, setResolving] = useState(false);
 
-  // The diff pane follows the editor tab, not the diff. A file picked inside
-  // the pane (the phone Turn and Branch pickers, a Branch or Commits file row)
-  // is the person's choice and must stay until they pick another one or switch
-  // tabs, so only a change of the active tab path re-opens the diff.
+  // The diff pane follows the editor tab in every mode. A file picked inside
+  // the pane (the phone Turn picker, a Branch or Commits row) is the person's
+  // choice and must stay until they pick another one or switch tabs; entries
+  // in a wider review's file list remain one click away.
   const diffTabPath = active?.path ?? null;
-  const diffSource = state.diffSource;
-  const openDiffSession = session.openDiff;
-  const diffPathRef = useRef(state.diffPath);
-  useEffect(() => {
-    diffPathRef.current = state.diffPath;
-  }, [state.diffPath]);
+  const followDiffTab = session.followDiffTab;
   const followedTabRef = useRef<string | null>(null);
   useEffect(() => {
-    if (panel !== "diff" || (diffSource !== "head" && diffSource !== "agent") || !diffTabPath) {
+    if (panel !== "diff" || !diffTabPath) {
       followedTabRef.current = null;
       return;
     }
     if (followedTabRef.current === diffTabPath) return;
     followedTabRef.current = diffTabPath;
     // Entering the pane (or switching the source) already asked for the tab's
-    // file; only a tab that disagrees with what is shown needs a read.
-    if (diffPathRef.current === diffTabPath) return;
-    void openDiffSession(diffTabPath, diffSource);
-  }, [panel, diffTabPath, diffSource, openDiffSession]);
+    // file. `followDiffTab` itself skips a tab the pane is already showing,
+    // and takes over a list load that would open another file.
+    void followDiffTab(diffTabPath);
+  }, [panel, diffTabPath, followDiffTab]);
 
   useEffect(() => {
     setCursor({ line: 1, column: 1 });
@@ -200,10 +195,14 @@ export function IdePane() {
 
   const openDiff = useCallback(
     (path: string, source: DiffSource) => {
+      // Asking for this file directly is the follow this tab already had; the
+      // tab-follow effect must not ask a second time. The guard compares tab
+      // paths, so remember the tab's file, not the row that was opened.
+      followedTabRef.current = diffTabPath;
       setPanel("diff");
       void session.openDiff(path, source);
     },
-    [session.openDiff],
+    [diffTabPath, session.openDiff],
   );
 
   /** Adds every pending comment to the thread's draft; sending stays manual. */
@@ -502,6 +501,9 @@ export function IdePane() {
               aria-selected={showDiff}
               disabled={!active && !state.diffPath}
               onClick={() => {
+                // Entering the pane already asks for the tab's file; mark the
+                // tab as handled so the follow effect does not ask twice.
+                followedTabRef.current = active?.path ?? null;
                 setPanel("diff");
                 void session.selectDiffSource(state.diffSource);
               }}
@@ -518,6 +520,7 @@ export function IdePane() {
               hint: entry.hint,
             }))}
             onChange={(value) => {
+              followedTabRef.current = active?.path ?? null;
               setPanel("diff");
               void session.selectDiffSource(value);
             }}

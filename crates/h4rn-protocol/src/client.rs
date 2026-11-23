@@ -794,6 +794,59 @@ pub enum ClientRequest {
         policy: crate::usage::AutoResumePolicy,
     },
     // ------------------------------------------------------------------
+    // Scheduled tasks and webhook automations. The daemon owns the timer,
+    // the journal and the webhook secret; clients read and edit tasks.
+    // ------------------------------------------------------------------
+    /// List every scheduled task on this host.
+    ListSchedules,
+    /// Create a scheduled task.
+    CreateSchedule {
+        /// The task to create.
+        task: crate::ScheduleDraft,
+    },
+    /// Replace a scheduled task's editable fields.
+    UpdateSchedule {
+        /// Task to edit.
+        task_id: crate::ScheduleTaskId,
+        /// New fields.
+        task: crate::ScheduleDraft,
+    },
+    /// Delete a scheduled task and its run history.
+    DeleteSchedule {
+        /// Task to delete.
+        task_id: crate::ScheduleTaskId,
+    },
+    /// Enable or disable a scheduled task.
+    SetScheduleEnabled {
+        /// Task to change.
+        task_id: crate::ScheduleTaskId,
+        /// Whether the clock or webhook may start it.
+        enabled: bool,
+    },
+    /// Start a scheduled task once, without changing its next clock run.
+    RunScheduleNow {
+        /// Task to run.
+        task_id: crate::ScheduleTaskId,
+    },
+    /// Read a task's bounded run history, newest first.
+    ListScheduleRuns {
+        /// Task whose history to read.
+        task_id: crate::ScheduleTaskId,
+    },
+    /// Replace a webhook task's URL path, invalidating the old one.
+    ///
+    /// The answer carries the new path, because a path is only ever revealed
+    /// through this admin request or [`Self::GetScheduleWebhookUrl`].
+    RotateScheduleWebhook {
+        /// Task to rotate.
+        task_id: crate::ScheduleTaskId,
+    },
+    /// Reveal a webhook task's secret URL path to an admin.
+    GetScheduleWebhookUrl {
+        /// Task whose path to read.
+        task_id: crate::ScheduleTaskId,
+    },
+    // ------------------------------------------------------------------
     // Forge (pull request) operations. Credentials stay in the daemon's
     // secret store; every request names an account or lets the daemon pick
     // the only matching one.
@@ -1350,6 +1403,8 @@ impl ClientRequest {
             | Self::ListDirectDevices
             | Self::ListTextGenerators
             | Self::GetTextGenerationSettings
+            | Self::ListSchedules
+            | Self::ListScheduleRuns { .. }
             | Self::GitStatus { .. } => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
@@ -1447,7 +1502,14 @@ impl ClientRequest {
             | Self::UpdateTextGenerator { .. }
             | Self::RemoveTextGenerator { .. }
             | Self::TestTextGenerator { .. }
-            | Self::SetTextGenerationSettings { .. } => Admin,
+            | Self::SetTextGenerationSettings { .. }
+            | Self::CreateSchedule { .. }
+            | Self::UpdateSchedule { .. }
+            | Self::DeleteSchedule { .. }
+            | Self::SetScheduleEnabled { .. }
+            | Self::RunScheduleNow { .. }
+            | Self::RotateScheduleWebhook { .. }
+            | Self::GetScheduleWebhookUrl { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers
                 | crate::mcp::McpRequest::ListTools { .. }
@@ -1751,6 +1813,27 @@ mod tests {
                     paths: None,
                     force: false,
                     bulk: false,
+                },
+                Admin,
+            ),
+            // Reading task lists is harmless; every write schedules work or
+            // hands out a webhook URL.
+            (ClientRequest::ListSchedules, View),
+            (
+                ClientRequest::ListScheduleRuns {
+                    task_id: crate::ids::ScheduleTaskId::new("sch_1"),
+                },
+                View,
+            ),
+            (
+                ClientRequest::DeleteSchedule {
+                    task_id: crate::ids::ScheduleTaskId::new("sch_1"),
+                },
+                Admin,
+            ),
+            (
+                ClientRequest::RunScheduleNow {
+                    task_id: crate::ids::ScheduleTaskId::new("sch_1"),
                 },
                 Admin,
             ),
