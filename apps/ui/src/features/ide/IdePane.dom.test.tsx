@@ -691,8 +691,7 @@ describe("a branch review resumed after a workspace round-trip", () => {
     await settle();
 
     // Picking `release` starts a new file list, which is held back.
-    const filesRequests = () =>
-      mock.requests.filter((request) => request.type === "fs_diff_files");
+    const filesRequests = () => mock.requests.filter((request) => request.type === "fs_diff_files");
     const releaseFiles = holdNext("fs_diff_files");
     openChip(await screen.findByRole("button", { name: "Base branch: main" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "release" }));
