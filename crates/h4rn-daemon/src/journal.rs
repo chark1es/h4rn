@@ -22,6 +22,7 @@ use h4rn_protocol::{
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 
+use crate::issue_links::IssueLinkRecord;
 use crate::pr_links::PrLinkRecord;
 
 /// Where a thread's current title came from.
@@ -237,6 +238,23 @@ pub trait Journal: Send + Sync {
         number: u32,
     ) -> Result<Vec<PrLinkRecord>, JournalError>;
 
+    /// Inserts or refreshes one thread → issue link.
+    async fn upsert_issue_link(&self, link: &IssueLinkRecord) -> Result<(), JournalError>;
+
+    /// Removes one thread → issue link.
+    async fn remove_issue_link(
+        &self,
+        thread_id: &ThreadId,
+        scope: &h4rn_protocol::IssueScope,
+        issue_id: &str,
+    ) -> Result<(), JournalError>;
+
+    /// Every issue link one thread holds, oldest link first.
+    async fn issue_links_for_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<IssueLinkRecord>, JournalError>;
+
     /// Every scheduled task, oldest first, with its most recent run.
     async fn list_schedules(&self) -> Result<Vec<ScheduleTask>, JournalError>;
 
@@ -410,6 +428,30 @@ impl SqliteJournal {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_pr_links_pr
              ON daemon_pr_links (forge, base_url, owner, repo, number)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Issue links keep the scope as JSON so a future tracker does not need
+        // a schema change; `scope_key` is the stable identity for conflicts.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_issue_links (
+                thread_id  TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                scope_key  TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                issue_id   TEXT NOT NULL,
+                linked_at  TEXT NOT NULL,
+                PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_daemon_issue_links_thread
+             ON daemon_issue_links (thread_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -832,6 +874,64 @@ impl Journal for SqliteJournal {
         rows.into_iter().map(pr_link_from_row).collect()
     }
 
+    async fn upsert_issue_link(&self, link: &IssueLinkRecord) -> Result<(), JournalError> {
+        let (kind, key) = issue_scope_parts(&link.scope);
+        let scope_json = serde_json::to_string(&link.scope)
+            .map_err(|error| JournalError::Database(sqlx::Error::Protocol(error.to_string())))?;
+        sqlx::query(
+            "INSERT INTO daemon_issue_links
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(thread_id, scope_kind, scope_key, issue_id) DO UPDATE SET
+                account_id = excluded.account_id",
+        )
+        .bind(link.thread_id.as_str())
+        .bind(&link.account_id)
+        .bind(kind)
+        .bind(key)
+        .bind(scope_json)
+        .bind(&link.issue_id)
+        .bind(link.linked_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_issue_link(
+        &self,
+        thread_id: &ThreadId,
+        scope: &h4rn_protocol::IssueScope,
+        issue_id: &str,
+    ) -> Result<(), JournalError> {
+        let (kind, key) = issue_scope_parts(scope);
+        sqlx::query(
+            "DELETE FROM daemon_issue_links
+             WHERE thread_id = ? AND scope_kind = ? AND scope_key = ? AND issue_id = ?",
+        )
+        .bind(thread_id.as_str())
+        .bind(kind)
+        .bind(key)
+        .bind(issue_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn issue_links_for_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<IssueLinkRecord>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT thread_id, account_id, scope_json, issue_id, linked_at
+             FROM daemon_issue_links WHERE thread_id = ?
+             ORDER BY linked_at ASC, rowid ASC",
+        )
+        .bind(thread_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(issue_link_from_row).collect()
+    }
+
     async fn list_schedules(&self) -> Result<Vec<ScheduleTask>, JournalError> {
         let rows = sqlx::query(
             "SELECT task_id, name, host, workspace_path, harness, agent_id, model,
@@ -1206,6 +1306,45 @@ fn pr_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<PrLinkRecord, Journa
             .map_err(|error| {
                 JournalError::Database(sqlx::Error::Protocol(format!(
                     "unparsable linked_at {linked_at:?} in daemon_pr_links: {error}"
+                )))
+            })?,
+    })
+}
+
+/// The stable, queryable identity of an issue scope.
+fn issue_scope_parts(scope: &h4rn_protocol::IssueScope) -> (&'static str, String) {
+    match scope {
+        h4rn_protocol::IssueScope::Forge { repo } => (
+            "forge",
+            format!(
+                "{}|{}|{}|{}",
+                repo.forge.slug(),
+                repo.base_url,
+                repo.owner,
+                repo.repo
+            ),
+        ),
+        h4rn_protocol::IssueScope::Linear { team_id } => ("linear", team_id.clone()),
+    }
+}
+
+fn issue_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<IssueLinkRecord, JournalError> {
+    let scope_json: String = row.try_get("scope_json")?;
+    let linked_at: String = row.try_get("linked_at")?;
+    Ok(IssueLinkRecord {
+        thread_id: ThreadId::new(row.try_get::<String, _>("thread_id")?),
+        account_id: row.try_get("account_id")?,
+        scope: serde_json::from_str(&scope_json).map_err(|error| {
+            JournalError::Database(sqlx::Error::Protocol(format!(
+                "unparsable issue scope in daemon_issue_links: {error}"
+            )))
+        })?,
+        issue_id: row.try_get("issue_id")?,
+        linked_at: DateTime::parse_from_rfc3339(&linked_at)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unparsable linked_at {linked_at:?} in daemon_issue_links: {error}"
                 )))
             })?,
     })

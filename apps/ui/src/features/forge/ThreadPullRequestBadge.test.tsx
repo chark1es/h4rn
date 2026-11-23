@@ -3,7 +3,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ForgePrSummary, ForgeRepoRef, ThreadPullRequest } from "@/gen";
+import type {
+  ForgeIssueSummary,
+  ForgePrSummary,
+  ForgeRepoRef,
+  ThreadIssue,
+  ThreadPullRequest,
+} from "@/gen";
 
 import { LinkedPullRequestsMenu } from "./ThreadPullRequestBadge";
 
@@ -55,13 +61,37 @@ const pulls: ThreadPullRequest[] = [
   },
 ];
 
+const issueSummary: ForgeIssueSummary = {
+  repo,
+  number: 12,
+  title: "Dark mode flickers",
+  state: "open",
+  author: "alice",
+  labels: [{ name: "bug", color: "d73a4a" }],
+  assignees: [{ login: "bob", name: null }],
+  comment_count: 1,
+  updated_at: "2026-01-01T00:00:00Z",
+  web_url: "https://github.com/h4rn/api/issues/12",
+};
+
+const issues: ThreadIssue[] = [
+  {
+    scope: { tracker: "forge", repo },
+    issue_id: "12",
+    account_id: "a1",
+    state: { tracker: "forge", issue: issueSummary },
+    error: null,
+    linked_at: "2026-01-01T00:00:00Z",
+  },
+];
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
 function openBadge(): void {
-  const trigger = screen.getByRole("button", { name: "Linked pull requests" });
+  const trigger = screen.getByRole("button", { name: "Linked items" });
   fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
   fireEvent.pointerUp(trigger, { button: 0, pointerType: "mouse" });
   fireEvent.click(trigger);
@@ -77,7 +107,7 @@ describe("linked pull request badge and panel", () => {
         onUnwatch={() => undefined}
       />,
     );
-    const badge = screen.getByRole("button", { name: "Linked pull requests" });
+    const badge = screen.getByRole("button", { name: "Linked items" });
     expect(badge.textContent).toContain("#7 Open");
     expect(badge.textContent).toContain("+1");
   });
@@ -98,7 +128,7 @@ describe("linked pull request badge and panel", () => {
 
     openBadge();
 
-    expect(screen.getByText("Linked pull requests")).toBeTruthy();
+    expect(screen.getByText("Linked items")).toBeTruthy();
     expect(screen.getByText("Add PR watch")).toBeTruthy();
     expect(screen.getByText("Old experiment")).toBeTruthy();
     expect(screen.getByText("Draft")).toBeTruthy();
@@ -134,7 +164,7 @@ describe("linked pull request badge and panel", () => {
       />,
     );
 
-    const trigger = screen.getByRole("button", { name: "Linked pull requests" });
+    const trigger = screen.getByRole("button", { name: "Linked items" });
     trigger.focus();
     fireEvent.keyDown(trigger, { key: "Enter" });
 
@@ -184,6 +214,26 @@ describe("linked pull request badge and panel", () => {
     expect(screen.getByText("Closed").className).toContain("q-danger");
     expect(screen.queryByRole("menuitem", { name: /Watch for changes/ })).toBeNull();
     expect(screen.getAllByRole("menuitem", { name: /Unlink/ })).toHaveLength(2);
+  });
+
+  it("lists a linked issue with its label, title and unlink", () => {
+    const onUnlinkIssue = vi.fn();
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={issues}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+        onUnlinkIssue={onUnlinkIssue}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Linked items" }).textContent).toContain("#12 Open");
+    openBadge();
+    expect(screen.getByText("Dark mode flickers")).toBeTruthy();
+    expect(screen.getAllByText("#12 Open").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("menuitem", { name: /Unlink issue/ }));
+    expect(onUnlinkIssue).toHaveBeenCalledWith(issues[0]);
   });
 
   it("says what a watch cannot cover when the forge has no login", () => {
