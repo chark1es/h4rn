@@ -218,6 +218,7 @@ mod tests {
     /// then correctly report a CLI that outlived its budget as off. The
     /// deadline itself is covered by
     /// [`a_hung_cli_is_killed_at_the_deadline`], which keeps a short one.
+    #[cfg(unix)]
     const ANSWER_BUDGET: Duration = Duration::from_secs(60);
 
     #[test]
