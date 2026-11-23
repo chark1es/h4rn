@@ -560,6 +560,10 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       current.diffLoading || current.filesLoading || current.commitsLoading
         ? {
             ...current,
+            // A body that was still on its way must not stand in for the newer
+            // choice: the abandoned request will never answer, so its half-
+            // open diff (or the previous file's) is cleared with its spinner.
+            ...(current.diffLoading ? { diff: null } : {}),
             diffLoading: false,
             filesLoading: false,
             commitsLoading: false,
@@ -870,6 +874,39 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const resumeDiffRef = useRef({ openDiff, loadBranch, loadCommit });
   resumeDiffRef.current = { openDiff, loadBranch, loadCommit };
 
+  /**
+   * Moves the open scope to another file without dropping the scope's list.
+   *
+   * A tab switch in Branch or Commits must keep the base or commit the person
+   * is reviewing: opening the tab as a plain diff would drop the in-flight
+   * list, and a commit scope with no sha would answer with an error instead of
+   * the list's own empty state. When the scope's list is not on screen yet, ask
+   * for it again with the tab as its preferred file.
+   */
+  const followDiffTab = useCallback(
+    async (path: string) => {
+      const current = stateRef.current;
+      if (current.diffSource === "branch") {
+        const base = current.diffFiles?.base ?? current.diffBase;
+        if (current.diffFiles && !current.filesLoading) await openDiff(path, "branch", { base });
+        else await loadBranch(path, { base });
+        return;
+      }
+      if (current.diffSource === "commit") {
+        const base = current.diffBase;
+        const commit = current.diffCommit;
+        if (commit && current.diffFiles && !current.filesLoading) {
+          await openDiff(path, "commit", { base, commit });
+        } else {
+          await loadCommit(path, { base, commit });
+        }
+        return;
+      }
+      await openDiff(path, current.diffSource);
+    },
+    [loadBranch, loadCommit, openDiff],
+  );
+
   /** Switches the pane's scope and loads whatever that scope needs. */
   const selectDiffSource = useCallback(
     async (source: DiffSource) => {
@@ -920,6 +957,10 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         diffBase: base,
         diffCommit: null,
         diffCommits: null,
+        // The body on screen was compared against the old base; keep it off
+        // the screen while the new comparison's list loads.
+        diff: null,
+        diffError: null,
       }));
       const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "base", base });
@@ -933,7 +974,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const setDiffCommit = useCallback(
     async (sha: string) => {
       const token = beginDiffRequest();
-      setState((current) => ({ ...current, diffCommit: sha }));
+      setState((current) => ({ ...current, diffCommit: sha, diff: null, diffError: null }));
       const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "commit", sha });
       if (!diffRequestCurrent(token)) return;
@@ -1265,6 +1306,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     moveTab,
     toggleDirectory,
     openDiff,
+    followDiffTab,
     selectDiffSource,
     setDiffBase,
     setDiffCommit,

@@ -110,10 +110,13 @@ until you press Send. The comments then leave the pane.
   file picked inside the pane (the phone File picker, a Branch or Commits row) stays until you pick
   another one, switch editor tabs, or switch the diff source; switching tabs is what makes the pane
   follow, in every mode. A reply that arrives after a newer pick is dropped, so a slow list never
-  replaces a file or source chosen later. The abandoned request's spinner goes with it: picking
-  Branch while an Uncommitted diff is still out shows the Branch list loading, not the old diff's
-  spinner. A failed read — a dropped connection, for example — clears its spinner and shows the
-  daemon's error. Leaving a workspace mid-read and coming back clears the cached spinner, and a
+  replaces a file or source chosen later. The abandoned request's spinner and body go with it:
+  picking Branch while an Uncommitted diff is still out shows the Branch list loading rather than
+  the old diff, and a newer base or commit never shows the previous comparison's lines under its
+  own name. A Branch or Commits tab switch keeps the scope and re-reads its file list when that
+  list is still out, so the list is not lost. An older branch-list reply never stops the newer
+  read's spinner. A failed read — a dropped connection, for example — clears its spinner and shows
+  the daemon's error. Leaving a workspace mid-read and coming back clears the cached spinner, and a
   branch list or diff reply from the workspace you left is ignored: the branch list's generation
   moves with the workspace.
 - Binary files and files over the 2 MiB read limit say so instead of showing mojibake, in the diff

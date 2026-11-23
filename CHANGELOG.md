@@ -432,13 +432,14 @@ All notable changes to h4rn are recorded here. The format follows
   for Branch (or the repository default), but the pane never said so. The diff header now reads
   `since main` — or whichever base — beside the commit, so a review against a non-default base is
   never implicit.
-- **A dropped diff reply never leaves a spinner behind, and a workspace change advances the branch
-  generation.** Starting a newer diff or list request clears the abandoned one's spinner, so
-  picking Branch while an Uncommitted diff is still out shows the Branch list loading instead of
-  the old diff. A disconnected diff, file list, commit list or branch list clears its spinner and
-  says what failed; a cached spinner from a workspace left mid-read is cleared when that workspace
-  is opened again. The branch list's generation moves with the workspace, so a branch list or file
-  list reply from the workspace you left is ignored.
+- **A superseded diff never speaks for the newer choice.** Starting a newer diff or list request
+  drops the abandoned one's body as well as its spinner, so changing the base, the commit or the
+  lists while a file is still loading never shows the previous comparison's lines under the new
+  one. A Branch or Commits tab switch keeps the scope and re-reads its file list when that list is
+  still out, so the list and the empty commit range survive the switch. A stale branch-list reply
+  no longer stops the newer read's spinner. The revisited-workspace spinner reset and the branch
+  generation's move with the workspace already shipped on main; tests now cover them, so a reply
+  from the workspace you left is still ignored.
 - **Commit, push and pull request follow what git and the forge really say.** A
   branch deleted on the forge no longer skips the push a pull request needs just
   because the local remote-tracking ref is stale: the daemon asks the remote with

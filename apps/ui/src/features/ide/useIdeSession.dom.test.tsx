@@ -158,11 +158,20 @@ function diffFiles(against?: FsDiff["against"]): FsDiffFiles {
   return {
     against: scope,
     label: scope.kind === "commit" ? "Commit c1" : "vs main",
-    base: scope.kind === "base" ? "main" : null,
+    base: scope.kind === "base" ? (scope.base ?? "main") : null,
     merge_base: scope.kind === "base" ? "base-sha" : null,
     files: [
       {
         path: "a.ts",
+        old_path: null,
+        status: "modified",
+        added: 1,
+        removed: 1,
+        binary: false,
+        counts_omitted: false,
+      },
+      {
+        path: "b.ts",
         old_path: null,
         status: "modified",
         added: 1,
@@ -573,6 +582,135 @@ describe("a dropped reply never leaves a spinner behind", () => {
       expect(latest?.state.diff).toBeNull();
     },
   );
+});
+
+describe("a superseded diff never shows under a newer choice", () => {
+  /** Loads a HEAD diff and then starts a held Branch diff for another file. */
+  async function startHeldBranchDiff(): Promise<() => void> {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.openDiff("a.ts", "head");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts");
+
+    const releaseDiff = holdNext("fs_diff");
+    await act(async () => {
+      void latest?.openDiff("b.ts", "branch");
+    });
+    await waitFor(() => latest?.state.diffLoading === true);
+    // The previous file's body is still held in state while its replacement
+    // loads; only a newer scope choice has to take it off the screen.
+    expect(latest?.state.diff?.path).toBe("a.ts");
+    return releaseDiff;
+  }
+
+  it("clears the held body when the base changes", async () => {
+    const releaseDiff = await startHeldBranchDiff();
+
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffBase("feature");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+    // a.ts-vs-main must not stay readable under b.ts and "feature".
+    expect(latest?.state.diff).toBeNull();
+    expect(latest?.state.diffPath).toBe("b.ts");
+
+    await releaseHold(releaseFiles);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "feature" });
+
+    // The abandoned read never paints over the newer comparison.
+    await releaseHold(releaseDiff);
+    expect(latest?.state.diff?.path).toBe("b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "feature" });
+  });
+
+  it("clears the held body when the commit changes", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-1" });
+
+    const releaseDiff = holdNext("fs_diff");
+    await act(async () => {
+      void latest?.openDiff("b.ts", "commit", { commit: "commit-2" });
+    });
+    await waitFor(() => latest?.state.diffLoading === true);
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-1" });
+
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffCommit("commit-2");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(latest?.state.diff).toBeNull();
+
+    await releaseHold(releaseFiles);
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-2" });
+
+    await releaseHold(releaseDiff);
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-2" });
+  });
+
+  it("clears the held body when the lists refresh", async () => {
+    const releaseDiff = await startHeldBranchDiff();
+
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.refreshDiffLists();
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+    expect(latest?.state.diff).toBeNull();
+
+    await releaseHold(releaseFiles);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "main" });
+
+    await releaseHold(releaseDiff);
+    expect(latest?.state.diff?.path).toBe("b.ts");
+  });
+});
+
+describe("a stale branch reply leaves its newer load alone", () => {
+  it("keeps the newer spinner and paints only the newer list", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+
+    const releaseOlder = holdNext("fs_branches");
+    const releaseNewer = holdNext("fs_branches");
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(
+      () => state.requests.filter((request) => request.type === "fs_branches").length === 1,
+    );
+
+    // A second read of the picker's list starts while the first is still out.
+    state.branches = { branches: ["main", "newer"], default_base: "main" };
+    await act(async () => {
+      void latest?.fetchBranches();
+    });
+    await waitFor(
+      () => state.requests.filter((request) => request.type === "fs_branches").length === 2,
+    );
+    expect(latest?.state.branchesLoading).toBe(true);
+
+    // The older reply lands first. The newer read owns the spinner and the
+    // list, so the older answer must neither stop the spinner nor paint.
+    await releaseHold(releaseOlder);
+    expect(latest?.state.branchesLoading).toBe(true);
+    expect(latest?.state.diffBranches).toBeNull();
+
+    await releaseHold(releaseNewer);
+    expect(latest?.state.branchesLoading).toBe(false);
+    expect(latest?.state.diffBranches?.branches).toEqual(["main", "newer"]);
+  });
 });
 
 describe("a workspace change advances the branch generation", () => {

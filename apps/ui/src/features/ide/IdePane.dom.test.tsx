@@ -45,6 +45,8 @@ const mock = vi.hoisted(() => {
       base?: unknown;
     }>,
     phone: false,
+    /** Makes the commit list empty, as a branch with nothing beyond its base. */
+    emptyCommits: false,
     /** The next request of this type waits for `promise` before it answers. */
     hold: null as { type: string; promise: Promise<void> } | null,
     subscribe: (listener: () => void) => {
@@ -110,15 +112,17 @@ vi.mock("@/lib/store/appStore", async () => {
               commits: {
                 base: (request.base as string | null) ?? "main",
                 merge_base: "abc",
-                commits: [
-                  {
-                    sha: "commit1",
-                    short_sha: "c1",
-                    subject: "first",
-                    author: "you",
-                    authored_at: "2026-03-04T12:00:00Z",
-                  },
-                ],
+                commits: mock.emptyCommits
+                  ? []
+                  : [
+                      {
+                        sha: "commit1",
+                        short_sha: "c1",
+                        subject: "first",
+                        author: "you",
+                        authored_at: "2026-03-04T12:00:00Z",
+                      },
+                    ],
                 truncated: false,
               },
             };
@@ -300,6 +304,15 @@ function diffFiles(against?: FsDiff["against"]): FsDiffFiles {
         binary: false,
         counts_omitted: false,
       },
+      {
+        path: "b.ts",
+        old_path: null,
+        status: "modified",
+        added: 1,
+        removed: 1,
+        binary: false,
+        counts_omitted: false,
+      },
     ],
     truncated: false,
     note: null,
@@ -439,6 +452,7 @@ beforeEach(() => {
   activeTurn = turn;
   mock.requests = [];
   mock.phone = false;
+  mock.emptyCommits = false;
   mock.hold = null;
   seed();
   resetReviewComments();
@@ -516,6 +530,8 @@ describe("the diff pane stays on the file the person picked", () => {
     expect(diffRequests().at(-1)?.path).toBe("b.ts");
     expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "main" });
     expect(pathBar().textContent).toBe("b.ts");
+    // One read for entering the mode, one for the tab that replaced its file.
+    expect(diffRequests()).toHaveLength(3);
   });
 
   it("follows the editor tab in a Commits review", async () => {
@@ -541,6 +557,126 @@ describe("the diff pane stays on the file the person picked", () => {
     expect(diffRequests().at(-1)?.path).toBe("b.ts");
     expect(diffRequests().at(-1)?.against).toEqual({ kind: "commit", sha: "commit1" });
     expect(pathBar().textContent).toBe("b.ts");
+    // One read for entering the mode, one for the tab that replaced its file.
+    expect(diffRequests()).toHaveLength(3);
+  });
+
+  it("keeps a Commits review when the tab switch lands while its list is out", async () => {
+    await mount();
+    await openDiff();
+
+    // The commit list is still out when the person moves to another tab.
+    const releaseCommits = holdNext("fs_diff_commits");
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+    await waitFor(() =>
+      expect(mock.requests.some((request) => request.type === "fs_diff_commits")).toBe(true),
+    );
+
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+
+    // Following re-asks the scope for the tab instead of opening a commit
+    // scope that has no sha yet.
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew commit/ })).toBeTruthy(),
+    );
+    expect(screen.queryByText(/The diff did not load/)).toBeNull();
+    expect(screen.queryByText(/Choose a commit to compare/)).toBeNull();
+    expect(diffRequests().at(-1)?.against).toEqual({ kind: "commit", sha: "commit1" });
+
+    // The abandoned list never paints or opens anything after the follow.
+    await releaseHold(releaseCommits);
+    expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew commit/ })).toBeTruthy();
+    expect(diffRequests()).toHaveLength(2);
+  });
+
+  it("keeps an empty commit range empty across a tab switch", async () => {
+    mock.emptyCommits = true;
+    await mount();
+    await openDiff();
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Commits/ }));
+
+    await waitFor(() => expect(screen.getByText("No commits beyond main.")).toBeTruthy());
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+
+    // The follow re-reads the same empty range; it must not become an error
+    // about a missing sha.
+    await waitFor(() => expect(screen.getByText("No commits beyond main.")).toBeTruthy());
+    expect(screen.queryByText(/Choose a commit to compare/)).toBeNull();
+    expect(screen.queryByText(/The diff did not load/)).toBeNull();
+  });
+
+  it("keeps a Branch review's file list when the tab switch lands while it is out", async () => {
+    await mount();
+    await openDiff();
+
+    const releaseFiles = holdNext("fs_diff_files");
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(mock.requests.some((request) => request.type === "fs_diff_files")).toBe(true),
+    );
+
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+
+    // The follow re-reads the scope's file list rather than superseding it.
+    await waitFor(() => expect(screen.getByText("2 files")).toBeTruthy());
+    const files = screen.getByRole("complementary", { name: "Changed files" });
+    expect(within(files).getByText("b.ts")).toBeTruthy();
+    expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew branch/ })).toBeTruthy();
+
+    // The held first list belongs to the request the follow replaced.
+    await releaseHold(releaseFiles);
+    expect(screen.getByText("2 files")).toBeTruthy();
+    expect(diffRequests()).toHaveLength(2);
+  });
+
+  it("reopening the pane in Branch mode asks for the diff once", async () => {
+    await mount();
+    await openDiff();
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+
+    // Close the pane, move to another tab, then reopen it in Branch mode.
+    fireEvent.click(screen.getByRole("tab", { name: "Edit" }));
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+    const before = diffRequests().length;
+    fireEvent.click(screen.getByRole("tab", { name: "Diff" }));
+    await waitFor(() => expect(diffRequests().length).toBeGreaterThan(before));
+    await settle();
+
+    // Entering the pane already asks for the tab's file; the follow effect
+    // must not add a second read.
+    expect(diffRequests()).toHaveLength(before + 1);
+    expect(diffRequests().at(-1)?.against).toEqual({ kind: "base", base: "main" });
   });
 
   it("names the base Commit mode reuses", async () => {

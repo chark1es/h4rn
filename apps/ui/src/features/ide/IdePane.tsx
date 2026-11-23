@@ -131,8 +131,7 @@ export function IdePane() {
   // choice and must stay until they pick another one or switch tabs; entries
   // in a wider review's file list remain one click away.
   const diffTabPath = active?.path ?? null;
-  const diffSource = state.diffSource;
-  const openDiffSession = session.openDiff;
+  const followDiffTab = session.followDiffTab;
   const diffPathRef = useRef(state.diffPath);
   useEffect(() => {
     diffPathRef.current = state.diffPath;
@@ -148,8 +147,8 @@ export function IdePane() {
     // Entering the pane (or switching the source) already asked for the tab's
     // file; only a tab that disagrees with what is shown needs a read.
     if (diffPathRef.current === diffTabPath) return;
-    void openDiffSession(diffTabPath, diffSource);
-  }, [panel, diffTabPath, diffSource, openDiffSession]);
+    void followDiffTab(diffTabPath);
+  }, [panel, diffTabPath, followDiffTab]);
 
   useEffect(() => {
     setCursor({ line: 1, column: 1 });
@@ -201,12 +200,13 @@ export function IdePane() {
   const openDiff = useCallback(
     (path: string, source: DiffSource) => {
       // Asking for this file directly is the follow this tab already had; the
-      // tab-follow effect must not ask a second time.
-      followedTabRef.current = path;
+      // tab-follow effect must not ask a second time. The guard compares tab
+      // paths, so remember the tab's file, not the row that was opened.
+      followedTabRef.current = diffTabPath;
       setPanel("diff");
       void session.openDiff(path, source);
     },
-    [session.openDiff],
+    [diffTabPath, session.openDiff],
   );
 
   /** Adds every pending comment to the thread's draft; sending stays manual. */
