@@ -15,6 +15,7 @@ const SURFACES: Record<string, string> = {
   library: "library",
   usage: "usage",
   pulls: "pulls",
+  issues: "issues",
   settings: "settings",
   pairing: "pairing",
 };

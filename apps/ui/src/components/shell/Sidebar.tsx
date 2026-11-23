@@ -7,6 +7,7 @@ import {
   ChevronRightIcon,
   CircleAlertIcon,
   CircleCheckIcon,
+  CircleDotIcon,
   CircleIcon,
   CircleXIcon,
   ClockIcon,
@@ -446,7 +447,7 @@ function HostsPopover({
 const NO_SKILLS: never[] = [];
 
 /** MCP servers and skills live under Settings, so the library has no button of its own. */
-type Destination = "pr" | "usage" | "settings";
+type Destination = "pr" | "issues" | "usage" | "settings";
 
 const DESTINATIONS: Array<{
   key: Destination;
@@ -461,6 +462,13 @@ const DESTINATIONS: Array<{
     icon: GitPullRequestIcon,
     path: "/pulls",
     command: "nav.pulls",
+  },
+  {
+    key: "issues",
+    label: "Issues",
+    icon: CircleDotIcon,
+    path: "/issues",
+    command: "nav.issues",
   },
   {
     key: "usage",
@@ -531,7 +539,14 @@ function SidebarFooter({
             onClick={() =>
               navigate({
                 kind: "placeholder",
-                surface: item.key === "pr" ? "pulls" : item.key === "usage" ? "usage" : "settings",
+                surface:
+                  item.key === "pr"
+                    ? "pulls"
+                    : item.key === "issues"
+                      ? "issues"
+                      : item.key === "usage"
+                        ? "usage"
+                        : "settings",
                 path: item.path,
               })
             }

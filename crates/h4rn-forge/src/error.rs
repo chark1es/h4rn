@@ -38,6 +38,18 @@ pub enum ForgeError {
     /// The request is malformed.
     #[error("{0}")]
     InvalidRequest(String),
+    /// Linear refused the request, for a workspace rule rather than a scope.
+    #[error("Linear refused the request: {message}")]
+    LinearForbidden {
+        /// What Linear said, with secrets removed.
+        message: String,
+    },
+    /// Linear is rate limiting this workspace.
+    #[error("Linear is rate limiting requests: {message}")]
+    LinearRateLimited {
+        /// What Linear said, with secrets removed.
+        message: String,
+    },
     /// The forge is rate limiting this account.
     #[error("the {} API is rate limited{}", forge.display_name(), retry_suffix(*retry_after_secs))]
     RateLimited {
@@ -85,6 +97,9 @@ pub type Result<T> = std::result::Result<T, ForgeError>;
 impl ForgeError {
     /// Whether a retry later could succeed without changing the request.
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::RateLimited { .. } | Self::Network(_))
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::LinearRateLimited { .. } | Self::Network(_)
+        )
     }
 }

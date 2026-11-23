@@ -39,6 +39,7 @@ mod fs;
 mod git_actions;
 mod harness;
 mod ids;
+pub mod issues;
 pub mod mcp;
 pub mod projects;
 mod proxy;
@@ -86,6 +87,7 @@ pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, ScheduleTaskId, SubagentId, TerminalId,
     ThreadId, TurnId,
 };
+pub use issues::*;
 pub use mcp::{
     AgentToolSettings, McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle,
     McpImportCandidate, McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest,

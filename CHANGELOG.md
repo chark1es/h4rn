@@ -25,6 +25,36 @@ All notable changes to h4rn are recorded here. The format follows
   button and lists connected agents with Revoke. Redirects are admitted only to `https` or
   localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client. See
   [docs/outside-agents.md](docs/outside-agents.md) and [ADR-044](docs/decisions.md).
+- **Issues from every forge and Linear sit beside your projects, and can be linked to a
+  thread.** The new Issues page reads each visible project's tracker, grouped per account, with
+  open/closed, assigned/opened/mentioning filters, a per-project visibility toggle and search that
+  runs on the tracker. Selecting an issue opens it beside the list with its body, state, labels,
+  assignees, comments and linked pull requests. Where the account allows it you can comment, edit
+  the title and body, replace labels and assignees, and close or reopen (with a reason where the
+  tracker records one); a repository no local project owns is read-only, and only the project's
+  designated remote is writable, so a fork never writes to its parent; ownership is read from the
+  checkouts on every write, so removing a project or repointing `origin` takes effect at once
+  rather than after a cache window. Choosing a filter or search that is already applied leaves the
+  list alone, and two accounts on the same host let the person choose which one reads each project
+  in the Projects menu. GitHub, GitLab, Gitea/Forgejo and Azure Boards are supported; Azure reads
+  the work-item types the project actually defines, keyed by type, so a process without `Issue` or
+  without `Bug` still lists, and each type closes on its own finished state. Bitbucket Cloud
+  removed its issue API in August 2026, so each such project shows a note and no request is sent.
+  What each tracker can do comes from its capability row (Linear's arrives in
+  the response's own optional field, so an older client's forge list keeps its
+  shape), so the page hides a filter, the labels
+  editor or the close-reason picker where it would fail, and a request that names a comment page
+  carries the provider's continuation (Gitea returns a discussion whole and
+  reads the whole label catalogue, even when a server caps its pages smaller
+  than the 50 rows asked for). A GitHub duplicate close resolves the
+  picked number to that issue's own
+  id, and Linear's `duplicate` workflow state shows as closed. A Linear API key connected under Settings → Source control is
+  stored like a forge token, never returned and never echoed in an error; pick a team per project
+  and its issues appear beside the forge ones, with comments. Issues link to threads through the
+  journal, survive a restart, are always read live, and appear with pull requests in the thread's
+  linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
+  `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and
+  `LinkIssue`/`UnlinkIssue`/`ListThreadIssues`. See [docs/forges.md](docs/forges.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a
