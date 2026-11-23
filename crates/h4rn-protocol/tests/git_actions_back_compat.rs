@@ -3,8 +3,9 @@
 //! working.
 
 use h4rn_protocol::{
-    ClientFrame, ClientRequest, SourceControlModelMode, SourceControlModelSetting,
-    TextGenerationSettings, TextGenerationSettingsUpdate, TitleModelMode, TitleModelSetting,
+    ClientFrame, ClientRequest, GitPushResult, GitThreadStatus, SourceControlModelMode,
+    SourceControlModelSetting, TextGenerationSettings, TextGenerationSettingsUpdate,
+    TitleModelMode, TitleModelSetting,
 };
 
 fn request(json: &str) -> ClientRequest {
@@ -116,4 +117,44 @@ fn an_older_text_generation_settings_file_has_source_control_off() {
     assert_eq!(settings.title.mode, TitleModelMode::CodingAgent);
     assert_eq!(settings.source_control.mode, SourceControlModelMode::Off);
     assert_eq!(settings.source_control.instructions, None);
+}
+
+/// Protocol 1 named the pushed branch's target `upstream`. A reply written by
+/// an older daemon still parses in the new code.
+#[test]
+fn an_older_push_reply_parses_in_the_new_code() {
+    let reply = serde_json::json!({
+        "branch": "feature/widget",
+        "upstream": "origin/feature/widget",
+        "status": GitThreadStatus::default(),
+    });
+    let result: GitPushResult = serde_json::from_value(reply).expect("an older reply parses");
+    assert_eq!(result.branch, "feature/widget");
+    assert_eq!(result.remote_branch, "origin/feature/widget");
+}
+
+/// The new reply keeps the protocol 1 key, so an older client reads it instead
+/// of showing an undefined target.
+#[test]
+fn a_new_push_reply_keeps_the_key_an_older_client_reads() {
+    let result = GitPushResult {
+        branch: "feature/widget".into(),
+        remote_branch: "origin/feature/widget".into(),
+        status: GitThreadStatus::default(),
+    };
+    let reply = serde_json::to_value(&result).expect("serialize");
+    assert_eq!(reply["upstream"], "origin/feature/widget");
+    assert!(
+        reply.get("remote_branch").is_none(),
+        "exactly one key travels: {reply}"
+    );
+
+    #[derive(serde::Deserialize)]
+    struct OlderReply {
+        branch: String,
+        upstream: String,
+    }
+    let older: OlderReply = serde_json::from_value(reply).expect("an older client parses");
+    assert_eq!(older.branch, "feature/widget");
+    assert_eq!(older.upstream, "origin/feature/widget");
 }

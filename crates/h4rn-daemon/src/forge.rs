@@ -944,12 +944,46 @@ impl ForgeService {
         draft: bool,
         client: &dyn Forge,
     ) -> Result<ForgePullRequest, ForgeServiceError> {
+        self.open_pr_until(
+            workspace,
+            repo,
+            remote,
+            title,
+            body,
+            base,
+            draft,
+            client,
+            crate::git_actions::Deadline::after(crate::git_actions::OPEN_PR_BUDGET),
+        )
+        .await
+    }
+
+    /// [`Self::open_pr_in`] inside the deadline the whole open shares.
+    ///
+    /// The forge request gets what is left of that deadline, so a rate-limit
+    /// wait is either covered by it or refused before it, never slept through.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_pr_until(
+        &self,
+        workspace: &Path,
+        repo: ForgeRepoRef,
+        remote: &str,
+        title: &str,
+        body: &str,
+        base: &str,
+        draft: bool,
+        client: &dyn Forge,
+        deadline: crate::git_actions::Deadline,
+    ) -> Result<ForgePullRequest, ForgeServiceError> {
         let branch = crate::fs::git::branch(workspace).ok_or_else(|| {
             ForgeError::Local("the workspace has a detached HEAD; check out a branch".into())
         })?;
-        crate::git_actions::push_for_pull_request(workspace, remote, &branch).await?;
+        // One budget for the lookup, the push and the forge request, so the
+        // whole open never outlives the dialog's wait (see OPEN_PR_BUDGET).
+        crate::git_actions::push_for_pull_request_until(workspace, remote, &branch, deadline)
+            .await?;
         client
-            .open_pr(
+            .open_pr_within(
                 &repo,
                 &ForgeNewPr {
                     title: title.to_owned(),
@@ -958,6 +992,7 @@ impl ForgeService {
                     base: base.to_owned(),
                     draft,
                 },
+                deadline.remaining(),
             )
             .await
             .map_err(Into::into)
@@ -1669,5 +1704,131 @@ mod tests {
         let body: serde_json::Value = requests[0].body_json().expect("json");
         assert_eq!(body["draft"], true);
         assert_eq!(body["head"], "main");
+    }
+
+    /// The forge call gets whatever is left of the open's budget, including
+    /// its rate-limit wait: a wait the budget cannot cover fails before the
+    /// shared deadline instead of sleeping through it.
+    #[tokio::test]
+    async fn a_rate_limited_forge_call_fails_before_the_shared_deadline() {
+        use h4rn_forge::ForgeError;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let data = tempfile::tempdir().expect("data dir");
+        let service = ForgeService::open(data.path()).expect("forge service");
+        service.shutdown();
+
+        let repo_dir = tempfile::tempdir().expect("repo");
+        let bare = tempfile::tempdir().expect("bare");
+        let bare_init = std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(bare.path())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .expect("init bare");
+        assert!(bare_init.success());
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_dir.path())
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "h4rn test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ]);
+        git(&[
+            "config",
+            &format!("url.file://{}.insteadOf", bare.path().display()),
+            "https://github.com/acme/widget.git",
+        ]);
+        std::fs::write(repo_dir.path().join("a.txt"), "one\n").expect("write");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-m", "Initial commit"]);
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/repos/acme/widget/pulls"))
+            .respond_with(ResponseTemplate::new(429).append_header("retry-after", "10"))
+            .mount(&server)
+            .await;
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            owner: "acme".into(),
+            repo: "widget".into(),
+        };
+        let client = h4rn_forge::GitHubClient::new(&server.uri(), "", 120).expect("client");
+
+        // The first open reaches the forge, which says how long to wait.
+        let error = service
+            .open_pr_in(
+                repo_dir.path(),
+                repo.clone(),
+                "origin",
+                "Fix the widget",
+                "Fixes the widget.",
+                "main",
+                false,
+                &client,
+            )
+            .await
+            .expect_err("429");
+        assert!(
+            matches!(
+                error,
+                ForgeServiceError::Forge(ForgeError::RateLimited { .. })
+            ),
+            "{error:?}"
+        );
+
+        // A one-second deadline cannot cover the ten-second wait, so the forge
+        // call refuses it at once rather than sleeping into the caller's wait.
+        let started = std::time::Instant::now();
+        let error = service
+            .open_pr_until(
+                repo_dir.path(),
+                repo,
+                "origin",
+                "Fix the widget",
+                "Fixes the widget.",
+                "main",
+                false,
+                &client,
+                crate::git_actions::Deadline::after(Duration::from_secs(1)),
+            )
+            .await
+            .expect_err("rate limited");
+        assert!(
+            matches!(
+                error,
+                ForgeServiceError::Forge(ForgeError::RateLimited { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("try again in"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the forge call slept instead of failing fast: {:?}",
+            started.elapsed()
+        );
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1, "the second call never reached the forge");
     }
 }
