@@ -109,7 +109,7 @@ async fn run(
                 Some(thread_id.as_str()),
                 serde_json::json!({
                     "branch": result.branch,
-                    "upstream": result.upstream,
+                    "remote_branch": result.remote_branch,
                     "set_upstream": set_upstream,
                 }),
             );

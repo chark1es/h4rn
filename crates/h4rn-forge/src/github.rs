@@ -594,6 +594,16 @@ impl Forge for GitHubClient {
     }
 
     async fn open_pr(&self, repo: &ForgeRepoRef, request: &ForgeNewPr) -> Result<ForgePullRequest> {
+        self.open_pr_within(repo, request, crate::http::DEFAULT_REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn open_pr_within(
+        &self,
+        repo: &ForgeRepoRef,
+        request: &ForgeNewPr,
+        budget: std::time::Duration,
+    ) -> Result<ForgePullRequest> {
         validate_repo(repo)?;
         if request.head.trim().is_empty() || request.base.trim().is_empty() {
             return Err(ForgeError::InvalidRequest(
@@ -603,7 +613,7 @@ impl Forge for GitHubClient {
         let url = format!("{}/pulls", self.repo_url(repo));
         let value = self
             .http
-            .post_json(
+            .post_json_within(
                 &url,
                 &json!({
                     "title": request.title,
@@ -612,6 +622,7 @@ impl Forge for GitHubClient {
                     "base": request.base,
                     "draft": request.draft,
                 }),
+                budget,
             )
             .await?;
         map_pr_detail(repo, &value)

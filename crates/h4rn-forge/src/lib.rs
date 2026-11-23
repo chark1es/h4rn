@@ -236,6 +236,22 @@ pub trait Forge: Send + Sync {
             self.kind().display_name()
         )))
     }
+
+    /// Opens a pull request that must be answered inside `budget`.
+    ///
+    /// The budget covers the rate-limit wait too: a wait it cannot cover fails
+    /// at once with [`ForgeError::RateLimited`] instead of sleeping past the
+    /// caller's deadline. Clients that own a [`ForgeHttp`] honour it; the
+    /// default ignores it.
+    async fn open_pr_within(
+        &self,
+        repo: &ForgeRepoRef,
+        request: &ForgeNewPr,
+        budget: std::time::Duration,
+    ) -> Result<ForgePullRequest> {
+        let _ = budget;
+        self.open_pr(repo, request).await
+    }
 }
 
 /// Builds a client for one stored account.

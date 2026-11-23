@@ -26,13 +26,16 @@ commit:
 A commit is refused, with the reason, when a rebase, merge or cherry-pick is in
 progress (that is named first, even though a rebase also leaves a detached
 `HEAD`), when the workspace has a detached `HEAD`, or when the index is empty.
-Git hooks run as usual: h4rn never passes `--no-verify`. A hook that fails stops
-the commit, and its last lines are shown in the panel.
+Hooks run for the real commit and the real push: h4rn never passes
+`--no-verify` to them. A hook that fails stops the commit, and its last lines are
+shown in the panel.
 
 A request that names `paths` commits only those paths: h4rn stages nothing else,
 uses `git commit --only`, and leaves work staged for other paths in the index. Its
 "nothing to commit" answer and the diff sent to a model cover exactly the paths
-named, never a change staged elsewhere.
+named, never a change staged elsewhere. The message input compares `HEAD` with
+those paths' working-tree content, which is what `--only` records, so an edit
+that was never staged is still described.
 
 Messages and paths are never handed to git as options. The message is the value
 of `-m`; path selection is validated as workspace-relative (no absolute paths,
@@ -47,14 +50,24 @@ remote). It always names one non-forced refspec,
 `refs/heads/<branch>:refs/heads/<branch>`, so `push.default=matching` cannot move
 other branches and a `remote.<name>.push` beginning with `+` cannot force-update
 anything. A branch without one gets `origin/<branch>` created, because the
-panel's button always asks for it. The decision to push reads
-`origin/<branch>`, not whatever upstream a branch happens to track (the panel's
-ahead/behind counts still follow the branch's tracking upstream): a branch
-that tracks `origin/main` is still published as `origin/<branch>`, and a fork
-with two remotes pushes to `origin`. A push is **never forced**: when the remote
-has commits the branch does not, the panel says so and asks you to pull or
-rebase. A rejected credential is reported as a credential problem, not a generic
-failure, and any credential-shaped text git prints is redacted.
+panel's button always asks for it. The decision to push is a dry run of that
+same push against the named remote, which resolves its `pushurl` and any
+`insteadOf` rewrite exactly as the real push does; it never reads
+`<remote>/<branch>` or whatever upstream a branch happens to track (the panel's
+ahead/behind counts still follow the branch's tracking upstream): a branch that
+tracks `origin/main` is still published as `origin/<branch>`, and a fork with
+two remotes pushes to `origin`. The check is a dry run without hooks or
+submodule recursion, so it has no side effects. The push result names the
+remote branch it wrote (sent as `upstream`, the protocol 1 key, so an older
+client still reads it); the branch's tracking upstream changes only when the
+request asked for it (`set_upstream`). A push is **never forced**: when the
+remote has commits the branch does not, the panel says so and asks you to pull
+or rebase. A rejected credential is reported as a credential problem, not a
+generic failure, and any credential-shaped text git prints — including the
+userinfo or query of an echoed URL — is redacted. A URL git prints with raw
+whitespace inside its quoted field is replaced whole: no real URL contains raw
+whitespace, and splitting at it would leave the rest of the token in the
+message.
 
 ## Pull request
 
@@ -64,15 +77,35 @@ the repository's default branch when git reports one; when it does not, the fiel
 is left empty and the panel asks you to name the target rather than guessing
 `main`. **Generate** fills the title and body and does nothing else.
 
-The daemon pushes the branch first when `<remote>/<branch>` does not exist or is
-behind the local branch, then asks the forge to open the request. On GitHub,
-Bitbucket and Azure DevOps the draft flag travels in its own field; GitLab and
-Gitea have no such field on the create request and mark a draft with a `Draft:`
-or `WIP:` title prefix (a title that already carries one is sent as it is). The
-open request waits as long as the push may take, and the dialog cannot submit
-twice. A PR opened this way is linked to its thread, so the header badge, the PR
-page and a watch all find it. Opening a request is never done silently from
-Generate.
+The daemon asks the remote whether the push would update anything, then pushes
+first when `<remote>/<branch>` is missing or does not name the local `HEAD`. The
+question is a dry run of the exact refspec and remote the real push will use, so
+a separate `pushurl` or an `insteadOf` rewrite cannot make it ask a different
+repository. It does not trust the local remote-tracking ref: a branch deleted on
+the forge leaves a stale `refs/remotes/<remote>/<branch>` until a prune, and the
+pull request would otherwise name a head branch that no longer exists. It also
+names every destination, so a branch up to date on one remote but missing on
+another is still pushed. The check runs no hook, including a submodule's
+(`--no-verify` and `--recurse-submodules=no`): it cannot block or delay the
+open, and it cannot push an unpublished submodule commit as a side effect. When
+the branch does need a push, the real push runs the pre-push hook as usual, and
+a hook that fails stops the open exactly as it stops a push from the panel.
+Then it asks the forge to open the
+request. On GitHub, Bitbucket
+and Azure DevOps the draft flag travels in its own field; GitLab and Gitea have
+no such field on the create request and mark a draft with a `Draft:` or `WIP:`
+title prefix (a title that already carries one is sent as it is). The lookup,
+the push and the forge call share one 220-second budget — the lookup may use at
+most 30 seconds and the push at most 160. The forge call gets whatever is left
+and includes its wait for a rate limit in that time: a wait the remaining budget
+cannot cover fails at once with "rate limited; try again in Ns" instead of
+outliving the dialog's 240-second wait. An ordinary request — a viewer, a
+repository lookup, a list — keeps the older timing: a documented rate-limit
+reset is waited out before the transfer's timeout starts, so a reset longer than
+one transfer does not fail it, and only a wait beyond a minute is refused. The
+dialog cannot submit twice. A PR
+opened this way is linked to its thread, so the header badge, the PR page and a
+watch all find it. Opening a request is never done silently from Generate.
 
 ## Generated messages
 
@@ -93,7 +126,9 @@ What leaves the machine is only what the request needs:
   characters, plus up to 20 recent commit subjects. A binary file appears as
   git's `Binary files … differ` line, never its bytes. With *Include unstaged*
   on, the diff is taken against `HEAD`, and untracked files are listed by name
-  only — their contents are never read or sent.
+  only — their contents are never read or sent. A request that names paths also
+  diffs against `HEAD`, limited to those paths, because the commit records their
+  working-tree content.
 - **Pull request**: the commits on the branch against the base (subjects and
   bodies, capped at 8,000 characters) and `git diff --stat` for the same range
   (capped at 4,000 characters).
