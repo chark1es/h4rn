@@ -221,13 +221,18 @@ pub enum ClientRequest {
         /// Viewer height, when known.
         #[serde(default)]
         rows: Option<u16>,
-        /// Whether this client names the output position on every marked reply.
+        /// Whether this client names the output position on every marked reply
+        /// with protocol 2 numbering: the chunk where the query **starts**.
         ///
-        /// A client that omits it is an older build. While one is attached the
-        /// terminal keeps the legacy single-owner reply rule, because its
-        /// answers cannot be correlated with a query position.
+        /// The field is new rather than reused because the first version of
+        /// positioned replies numbered answers by the chunk where the query
+        /// *ended*. An older client sends no such field (or only
+        /// `reply_positions`), so it is treated as legacy and its answers are
+        /// never correlated with a position; an older daemon ignores the field
+        /// and applies its own single-owner rule. While one such viewer is
+        /// attached the terminal keeps that legacy rule.
         #[serde(default)]
-        reply_positions: bool,
+        reply_positions_v2: bool,
     },
     /// List terminals owned by this daemon.
     TerminalList {
@@ -1610,6 +1615,54 @@ mod tests {
             panic!("expected forge_add_account");
         };
         assert_eq!(repository, Some(repo));
+    }
+
+    #[test]
+    fn an_older_positioned_attach_is_treated_as_legacy() {
+        // The first positioned-reply flag numbered answers by the chunk where
+        // the query ended. A client that still sends only that flag must not be
+        // trusted as a protocol 2 viewer, so the new field stays false.
+        let request: ClientRequest = serde_json::from_value(serde_json::json!({
+            "type": "terminal_attach",
+            "terminal_id": "term_1",
+            "reply_positions": true,
+        }))
+        .expect("an older client's attach still parses");
+        let ClientRequest::TerminalAttach {
+            reply_positions_v2, ..
+        } = request
+        else {
+            panic!("expected terminal_attach");
+        };
+        assert!(!reply_positions_v2, "an older reply flag is legacy");
+
+        // A client that omits every flag is legacy too.
+        let request: ClientRequest = serde_json::from_value(serde_json::json!({
+            "type": "terminal_attach",
+            "terminal_id": "term_1",
+        }))
+        .expect("an attach without flags parses");
+        let ClientRequest::TerminalAttach {
+            reply_positions_v2, ..
+        } = request
+        else {
+            panic!("expected terminal_attach");
+        };
+        assert!(!reply_positions_v2);
+
+        let request: ClientRequest = serde_json::from_value(serde_json::json!({
+            "type": "terminal_attach",
+            "terminal_id": "term_1",
+            "reply_positions_v2": true,
+        }))
+        .expect("a protocol 2 attach parses");
+        let ClientRequest::TerminalAttach {
+            reply_positions_v2, ..
+        } = request
+        else {
+            panic!("expected terminal_attach");
+        };
+        assert!(reply_positions_v2);
     }
 
     #[test]
