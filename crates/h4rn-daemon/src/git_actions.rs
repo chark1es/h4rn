@@ -940,9 +940,13 @@ fn redact_urls_in_line(text: &str) -> String {
     while let Some(index) = rest.find("://") {
         // The scheme starts at the run of scheme characters before `://`;
         // everything earlier in the string is prose.
+        // `char_indices` keeps the start on a character boundary even when
+        // the text before the scheme is not ASCII (a localized quote such as
+        // `«`), which a byte `+ 1` would split.
         let scheme_start = rest[..index]
-            .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')))
-            .map_or(0, |start| start + 1);
+            .char_indices()
+            .rfind(|(_, ch)| !(ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')))
+            .map_or(0, |(start, ch)| start + ch.len_utf8());
         output.push_str(&rest[..scheme_start]);
         let after = &rest[scheme_start..];
         // A quote directly before the scheme opens the field git prints; its

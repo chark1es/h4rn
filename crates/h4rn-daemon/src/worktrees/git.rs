@@ -300,7 +300,13 @@ pub(crate) fn sanitize(command: &mut Command) {
         // Grafts (`<common>/info/grafts`, or an inherited `GIT_GRAFT_FILE`)
         // rewrite parent links the same way and are honoured regardless of
         // `GIT_NO_REPLACE_OBJECTS`; point git at an empty graft file.
-        .env("GIT_GRAFT_FILE", EMPTY_FILE);
+        .env("GIT_GRAFT_FILE", EMPTY_FILE)
+        // Git's messages are parsed (push classification, URL redaction, the
+        // tracker's error triage) and localized catalogs change their quotes,
+        // spacing and words, so every call speaks the C locale.
+        .env("LC_ALL", "C")
+        .env("LANG", "C");
+    command.env_remove("LANGUAGE");
     for name in TRACE_VARS.iter().chain(LOCATION_VARS).chain(
         [
             "GIT_REPLACE_REF_BASE",

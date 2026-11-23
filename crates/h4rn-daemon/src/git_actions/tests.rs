@@ -1634,6 +1634,39 @@ fn a_porcelain_rejected_record_is_a_conflict() {
     );
 }
 
+/// A non-ASCII character before the scheme (git's localized quotes) never
+/// splits a character, and the URL inside is still redacted.
+#[test]
+fn a_localized_quote_before_a_url_is_handled_without_panicking() {
+    let secret = format!("{}-{}", "tok", "m4p8");
+    let text = format!("fatal: \u{ab}http://git:{secret}@example.invalid/r.git?k={secret}\u{bb}");
+    let redacted = redact_url_credentials(&text);
+    assert!(!redacted.contains(&secret), "{redacted}");
+    assert!(redacted.starts_with("fatal: \u{ab}"), "{redacted}");
+}
+
+/// Every git call runs in the C locale, so the messages h4rn parses keep the
+/// English shape the redactor and classifier expect.
+#[test]
+fn git_commands_run_in_the_c_locale() {
+    let mut command = std::process::Command::new("git");
+    crate::worktrees::git::sanitize(&mut command);
+    let envs: Vec<(String, Option<String>)> = command
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    assert!(
+        envs.contains(&("LC_ALL".to_owned(), Some("C".to_owned()))),
+        "{envs:?}"
+    );
+    assert!(envs.contains(&("LANGUAGE".to_owned(), None)), "{envs:?}");
+}
+
 /// The `To <url>` line of a push's output is unquoted and keeps the query raw,
 /// whitespace included; nothing after that whitespace may reach the message.
 #[test]
