@@ -34,7 +34,7 @@ import {
   updateReviewComment,
   useReviewComments,
 } from "./reviewComments";
-import type { DiffSource } from "./sources";
+import { type DiffSource, diffScopeKey } from "./sources";
 
 type DiffViewProps = {
   path: string | null;
@@ -370,6 +370,9 @@ export function DiffView({
     () => comments.filter((comment) => comment.path === path),
     [comments, path],
   );
+  // The identity of the diff on screen. The label above it is text a person
+  // reads; two scopes can share one, so comments are matched on the request.
+  const scopeKey = diffScopeKey(diff?.against ?? null);
   const [selection, setSelection] = useState<LineSelection | null>(null);
   const [draft, setDraft] = useState<LineSelection | null>(null);
   const rowRefs = useRef(new Map<number, HTMLButtonElement>());
@@ -394,9 +397,10 @@ export function DiffView({
     const hidden: ReviewComment[] = [];
     const elsewhere: ReviewComment[] = [];
     for (const comment of commentsForPath) {
-      // A comment belongs to the source it was written in. Showing it under a
-      // line of another source would move the note to a place it never meant.
-      if (comment.source !== sourceLabel) {
+      // A comment belongs to the diff it was written on. Showing it under a
+      // line of another scope would move the note to a place it never meant,
+      // even when the scope's display label happens to read the same.
+      if (comment.scope !== scopeKey) {
         elsewhere.push(comment);
         continue;
       }
@@ -416,7 +420,7 @@ export function DiffView({
       byLine.set(anchor, [...(byLine.get(anchor) ?? []), comment]);
     }
     return { byLine, hidden, elsewhere };
-  }, [commentsForPath, sourceLabel, visible]);
+  }, [commentsForPath, scopeKey, visible]);
 
   const addComment = (range: LineSelection, text: string) => {
     if (!threadId || !path) return;
@@ -430,6 +434,7 @@ export function DiffView({
       endLine: selected.endLine,
       lines: selected.lines,
       text,
+      scope: scopeKey,
       source: sourceLabel,
     });
     setDraft(null);

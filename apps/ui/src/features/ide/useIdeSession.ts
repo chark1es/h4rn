@@ -212,6 +212,8 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const savingPathRef = useRef<string | null>(null);
   const autoOpenedRef = useRef<string | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
+  /** The newest diff request; replies for an older counter are dropped. */
+  const diffRequestRef = useRef(0);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
 
@@ -531,12 +533,34 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   // Diff and agent changes
   // -------------------------------------------------------------------
 
+  /**
+   * Starts a diff request and returns its token.
+   *
+   * Every diff loader bumps the counter before it awaits anything. A reply
+   * whose counter has moved on is dropped, so a slow Branch list or an older
+   * `fs_diff` can never replace a source or file the person picked afterwards.
+   */
+  const beginDiffRequest = useCallback(() => {
+    diffRequestRef.current += 1;
+    // The dropped reply's spinner must not outlive it. A current list request
+    // sets its own flag again in the same tick, before its first await.
+    setState((current) =>
+      current.filesLoading || current.commitsLoading
+        ? { ...current, filesLoading: false, commitsLoading: false }
+        : current,
+    );
+    return diffRequestRef.current;
+  }, [setState]);
+
+  const diffRequestCurrent = useCallback((token: number) => diffRequestRef.current === token, []);
+
   const openDiff = useCallback(
     async (
       path: string,
       source: DiffSource = stateRef.current.diffSource,
       overrides: { base?: string | null; commit?: string | null } = {},
     ) => {
+      const token = beginDiffRequest();
       const target = workspaceRef.current;
       if (!target) return;
       const current = stateRef.current;
@@ -584,6 +608,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           path,
           against,
         });
+        if (!diffRequestCurrent(token)) return;
         if (response.type !== "fs_diff") return;
         setState((state) => ({
           ...state,
@@ -592,6 +617,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           diffError: null,
         }));
       } catch (error) {
+        if (!diffRequestCurrent(token)) return;
         setState((state) => ({
           ...state,
           diff: null,
@@ -600,13 +626,16 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         }));
       }
     },
-    [setState],
+    [beginDiffRequest, diffRequestCurrent, setState],
   );
 
   const fetchDiffFiles = useCallback(
     async (against: DiffAgainst): Promise<FsDiffFiles | null> => {
       const target = workspaceRef.current;
       if (!target) return null;
+      // The caller bumped the counter; this reply is only applied while it is
+      // still the newest request.
+      const token = diffRequestRef.current;
       setState((current) => ({ ...current, filesLoading: true, filesError: null }));
       try {
         const response = await getClient().request({
@@ -615,6 +644,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           workspace: target.path,
           against,
         });
+        if (!diffRequestCurrent(token)) return null;
         if (response.type !== "fs_diff_files") return null;
         const files = response.files;
         setState((current) => ({
@@ -625,6 +655,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         }));
         return files;
       } catch (error) {
+        if (!diffRequestCurrent(token)) return null;
         setState((current) => ({
           ...current,
           diffFiles: null,
@@ -634,13 +665,14 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         return null;
       }
     },
-    [setState],
+    [diffRequestCurrent, setState],
   );
 
   const fetchDiffCommits = useCallback(
     async (base: string | null): Promise<FsDiffCommitList | null> => {
       const target = workspaceRef.current;
       if (!target) return null;
+      const token = diffRequestRef.current;
       setState((current) => ({ ...current, commitsLoading: true, commitsError: null }));
       try {
         const response = await getClient().request({
@@ -649,6 +681,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           workspace: target.path,
           base,
         });
+        if (!diffRequestCurrent(token)) return null;
         if (response.type !== "fs_diff_commits") return null;
         const commits = response.commits;
         setState((current) => ({
@@ -659,6 +692,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         }));
         return commits;
       } catch (error) {
+        if (!diffRequestCurrent(token)) return null;
         setState((current) => ({
           ...current,
           diffCommits: null,
@@ -668,12 +702,13 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         return null;
       }
     },
-    [setState],
+    [diffRequestCurrent, setState],
   );
 
   const fetchBranches = useCallback(async (): Promise<FsBranchList | null> => {
     const target = workspaceRef.current;
     if (!target) return null;
+    const token = diffRequestRef.current;
     setState((current) => ({ ...current, branchesLoading: true, branchesError: null }));
     try {
       const response = await getClient().request({
@@ -681,6 +716,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         host: target.host,
         workspace: target.path,
       });
+      if (!diffRequestCurrent(token)) return null;
       if (response.type !== "fs_branches") return null;
       const branches = response.branches;
       setState((current) => ({
@@ -691,6 +727,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }));
       return branches;
     } catch (error) {
+      if (!diffRequestCurrent(token)) return null;
       setState((current) => ({
         ...current,
         diffBranches: null,
@@ -699,7 +736,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }));
       return null;
     }
-  }, [setState]);
+  }, [diffRequestCurrent, setState]);
 
   const showDiffForFiles = useCallback(
     async (
@@ -728,21 +765,25 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   /** Loads the branch review: the branch list for its picker, then the files. */
   const loadBranch = useCallback(
     async (preferred: string | null) => {
+      const token = beginDiffRequest();
       const base = stateRef.current.diffBase;
       // Always refetch: the agent may have fetched, committed or renamed a
       // branch since this pane last read the list.
       void fetchBranches();
       const files = await fetchDiffFiles({ kind: "base", base });
+      if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "branch", preferred, { base });
     },
-    [fetchBranches, fetchDiffFiles, showDiffForFiles],
+    [beginDiffRequest, diffRequestCurrent, fetchBranches, fetchDiffFiles, showDiffForFiles],
   );
 
   /** Loads the commits review: a fresh commit list, then one commit's files. */
   const loadCommit = useCallback(
     async (preferred: string | null) => {
+      const token = beginDiffRequest();
       const current = stateRef.current;
       const list = await fetchDiffCommits(current.diffBase);
+      if (!diffRequestCurrent(token)) return;
       const sha = chooseCommit(list, current.diffCommit);
       if (!sha) {
         setState((state) => ({
@@ -758,14 +799,31 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }
       setState((state) => ({ ...state, diffSource: "commit", diffCommit: sha }));
       const files = await fetchDiffFiles({ kind: "commit", sha });
+      if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "commit", preferred, { commit: sha });
     },
-    [fetchDiffCommits, fetchDiffFiles, showDiffForFiles, setState],
+    [
+      beginDiffRequest,
+      diffRequestCurrent,
+      fetchDiffCommits,
+      fetchDiffFiles,
+      showDiffForFiles,
+      setState,
+    ],
   );
 
   /** Switches the pane's scope and loads whatever that scope needs. */
   const selectDiffSource = useCallback(
     async (source: DiffSource) => {
+      // The picker shows the choice the moment it is made; a list or diff that
+      // arrives later without being the newest request is dropped.
+      beginDiffRequest();
+      setState((state) => ({
+        ...state,
+        diffSource: source,
+        diff: null,
+        diffError: null,
+      }));
       const current = stateRef.current;
       // Entering the pane shows the file the person is on. The remembered
       // `diffPath` belongs to the Branch/Commits file list, and a stale one
@@ -792,12 +850,13 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }
       await loadCommit(preferred);
     },
-    [loadBranch, loadCommit, openDiff, setState],
+    [beginDiffRequest, loadBranch, loadCommit, openDiff, setState],
   );
 
   /** Changes the branch the review compares against. */
   const setDiffBase = useCallback(
     async (base: string | null) => {
+      const token = beginDiffRequest();
       setState((current) => ({
         ...current,
         diffBase: base,
@@ -806,31 +865,35 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }));
       const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "base", base });
+      if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "branch", preferred, { base });
     },
-    [fetchDiffFiles, showDiffForFiles, setState],
+    [beginDiffRequest, diffRequestCurrent, fetchDiffFiles, showDiffForFiles, setState],
   );
 
   /** Opens one commit's files. */
   const setDiffCommit = useCallback(
     async (sha: string) => {
+      const token = beginDiffRequest();
       setState((current) => ({ ...current, diffCommit: sha }));
       const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "commit", sha });
+      if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "commit", preferred, { commit: sha });
     },
-    [fetchDiffFiles, showDiffForFiles, setState],
+    [beginDiffRequest, diffRequestCurrent, fetchDiffFiles, showDiffForFiles, setState],
   );
 
   /** Re-reads the branch or commit lists on an explicit refresh. */
   const refreshDiffLists = useCallback(async () => {
+    beginDiffRequest();
     const current = stateRef.current;
     if (current.diffSource === "branch") {
       await loadBranch(current.diffPath);
     } else if (current.diffSource === "commit") {
       await loadCommit(current.diffPath);
     }
-  }, [loadBranch, loadCommit]);
+  }, [beginDiffRequest, loadBranch, loadCommit]);
 
   // -------------------------------------------------------------------
   // Search

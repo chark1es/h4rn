@@ -27,10 +27,12 @@ with HEAD**, which switches to Uncommitted. Choose another branch from the base 
 
 The file list comes from `git diff` against the merge base plus untracked files. It shows the git
 status letter, added and removed line counts, and the old path for a rename. Like every list in
-IDE mode it stops at 2,000 files and says when it did; untracked files stop at the same cap, and
-the daemon stops reading `git ls-files` at the first entry past it and ends git, so a tree full of
-build output is never walked to the end. An untracked file has no git numstat, so the daemon reads
-it to count lines, within a 2 MiB budget for the whole untracked pass. Files past that budget are
+IDE mode it stops at 2,000 files and says when it did. Untracked files stop at the same cap; the
+daemon stops reading `git ls-files` at the first entry inside the pane's workspace past that cap
+and then ends git. In a workspace below the repository root, paths outside it are skipped, so the
+scan may read further down the listing before it has enough of the workspace's own entries; the
+list itself never grows past the cap. An untracked file has no git numstat, so the daemon reads it
+to count lines, within a 2 MiB budget for the whole untracked pass. Files past that budget are
 still listed with `no counts`; a binary or unreadable file is marked `binary`. Neither is shown as
 an empty added file.
 
@@ -61,15 +63,19 @@ Select a line in any diff mode. Shift-click or Shift+Arrow extends the range. Pr
 `c`) to write a comment; `Escape` closes it. Added lines are commented on the new side, removed
 lines on the old side, and a mixed range reports the side where it has line numbers.
 
-A comment sits inline under its line only while the pane shows the source it was written in. The
-source names itself in the comment: `turn 3` for a turn, `branch vs main` for the branch review,
-`commit 1a2b3c4` for a commit and `uncommitted (HEAD)` for the working tree. A comment written
-during one turn therefore stays with that turn and is not drawn on another turn's diff. Comments
-for the same file but another source (or on lines hidden by collapsed context) are listed below the
-diff with the source each was written in, so nothing is silently moved to a line it never
-described. Edit or delete one in place. The pane header counts the thread's pending comments, so
-switching files or modes never hides one. Comments live in page memory for the thread; a reload
-clears them, while diff contents are always re-read from git.
+A comment sits inline under its line only while the pane shows the diff it was written on. It
+remembers the scope it was written against — the turn's id, the commit's sha, the base's name —
+rather than the label printed above the diff. Two turns a moment apart can read the same label (a
+UUIDv7's first characters cover roughly a minute), so matching on text would put a comment on the
+wrong turn; the id keeps them apart. The source names itself in the comment: `turn 0192f0c1` for a
+turn, `branch vs main` for the branch review, `commit 1a2b3c4` for a commit and `uncommitted
+(HEAD)` for the working tree. A comment written during one turn therefore stays with that turn and
+is not drawn on another turn's diff. Comments for the same file but another scope (or on lines
+hidden by collapsed context) are listed below the diff with the source each was written in, so
+nothing is silently moved to a line it never described. Edit or delete one in place. The pane
+header counts the thread's pending comments, so switching files or modes never hides one. Comments
+live in page memory for the thread; a reload clears them, while diff contents are always re-read
+from git.
 
 **Send to agent** appends one plain-text context block per comment to the thread's composer draft:
 
@@ -91,7 +97,9 @@ until you press Send. The comments then leave the pane.
 - The path bar names what is on screen: the diff's file while the diff is open, the editor's file
   otherwise. A diff outlives its tab, so closing the tab still shows the file it was comparing. A
   file picked inside the pane (the phone File picker, a Branch or Commits row) stays until you pick
-  another one or switch editor tabs; switching tabs is what makes the pane follow.
+  another one, switch editor tabs, or switch the diff source; switching tabs is what makes the pane
+  follow. A reply that arrives after a newer pick is dropped, so a slow list never replaces a file
+  or source chosen later.
 - Binary files and files over the 2 MiB read limit say so instead of showing mojibake, in the diff
   body only: the file list, source bar and comment actions stay usable, so another file or source
   is one click away. Both sides of `HEAD` and commit diffs are size-checked before they are read.

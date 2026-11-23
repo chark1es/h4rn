@@ -18,6 +18,7 @@ import type {
   ThreadId,
   TurnId,
 } from "@/gen";
+import { readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 
 const mock = vi.hoisted(() => {
   const state = {
@@ -38,6 +39,8 @@ const mock = vi.hoisted(() => {
     state,
     requests: [] as Array<{ type: string; path?: string; against?: unknown }>,
     phone: false,
+    /** The next request of this type waits for `promise` before it answers. */
+    hold: null as { type: string; promise: Promise<void> } | null,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => {
@@ -64,6 +67,11 @@ vi.mock("@/lib/store/appStore", async () => {
     getClient: () => ({
       request: async (request: { type: string; path?: string; against?: unknown }) => {
         mock.requests.push(request);
+        if (mock.hold && mock.hold.type === request.type) {
+          const hold = mock.hold;
+          mock.hold = null;
+          await hold.promise;
+        }
         switch (request.type) {
           case "fs_list":
             return { type: "fs_listing", listing: listing(request.path ?? "") };
@@ -127,8 +135,15 @@ const turn = "turn_1" as TurnId;
 const host = "host_1" as HostId;
 const harness = "claude_code" as HarnessKind;
 
+/** The daemon's turn label: the first 8 characters of the turn id. */
+function turnLabel(id: TurnId): string {
+  return `Turn ${id.replace(/^turn_/, "").slice(0, 8)}`;
+}
+
 let project = 0;
 let workspacePath = "/work";
+/** The turn the thread reports as its latest; a test can move it forward. */
+let activeTurn: TurnId = turn;
 
 function listing(path: string): FsListing {
   const entries =
@@ -174,6 +189,15 @@ function before(path: string): string {
 
 function diff(path: string, against?: FsDiff["against"]): FsDiff {
   const scope = against ?? { kind: "head" };
+  // The scope tags each side, so a stale reply is visible in the body itself.
+  const tag =
+    scope.kind === "agent_turn"
+      ? "turn"
+      : scope.kind === "base"
+        ? "branch"
+        : scope.kind === "commit"
+          ? "commit"
+          : "head";
   return {
     path,
     against: scope,
@@ -181,12 +205,12 @@ function diff(path: string, against?: FsDiff["against"]): FsDiff {
       scope.kind === "head"
         ? "HEAD"
         : scope.kind === "agent_turn"
-          ? "Turn 1"
+          ? turnLabel(scope.turn_id)
           : scope.kind === "commit"
             ? "Commit c1"
             : "vs main",
-    before: before(path),
-    after: after(path),
+    before: `${before(path).trimEnd()} ${tag}\n`,
+    after: `${after(path).trimEnd()} ${tag}\n`,
     binary: false,
     too_large: false,
     note: null,
@@ -196,7 +220,7 @@ function diff(path: string, against?: FsDiff["against"]): FsDiff {
 function changes(): FsTurnChanges {
   return {
     thread_id: thread,
-    turn_id: turn,
+    turn_id: activeTurn,
     files: [
       {
         path: "a.ts",
@@ -223,7 +247,17 @@ function diffFiles(): FsDiffFiles {
     label: "vs main",
     base: "main",
     merge_base: "abc",
-    files: [],
+    files: [
+      {
+        path: "a.ts",
+        old_path: null,
+        status: "modified",
+        added: 1,
+        removed: 1,
+        binary: false,
+        counts_omitted: false,
+      },
+    ],
     truncated: false,
     note: null,
   };
@@ -268,8 +302,14 @@ function seed() {
       path: null,
     },
   };
-  mock.state.logs = { [thread]: { turns: [{ id: turn }] } };
+  mock.state.logs = { [thread]: { turns: [{ id: activeTurn }] } };
   mock.state.ui.selectedThreadId = thread;
+}
+
+/** Moves the thread on to another turn; callers notify when the pane is mounted. */
+function setTurn(id: TurnId) {
+  activeTurn = id;
+  mock.state.logs = { [thread]: { turns: [{ id }] } };
 }
 
 /** Opens a ChipSelect's menu; Radix listens for the pointer down, not the click. */
@@ -280,6 +320,36 @@ function openChip(trigger: HTMLElement) {
 
 function diffRequests() {
   return mock.requests.filter((request) => request.type === "fs_diff");
+}
+
+/** Makes the next request of `type` wait; call the returned function to answer. */
+function holdNext(type: string): () => void {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mock.hold = { type, promise };
+  return release;
+}
+
+/** Releases a held reply and lets its callbacks run. */
+async function releaseHold(release: () => void): Promise<void> {
+  await act(async () => {
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+/**
+ * Waits for the render a diff reply caused to finish committing its effects.
+ * The pane clears a stale line selection when the diff changes; typing before
+ * that effect runs would open an editor it then throws away.
+ */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+  });
 }
 
 function diffLines() {
@@ -318,10 +388,14 @@ beforeEach(() => {
   // A fresh path keeps the hook's per-project tab cache (module state) out of
   // the next test.
   workspacePath = `/work-${project}`;
+  activeTurn = turn;
   mock.requests = [];
   mock.phone = false;
+  mock.hold = null;
   seed();
   resetReviewComments();
+  // The draft store is device-wide; a sent comment must not reach the next test.
+  writeThreadDraft(host, thread, "");
 });
 
 afterEach(() => {
@@ -361,6 +435,12 @@ describe("the diff pane stays on the file the person picked", () => {
     // The effect that follows the editor tab must not answer for the pick.
     expect(diffRequests()).toHaveLength(afterTurn + 1);
     expect(diffRequests().at(-1)?.path).toBe("b.ts");
+    // Nor may the pick fall back to another source while it loads.
+    expect(diffRequests().at(-1)?.against).toMatchObject({
+      kind: "agent_turn",
+      thread_id: thread,
+      turn_id: turn,
+    });
     expect(within(diffLines()).queryByRole("button", { name: /Line 1: anew/ })).toBeNull();
   });
 
@@ -417,6 +497,7 @@ describe("the diff pane stays on the file the person picked", () => {
       within(diffLines()).getByRole("button", { name: /Line 1: anew/ }),
     );
 
+    await settle();
     fireEvent.keyDown(added, { key: "Enter" });
     fireEvent.change(screen.getByLabelText("Review comment"), {
       target: { value: "Rename this." },
@@ -426,5 +507,141 @@ describe("the diff pane stays on the file the person picked", () => {
     await waitFor(() => expect(listReviewComments(thread)).toHaveLength(1));
     expect(listReviewComments(thread)[0]?.source).toBe("turn 1");
     expect(screen.getByText(/line 1 · turn 1/)).toBeTruthy();
+  });
+});
+
+describe("a slower reply never overrides a later choice", () => {
+  it("stays on the source picked after a slow file list", async () => {
+    await mount();
+    await openDiff();
+
+    const releaseList = holdNext("fs_diff_files");
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+
+    // The picker shows the new source while its list is still loading.
+    const branchChip = await screen.findByRole("button", { name: "Diff source: Branch" });
+    await waitFor(() =>
+      expect(mock.requests.some((request) => request.type === "fs_diff_files")).toBe(true),
+    );
+
+    // Meanwhile the person picks Turn; that choice came after the Branch list.
+    openChip(branchChip);
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew turn/ })).toBeTruthy(),
+    );
+
+    await releaseHold(releaseList);
+
+    // The late Branch list must not open a branch diff over the Turn choice.
+    await waitFor(() =>
+      expect(
+        diffRequests().filter(
+          (request) => (request.against as { kind?: string } | undefined)?.kind === "base",
+        ),
+      ).toHaveLength(0),
+    );
+    expect(within(diffLines()).getByRole("button", { name: /Line 1: anew turn/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Diff source: Turn" })).toBeTruthy();
+  });
+
+  it("names the newest choice in the body, the path bar and the comment", async () => {
+    await mount();
+    await openDiff();
+
+    // Opening b.ts asks for its uncommitted diff; the reply is held back.
+    const releaseHead = holdNext("fs_diff");
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(diffRequests().some((request) => request.path === "b.ts")).toBe(true),
+    );
+    expect(diffRequests().at(-1)?.against).toEqual({ kind: "head" });
+
+    // Picking Turn asks for the same file's turn diff, and that reply lands
+    // first: the two answers arrive in reverse order.
+    const releaseTurn = holdNext("fs_diff");
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    await waitFor(() =>
+      expect(diffRequests().at(-1)?.against).toMatchObject({ kind: "agent_turn" }),
+    );
+
+    await releaseHold(releaseTurn);
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew turn/ })).toBeTruthy(),
+    );
+    await releaseHold(releaseHead);
+
+    expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew turn/ })).toBeTruthy();
+    expect(within(diffLines()).queryByRole("button", { name: /Line 1: bnew head/ })).toBeNull();
+    expect(pathBar().textContent).toBe("b.ts");
+    expect(screen.getByText("Turn 1")).toBeTruthy();
+
+    // A comment written now belongs to the Turn diff, not the late head one.
+    await settle();
+    fireEvent.keyDown(within(diffLines()).getByRole("button", { name: /Line 1: bnew turn/ }), {
+      key: "Enter",
+    });
+    fireEvent.change(screen.getByLabelText("Review comment"), {
+      target: { value: "Keep the injected clock." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await waitFor(() => expect(listReviewComments(thread)).toHaveLength(1));
+    expect(listReviewComments(thread)[0]?.path).toBe("b.ts");
+    expect(listReviewComments(thread)[0]?.source).toBe("turn 1");
+  });
+});
+
+describe("comments are keyed on the turn, not its label", () => {
+  it("keeps a comment off a second turn whose 8-character label reads the same", async () => {
+    // Two UUIDv7 ids a moment apart: the first 8 characters, and so the
+    // daemon's turn label, are identical.
+    const first = "0192f0c1-2345-7abc-8def-0123456789ab" as TurnId;
+    const second = "0192f0c1-9876-7abc-8def-fedcba987654" as TurnId;
+    setTurn(first);
+
+    await mount();
+    await openDiff();
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Turn/ }));
+    const added = await waitFor(() =>
+      within(diffLines()).getByRole("button", { name: /Line 1: anew/ }),
+    );
+    await settle();
+    fireEvent.keyDown(added, { key: "Enter" });
+    fireEvent.change(screen.getByLabelText("Review comment"), {
+      target: { value: "Keep the clock injected." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await waitFor(() => expect(listReviewComments(thread)).toHaveLength(1));
+    expect(listReviewComments(thread)[0]?.scope).toBe(`turn:${thread}:${first}`);
+    expect(listReviewComments(thread)[0]?.source).toBe("turn 0192f0c1");
+
+    // The thread starts its next turn; the label has not ticked over.
+    act(() => {
+      setTurn(second);
+      mock.notify();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Diff" }));
+    await waitFor(() =>
+      expect(diffRequests().at(-1)?.against).toMatchObject({ kind: "agent_turn", turn_id: second }),
+    );
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew turn/ })).toBeTruthy(),
+    );
+
+    // Same label, different turn: the comment is listed, not drawn inline.
+    expect(within(diffLines()).queryByText("Keep the clock injected.")).toBeNull();
+    expect(screen.getByText("Keep the clock injected.")).toBeTruthy();
+    expect(screen.getByText(/another diff source/)).toBeTruthy();
+
+    // Send to agent names the turn the comment was written in.
+    fireEvent.click(screen.getByRole("button", { name: "Send to agent" }));
+    await waitFor(() => expect(listReviewComments(thread)).toHaveLength(0));
+    expect(readThreadDraft(host, thread)).toContain("turn 0192f0c1");
   });
 });

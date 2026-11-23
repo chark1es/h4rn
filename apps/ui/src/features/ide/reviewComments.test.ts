@@ -30,6 +30,7 @@ function comment(overrides: Partial<ReviewComment> = {}): ReviewComment {
       { number: 13, sign: "+", text: "expect(now).toBe(fixed);" },
     ],
     text: "Use the injected clock here.",
+    scope: "base:main",
     source: "branch vs main",
     createdAt: 1,
     ...overrides,
@@ -50,6 +51,7 @@ describe("review comments", () => {
       endLine: 3,
       lines: [{ number: 3, sign: " ", text: "let x = 1;" }],
       text: "  keep it const  ",
+      scope: "head",
       source: "uncommitted (HEAD)",
     });
     expect(added.text).toBe("keep it const");
@@ -71,6 +73,7 @@ describe("review comments", () => {
       endLine: 1,
       lines: [],
       text: "one",
+      scope: "head",
       source: "uncommitted (HEAD)",
     });
     expect(listReviewComments("th_2" as ThreadId)).toHaveLength(0);

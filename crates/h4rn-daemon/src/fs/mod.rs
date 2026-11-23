@@ -1216,12 +1216,12 @@ fn to_utc(value: SystemTime) -> DateTime<Utc> {
 }
 
 fn short_turn(value: &str) -> String {
-    value
-        .strip_prefix("turn_")
-        .unwrap_or(value)
-        .chars()
-        .take(8)
-        .collect()
+    // A UUIDv7 starts with a timestamp that only ticks over about once a
+    // minute, so the first characters are shared by turns a moment apart. The
+    // trailing characters are random, so two quick turns still read apart.
+    let id = value.strip_prefix("turn_").unwrap_or(value);
+    let skip = id.chars().count().saturating_sub(8);
+    id.chars().skip(skip).collect()
 }
 
 /// The working-tree side of a diff, read within the same bound as an editor.
@@ -1368,5 +1368,15 @@ mod tests {
             "src/main.rs"
         );
         assert_eq!(relative_of(root, root), "");
+    }
+
+    #[test]
+    fn turn_labels_stay_apart_for_turns_a_moment_parted() {
+        // UUIDv7 ids created within the same timestamp step share a prefix.
+        let first = "0192f0c1-2345-7abc-8def-0123456789ab";
+        let second = "0192f0c1-9876-7abc-8def-fedcba987654";
+        assert_eq!(&first[..8], &second[..8]);
+        assert_ne!(short_turn(first), short_turn(second));
+        assert_eq!(short_turn("turn_test"), "test");
     }
 }

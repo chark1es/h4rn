@@ -52,10 +52,32 @@ export function againstForScope(scope: DiffScope): DiffAgainst | null {
 }
 
 /**
+ * The identity of a diff scope: exactly what the pane asked the daemon for.
+ *
+ * A review comment is stored against this key, never against the display
+ * label. Two turns a moment apart can share their label — the short turn id is
+ * a UUIDv7 prefix, which only ticks over once per timestamp step — but their
+ * ids are different, so their comments stay apart.
+ */
+export function diffScopeKey(against: DiffAgainst | null | undefined): string {
+  if (!against) return "none";
+  switch (against.kind) {
+    case "head":
+      return "head";
+    case "agent_turn":
+      return `turn:${against.thread_id}:${against.turn_id}`;
+    case "base":
+      return `base:${against.base ?? ""}`;
+    case "commit":
+      return `commit:${against.sha}`;
+  }
+}
+
+/**
  * The phrase a review comment carries: "branch vs main", "commit 1a2b3c4".
  *
- * A turn is named by its own label ("turn 3"), so a comment written during one
- * turn is never mistaken for a comment on another.
+ * This is display text only; `diffScopeKey` decides which diff a comment
+ * belongs to.
  */
 export function sourceDescription(source: DiffSource, label: string | null): string {
   switch (source) {

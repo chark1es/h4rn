@@ -28,7 +28,15 @@ export type ReviewComment = {
   endLine: number;
   lines: QuotedLine[];
   text: string;
-  /** "branch vs main", "commit 1a2b3c4", "uncommitted (HEAD)". */
+  /**
+   * The exact diff this was written on (`diffScopeKey` of its `against`):
+   * `head`, `turn:<thread>:<turn>`, `base:<name>` or `commit:<sha>`.
+   *
+   * Inline placement and the "other source" list match on this, so two turns
+   * whose short labels collide still keep their comments apart.
+   */
+  scope: string;
+  /** Display text only: "branch vs main", "commit 1a2b3c4". */
   source: string;
   createdAt: number;
 };

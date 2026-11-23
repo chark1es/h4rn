@@ -7,6 +7,7 @@ import {
   baseOptions,
   chooseCommit,
   commitLabel,
+  diffScopeKey,
   firstDiffPath,
   sourceDescription,
 } from "./sources";
@@ -60,6 +61,23 @@ describe("diff sources", () => {
     expect(sourceDescription("agent", null)).toBe("agent turn");
     expect(sourceDescription("branch", "vs main")).toBe("branch vs main");
     expect(sourceDescription("commit", "Commit 1a2b3c4")).toBe("commit 1a2b3c4");
+  });
+
+  it("identifies a scope by the request, not by its label", () => {
+    // Two UUIDv7 turn ids a moment apart share their first 8 characters, which
+    // is all the pane's turn label shows; their identities must still differ.
+    const first = "0192f0c1-2345-7abc-8def-0123456789ab";
+    const second = "0192f0c1-9876-7abc-8def-fedcba987654";
+    expect(diffScopeKey({ kind: "head" })).toBe("head");
+    expect(
+      diffScopeKey({ kind: "agent_turn", thread_id: "th_1" as never, turn_id: first as never }),
+    ).not.toBe(
+      diffScopeKey({ kind: "agent_turn", thread_id: "th_1" as never, turn_id: second as never }),
+    );
+    expect(diffScopeKey({ kind: "base", base: "main" })).toBe("base:main");
+    expect(diffScopeKey({ kind: "base", base: null })).toBe("base:");
+    expect(diffScopeKey({ kind: "commit", sha: "1a2b3c4" })).toBe("commit:1a2b3c4");
+    expect(diffScopeKey(null)).toBe("none");
   });
 
   it("keeps the open file when it is still in the range", () => {

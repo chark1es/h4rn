@@ -151,6 +151,7 @@ describe("diff review", () => {
       endLine: 2,
       lines: [{ number: 2, sign: "+", text: "B" }],
       text: "Keep the original name.",
+      scope: "head",
       source: "uncommitted (HEAD)",
     });
     const onSendComments = vi.fn();
@@ -254,6 +255,7 @@ describe("diff review", () => {
       endLine: 2,
       lines: [{ number: 2, sign: "+", text: "B" }],
       text: "Written against the branch.",
+      scope: "base:main",
       source: "branch vs main",
     });
     render(view({ sourceLabel: "uncommitted (HEAD)" }));
@@ -264,10 +266,12 @@ describe("diff review", () => {
     expect(screen.getByText(/branch vs main/)).toBeTruthy();
   });
 
-  it("keeps a comment with the turn it was written in", () => {
-    // The pane names a turn by its label, so two turns are two sources.
-    const firstTurn = sourceDescription("agent", "Turn 1");
-    const secondTurn = sourceDescription("agent", "Turn 2");
+  it("keeps a comment with its turn when two turns share a label", () => {
+    // UUIDv7 turn ids a moment apart share their first 8 characters, so the
+    // pane's labels read the same. The turn id, not the label, is what a
+    // comment belongs to.
+    const label = "Turn 0192f0c1";
+    const first = "0192f0c1-2345-7abc-8def-0123456789ab";
     addReviewComment({
       threadId: thread,
       path: "a.txt",
@@ -276,27 +280,28 @@ describe("diff review", () => {
       endLine: 2,
       lines: [{ number: 2, sign: "+", text: "B" }],
       text: "Written during the first turn.",
-      source: firstTurn,
+      scope: `turn:${thread}:${first}`,
+      source: sourceDescription("agent", label),
     });
     render(
       view({
         source: "agent",
-        sourceLabel: secondTurn,
+        sourceLabel: sourceDescription("agent", label),
         diff: {
           ...diff,
           against: {
             kind: "agent_turn",
             thread_id: thread,
-            turn_id: "turn_2" as never,
+            turn_id: "0192f0c1-9876-7abc-8def-fedcba987654" as never,
           },
-          label: "Turn 2",
+          label,
         },
       }),
     );
     const lines = screen.getByRole("region", { name: "Diff lines" });
     expect(within(lines).queryByText("Written during the first turn.")).toBeNull();
     expect(screen.getByText("Written during the first turn.")).toBeTruthy();
-    expect(screen.getByText(new RegExp(firstTurn))).toBeTruthy();
+    expect(screen.getByText(/turn 0192f0c1/)).toBeTruthy();
   });
 
   it("marks a binary or unread file in the list instead of fake counts", () => {

@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{FsDiffCommit, FsDiffCommitList, FsDiffFile, GitFileStatus};
@@ -478,6 +478,18 @@ fn take_untracked_paths<R: Read>(
     }
 }
 
+/// Ends `git ls-files` and reaps it, killing it only when the list was cut.
+///
+/// Git may close stdout a moment before it exits. Killing a process that is
+/// already finishing would report a signal death for a listing that succeeded,
+/// so a complete listing is always waited for.
+fn finish_listing(child: &mut Child, truncated: bool) -> std::io::Result<ExitStatus> {
+    if truncated {
+        let _ = child.kill();
+    }
+    child.wait()
+}
+
 /// The untracked files inside `prefix`, and whether the cap cut the list.
 fn untracked_changes(repo: &Path, prefix: &str) -> Result<(Vec<RawChange>, bool), FsError> {
     let mut child = Command::new("git")
@@ -496,10 +508,8 @@ fn untracked_changes(repo: &Path, prefix: &str) -> Result<(Vec<RawChange>, bool)
             take_untracked_paths(stdout, prefix)
                 .map_err(|error| FsError::Io(format!("read git ls-files: {error}")))
         });
-    // Stop git as soon as the list is long enough; a huge tree is not worth
-    // walking to the end for a list that is already cut at the cap.
-    let _ = child.kill();
-    let status = child.wait();
+    let truncated = matches!(&scanned, Ok((_, true)));
+    let status = finish_listing(&mut child, truncated);
     let (paths, truncated) = scanned?;
     if !truncated {
         if let Ok(status) = status {
@@ -858,6 +868,51 @@ mod tests {
         let (paths, truncated) = take_untracked_paths(reader, "sub").expect("scan");
         assert_eq!(paths, vec!["sub/a.txt".to_owned(), "sub/c.txt".to_owned()]);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn the_untracked_cap_counts_only_paths_inside_the_workspace() {
+        // A workspace below the repository root sees a listing full of paths
+        // it will never show. Those are skipped, so the scan keeps reading
+        // until it has one entry past the cap that is actually in scope.
+        let mut data = Vec::new();
+        for index in 0..500 {
+            data.extend_from_slice(format!("other/build-{index:05}.o\0").as_bytes());
+        }
+        for index in 0..=MAX_DIFF_FILES {
+            data.extend_from_slice(format!("sub/file-{index:05}.txt\0").as_bytes());
+        }
+        let reader = std::io::Cursor::new(data);
+        let (paths, truncated) = take_untracked_paths(reader, "sub").expect("scan");
+        assert_eq!(paths.len(), MAX_DIFF_FILES);
+        assert!(paths.iter().all(|path| path.starts_with("sub/")));
+        assert!(truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_that_ended_by_itself_is_not_killed() {
+        use std::process::{Command, Stdio};
+
+        // Stands in for git: writes its list, closes stdout, then takes a
+        // moment to exit. Killing it in that gap would report a signal death
+        // for a listing that was already complete.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf 'a\\000b\\000'; exec 1>&-; sleep 0.2; exit 0")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn a stand-in for git");
+        let stdout = child.stdout.take().expect("stdout");
+        let (paths, truncated) = take_untracked_paths(stdout, "").expect("scan");
+        assert_eq!(paths, vec!["a".to_owned(), "b".to_owned()]);
+        assert!(!truncated);
+
+        let status = finish_listing(&mut child, truncated).expect("reap");
+        assert!(
+            status.success(),
+            "a listing that closed its own stdout was killed: {status:?}"
+        );
     }
 
     #[test]

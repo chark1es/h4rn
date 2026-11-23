@@ -82,33 +82,37 @@ All notable changes to h4rn are recorded here. The format follows
   and can be changed from the repository's branches. A remote `HEAD` that no longer resolves is
   skipped rather than becoming a dead base. The file list carries git status, added and removed
   line counts, renames and untracked files, and stops at 2,000 entries with a visible truncation
-  note; the daemon stops reading `git ls-files` at the first entry past that cap and ends git, so a
-  tree full of build output is never walked to the end. Untracked line counts stop at a byte budget
-  and say `no counts`, and an unreadable or binary new file is marked instead of reading as an
-  empty addition. Commits lists the newest 100 commits in the branch range and shows one commit's
-  files against its first parent (a root commit against the empty tree), following a rename to the
-  parent's old path and reading only the committed blobs, so a large working copy does not hide a
-  small commit. A shallow clone's boundary commit says its parent is missing instead of pretending
-  every file was added. Commit ids are validated before git sees them; a tag or branch name is
-  refused, while an annotated tag's object id is peeled to its commit. Both wider lists re-read when
-  entered and on Refresh. With no base, the pane says why and **Compare with HEAD** switches to
-  Uncommitted. Every file still shows the existing binary and too-large states, with the file list
-  and comment actions left usable.
+  note; the daemon stops reading `git ls-files` at the first entry inside the workspace past that
+  cap and ends git, so a tree full of build output is not walked to the end (a workspace below the
+  repository root skips paths outside it, so it may read further down the listing). Untracked line
+  counts stop at a byte budget and say `no counts`, and an unreadable or binary new file is marked
+  instead of reading as an empty addition. Commits lists the newest 100 commits in the branch range
+  and shows one commit's files against its first parent (a root commit against the empty tree),
+  following a rename to the parent's old path and reading only the committed blobs, so a large
+  working copy does not hide a small commit. A shallow clone's boundary commit says its parent is
+  missing instead of pretending every file was added. Commit ids are validated before git sees
+  them; a tag or branch name is refused, while an annotated tag's object id is peeled to its
+  commit. Both wider lists re-read when entered and on Refresh. With no base, the pane says why and
+  **Compare with HEAD** switches to Uncommitted. Every file still shows the existing binary and
+  too-large states, with the file list and comment actions left usable.
 - **The diff pane follows the editor tab and stays on the file you pick.** Entering the diff shows
   the active tab's file, and switching tabs follows the new one, but a file chosen inside the pane
-  — the phone Turn picker or a Branch or Commits row — stays until you choose another. The path bar
-  always names the file on screen, including a diff whose tab was closed since the diff outlives its
-  tab.
+  — the phone Turn picker or a Branch or Commits row — stays until you choose another, switch
+  editor tabs, or switch the diff source. A reply that arrives after a newer pick is dropped, so a
+  slow Branch list or an older diff answer never replaces what you chose. The picker shows the new
+  source while it loads. The path bar always names the file on screen, including a diff whose tab
+  was closed since the diff outlives its tab.
 - **Line review comments go to the thread's composer as plain context.** Select a line or range in
-  any diff mode (click, Shift-click, or the keyboard) and write a comment. Each comment carries the
-  source it was written in, and a turn's source is its own label (`turn 3`), so a comment from one
-  turn is never drawn on another turn's diff. Pending comments sit under their lines while that
-  source is open and are listed with their source when it is not, survive switching files and modes
-  for the thread (in page memory; a reload clears them), and can be edited or deleted. **Send to
-  agent** appends one quoted block per comment (path, side, line range, the quoted lines, the
-  comment and the diff source) to the composer draft; nothing is sent until the person presses Send.
-  There is no mock data behind any of it: every list and diff comes from git in the thread's
-  workspace.
+  any diff mode (click, Shift-click, or the keyboard) and write a comment. Each comment remembers
+  the exact diff it was written on — the turn's id, the commit's sha, the base's name — and its
+  label is display text only. Two turns a moment apart can share the label the pane shows (the
+  first characters of a UUIDv7), so a comment written on one is never drawn on the other's diff.
+  Pending comments sit under their lines while that scope is open and are listed with their source
+  when it is not, survive switching files and modes for the thread (in page memory; a reload clears
+  them), and can be edited or deleted. **Send to agent** appends one quoted block per comment
+  (path, side, line range, the quoted lines, the comment and the diff source) to the composer
+  draft; nothing is sent until the person presses Send. There is no mock data behind any of it:
+  every list and diff comes from git in the thread's workspace.
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and
