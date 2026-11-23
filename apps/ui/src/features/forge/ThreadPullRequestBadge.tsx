@@ -107,6 +107,7 @@ export function LinkedPullRequestsMenu({
         {pulls.map((pull, index) => {
           const url = pull.summary?.web_url || prWebUrl(pull.repo, pull.number);
           const state = pull.summary ? stateLabel(pull.summary.state) : null;
+          const finished = pull.summary?.state === "merged" || pull.summary?.state === "closed";
           return (
             <div className="q-pr-links" key={`${pull.repo.base_url}:${pull.number}`}>
               {index > 0 ? <DropdownMenuSeparator /> : null}
@@ -132,17 +133,20 @@ export function LinkedPullRequestsMenu({
                 <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               </DropdownMenuItem>
               {pull.error ? <p className="q-pr-note q-danger">{pull.error}</p> : null}
-              <DropdownMenuItem
-                disabled={busy !== null}
-                onSelect={() => (pull.watching ? onUnwatch(pull) : onWatch(pull))}
-              >
-                {/* The eye marks the current state; the action row that ends a
+              {/* A merged or closed PR has nothing left to watch. */}
+              {pull.watching || !finished ? (
+                <DropdownMenuItem
+                  disabled={busy !== null}
+                  onSelect={() => (pull.watching ? onUnwatch(pull) : onWatch(pull))}
+                >
+                  {/* The eye marks the current state; the action row that ends a
                     watch is the only place it appears. */}
-                {pull.watching ? (
-                  <EyeIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                ) : null}
-                {pull.watching ? "Stop watching" : "Watch for changes"}
-              </DropdownMenuItem>
+                  {pull.watching ? (
+                    <EyeIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  ) : null}
+                  {pull.watching ? "Stop watching" : "Watch for changes"}
+                </DropdownMenuItem>
+              ) : null}
               {pull.watch_notice ? <p className="q-pr-note">{pull.watch_notice}</p> : null}
               <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlink(pull)}>
                 <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />

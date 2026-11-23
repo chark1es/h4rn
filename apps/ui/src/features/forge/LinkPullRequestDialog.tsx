@@ -100,7 +100,7 @@ export function LinkPullRequestDialog({
     );
     if (!reference) {
       setError(
-        "That is not a GitHub, GitLab, Gitea or Forgejo pull request link. Paste the page URL, including the number.",
+        "That is not a pull request link h4rn can read (GitHub, GitLab, Gitea, Forgejo, Bitbucket or Azure DevOps). Paste the page URL, including the number.",
       );
       return;
     }

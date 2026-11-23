@@ -444,6 +444,17 @@ impl PrLinkService {
         // watcher's arrival. A transient failure leaves the watch running;
         // its first successful read becomes the baseline.
         match self.read_full(&record.account_id, repo, number).await {
+            Ok(snapshot)
+                if matches!(
+                    snapshot.summary.state,
+                    ForgePrState::Merged | ForgePrState::Closed
+                ) =>
+            {
+                // A merged or closed PR will never change in a way the watch
+                // reports, so there is nothing to watch: end it now rather
+                // than polling it forever.
+                self.remove_watch(&key, thread_id);
+            }
             Ok(snapshot) => {
                 let mut watches = self.lock_watches();
                 if let Some(watch) = watches
@@ -629,7 +640,7 @@ impl PrLinkService {
                 if !wake.message.is_empty()
                     && let Err(error) = self.sink.wake(&wake.thread_id, wake.message).await
                 {
-                    tracing::debug!(thread = %wake.thread_id, %error, "PR watch wake failed");
+                    tracing::warn!(thread = %wake.thread_id, %error, "PR watch wake failed");
                 }
             }
         }
@@ -762,6 +773,9 @@ impl WatchedPr {
                 // begins here: nothing before this moment is its news.
                 watch.failure_seen = failure_now;
                 watch.baseline = Some(snapshot.clone());
+                if terminal {
+                    ended.push(thread.clone());
+                }
                 continue;
             };
             let new_head = previous.summary.head_sha != snapshot.summary.head_sha;
@@ -770,6 +784,11 @@ impl WatchedPr {
             watch.failure_seen = failure_now;
             watch.baseline = Some(snapshot.clone());
             if events.is_empty() {
+                if terminal {
+                    // Already merged or closed when this watcher last looked:
+                    // nothing more can happen, so the watch ends quietly.
+                    ended.push(thread.clone());
+                }
                 continue;
             }
             let comment_only = events.iter().all(WatchEvent::is_comment_only);
@@ -790,7 +809,10 @@ impl WatchedPr {
             });
         }
         for thread in ended {
-            tracing::debug!(thread, "PR watch ended after repeated comment-only wakes");
+            tracing::debug!(
+                thread,
+                "PR watch ended (PR finished or repeated comment-only wakes)"
+            );
             self.watchers.remove(&thread);
         }
 
@@ -1802,6 +1824,22 @@ mod tests {
         service.poll_once().await;
         assert_eq!(sink.wakes().len(), 1);
         // The link survives the watch ending.
+        assert_eq!(service.list(&thread_id).await.expect("list").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watching_a_pr_that_is_already_merged_ends_at_once() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_merged_first");
+        source.set(|state| {
+            state.pr = detail(ForgePrState::Merged, "sha-1", ForgeMergeable::Mergeable);
+        });
+        watched(&service, &sink, &thread_id).await;
+
+        // Nothing can change on a merged PR, so the watch never starts.
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+        service.poll_once().await;
+        assert!(sink.wakes().is_empty());
         assert_eq!(service.list(&thread_id).await.expect("list").len(), 1);
     }
 

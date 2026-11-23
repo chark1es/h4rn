@@ -463,7 +463,7 @@ that starts a turn, naming what changed and linking to the PR or comment:
 - someone other than the linked account comments or reviews (including inline
   review comments);
 - the branch starts to conflict;
-- the PR merges or closes, which also ends that watch.
+- the PR merges or closes, which also ends that watch. A PR that is already merged or closed has nothing left to watch, so the panel offers no Watch for it and a watch request ends at once.
 
 Each event is reported once per watch, and re-watching starts a fresh baseline
 so old news is not repeated. Every watcher keeps its own snapshot and

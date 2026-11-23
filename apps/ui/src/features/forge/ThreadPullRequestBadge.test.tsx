@@ -47,7 +47,7 @@ const pulls: ThreadPullRequest[] = [
     repo,
     number: 9,
     account_id: "a1",
-    summary: summary("closed", 9, "Old experiment"),
+    summary: summary("draft", 9, "Old experiment"),
     error: null,
     watching: false,
     watch_notice: null,
@@ -101,7 +101,7 @@ describe("linked pull request badge and panel", () => {
     expect(screen.getByText("Linked pull requests")).toBeTruthy();
     expect(screen.getByText("Add PR watch")).toBeTruthy();
     expect(screen.getByText("Old experiment")).toBeTruthy();
-    expect(screen.getByText("Closed")).toBeTruthy();
+    expect(screen.getByText("Draft")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("menuitem", { name: /Add PR watch/ }));
     expect(open).toHaveBeenCalledWith(
@@ -162,6 +162,28 @@ describe("linked pull request badge and panel", () => {
     const watch = screen.getByRole("menuitem", { name: /Watch for changes/ });
     expect(stop.querySelector("svg")).not.toBeNull();
     expect(watch.querySelector("svg")).toBeNull();
+  });
+
+  it("offers no watch on a merged or closed pull request", () => {
+    const [primary, other] = pulls;
+    if (!primary || !other) throw new Error("the badge fixtures are missing");
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[
+          { ...primary, watching: false, summary: summary("merged", 7, "Add PR watch") },
+          { ...other, summary: summary("closed", 9, "Old experiment") },
+        ]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    openBadge();
+
+    expect(screen.getByText("Merged")).toBeTruthy();
+    expect(screen.getByText("Closed").className).toContain("q-danger");
+    expect(screen.queryByRole("menuitem", { name: /Watch for changes/ })).toBeNull();
+    expect(screen.getAllByRole("menuitem", { name: /Unlink/ })).toHaveLength(2);
   });
 
   it("says what a watch cannot cover when the forge has no login", () => {

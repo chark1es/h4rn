@@ -285,7 +285,7 @@ async fn github_pr_read_reports_a_merge_refreshed_by_another_reader() {
         .mount(&server)
         .await;
 
-    let client = GitHubClient::new(&server.uri(), "ghp_test", 120).unwrap();
+    let client = GitHubClient::new(&server.uri(), "test-token", 120).unwrap();
     let repo = repo(ForgeKind::GitHub, &server.uri());
 
     // The watch's first read takes the open snapshot and caches its ETag.

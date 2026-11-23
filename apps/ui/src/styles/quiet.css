@@ -490,6 +490,14 @@ fieldset.q-seg-fs {
   line-height: 1.4;
   color: var(--fg-3);
 }
+/* The tone classes must win over the muted base colour above. */
+.q-pr-row-state.q-danger,
+.q-pr-note.q-danger {
+  color: var(--danger);
+}
+.q-pr-row-state.q-ok {
+  color: var(--ok);
+}
 .q-pr-link-name {
   flex: 1;
   min-width: 0;
