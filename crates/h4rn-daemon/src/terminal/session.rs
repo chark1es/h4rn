@@ -598,6 +598,18 @@ impl Session {
             // and the no-pid fallback reach the reap without this wait.
             return;
         };
+        // A close that already reaped and published the shell freed its pid;
+        // waiting on that pid could block on an unrelated child that reused
+        // it. Each lock is taken on its own, in the documented order.
+        {
+            let _reap = lock(&self.reap);
+            if lock(&self.reaped_status).is_some() {
+                return;
+            }
+            if lock(&self.exit).is_some() {
+                return;
+            }
+        }
         #[cfg(all(test, unix))]
         self.awaiting_shell_exit.store(true, Ordering::SeqCst);
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -1016,10 +1028,11 @@ impl Session {
                         //
                         // portable-pty's `child.kill()` is a SIGHUP by pid on
                         // Unix and polls `try_wait` for a moment inside the
-                        // call; that poll also runs under this lock, so even a
-                        // shell it reaps there cannot be signalled by a later
-                        // pid-targeted step. The fallback stays in the same
-                        // critical section.
+                        // call, which can reap a shell that exits during it.
+                        // That reap is published below before this lock is
+                        // released, so every reap still publishes its exit
+                        // first. The fallback stays in the same critical
+                        // section.
                         let kill_failed = match child.as_mut() {
                             Some(child) => child.kill().is_err(),
                             None => true,
@@ -1031,8 +1044,12 @@ impl Session {
                             kill_through_handle(&self.killer);
                             self.signals.pid(self.shell_pid, Signal::Kill);
                         }
+                        // A reap inside `kill()` leaves the status cached by
+                        // the child handle; publish it now, under the lock.
+                        child.as_mut().and_then(|child| self.reap_exited(child))
+                    } else {
+                        reaped
                     }
-                    reaped
                 }
             };
             if let Some(exit) = published {
@@ -3194,6 +3211,92 @@ mod tests {
         }
     }
 
+    /// A shell that is still running until `kill()`, which reaps it inside
+    /// the call the way portable-pty's Unix `kill` polls `try_wait`.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct ReapedByKillChild {
+        pid: u32,
+        killed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::ChildKiller for ReapedByKillChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self {
+                pid: self.pid,
+                killed: Arc::clone(&self.killed),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::Child for ReapedByKillChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(self
+                .killed
+                .load(Ordering::SeqCst)
+                .then(|| portable_pty::ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::other("the child was already reaped"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(self.pid)
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reap_inside_the_primary_kill_is_published_before_the_lock_is_released() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut session = Session::new(
+            TerminalId::new("term_reaped_by_kill"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(ReapedByKillChild {
+                pid: 4_000_005,
+                killed: Arc::clone(&killed),
+            }),
+            writer,
+        );
+        session.signals = Arc::new(RecordedSignals::default()) as Arc<dyn CloseSignals>;
+        // No opening hangup wait, so the primary kill is the step that ends
+        // (and, inside the call, reaps) the shell.
+        session.shell_pid = None;
+        session.process_group = None;
+
+        session.end_shell();
+
+        assert!(killed.load(Ordering::SeqCst), "the primary kill ran");
+        assert!(
+            lock(&session.exit).is_some(),
+            "a reap inside kill() must publish the exit before the reap lock is released"
+        );
+    }
+
     #[test]
     fn the_independent_killer_ends_the_shell_without_the_child_lock() {
         let kills = Arc::new(AtomicU64::new(0));
@@ -3586,6 +3689,8 @@ mod tests {
 
     /// Records every pid-targeted signal and checks the invariant at the
     /// moment it is sent: the reap lock is held and the exit is unpublished.
+    /// Unix only: the reap lock guards pid signals, which Windows does not send.
+    #[cfg(unix)]
     #[derive(Default)]
     struct GuardedSignals {
         /// Set once the session exists (the recorder is built first so the
@@ -3596,6 +3701,7 @@ mod tests {
         violations: Mutex<Vec<String>>,
     }
 
+    #[cfg(unix)]
     impl GuardedSignals {
         fn record_pid_target(&self, what: &str) {
             let Some(session) = lock(&self.session).as_ref().and_then(|weak| weak.upgrade()) else {
@@ -3613,6 +3719,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl CloseSignals for GuardedSignals {
         fn hangup(&self, pid: i32) -> bool {
             self.record_pid_target("the opening hangup");
