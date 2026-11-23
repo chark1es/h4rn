@@ -497,8 +497,31 @@ impl PrLinkService {
             {
                 // A merged or closed PR will never change in a way the watch
                 // reports, so there is nothing to watch: end it now rather
-                // than polling it forever.
-                self.remove_watch(&key, thread_id);
+                // than polling it forever. Unless a poll applied a newer
+                // state while this read was in flight — an undelivered merge
+                // wake may be waiting to retry, and this read must not delete
+                // the watcher that will deliver it.
+                let current = {
+                    let watches = self.lock_watches();
+                    watches
+                        .prs
+                        .get(&key)
+                        .and_then(|watched| watched.watchers.get(thread_id.as_str()))
+                        .map(|watch| watch.generation)
+                };
+                match current {
+                    Some(current) if current == generation => {
+                        self.remove_watch(&key, thread_id);
+                    }
+                    Some(_) => {
+                        tracing::debug!(
+                            repo = %repo.full_name(),
+                            pr = number,
+                            "discarding a terminal PR watch read a poll overtook"
+                        );
+                    }
+                    None => {}
+                }
             }
             Ok(snapshot) => {
                 let mut watches = self.lock_watches();
@@ -638,6 +661,25 @@ impl PrLinkService {
         for key in keys {
             let viewer = self.source.account_login(&key.account_id);
 
+            // Each watcher's generation at the moment this read starts. A
+            // re-watch or a failed-wake retry that completes while the read
+            // is in flight bumps it, and this snapshot must not be applied
+            // over that newer state in either direction.
+            let generations: HashMap<String, u64> = {
+                let watches = self.lock_watches();
+                watches
+                    .prs
+                    .get(&key)
+                    .map(|watched| {
+                        watched
+                            .watchers
+                            .iter()
+                            .map(|(thread, watch)| (thread.clone(), watch.generation))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
             let snapshot = match self.read_full(&key.account_id, &key.repo, key.number).await {
                 Ok(snapshot) => snapshot,
                 Err(PrSourceError::RateLimited { retry_after }) => {
@@ -688,7 +730,7 @@ impl PrLinkService {
                 if watched.watchers.is_empty() {
                     continue;
                 }
-                watched.observe(snapshot, viewer.as_deref())
+                watched.observe(snapshot, viewer.as_deref(), &generations)
             };
 
             for wake in wakes {
@@ -919,7 +961,12 @@ impl WatchedPr {
     /// Each watcher compares the snapshot with its own baseline, so a watcher
     /// hears every change since it started watching exactly once, whatever
     /// other threads (or a re-watch) did to theirs.
-    fn observe(&mut self, snapshot: PrSnapshot, viewer: Option<&str>) -> Vec<Wake> {
+    fn observe(
+        &mut self,
+        snapshot: PrSnapshot,
+        viewer: Option<&str>,
+        generations: &HashMap<String, u64>,
+    ) -> Vec<Wake> {
         let terminal = matches!(
             snapshot.summary.state,
             ForgePrState::Merged | ForgePrState::Closed
@@ -928,6 +975,19 @@ impl WatchedPr {
         let mut wakes = Vec::new();
         let mut ended = Vec::new();
         for (thread, watch) in &mut self.watchers {
+            // Only a watcher whose state is exactly what this read started
+            // with may take its snapshot. A re-watch, a poll, or a failed-wake
+            // retry that bumped the generation meanwhile has a newer state,
+            // and applying this older body would move the baseline backwards.
+            // A watcher added after the read started has no entry here: it
+            // takes its own baseline from its own read.
+            if generations.get(thread) != Some(&watch.generation) {
+                tracing::debug!(
+                    thread,
+                    "discarding a PR poll snapshot a newer watch read overtook"
+                );
+                continue;
+            }
             watch.generation = watch.generation.wrapping_add(1);
             watch.failed_reads = 0;
             let failure_now = snapshot.checks.pending > 0 && snapshot.checks.failed > 0;
@@ -968,9 +1028,9 @@ impl WatchedPr {
             }
             let last_comment =
                 comment_only && watch.comment_only_wakes >= MAX_COMMENT_ONLY_WAKES && !terminal;
-            if last_comment {
-                ended.push(thread.clone());
-            }
+            // A comment-only cap is not applied here: the watcher stays until
+            // the wake is delivered, so a failed final wake is retried like a
+            // terminal one. `poll_once` removes it after a delivered wake.
             wakes.push(Wake {
                 thread_id: ThreadId::new(thread.clone()),
                 message: wake_message(&events, &snapshot),
@@ -1710,6 +1770,9 @@ mod tests {
         titles: Mutex<HashMap<String, String>>,
         wakes: Mutex<Vec<(String, String)>>,
         fail_wakes: Mutex<usize>,
+        /// One specific wake attempt (1-based) that fails.
+        fail_wake_at: Mutex<Option<usize>>,
+        wake_attempts: Mutex<usize>,
     }
 
     impl MockSink {
@@ -1744,6 +1807,14 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = count;
         }
+
+        /// Fails exactly the given wake attempt (1-based).
+        fn fail_wake_at(&self, attempt: usize) {
+            *self
+                .fail_wake_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(attempt);
+        }
     }
 
     #[async_trait]
@@ -1764,12 +1835,28 @@ mod tests {
         }
 
         async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String> {
+            let attempt = {
+                let mut attempts = self
+                    .wake_attempts
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *attempts += 1;
+                *attempts
+            };
+            let fail_here = *self
+                .fail_wake_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                == Some(attempt);
             let mut remaining = self
                 .fail_wakes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if *remaining > 0 {
                 *remaining -= 1;
+                return Err("the thread could not be woken".into());
+            }
+            if fail_here {
                 return Err("the thread could not be woken".into());
             }
             self.wakes
@@ -2741,6 +2828,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rewatch_that_overtakes_a_poll_does_not_replay_a_delivered_failure() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_poll_race");
+        watched(&service, &sink, &thread_id).await;
+
+        // The failure is delivered once.
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Failure,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1, "{:?}", sink.wakes());
+
+        // A poll read starts with that failing body and is held in checks.
+        let (started, release) = source.gate_next_checks();
+        let service_for_poll = Arc::clone(&service);
+        let poll = tokio::spawn(async move { service_for_poll.poll_once().await });
+        started.await.expect("the poll read is waiting");
+
+        // The checks pass and a re-watch reads that state to completion.
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Success,
+                    Some(true),
+                    Some(4),
+                )],
+            );
+        });
+        service
+            .watch(&thread_id, &repo(), 7)
+            .await
+            .expect("re-watch");
+
+        // The held poll now finishes with the older, failing body. It must
+        // not replace the fresh passing baseline and report the failure again.
+        release.send(()).expect("release the poll read");
+        poll.await.expect("poll finished");
+
+        service.poll_once().await;
+        assert_eq!(
+            sink.wakes().len(),
+            1,
+            "a stale poll body must not re-report a delivered failure: {:?}",
+            sink.wakes()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_rewatch_does_not_delete_a_watcher_retrying_its_wake() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_terminal_rewatch");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.pr = detail(ForgePrState::Merged, "sha-1", ForgeMergeable::Mergeable);
+        });
+
+        // The re-watch read starts with the merged body and is held in checks.
+        let (started, release) = source.gate_next_checks();
+        let service_for_watch = Arc::clone(&service);
+        let thread_for_watch = thread_id.clone();
+        let rewatch = tokio::spawn(async move {
+            service_for_watch
+                .watch(&thread_for_watch, &repo(), 7)
+                .await
+                .expect("re-watch");
+        });
+        started.await.expect("the re-watch read is waiting");
+
+        // A poll reports the merge, but its wake fails, so the watcher stays
+        // alive to retry it.
+        sink.fail_next_wakes(1);
+        service.poll_once().await;
+        assert!(sink.wakes().is_empty());
+        assert_eq!(service.watching_threads(&repo(), 7).len(), 1);
+
+        // The held re-watch now finishes. It must not delete the watcher that
+        // is waiting to retry the undelivered merge.
+        release.send(()).expect("release the re-watch read");
+        rewatch.await.expect("re-watch finished");
+        assert_eq!(
+            service.watching_threads(&repo(), 7).len(),
+            1,
+            "a terminal re-watch must not delete a watcher retrying its wake"
+        );
+
+        // The retry delivers the merge exactly once and ends the watch.
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].1.contains("was merged"), "{wakes:?}");
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_tenth_comment_only_wake_is_retried() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_comment_retry");
+        watched(&service, &sink, &thread_id).await;
+
+        // Fail exactly the wake that reaches the comment-only cap.
+        sink.fail_wake_at(MAX_COMMENT_ONLY_WAKES as usize);
+        for index in 0..MAX_COMMENT_ONLY_WAKES {
+            source.set(|state| {
+                state.comments = comments(
+                    vec![comment(
+                        &format!("c{index}"),
+                        "alice",
+                        &format!("comment {index}"),
+                    )],
+                    Vec::new(),
+                );
+            });
+            service.poll_once().await;
+        }
+        assert_eq!(
+            sink.wakes().len(),
+            (MAX_COMMENT_ONLY_WAKES - 1) as usize,
+            "the failed final wake must not be delivered: {:?}",
+            sink.wakes()
+        );
+        assert_eq!(
+            service.watching_threads(&repo(), 7).len(),
+            1,
+            "a failed final comment wake must keep the watcher for its retry"
+        );
+
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), MAX_COMMENT_ONLY_WAKES as usize, "{wakes:?}");
+        assert!(
+            wakes
+                .last()
+                .is_some_and(|(_, message)| message.contains("comment 9")),
+            "{wakes:?}"
+        );
+        assert!(
+            service.watching_threads(&repo(), 7).is_empty(),
+            "the retried wake is the watch's last"
+        );
+
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), MAX_COMMENT_ONLY_WAKES as usize);
+    }
+
+    #[tokio::test]
     async fn a_watch_during_a_rate_limit_pause_spends_no_read() {
         let (service, source, sink) = service().await;
         let first = thread("th_pause_watch_a");
@@ -2938,6 +3184,35 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(pr_json("open", false)))
             .mount(&server)
             .await;
+        // The watch's full read: comments, reviews and checks. All of them
+        // must succeed, or the watch never takes a baseline and a leak would
+        // go unnoticed.
+        for quiet in [
+            "/api/v3/repos/acme/widget/issues/7/comments",
+            "/api/v3/repos/acme/widget/pulls/7/comments",
+            "/api/v3/repos/acme/widget/pulls/7/reviews",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(quiet))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/v3/repos/acme/widget/commits/sha-1/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"check_runs": []})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/repos/acme/widget/commits/sha-1/status"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"state": "success", "statuses": []})),
+            )
+            .mount(&server)
+            .await;
 
         let (forge, _forge_dir) = forge_over(&server).await;
         let repo_ref = wiremock_repo(&server);
@@ -2960,9 +3235,30 @@ mod tests {
             .watch(&thread_id, &repo_ref, 7)
             .await
             .expect("watch");
+        // The watch's own read completed: it has a baseline to compare with.
+        assert!(
+            service
+                .lock_watches()
+                .prs
+                .values()
+                .flat_map(|watched| watched.watchers.values())
+                .all(|watch| watch.baseline.is_some()),
+            "the watch read must complete and take a baseline"
+        );
         assert!(
             forge.watched_prs().is_empty(),
             "a watch read must not add the PR to the checks poller: {:?}",
+            forge.watched_prs()
+        );
+
+        // A full poll reads all three quiet paths again and still enrols
+        // nothing.
+        service.poll_once().await;
+        assert_eq!(service.watching_threads(&repo_ref, 7).len(), 1);
+        assert!(sink.wakes().is_empty(), "{:?}", sink.wakes());
+        assert!(
+            forge.watched_prs().is_empty(),
+            "a watch poll must not add the PR to the checks poller: {:?}",
             forge.watched_prs()
         );
 

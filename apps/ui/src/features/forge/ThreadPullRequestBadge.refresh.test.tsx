@@ -147,6 +147,17 @@ describe("the linked pull request badge follows the daemon", () => {
     expect(mock.state.calls).toBe(1);
   });
 
+  it("does not re-read for a wake that a reconnect replayed", async () => {
+    render(<ThreadPullRequestBadge threadId="th_1" />);
+    await screen.findByRole("button", { name: "Linked pull requests" });
+    expect(mock.state.calls).toBe(1);
+
+    // Replayed history is not news: a reconnect must not cost one forge read
+    // per replayed message.
+    act(() => mock.emit({ ...userMessage("th_1"), replayed: true }));
+    expect(mock.state.calls).toBe(1);
+  });
+
   it("re-reads when the panel opens", async () => {
     render(<ThreadPullRequestBadge threadId="th_1" />);
     const badge = await screen.findByRole("button", { name: "Linked pull requests" });

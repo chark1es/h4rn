@@ -57,10 +57,13 @@ export function useThreadPullRequests(
   // A watch wake arrives as a user message appended to the thread. It may
   // also be the last thing the watch ever says (a merge or close ends it), so
   // re-read rather than keep showing the pre-wake state and a stale
-  // "Stop watching".
+  // "Stop watching". Replayed history is not a new wake: a reconnect must not
+  // cost one forge read per replayed message, and the popover re-reads when it
+  // opens anyway.
   useEffect(() => {
     if (!threadId) return;
-    return onAppEvent(({ event }) => {
+    return onAppEvent(({ event, replayed }) => {
+      if (replayed) return;
       if (event.type !== "item_completed") return;
       if (event.thread_id !== threadId) return;
       if (event.item.kind !== "message" || event.item.role !== "user") return;

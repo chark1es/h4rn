@@ -3371,7 +3371,6 @@ async fn a_slow_acp_probe_does_not_block_the_connection() {
     daemon.stop().await;
 }
 
-
 /// A workspace on `main` whose `origin` looks like GitHub and pushes to a
 /// local bare repository, so opening a PR never touches the network.
 fn forge_workspace() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -3562,6 +3561,7 @@ async fn opening_a_pr_from_a_thread_links_it() {
             title: "Add PR watch".into(),
             body: String::new(),
             base: "main".into(),
+            draft: false,
         })
         .await
         .expect("open the PR");
