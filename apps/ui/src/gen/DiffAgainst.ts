@@ -13,4 +13,12 @@ thread_id: ThreadId,
 /**
  * Turn whose pre-turn snapshot is the base.
  */
-turn_id: TurnId, };
+turn_id: TurnId, } | { "kind": "base", 
+/**
+ * Branch to compare against, or `None` for the repository default.
+ */
+base: string | null, } | { "kind": "commit", 
+/**
+ * Full or abbreviated commit object id, validated by the daemon.
+ */
+sha: string, };

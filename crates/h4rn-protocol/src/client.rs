@@ -457,6 +457,31 @@ pub enum ClientRequest {
         /// Turn whose pre-turn snapshots are the base.
         turn_id: crate::ids::TurnId,
     },
+    /// List the files a branch or commit range changed.
+    FsDiffFiles {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Scope to list; only `base` and `commit` are valid here.
+        against: crate::fs::DiffAgainst,
+    },
+    /// List the newest commits in the branch comparison.
+    FsDiffCommits {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Branch to compare against, or `None` for the repository default.
+        base: Option<String>,
+    },
+    /// List the branch names a diff can be compared against.
+    FsBranches {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+    },
     /// List every MCP server known to this daemon (phase 4).
     ///
     /// Kept as a distinct variant because it predates the general
@@ -1377,6 +1402,9 @@ impl ClientRequest {
             | Self::FsUnwatch { .. }
             | Self::FsDiff { .. }
             | Self::FsTurnChanges { .. }
+            | Self::FsDiffFiles { .. }
+            | Self::FsDiffCommits { .. }
+            | Self::FsBranches { .. }
             | Self::AddProject { .. }
             | Self::BrowseDirectories { .. } => Files,
             Self::McpUpsert { .. }
@@ -1589,6 +1617,29 @@ mod tests {
                     workspace: "/w".into(),
                     thread_id: thread(),
                     turn_id: crate::ids::TurnId::new("turn_1"),
+                },
+                Files,
+            ),
+            (
+                ClientRequest::FsDiffFiles {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
+                    against: crate::fs::DiffAgainst::Base { base: None },
+                },
+                Files,
+            ),
+            (
+                ClientRequest::FsDiffCommits {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
+                    base: None,
+                },
+                Files,
+            ),
+            (
+                ClientRequest::FsBranches {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
                 },
                 Files,
             ),

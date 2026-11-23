@@ -24,8 +24,11 @@ import type { ForgePullRequest } from "./ForgePullRequest";
 import type { ForgeRemote } from "./ForgeRemote";
 import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { ForgeReviewComment } from "./ForgeReviewComment";
+import type { FsBranchList } from "./FsBranchList";
 import type { FsDeleteResult } from "./FsDeleteResult";
 import type { FsDiff } from "./FsDiff";
+import type { FsDiffCommitList } from "./FsDiffCommitList";
+import type { FsDiffFiles } from "./FsDiffFiles";
 import type { FsFileContent } from "./FsFileContent";
 import type { FsListing } from "./FsListing";
 import type { FsTurnChanges } from "./FsTurnChanges";
@@ -221,7 +224,19 @@ diff: FsDiff, } | { "type": "fs_turn_changes",
 /**
  * Turn change set.
  */
-changes: FsTurnChanges, } | { "type": "skills", 
+changes: FsTurnChanges, } | { "type": "fs_diff_files", 
+/**
+ * File list.
+ */
+files: FsDiffFiles, } | { "type": "fs_diff_commits", 
+/**
+ * Commit list.
+ */
+commits: FsDiffCommitList, } | { "type": "fs_branches", 
+/**
+ * Branch list.
+ */
+branches: FsBranchList, } | { "type": "skills", 
 /**
  * Inventory the Skills screen renders.
  */

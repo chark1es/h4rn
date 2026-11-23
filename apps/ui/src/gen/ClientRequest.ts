@@ -526,7 +526,39 @@ thread_id: ThreadId,
 /**
  * Turn whose pre-turn snapshots are the base.
  */
-turn_id: TurnId, } | { "type": "mcp_list" } | { "type": "mcp_upsert", 
+turn_id: TurnId, } | { "type": "fs_diff_files", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Scope to list; only `base` and `commit` are valid here.
+ */
+against: DiffAgainst, } | { "type": "fs_diff_commits", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Branch to compare against, or `None` for the repository default.
+ */
+base: string | null, } | { "type": "fs_branches", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, } | { "type": "mcp_list" } | { "type": "mcp_upsert", 
 /**
  * Full configuration, including any new secret values.
  */

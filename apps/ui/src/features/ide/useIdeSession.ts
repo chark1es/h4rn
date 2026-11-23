@@ -2,7 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   DiffAgainst,
+  FsBranchList,
   FsDiff,
+  FsDiffCommitList,
+  FsDiffFiles,
   FsListing,
   FsSearchMatch,
   FsTurnChanges,
@@ -18,6 +21,7 @@ import { toProtoError } from "@/lib/client/errors";
 import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
 import { getClient } from "@/lib/store/appStore";
 import { conflictFromWrite, keepMineBaseEtag } from "./conflict";
+import { againstForScope, chooseCommit, type DiffSource, firstDiffPath } from "./sources";
 import {
   activeTab,
   closeTab,
@@ -82,9 +86,22 @@ export type IdeState = {
   search: SearchState;
   diff: FsDiff | null;
   diffPath: string | null;
-  diffMode: "head" | "agent";
+  diffSource: DiffSource;
+  /** The branch scope's base; null asks the daemon for the repository default. */
+  diffBase: string | null;
+  /** The commit scope's commit. */
+  diffCommit: string | null;
   diffLoading: boolean;
   diffError: ProtoError | null;
+  diffFiles: FsDiffFiles | null;
+  filesLoading: boolean;
+  filesError: ProtoError | null;
+  diffCommits: FsDiffCommitList | null;
+  commitsLoading: boolean;
+  commitsError: ProtoError | null;
+  diffBranches: FsBranchList | null;
+  branchesLoading: boolean;
+  branchesError: ProtoError | null;
   agentChanges: FsTurnChanges | null;
   agentLoading: boolean;
   agentError: ProtoError | null;
@@ -118,9 +135,20 @@ function initialState(): IdeState {
     search: emptySearch,
     diff: null,
     diffPath: null,
-    diffMode: "head",
+    diffSource: "head",
+    diffBase: null,
+    diffCommit: null,
     diffLoading: false,
     diffError: null,
+    diffFiles: null,
+    filesLoading: false,
+    filesError: null,
+    diffCommits: null,
+    commitsLoading: false,
+    commitsError: null,
+    diffBranches: null,
+    branchesLoading: false,
+    branchesError: null,
     agentChanges: null,
     agentLoading: false,
     agentError: null,
@@ -184,6 +212,14 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const savingPathRef = useRef<string | null>(null);
   const autoOpenedRef = useRef<string | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
+  /** The newest diff request; replies for an older counter are dropped. */
+  const diffRequestRef = useRef(0);
+  /**
+   * The newest base-branch list request. The list does not depend on the open
+   * file, so it has its own counter: a slower file list or diff reply must not
+   * throw it away, and only a newer branch read (or another workspace) may.
+   */
+  const branchesRequestRef = useRef(0);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
 
@@ -503,37 +539,74 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   // Diff and agent changes
   // -------------------------------------------------------------------
 
+  /**
+   * Starts a diff request and returns its token.
+   *
+   * Every diff loader bumps the counter before it awaits anything. A reply
+   * whose counter has moved on is dropped, so a slow Branch list or an older
+   * `fs_diff` can never replace a source or file the person picked afterwards.
+   */
+  const beginDiffRequest = useCallback(() => {
+    diffRequestRef.current += 1;
+    // The dropped reply's spinner must not outlive it. A current list request
+    // sets its own flag again in the same tick, before its first await.
+    setState((current) =>
+      current.filesLoading || current.commitsLoading || current.branchesLoading
+        ? {
+            ...current,
+            filesLoading: false,
+            commitsLoading: false,
+            branchesLoading: false,
+          }
+        : current,
+    );
+    return diffRequestRef.current;
+  }, [setState]);
+
+  const diffRequestCurrent = useCallback((token: number) => diffRequestRef.current === token, []);
+
   const openDiff = useCallback(
-    async (path: string, mode: "head" | "agent") => {
+    async (
+      path: string,
+      source: DiffSource = stateRef.current.diffSource,
+      overrides: { base?: string | null; commit?: string | null } = {},
+    ) => {
+      const token = beginDiffRequest();
       const target = workspaceRef.current;
       if (!target) return;
-      let against: DiffAgainst;
-      if (mode === "head") {
-        against = { kind: "head" };
-      } else if (target.threadId && target.turnId) {
-        against = {
-          kind: "agent_turn",
-          thread_id: target.threadId,
-          turn_id: target.turnId,
-        };
-      } else {
-        setState((current) => ({
-          ...current,
-          diffMode: mode,
+      const current = stateRef.current;
+      const base = overrides.base !== undefined ? overrides.base : current.diffBase;
+      const commit = overrides.commit !== undefined ? overrides.commit : current.diffCommit;
+      const against: DiffAgainst | null = againstForScope({
+        source,
+        threadId: target.threadId,
+        turnId: target.turnId,
+        base,
+        commit,
+      });
+      if (!against) {
+        const missingTurn = source === "agent";
+        setState((state) => ({
+          ...state,
+          diffSource: source,
           diffPath: path,
           diff: null,
           diffLoading: false,
           diffError: {
             code: "invalid_request",
-            message: "This workspace has no agent turn to compare against yet.",
-            hint: "Run a turn first, then open Agent changes.",
+            message: missingTurn
+              ? "This workspace has no agent turn to compare against yet."
+              : "Choose a commit to compare against first.",
+            hint: missingTurn
+              ? "Run a turn first, then open Turn changes."
+              : "Pick a commit from the source picker.",
           },
         }));
         return;
       }
-      setState((current) => ({
-        ...current,
-        diffMode: mode,
+      setState((state) => ({
+        ...state,
+        diffSource: source,
         diffPath: path,
         diffLoading: true,
         diffError: null,
@@ -546,24 +619,334 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           path,
           against,
         });
+        if (!diffRequestCurrent(token)) return;
         if (response.type !== "fs_diff") return;
-        setState((current) => ({
-          ...current,
+        setState((state) => ({
+          ...state,
           diff: response.diff,
           diffLoading: false,
           diffError: null,
         }));
       } catch (error) {
-        setState((current) => ({
-          ...current,
+        if (!diffRequestCurrent(token)) return;
+        setState((state) => ({
+          ...state,
           diff: null,
           diffLoading: false,
           diffError: toProtoError(error),
         }));
       }
     },
-    [setState],
+    [beginDiffRequest, diffRequestCurrent, setState],
   );
+
+  const fetchDiffFiles = useCallback(
+    async (against: DiffAgainst): Promise<FsDiffFiles | null> => {
+      const target = workspaceRef.current;
+      if (!target) return null;
+      // The caller bumped the counter; this reply is only applied while it is
+      // still the newest request.
+      const token = diffRequestRef.current;
+      setState((current) => ({ ...current, filesLoading: true, filesError: null }));
+      try {
+        const response = await getClient().request({
+          type: "fs_diff_files",
+          host: target.host,
+          workspace: target.path,
+          against,
+        });
+        if (!diffRequestCurrent(token)) return null;
+        if (response.type !== "fs_diff_files") return null;
+        const files = response.files;
+        setState((current) => ({
+          ...current,
+          diffFiles: files,
+          filesLoading: false,
+          filesError: null,
+          // One comparison has one name. The daemon resolves the default base
+          // (and the default base) to this branch; the pane remembers the
+          // resolved name so the picker, the next requests and the comment key
+          // all name the same comparison however the base was chosen.
+          ...(against.kind === "base" && files.base ? { diffBase: files.base } : {}),
+        }));
+        return files;
+      } catch (error) {
+        if (!diffRequestCurrent(token)) return null;
+        setState((current) => ({
+          ...current,
+          diffFiles: null,
+          filesLoading: false,
+          filesError: toProtoError(error),
+        }));
+        return null;
+      }
+    },
+    [diffRequestCurrent, setState],
+  );
+
+  const fetchDiffCommits = useCallback(
+    async (base: string | null): Promise<FsDiffCommitList | null> => {
+      const target = workspaceRef.current;
+      if (!target) return null;
+      const token = diffRequestRef.current;
+      setState((current) => ({ ...current, commitsLoading: true, commitsError: null }));
+      try {
+        const response = await getClient().request({
+          type: "fs_diff_commits",
+          host: target.host,
+          workspace: target.path,
+          base,
+        });
+        if (!diffRequestCurrent(token)) return null;
+        if (response.type !== "fs_diff_commits") return null;
+        const commits = response.commits;
+        setState((current) => ({
+          ...current,
+          diffCommits: commits,
+          commitsLoading: false,
+          commitsError: null,
+        }));
+        return commits;
+      } catch (error) {
+        if (!diffRequestCurrent(token)) return null;
+        setState((current) => ({
+          ...current,
+          diffCommits: null,
+          commitsLoading: false,
+          commitsError: toProtoError(error),
+        }));
+        return null;
+      }
+    },
+    [diffRequestCurrent, setState],
+  );
+
+  /**
+   * Loads the branches the base picker offers.
+   *
+   * This reply is not tied to the open file or diff: a slower branch list is
+   * still the answer to the picker's question after the file list and the diff
+   * have opened. Only a newer branch read, or a different workspace, may
+   * replace it.
+   */
+  const fetchBranches = useCallback(async (): Promise<FsBranchList | null> => {
+    const target = workspaceRef.current;
+    if (!target) return null;
+    branchesRequestRef.current += 1;
+    const token = branchesRequestRef.current;
+    setState((current) => ({ ...current, branchesLoading: true, branchesError: null }));
+    try {
+      const response = await getClient().request({
+        type: "fs_branches",
+        host: target.host,
+        workspace: target.path,
+      });
+      if (branchesRequestRef.current !== token) {
+        // A newer read or another workspace owns the picker now. This reply
+        // must not paint over it, and its spinner must not outlive it.
+        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        return null;
+      }
+      if (response.type !== "fs_branches") {
+        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        return null;
+      }
+      const branches = response.branches;
+      setState((current) => ({
+        ...current,
+        diffBranches: branches,
+        branchesLoading: false,
+        branchesError: null,
+      }));
+      return branches;
+    } catch (error) {
+      if (branchesRequestRef.current !== token) {
+        setState((current) => ({ ...current, branchesLoading: false, branchesError: null }));
+        return null;
+      }
+      setState((current) => ({
+        ...current,
+        diffBranches: null,
+        branchesLoading: false,
+        branchesError: toProtoError(error),
+      }));
+      return null;
+    }
+  }, [setState]);
+
+  const showDiffForFiles = useCallback(
+    async (
+      files: FsDiffFiles | null,
+      source: DiffSource,
+      preferred: string | null,
+      overrides: { base?: string | null; commit?: string | null } = {},
+    ) => {
+      const path = firstDiffPath(files, preferred);
+      if (!path) {
+        setState((current) => ({
+          ...current,
+          diffSource: source,
+          diffPath: null,
+          diff: null,
+          diffLoading: false,
+          diffError: null,
+        }));
+        return;
+      }
+      await openDiff(path, source, overrides);
+    },
+    [openDiff, setState],
+  );
+
+  /** Loads the branch review: the branch list for its picker, then the files. */
+  const loadBranch = useCallback(
+    async (preferred: string | null, overrides: { base?: string | null } = {}) => {
+      const token = beginDiffRequest();
+      // A caller that restores another workspace's state passes its base: the
+      // restored state has not rendered yet, so `stateRef` still holds the
+      // previous workspace's choice.
+      const base = overrides.base !== undefined ? overrides.base : stateRef.current.diffBase;
+      // Always refetch: the agent may have fetched, committed or renamed a
+      // branch since this pane last read the list.
+      void fetchBranches();
+      const files = await fetchDiffFiles({ kind: "base", base });
+      if (!diffRequestCurrent(token)) return;
+      // The list resolves the base (the default included); ask for that name so
+      // the diff, the picker and the comment key all describe one comparison.
+      await showDiffForFiles(files, "branch", preferred, { base: files?.base ?? base });
+    },
+    [beginDiffRequest, diffRequestCurrent, fetchBranches, fetchDiffFiles, showDiffForFiles],
+  );
+
+  /** Loads the commits review: a fresh commit list, then one commit's files. */
+  const loadCommit = useCallback(
+    async (
+      preferred: string | null,
+      overrides: { base?: string | null; commit?: string | null } = {},
+    ) => {
+      const token = beginDiffRequest();
+      const current = stateRef.current;
+      // See `loadBranch`: restored values win over a `stateRef` that has not
+      // caught up with the restore yet.
+      const base = overrides.base !== undefined ? overrides.base : current.diffBase;
+      const commit = overrides.commit !== undefined ? overrides.commit : current.diffCommit;
+      const list = await fetchDiffCommits(base);
+      if (!diffRequestCurrent(token)) return;
+      const sha = chooseCommit(list, commit);
+      if (!sha) {
+        setState((state) => ({
+          ...state,
+          diffSource: "commit",
+          diffCommit: null,
+          diffPath: null,
+          diff: null,
+          diffLoading: false,
+          diffError: state.commitsError,
+        }));
+        return;
+      }
+      setState((state) => ({ ...state, diffSource: "commit", diffCommit: sha }));
+      const files = await fetchDiffFiles({ kind: "commit", sha });
+      if (!diffRequestCurrent(token)) return;
+      await showDiffForFiles(files, "commit", preferred, { commit: sha });
+    },
+    [
+      beginDiffRequest,
+      diffRequestCurrent,
+      fetchDiffCommits,
+      fetchDiffFiles,
+      showDiffForFiles,
+      setState,
+    ],
+  );
+
+  // The workspace effect re-runs an interrupted diff load through these
+  // without taking them as dependencies (that would re-run the whole restore).
+  const resumeDiffRef = useRef({ openDiff, loadBranch, loadCommit });
+  resumeDiffRef.current = { openDiff, loadBranch, loadCommit };
+
+  /** Switches the pane's scope and loads whatever that scope needs. */
+  const selectDiffSource = useCallback(
+    async (source: DiffSource) => {
+      // The picker shows the choice the moment it is made; a list or diff that
+      // arrives later without being the newest request is dropped.
+      beginDiffRequest();
+      setState((state) => ({
+        ...state,
+        diffSource: source,
+        diff: null,
+        diffError: null,
+      }));
+      const current = stateRef.current;
+      // Entering the pane shows the file the person is on. The remembered
+      // `diffPath` belongs to the Branch/Commits file list, and a stale one
+      // must never answer for another tab.
+      const preferred = activeTab(current.tabs)?.path ?? current.diffPath;
+      if (source === "head" || source === "agent") {
+        if (preferred) {
+          await openDiff(preferred, source);
+        } else {
+          setState((state) => ({
+            ...state,
+            diffSource: source,
+            diffPath: null,
+            diff: null,
+            diffLoading: false,
+            diffError: null,
+          }));
+        }
+        return;
+      }
+      if (source === "branch") {
+        await loadBranch(preferred);
+        return;
+      }
+      await loadCommit(preferred);
+    },
+    [beginDiffRequest, loadBranch, loadCommit, openDiff, setState],
+  );
+
+  /** Changes the branch the review compares against. */
+  const setDiffBase = useCallback(
+    async (base: string | null) => {
+      const token = beginDiffRequest();
+      setState((current) => ({
+        ...current,
+        diffBase: base,
+        diffCommit: null,
+        diffCommits: null,
+      }));
+      const preferred = stateRef.current.diffPath;
+      const files = await fetchDiffFiles({ kind: "base", base });
+      if (!diffRequestCurrent(token)) return;
+      await showDiffForFiles(files, "branch", preferred, { base: files?.base ?? base });
+    },
+    [beginDiffRequest, diffRequestCurrent, fetchDiffFiles, showDiffForFiles, setState],
+  );
+
+  /** Opens one commit's files. */
+  const setDiffCommit = useCallback(
+    async (sha: string) => {
+      const token = beginDiffRequest();
+      setState((current) => ({ ...current, diffCommit: sha }));
+      const preferred = stateRef.current.diffPath;
+      const files = await fetchDiffFiles({ kind: "commit", sha });
+      if (!diffRequestCurrent(token)) return;
+      await showDiffForFiles(files, "commit", preferred, { commit: sha });
+    },
+    [beginDiffRequest, diffRequestCurrent, fetchDiffFiles, showDiffForFiles, setState],
+  );
+
+  /** Re-reads the branch or commit lists on an explicit refresh. */
+  const refreshDiffLists = useCallback(async () => {
+    beginDiffRequest();
+    const current = stateRef.current;
+    if (current.diffSource === "branch") {
+      await loadBranch(current.diffPath);
+    } else if (current.diffSource === "commit") {
+      await loadCommit(current.diffPath);
+    }
+  }, [beginDiffRequest, loadBranch, loadCommit]);
 
   // -------------------------------------------------------------------
   // Search
@@ -655,20 +1038,69 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     if (!workspacePath || !workspaceHost || !workspaceKey) return;
     autoOpenedRef.current = null;
     loadedKeyRef.current = workspaceKey;
+    // A reply addressed to the previous workspace must never paint this one:
+    // bump both generations so every request still in flight is dropped.
+    diffRequestRef.current += 1;
+    branchesRequestRef.current += 1;
+    // Nothing is in flight for the state being restored, so a cached spinner
+    // is the leftover of a read that has already been dropped.
+    const idle: Partial<IdeState> = {
+      diffLoading: false,
+      diffError: null,
+      filesLoading: false,
+      filesError: null,
+      commitsLoading: false,
+      commitsError: null,
+      branchesLoading: false,
+      branchesError: null,
+    };
     const cached = IDE_CACHE.get(workspaceKey);
     if (cached) {
+      // A diff, file list or commit list that was still loading when the
+      // workspace changed was dropped above. What the cache holds for it
+      // belongs to the previous request (`openDiff` keeps the last body until
+      // its reply lands), so never show it under the newer choice: clear it and
+      // ask again for exactly what was being loaded.
+      const interrupted = cached.diffLoading || cached.filesLoading || cached.commitsLoading;
+      const stale: Partial<IdeState> = interrupted
+        ? {
+            diff: null,
+            ...(cached.filesLoading ? { diffFiles: null } : {}),
+            ...(cached.commitsLoading ? { diffCommits: null } : {}),
+          }
+        : {};
       // A project keeps its tabs. Do not auto-open over them; just refresh the
       // root listing so new or deleted files still show up.
       applyState({
         ...cached,
+        ...idle,
+        ...stale,
         workspaceKey,
         restoredTabs: cached.tabs.tabs.length,
         treeLoading: cached.listings[""] === undefined,
         treeError: null,
       });
       if (cached.listings[""] === undefined) void loadListing("");
+      if (interrupted) {
+        const resume = resumeDiffRef.current;
+        // The restore has not rendered yet, so hand the cached choices over
+        // explicitly instead of letting the loaders read `stateRef`.
+        if (cached.diffSource === "branch") {
+          void resume.loadBranch(cached.diffPath, { base: cached.diffBase });
+        } else if (cached.diffSource === "commit") {
+          void resume.loadCommit(cached.diffPath, {
+            base: cached.diffBase,
+            commit: cached.diffCommit,
+          });
+        } else if (cached.diffPath) {
+          void resume.openDiff(cached.diffPath, cached.diffSource, {
+            base: cached.diffBase,
+            commit: cached.diffCommit,
+          });
+        }
+      }
     } else {
-      applyState({ ...initialState(), workspaceKey });
+      applyState({ ...initialState(), ...idle, workspaceKey });
       void loadListing("");
     }
     const release = retainWorkspaceWatch(workspaceHost, workspacePath);
@@ -828,6 +1260,11 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     moveTab,
     toggleDirectory,
     openDiff,
+    selectDiffSource,
+    setDiffBase,
+    setDiffCommit,
+    refreshDiffLists,
+    fetchBranches,
     runSearch,
     setSearchQuery,
     setSearchOption,
