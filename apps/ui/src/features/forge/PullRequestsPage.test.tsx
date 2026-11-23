@@ -61,6 +61,7 @@ const mock = vi.hoisted(() => {
             },
           ],
           capabilities: [],
+          linear: null,
         };
       case "forge_list_prs":
         return {

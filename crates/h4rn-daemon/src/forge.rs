@@ -47,6 +47,8 @@ const KEYCHAIN_SERVICE: &str = "h4rn-forge";
 const DEFAULT_POLL_SECS: u64 = 30;
 /// Maximum poll backoff after repeated failures.
 const MAX_BACKOFF_SECS: u64 = 300;
+/// How long a repository write-ownership answer is reused.
+const WRITE_OWNERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One checks snapshot broadcast to connected clients.
 #[derive(Clone, Debug)]
@@ -125,9 +127,13 @@ fn forge_proto_error(error: ForgeError) -> ProtoError {
             ProtoErrorCode::InvalidRequest,
             "Fix the request; the message names the field the forge rejected",
         ),
-        ForgeError::RateLimited { .. } => (
+        ForgeError::RateLimited { .. } | ForgeError::LinearRateLimited { .. } => (
             ProtoErrorCode::RateLimited,
             "Wait for the reset, or add a second account with its own quota",
+        ),
+        ForgeError::LinearForbidden { .. } => (
+            ProtoErrorCode::Forbidden,
+            "Check the Linear workspace's permissions for this key",
         ),
         ForgeError::Unsupported(_) => (
             ProtoErrorCode::Unsupported,
@@ -153,39 +159,44 @@ fn forge_proto_error(error: ForgeError) -> ProtoError {
     ProtoError::new(code, message, hint)
 }
 
-/// Account token storage: OS keychain first, encrypted file otherwise.
-struct TokenStore {
+/// Token storage shared by forge and Linear connections: OS keychain first,
+/// encrypted file otherwise.
+pub(crate) struct SecretStore {
     data_dir: PathBuf,
     keychain: bool,
+    service: &'static str,
+    prefix: &'static str,
 }
 
-impl TokenStore {
-    fn new(data_dir: &Path) -> Self {
+impl SecretStore {
+    pub(crate) fn new(data_dir: &Path, service: &'static str, prefix: &'static str) -> Self {
         Self {
             data_dir: data_dir.to_path_buf(),
             keychain: keyring::Entry::store_status().is_ok(),
+            service,
+            prefix,
         }
     }
 
     fn path(&self, account_id: &str) -> PathBuf {
-        self.data_dir.join(format!("forge-token-{account_id}"))
+        self.data_dir.join(format!("{}{account_id}", self.prefix))
     }
 
-    fn save(&self, account_id: &str, token: &str) -> Result<(), ForgeServiceError> {
+    pub(crate) fn save(&self, account_id: &str, token: &str) -> Result<(), ForgeServiceError> {
         if self.keychain {
-            if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, account_id) {
+            if let Ok(entry) = keyring::Entry::new(self.service, account_id) {
                 if entry.set_password(token).is_ok() {
                     return Ok(());
                 }
             }
         }
         h4rn_transport::keys::write_secret_file(&self.path(account_id), token.as_bytes())
-            .map_err(|error| ForgeServiceError::Local(format!("store forge token: {error}")))
+            .map_err(|error| ForgeServiceError::Local(format!("store secret: {error}")))
     }
 
-    fn load(&self, account_id: &str) -> Result<Option<String>, ForgeServiceError> {
+    pub(crate) fn load(&self, account_id: &str) -> Result<Option<String>, ForgeServiceError> {
         if self.keychain {
-            if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, account_id) {
+            if let Ok(entry) = keyring::Entry::new(self.service, account_id) {
                 if let Ok(token) = entry.get_password() {
                     if !token.is_empty() {
                         return Ok(Some(token));
@@ -194,21 +205,21 @@ impl TokenStore {
             }
         }
         let bytes = h4rn_transport::keys::read_secret_file(&self.path(account_id))
-            .map_err(|error| ForgeServiceError::Local(format!("read forge token: {error}")))?;
+            .map_err(|error| ForgeServiceError::Local(format!("read secret: {error}")))?;
         match bytes {
             Some(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).trim().to_owned())),
             None => Ok(None),
         }
     }
 
-    fn remove(&self, account_id: &str) {
+    pub(crate) fn remove(&self, account_id: &str) {
         if self.keychain
-            && let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, account_id)
+            && let Ok(entry) = keyring::Entry::new(self.service, account_id)
         {
             let _ = entry.delete_credential();
         }
         if let Err(error) = h4rn_transport::keys::remove_secret_file(&self.path(account_id)) {
-            tracing::warn!(%error, "could not remove a forge token file");
+            tracing::warn!(%error, "could not remove a stored secret");
         }
     }
 }
@@ -275,7 +286,7 @@ struct DeviceFlowState {
 pub struct ForgeService {
     accounts_path: PathBuf,
     hosts: ForgeHosts,
-    tokens: TokenStore,
+    tokens: SecretStore,
     accounts: RwLock<Vec<ForgeAccount>>,
     clients: RwLock<HashMap<String, Arc<dyn Forge>>>,
     audit: ForgeAudit,
@@ -284,6 +295,9 @@ pub struct ForgeService {
     poller: Mutex<Option<JoinHandle<()>>>,
     /// Device authorizations in flight, keyed by the id handed to the client.
     flows: Mutex<HashMap<String, DeviceFlowState>>,
+    /// Repository write ownership, keyed by forge and repository, cached for
+    /// [`WRITE_OWNERSHIP_TTL`] because every issue read and write asks.
+    owned_repos: Mutex<HashMap<String, (bool, std::time::Instant)>>,
     requests_per_minute: u32,
 }
 
@@ -303,7 +317,7 @@ impl ForgeService {
         let service = Arc::new(Self {
             accounts_path: data_dir.join(ACCOUNTS_FILE),
             hosts,
-            tokens: TokenStore::new(data_dir),
+            tokens: SecretStore::new(data_dir, KEYCHAIN_SERVICE, "forge-token-"),
             accounts: RwLock::new(accounts),
             clients: RwLock::new(HashMap::new()),
             audit: ForgeAudit::new(data_dir),
@@ -311,6 +325,7 @@ impl ForgeService {
             watches: RwLock::new(HashMap::new()),
             poller: Mutex::new(None),
             flows: Mutex::new(HashMap::new()),
+            owned_repos: Mutex::new(HashMap::new()),
             requests_per_minute,
         });
         service.start_poller();
@@ -332,6 +347,9 @@ impl ForgeService {
     }
 
     /// Configured accounts plus one capability row per forge.
+    ///
+    /// Linear is not a forge and is reported separately by the response, so
+    /// older clients keep reading a list that only ever names forges.
     pub fn list_accounts(&self) -> (Vec<ForgeAccount>, Vec<ForgeCapabilityEntry>) {
         let accounts = self
             .accounts
@@ -637,6 +655,76 @@ impl ForgeService {
         Ok(detect_repos(Path::new(workspace), &self.hosts)?)
     }
 
+    /// Whether `repo` is the repository a local project designates for writes.
+    ///
+    /// The PR features read the first detected remote (`origin`, or the first
+    /// forge remote when a checkout has no origin). That remote, and only
+    /// that one, is the project's repository: a fork whose `origin` is the
+    /// fork and whose `upstream` is the parent must never let an issue write
+    /// reach the parent. The git scan runs off the async runtime, and the
+    /// answer is cached briefly because every issue read asks.
+    ///
+    /// Writes use [`Self::repo_is_designated_fresh`] instead: a cached
+    /// positive would keep accepting writes after the project was removed or
+    /// its `origin` became a fork.
+    pub async fn repo_is_designated(
+        &self,
+        projects: &[h4rn_protocol::Project],
+        repo: &ForgeRepoRef,
+    ) -> bool {
+        let key = format!(
+            "{:?}|{}|{}/{}",
+            repo.forge, repo.base_url, repo.owner, repo.repo
+        );
+        if let Ok(cache) = self.owned_repos.lock()
+            && let Some((owned, at)) = cache.get(&key)
+            && at.elapsed() < WRITE_OWNERSHIP_TTL
+        {
+            return *owned;
+        }
+        let owned = self.scan_designated(projects, repo).await;
+        if let Ok(mut cache) = self.owned_repos.lock() {
+            cache.insert(key, (owned, std::time::Instant::now()));
+        }
+        owned
+    }
+
+    /// The same ownership answer, read from the checkouts again.
+    ///
+    /// Every issue write asks this so a project removal or a changed `origin`
+    /// takes effect on the next write, not after the read cache expires.
+    pub async fn repo_is_designated_fresh(
+        &self,
+        projects: &[h4rn_protocol::Project],
+        repo: &ForgeRepoRef,
+    ) -> bool {
+        self.scan_designated(projects, repo).await
+    }
+
+    /// Scans each project's first remote off the async runtime.
+    async fn scan_designated(
+        &self,
+        projects: &[h4rn_protocol::Project],
+        repo: &ForgeRepoRef,
+    ) -> bool {
+        let paths = projects
+            .iter()
+            .map(|project| project.path.clone())
+            .collect::<Vec<_>>();
+        let hosts = self.hosts.clone();
+        let target = repo.clone();
+        tokio::task::spawn_blocking(move || {
+            paths.iter().any(|path| {
+                detect_repos(Path::new(path), &hosts)
+                    .ok()
+                    .and_then(|remotes| remotes.into_iter().next())
+                    .is_some_and(|remote| remote.repo == target)
+            })
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Lists PRs for one repository.
     pub async fn list_prs(
         &self,
@@ -851,6 +939,88 @@ impl ForgeService {
             json!({"thread": thread_id, "comment": comment_id, "chars": body.len()}),
         );
         Ok(comment)
+    }
+
+    /// Lists issues for one repository.
+    pub async fn list_issues(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        filter: h4rn_protocol::ForgeIssueFilter,
+        page: u32,
+        query: Option<&str>,
+    ) -> Result<h4rn_protocol::ForgeIssuePage, ForgeServiceError> {
+        let (_account, client) = self.resolve_client(account_id, repo)?;
+        Ok(client.list_issues(repo, filter, page.max(1), query).await?)
+    }
+
+    /// Reads one issue.
+    pub async fn get_issue(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<h4rn_protocol::ForgeIssue, ForgeServiceError> {
+        let (_account, client) = self.resolve_client(account_id, repo)?;
+        Ok(client.get_issue(repo, number).await?)
+    }
+
+    /// Reads one issue's comments.
+    pub async fn list_issue_comments(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        cursor: Option<&str>,
+    ) -> Result<h4rn_protocol::ForgeIssueCommentPage, ForgeServiceError> {
+        let (_account, client) = self.resolve_client(account_id, repo)?;
+        Ok(client.list_issue_comments(repo, number, cursor).await?)
+    }
+
+    /// Posts a comment on an issue.
+    pub async fn comment_issue(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        body: &str,
+    ) -> Result<h4rn_protocol::ForgeIssueComment, ForgeServiceError> {
+        let (account, client) = self.resolve_client(account_id, repo)?;
+        let comment = client.comment_issue(repo, number, body).await?;
+        self.audit.record(
+            "issue.comment",
+            &account,
+            repo,
+            number,
+            json!({"chars": body.len()}),
+        );
+        Ok(comment)
+    }
+
+    /// Changes an issue's title, body, state, labels or assignees.
+    pub async fn update_issue(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+        update: &h4rn_protocol::ForgeIssueUpdate,
+    ) -> Result<h4rn_protocol::ForgeIssue, ForgeServiceError> {
+        let (account, client) = self.resolve_client(account_id, repo)?;
+        let issue = client.update_issue(repo, number, update).await?;
+        self.audit.record(
+            "issue.updated",
+            &account,
+            repo,
+            number,
+            json!({
+                "title": update.title.is_some(),
+                "body": update.body.is_some(),
+                "state": update.state.map(|state| format!("{state:?}")),
+                "labels": update.labels.as_ref().map(Vec::len),
+                "assignees": update.assignees.as_ref().map(Vec::len),
+            }),
+        );
+        Ok(issue)
     }
 
     /// Posts a general PR comment.
@@ -1392,6 +1562,31 @@ mod tests {
         assert_eq!(load_accounts(&path).unwrap(), vec![account]);
     }
 
+    #[tokio::test]
+    async fn the_capability_list_names_only_forges() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = ForgeService::open(dir.path()).unwrap();
+        let (_, entries) = service.list_accounts();
+        assert_eq!(entries.len(), 6);
+        for forge in [
+            ForgeKind::GitHub,
+            ForgeKind::GitLab,
+            ForgeKind::Gitea,
+            ForgeKind::Forgejo,
+            ForgeKind::Bitbucket,
+            ForgeKind::AzureDevOps,
+        ] {
+            assert!(
+                entries.iter().any(|entry| entry.forge == forge),
+                "{forge:?} has a capability row"
+            );
+        }
+        // Linear's row is not part of this list: the response carries it in
+        // its own `linear` field so older clients keep their old shape.
+        assert!(crate::linear::capabilities().issues.read);
+        service.shutdown();
+    }
+
     #[test]
     fn missing_account_file_is_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -1704,6 +1899,171 @@ mod tests {
         let body: serde_json::Value = requests[0].body_json().expect("json");
         assert_eq!(body["draft"], true);
         assert_eq!(body["head"], "main");
+    }
+
+    /// A fork's checkout has `upstream` pointing at the parent. Only the
+    /// designated remote (`origin`) is a write target; a write aimed at the
+    /// parent's repository is refused before a forge client is built.
+    #[tokio::test]
+    async fn only_the_projects_designated_remote_is_a_write_target() {
+        let repo_dir = tempfile::tempdir().expect("repo");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_dir.path())
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&[
+            "remote",
+            "add",
+            "upstream",
+            "https://github.com/parent/widget.git",
+        ]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ]);
+
+        let data = tempfile::tempdir().expect("data dir");
+        let service = ForgeService::open(data.path()).expect("forge service");
+        service.shutdown();
+        let projects = vec![h4rn_protocol::Project {
+            id: "proj_1".into(),
+            host: h4rn_protocol::HostId::new("host_local"),
+            path: repo_dir.path().to_string_lossy().into_owned(),
+            name: "widget".into(),
+            created_at: Utc::now(),
+            git: true,
+        }];
+        let repo = |owner: &str| ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: "https://github.com".into(),
+            owner: owner.into(),
+            repo: "widget".into(),
+        };
+        assert!(service.repo_is_designated(&projects, &repo("acme")).await);
+        assert!(!service.repo_is_designated(&projects, &repo("parent")).await);
+        // Reads may still answer from the brief cache, but the write answer
+        // follows the checkouts: a removed project stops authorising at once.
+        assert!(
+            service.repo_is_designated(&[], &repo("acme")).await,
+            "a read reuses the positive answer"
+        );
+        assert!(
+            !service.repo_is_designated_fresh(&[], &repo("acme")).await,
+            "a write does not"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_issue_write_leaves_exactly_one_audit_entry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": "alice"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/repos/acme/widget/issues/4/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 11,
+                "user": {"login": "alice"},
+                "body": "hi",
+                "created_at": "2026-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v3/repos/acme/widget/issues/4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "number": 4,
+                "title": "New title",
+                "state": "open",
+                "user": {"login": "alice"},
+                "updated_at": "2026-01-01T00:00:00Z",
+                "html_url": "https://github.com/acme/widget/issues/4"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/repos/acme/widget/issues/4/timeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("data dir");
+        let service = ForgeService::open(dir.path()).expect("forge service");
+        service.shutdown();
+        let account = ForgeAccount {
+            account_id: "acct_audit".into(),
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            username: None,
+            display_name: None,
+            scopes: Vec::new(),
+            source: ForgeCredentialSource::Pat,
+            created_at: Utc::now(),
+        };
+        let client: Arc<dyn Forge> =
+            Arc::new(h4rn_forge::GitHubClient::new(&server.uri(), "fixture-token", 120).unwrap());
+        service
+            .finish_add_account(account, "fixture-token", client, None)
+            .await
+            .expect("store the account");
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::GitHub,
+            base_url: server.uri(),
+            owner: "acme".into(),
+            repo: "widget".into(),
+        };
+        service
+            .comment_issue(Some("acct_audit"), &repo, 4, "hi")
+            .await
+            .expect("comment");
+        service
+            .update_issue(
+                Some("acct_audit"),
+                &repo,
+                4,
+                &h4rn_protocol::issues::ForgeIssueUpdate {
+                    title: Some("New title".into()),
+                    ..h4rn_protocol::issues::ForgeIssueUpdate::default()
+                },
+            )
+            .await
+            .expect("update");
+
+        let trail = std::fs::read_to_string(dir.path().join(AUDIT_FILE)).expect("audit trail");
+        let entries = trail
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("entry"))
+            .collect::<Vec<_>>();
+        for action in ["issue.comment", "issue.updated"] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry["action"] == action)
+                    .count(),
+                1,
+                "exactly one {action} entry: {trail}"
+            );
+        }
     }
 
     /// The forge call gets whatever is left of the open's budget, including

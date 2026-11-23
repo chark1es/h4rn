@@ -26,9 +26,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use h4rn_protocol::{
     ForgeCapabilities, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeComment, ForgeCommentPage,
-    ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeKind, ForgeMergeable, ForgeNewPr,
-    ForgePrFilter, ForgePrState, ForgePrSummary, ForgePullRequest, ForgeRepoRef, ForgeReview,
-    ForgeReviewComment, ForgeReviewState, ForgeReviewThread,
+    ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeIssue, ForgeIssueComment,
+    ForgeIssueCommentPage, ForgeIssueFilter, ForgeIssuePage, ForgeIssueUpdate, ForgeKind,
+    ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary, ForgePullRequest,
+    ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState, ForgeReviewThread,
 };
 use serde_json::{Value, json};
 
@@ -654,6 +655,47 @@ impl Forge for BitbucketClient {
             )
             .await?;
         map_pr_detail(repo, &value)
+    }
+
+    async fn list_issues(
+        &self,
+        _repo: &ForgeRepoRef,
+        _filter: ForgeIssueFilter,
+        _page: u32,
+        _query: Option<&str>,
+    ) -> Result<ForgeIssuePage> {
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
+    }
+
+    async fn get_issue(&self, _repo: &ForgeRepoRef, _number: u32) -> Result<ForgeIssue> {
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
+    }
+
+    async fn list_issue_comments(
+        &self,
+        _repo: &ForgeRepoRef,
+        _number: u32,
+        _cursor: Option<&str>,
+    ) -> Result<ForgeIssueCommentPage> {
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
+    }
+
+    async fn comment_issue(
+        &self,
+        _repo: &ForgeRepoRef,
+        _number: u32,
+        _body: &str,
+    ) -> Result<ForgeIssueComment> {
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
+    }
+
+    async fn update_issue(
+        &self,
+        _repo: &ForgeRepoRef,
+        _number: u32,
+        _update: &ForgeIssueUpdate,
+    ) -> Result<ForgeIssue> {
+        Err(crate::issues::unavailable(ForgeKind::Bitbucket))
     }
 }
 

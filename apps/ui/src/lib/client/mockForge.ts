@@ -1,6 +1,7 @@
 import type {
   ClientRequest,
   ForgeAccount,
+  ForgeCapabilities,
   ForgeCapabilityEntry,
   ForgeChecks,
   ForgeComment,
@@ -9,6 +10,11 @@ import type {
   ForgeFileDiff,
   ForgeFileStatus,
   ForgeHandoff,
+  ForgeIssue,
+  ForgeIssueComment,
+  ForgeIssueCommentPage,
+  ForgeIssueSummary,
+  ForgeIssueUpdate,
   ForgePrFilter,
   ForgePrSummary,
   ForgePullRequest,
@@ -16,10 +22,12 @@ import type {
   ForgeReview,
   ForgeReviewComment,
   ForgeReviewThread,
+  IssueScope,
   PrLinkedThread,
   ProtoError,
   ResponseBody,
   ThreadId,
+  ThreadIssue,
   ThreadPullRequest,
 } from "@/gen";
 
@@ -56,6 +64,19 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       graphql: true,
       rerun_checks: true,
       conditional_poll: true,
+      issues: {
+        read: true,
+        write: true,
+        comments: true,
+        labels: true,
+        assignees: true,
+        close_reason: true,
+        search: true,
+        assigned_filter: true,
+        created_filter: true,
+        mentioning_filter: true,
+        linked_pull_requests: true,
+      },
     },
   },
   {
@@ -72,6 +93,19 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       graphql: false,
       rerun_checks: true,
       conditional_poll: false,
+      issues: {
+        read: true,
+        write: true,
+        comments: true,
+        labels: true,
+        assignees: true,
+        close_reason: false,
+        search: true,
+        assigned_filter: true,
+        created_filter: true,
+        mentioning_filter: false,
+        linked_pull_requests: true,
+      },
     },
   },
   {
@@ -88,6 +122,19 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       graphql: false,
       rerun_checks: false,
       conditional_poll: false,
+      issues: {
+        read: true,
+        write: true,
+        comments: true,
+        labels: true,
+        assignees: true,
+        close_reason: false,
+        search: true,
+        assigned_filter: true,
+        created_filter: true,
+        mentioning_filter: true,
+        linked_pull_requests: false,
+      },
     },
   },
   {
@@ -104,6 +151,19 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       graphql: false,
       rerun_checks: false,
       conditional_poll: false,
+      issues: {
+        read: true,
+        write: true,
+        comments: true,
+        labels: true,
+        assignees: true,
+        close_reason: false,
+        search: true,
+        assigned_filter: true,
+        created_filter: true,
+        mentioning_filter: true,
+        linked_pull_requests: false,
+      },
     },
   },
   {
@@ -120,6 +180,19 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       graphql: false,
       rerun_checks: false,
       conditional_poll: false,
+      issues: {
+        read: false,
+        write: false,
+        comments: false,
+        labels: false,
+        assignees: false,
+        close_reason: false,
+        search: false,
+        assigned_filter: false,
+        created_filter: false,
+        mentioning_filter: false,
+        linked_pull_requests: false,
+      },
     },
   },
   {
@@ -136,7 +209,72 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       graphql: false,
       rerun_checks: false,
       conditional_poll: false,
+      issues: {
+        read: true,
+        write: true,
+        comments: true,
+        labels: true,
+        assignees: true,
+        close_reason: false,
+        search: true,
+        assigned_filter: true,
+        created_filter: true,
+        mentioning_filter: false,
+        linked_pull_requests: true,
+      },
     },
+  },
+];
+
+/// Linear is not a forge: its capabilities travel in their own field.
+const LINEAR_CAPABILITIES: ForgeCapabilities = {
+  device_flow: false,
+  review_threads: false,
+  resolve_threads: false,
+  nested_replies: false,
+  inline_review_comments: false,
+  checks: false,
+  pipelines: false,
+  diff_pagination: false,
+  graphql: true,
+  rerun_checks: false,
+  conditional_poll: false,
+  issues: {
+    read: true,
+    write: false,
+    comments: true,
+    labels: false,
+    assignees: false,
+    close_reason: false,
+    search: true,
+    assigned_filter: true,
+    created_filter: true,
+    mentioning_filter: false,
+    linked_pull_requests: true,
+  },
+};
+
+const ISSUE_SUMMARY: ForgeIssueSummary = {
+  repo: REPO,
+  number: 41,
+  title: "Login loop on Safari",
+  state: "open",
+  author: "mara-k",
+  labels: [{ name: "bug", color: "d73a4a" }],
+  assignees: [{ login: "you", name: "You" }],
+  comment_count: 1,
+  updated_at: now(-20 * 60_000),
+  web_url: "https://github.com/h4rn/api/issues/41",
+};
+
+const ISSUE_COMMENTS: ForgeIssueComment[] = [
+  {
+    comment_id: "ic_41_1",
+    author: "mara-k",
+    body: "Only reproduces when the session cookie is third-party.",
+    created_at: now(-30 * 60_000),
+    updated_at: null,
+    web_url: null,
   },
 ];
 
@@ -475,6 +613,18 @@ export class MockForge {
   private comments = new Map<number, ForgeComment[]>(
     Object.entries(GENERAL_COMMENTS).map(([number, list]) => [Number(number), [...list]]),
   );
+  /** The dev issue, kept live across edits so the Issues page behaves. */
+  private issue: ForgeIssue = {
+    summary: { ...ISSUE_SUMMARY },
+    body: "Signing in bounces between `/#/login` and the dashboard.",
+    created_at: now(-40 * 60_000),
+    closed_at: null,
+    close_reason: null,
+    linked_pull_requests: [],
+  };
+  private issueComments: ForgeIssueComment[] = [...ISSUE_COMMENTS];
+  /** Thread → issue keys, the same live link the daemon keeps in its journal. */
+  private issueLinks = new Map<string, Set<string>>();
   private threads = new Map<number, ForgeReviewThread[]>(
     Object.entries(THREADS).map(([number, list]) => [Number(number), cloneThreads(list)]),
   );
@@ -486,6 +636,7 @@ export class MockForge {
           type: "forge_accounts",
           accounts: this.accounts,
           capabilities: CAPABILITIES,
+          linear: LINEAR_CAPABILITIES,
         });
         return true;
       }
@@ -570,6 +721,138 @@ export class MockForge {
           type: "forge_repos",
           repos: [{ remote: "origin", repo: REPO, url: "git@github.com:h4rn/api.git" }],
         });
+        return true;
+      }
+      case "linear_list_accounts": {
+        hooks.ok({ type: "linear_accounts", accounts: [] });
+        return true;
+      }
+      case "linear_project_teams": {
+        hooks.ok({ type: "linear_project_teams", teams: [] });
+        return true;
+      }
+      case "forge_list_issues": {
+        const request = body as Extract<ClientRequest, { type: "forge_list_issues" }>;
+        const open = this.issue.summary.state === "open";
+        const matches =
+          request.filter === "all" ? true : request.filter === "closed" ? !open : open;
+        hooks.ok({
+          type: "forge_issues",
+          issues: matches ? [{ ...this.issue.summary, repo: request.repo }] : [],
+          page: request.page,
+          has_more: false,
+          read_only: false,
+        });
+        return true;
+      }
+      case "forge_get_issue": {
+        const request = body as Extract<ClientRequest, { type: "forge_get_issue" }>;
+        hooks.ok({
+          type: "forge_issue",
+          issue: {
+            ...this.issue,
+            summary: { ...this.issue.summary, repo: request.repo },
+          },
+          read_only: false,
+        });
+        return true;
+      }
+      case "forge_list_issue_comments": {
+        const request = body as Extract<ClientRequest, { type: "forge_list_issue_comments" }>;
+        const page: ForgeIssueCommentPage = {
+          repo: request.repo,
+          number: request.number,
+          comments: this.issueComments,
+          has_more: false,
+          next_cursor: null,
+        };
+        hooks.ok({ type: "forge_issue_comments", page });
+        return true;
+      }
+      case "forge_comment_issue": {
+        const request = body as Extract<ClientRequest, { type: "forge_comment_issue" }>;
+        this.commentSeq += 1;
+        const comment: ForgeIssueComment = {
+          comment_id: `ic_mock_${this.commentSeq}`,
+          author: "you",
+          body: request.body,
+          created_at: now(),
+          updated_at: null,
+          web_url: null,
+        };
+        this.issueComments = [...this.issueComments, comment];
+        this.issue = {
+          ...this.issue,
+          summary: { ...this.issue.summary, comment_count: this.issueComments.length },
+        };
+        hooks.ok({ type: "forge_issue_comment_posted", comment });
+        return true;
+      }
+      case "forge_update_issue": {
+        const request = body as Extract<ClientRequest, { type: "forge_update_issue" }>;
+        const update: ForgeIssueUpdate = request.update;
+        const summary: ForgeIssueSummary = {
+          ...this.issue.summary,
+          repo: request.repo,
+          title: update.title ?? this.issue.summary.title,
+          labels: (update.labels ?? this.issue.summary.labels.map((label) => label.name)).map(
+            (name) =>
+              this.issue.summary.labels.find((label) => label.name === name) ?? {
+                name,
+                color: null,
+              },
+          ),
+          assignees: (update.assignees ?? this.issue.summary.assignees.map((p) => p.login)).map(
+            (login) => ({ login, name: null }),
+          ),
+          state: update.state ?? this.issue.summary.state,
+        };
+        this.issue = {
+          ...this.issue,
+          summary,
+          body: update.body ?? this.issue.body,
+          closed_at: summary.state === "closed" ? now() : null,
+          close_reason: update.close_reason ?? null,
+        };
+        hooks.ok({ type: "forge_issue", issue: this.issue, read_only: false });
+        return true;
+      }
+      case "link_issue": {
+        const request = body as Extract<ClientRequest, { type: "link_issue" }>;
+        const key = issueScopeKey(request.scope, request.issue_id);
+        const linked = this.issueLinks.get(request.thread_id) ?? new Set<string>();
+        linked.add(key);
+        this.issueLinks.set(request.thread_id, linked);
+        hooks.ok({
+          type: "thread_issue",
+          issue: this.threadIssue(
+            request.scope,
+            request.issue_id,
+            request.account_id ?? "acct_mock_github",
+          ),
+        });
+        return true;
+      }
+      case "unlink_issue": {
+        const request = body as Extract<ClientRequest, { type: "unlink_issue" }>;
+        const linked = this.issueLinks.get(request.thread_id) ?? new Set<string>();
+        linked.delete(issueScopeKey(request.scope, request.issue_id));
+        this.issueLinks.set(request.thread_id, linked);
+        hooks.ok({ type: "ack" });
+        return true;
+      }
+      case "list_thread_issues": {
+        const request = body as Extract<ClientRequest, { type: "list_thread_issues" }>;
+        const linked = this.issueLinks.get(request.thread_id) ?? new Set<string>();
+        const issues: ThreadIssue[] = [];
+        for (const key of linked) {
+          if (!key.startsWith("forge:")) continue;
+          const number = Number(key.slice(key.lastIndexOf("#") + 1));
+          issues.push(
+            this.threadIssue({ tracker: "forge", repo: REPO }, String(number), "acct_mock_github"),
+          );
+        }
+        hooks.ok({ type: "thread_issues", thread_id: request.thread_id, issues });
         return true;
       }
       case "forge_list_prs": {
@@ -904,6 +1187,18 @@ export class MockForge {
     }
   }
 
+  private threadIssue(scope: IssueScope, issueId: string, accountId: string): ThreadIssue {
+    return {
+      scope,
+      issue_id: issueId,
+      account_id: accountId,
+      state:
+        scope.tracker === "forge" ? { tracker: "forge", issue: { ...this.issue.summary } } : null,
+      error: null,
+      linked_at: now(),
+    };
+  }
+
   private pullsFor(threadId: string): ThreadPullRequest[] {
     return (this.links.get(threadId) ?? []).map((link) => {
       const summary = SUMMARIES.find((item) => item.number === link.number);
@@ -927,6 +1222,13 @@ type MockLink = {
   account_id: string;
   linked_at: string;
 };
+
+function issueScopeKey(scope: IssueScope, issueId: string): string {
+  if (scope.tracker === "forge") {
+    return `forge:${scope.repo.base_url}:${scope.repo.owner}/${scope.repo.repo}#${issueId}`;
+  }
+  return `linear:${issueId}`;
+}
 
 function linkKey(repo: ForgeRepoRef, number: number): string {
   return `${repo.forge}|${repo.base_url}|${repo.owner}|${repo.repo}|${number}`;

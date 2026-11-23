@@ -21,7 +21,7 @@ const mock = vi.hoisted(() => {
         mock.requests.push(request);
         switch (request.type) {
           case "forge_list_accounts":
-            return { type: "forge_accounts", accounts: [], capabilities: [] };
+            return { type: "forge_accounts", accounts: [], capabilities: [], linear: null };
           case "forge_detect_repo": {
             const workspace = request.workspace;
             const remote: ForgeRemote = {

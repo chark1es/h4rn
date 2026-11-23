@@ -13,6 +13,7 @@ import { CommandPalette } from "@/components/dialogs/CommandPalette";
 import { NewThreadDialog } from "@/components/dialogs/NewThreadDialog";
 import { ShortcutsDialog } from "@/components/dialogs/ShortcutsDialog";
 import { PhoneInbox } from "@/components/inbox/PhoneInbox";
+import { IssuesPage } from "@/components/pages/IssuesPage";
 import { LibraryPage } from "@/components/pages/LibraryPage";
 import { PairingPage } from "@/components/pages/PairingPage";
 import { PullRequestsPage } from "@/components/pages/PullRequestsPage";
@@ -685,6 +686,8 @@ function Surface({ surface, path }: { surface: string; path: string }) {
   switch (surface) {
     case "pulls":
       return <PullRequestsPage />;
+    case "issues":
+      return <IssuesPage />;
     case "library":
       return <LibraryPage path={path} />;
     case "usage":

@@ -1035,6 +1035,152 @@ pub enum ClientRequest {
         draft: bool,
     },
     // ------------------------------------------------------------------
+    // Issues. Same accounts and clients as pull requests; Linear keeps its
+    // own connection because its model (teams, workflow states) differs.
+    // ------------------------------------------------------------------
+    /// List a repository's issues.
+    ForgeListIssues {
+        /// Account to use; the only matching one when omitted.
+        account_id: Option<String>,
+        /// Repository to query.
+        repo: crate::forge::ForgeRepoRef,
+        /// Which issues to return.
+        filter: crate::issues::ForgeIssueFilter,
+        /// Page number, starting at 1.
+        page: u32,
+        /// The tracker's own search text, when non-empty.
+        #[serde(default)]
+        query: Option<String>,
+    },
+    /// Read one issue.
+    ForgeGetIssue {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// Issue number.
+        number: u32,
+    },
+    /// Read one issue's comments.
+    ForgeListIssueComments {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// Issue number.
+        number: u32,
+        /// Provider continuation from the previous page, carried unchanged.
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    /// Post a comment on an issue.
+    ForgeCommentIssue {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// Issue number.
+        number: u32,
+        /// Markdown body.
+        body: String,
+    },
+    /// Change an issue's title, body, labels, assignees or state.
+    ForgeUpdateIssue {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// Issue number.
+        number: u32,
+        /// Fields to change; the rest stay as they are.
+        update: crate::issues::ForgeIssueUpdate,
+    },
+    /// List connected Linear workspaces (never the keys).
+    LinearListAccounts,
+    /// Validate an API key against Linear and store it.
+    LinearConnect {
+        /// Linear personal API key.
+        api_key: String,
+    },
+    /// Forget a Linear connection and its key.
+    LinearRemoveAccount {
+        /// Connection to remove.
+        account_id: String,
+    },
+    /// List the teams one Linear workspace exposes.
+    LinearListTeams {
+        /// Connection to use.
+        account_id: String,
+    },
+    /// The Linear team chosen for each project.
+    LinearProjectTeams,
+    /// Attach a Linear team to a project, or detach it with `team: None`.
+    LinearSetProjectTeam {
+        /// h4rn project id.
+        project_id: String,
+        /// Chosen connection and team.
+        #[serde(default)]
+        team: Option<crate::issues::LinearProjectTeam>,
+    },
+    /// List the issues of the team a project chose.
+    LinearListIssues {
+        /// h4rn project id.
+        project_id: String,
+        /// Open, closed or every issue.
+        filter: crate::issues::ForgeIssueFilter,
+        /// Cursor returned by the previous page.
+        #[serde(default)]
+        cursor: Option<String>,
+        /// Search text, when the tracker should search.
+        #[serde(default)]
+        query: Option<String>,
+    },
+    /// Read one Linear issue and its comments.
+    LinearGetIssue {
+        /// Connection to read with.
+        account_id: String,
+        /// Linear issue id.
+        issue_id: String,
+        /// Provider continuation for the next comment page.
+        #[serde(default)]
+        comments_after: Option<String>,
+    },
+    /// Comment on a Linear issue.
+    LinearCommentIssue {
+        /// Connection to comment with.
+        account_id: String,
+        /// Linear issue id.
+        issue_id: String,
+        /// Markdown body.
+        body: String,
+    },
+    /// Link an issue to a thread. Linking reads it once so the answer carries
+    /// its current state, and keeps the link in the journal across a restart.
+    LinkIssue {
+        /// Thread that will hold the link.
+        thread_id: ThreadId,
+        /// Account to read with; the matching one when omitted.
+        account_id: Option<String>,
+        /// Tracker coordinates.
+        scope: crate::issues::IssueScope,
+        /// Forge issue number, or Linear issue id.
+        issue_id: String,
+    },
+    /// Remove an issue link from a thread.
+    UnlinkIssue {
+        /// Thread that holds the link.
+        thread_id: ThreadId,
+        /// Tracker coordinates.
+        scope: crate::issues::IssueScope,
+        /// Forge issue number, or Linear issue id.
+        issue_id: String,
+    },
+    /// List a thread's linked issues with their latest tracker state.
+    ListThreadIssues {
+        /// Thread to list.
+        thread_id: ThreadId,
+    },
+    // ------------------------------------------------------------------
     // Git actions for a thread.
     // ------------------------------------------------------------------
     /// Read the thread workspace's branch, upstream, counts and paths.
@@ -1398,6 +1544,15 @@ impl ClientRequest {
             | Self::ForgeListPrCommits { .. }
             | Self::ListThreadPullRequests { .. }
             | Self::ListPrThreads { .. }
+            | Self::ForgeListIssues { .. }
+            | Self::ForgeGetIssue { .. }
+            | Self::ForgeListIssueComments { .. }
+            | Self::LinearListAccounts
+            | Self::LinearListTeams { .. }
+            | Self::LinearProjectTeams
+            | Self::LinearListIssues { .. }
+            | Self::LinearGetIssue { .. }
+            | Self::ListThreadIssues { .. }
             | Self::ListProjects { .. }
             | Self::GetNetworkAccess
             | Self::ListDirectDevices
@@ -1436,6 +1591,12 @@ impl ClientRequest {
             | Self::UnlinkPullRequest { .. }
             | Self::WatchPullRequest { .. }
             | Self::UnwatchPullRequest { .. }
+            | Self::ForgeCommentIssue { .. }
+            | Self::ForgeUpdateIssue { .. }
+            | Self::LinearCommentIssue { .. }
+            | Self::LinearSetProjectTeam { .. }
+            | Self::LinkIssue { .. }
+            | Self::UnlinkIssue { .. }
             | Self::RenameThread { .. }
             | Self::RenameProject { .. }
             | Self::RemoveProject { .. } => Approve,
@@ -1489,6 +1650,8 @@ impl ClientRequest {
             | Self::ForgeRemoveAccount { .. }
             | Self::ForgeDeviceFlowStart { .. }
             | Self::ForgeDeviceFlowPoll { .. }
+            | Self::LinearConnect { .. }
+            | Self::LinearRemoveAccount { .. }
             | Self::PairingConfirmations
             | Self::ConfirmPairing { .. }
             | Self::SetNetworkAccess { .. }
@@ -1643,6 +1806,86 @@ mod tests {
                     number: 1,
                 },
                 Approve,
+            ),
+            // Issue reads are view; writing to a tracker and linking a thread
+            // are approve. Connecting Linear changes credentials, so admin.
+            (
+                ClientRequest::ForgeListIssues {
+                    account_id: None,
+                    repo: repo(),
+                    filter: crate::issues::ForgeIssueFilter::Open,
+                    page: 1,
+                    query: None,
+                },
+                View,
+            ),
+            (
+                ClientRequest::ForgeUpdateIssue {
+                    account_id: None,
+                    repo: repo(),
+                    number: 1,
+                    update: crate::issues::ForgeIssueUpdate::default(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::ForgeCommentIssue {
+                    account_id: None,
+                    repo: repo(),
+                    number: 1,
+                    body: "Confirmed.".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::LinearCommentIssue {
+                    account_id: "lin_1".into(),
+                    issue_id: "iss_1".into(),
+                    body: "Shipped.".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::LinearSetProjectTeam {
+                    project_id: "proj_1".into(),
+                    team: None,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::LinearRemoveAccount {
+                    account_id: "lin_1".into(),
+                },
+                Admin,
+            ),
+            (
+                ClientRequest::UnlinkIssue {
+                    thread_id: thread(),
+                    scope: crate::issues::IssueScope::Forge { repo: repo() },
+                    issue_id: "1".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::LinkIssue {
+                    thread_id: thread(),
+                    account_id: None,
+                    scope: crate::issues::IssueScope::Forge { repo: repo() },
+                    issue_id: "1".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::ListThreadIssues {
+                    thread_id: thread(),
+                },
+                View,
+            ),
+            (
+                ClientRequest::LinearConnect {
+                    api_key: "k".into(),
+                },
+                Admin,
             ),
             (
                 ClientRequest::RespondApproval {
