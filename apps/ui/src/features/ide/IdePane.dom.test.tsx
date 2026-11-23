@@ -679,6 +679,53 @@ describe("comments are keyed on the turn, not its label", () => {
   });
 });
 
+describe("a branch review resumed after a workspace round-trip", () => {
+  it("asks again with the base this workspace had picked", async () => {
+    await mount();
+    await openDiff();
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+    await settle();
+
+    // Picking `release` starts a new file list, which is held back.
+    const filesRequests = () =>
+      mock.requests.filter((request) => request.type === "fs_diff_files");
+    const releaseFiles = holdNext("fs_diff_files");
+    openChip(await screen.findByRole("button", { name: "Base branch: main" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "release" }));
+    await waitFor(() =>
+      expect(filesRequests().at(-1)?.against).toEqual({ kind: "base", base: "release" }),
+    );
+
+    // The person leaves for a thread in another workspace mid-load, whose own
+    // state has no base picked, and the held list is dropped there.
+    const other = "th_2" as ThreadId;
+    mock.state.threads = {
+      ...mock.state.threads,
+      [other]: threadRow(other, `${workspacePath}-empty`, "Another task"),
+    };
+    act(() => {
+      mock.state.ui.selectedThreadId = other;
+      mock.notify();
+    });
+    await waitFor(() => expect(pathBar().textContent).toBe(`${workspacePath}-empty`));
+    await releaseHold(releaseFiles);
+    const before = filesRequests().length;
+
+    // Coming back resumes the interrupted review against `release`, not the
+    // other workspace's (empty) choice.
+    act(() => {
+      mock.state.ui.selectedThreadId = thread;
+      mock.notify();
+    });
+    await waitFor(() => expect(filesRequests().length).toBeGreaterThan(before));
+    expect(filesRequests().at(-1)?.against).toEqual({ kind: "base", base: "release" });
+  });
+});
+
 describe("one comparison has one branch list and one comment key", () => {
   it("keeps a slow base-branch list after the file list and diff have opened", async () => {
     await mount();

@@ -800,9 +800,12 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
 
   /** Loads the branch review: the branch list for its picker, then the files. */
   const loadBranch = useCallback(
-    async (preferred: string | null) => {
+    async (preferred: string | null, overrides: { base?: string | null } = {}) => {
       const token = beginDiffRequest();
-      const base = stateRef.current.diffBase;
+      // A caller that restores another workspace's state passes its base: the
+      // restored state has not rendered yet, so `stateRef` still holds the
+      // previous workspace's choice.
+      const base = overrides.base !== undefined ? overrides.base : stateRef.current.diffBase;
       // Always refetch: the agent may have fetched, committed or renamed a
       // branch since this pane last read the list.
       void fetchBranches();
@@ -817,12 +820,19 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
 
   /** Loads the commits review: a fresh commit list, then one commit's files. */
   const loadCommit = useCallback(
-    async (preferred: string | null) => {
+    async (
+      preferred: string | null,
+      overrides: { base?: string | null; commit?: string | null } = {},
+    ) => {
       const token = beginDiffRequest();
       const current = stateRef.current;
-      const list = await fetchDiffCommits(current.diffBase);
+      // See `loadBranch`: restored values win over a `stateRef` that has not
+      // caught up with the restore yet.
+      const base = overrides.base !== undefined ? overrides.base : current.diffBase;
+      const commit = overrides.commit !== undefined ? overrides.commit : current.diffCommit;
+      const list = await fetchDiffCommits(base);
       if (!diffRequestCurrent(token)) return;
-      const sha = chooseCommit(list, current.diffCommit);
+      const sha = chooseCommit(list, commit);
       if (!sha) {
         setState((state) => ({
           ...state,
@@ -1073,9 +1083,21 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       if (cached.listings[""] === undefined) void loadListing("");
       if (interrupted) {
         const resume = resumeDiffRef.current;
-        if (cached.diffSource === "branch") void resume.loadBranch(cached.diffPath);
-        else if (cached.diffSource === "commit") void resume.loadCommit(cached.diffPath);
-        else if (cached.diffPath) void resume.openDiff(cached.diffPath, cached.diffSource);
+        // The restore has not rendered yet, so hand the cached choices over
+        // explicitly instead of letting the loaders read `stateRef`.
+        if (cached.diffSource === "branch") {
+          void resume.loadBranch(cached.diffPath, { base: cached.diffBase });
+        } else if (cached.diffSource === "commit") {
+          void resume.loadCommit(cached.diffPath, {
+            base: cached.diffBase,
+            commit: cached.diffCommit,
+          });
+        } else if (cached.diffPath) {
+          void resume.openDiff(cached.diffPath, cached.diffSource, {
+            base: cached.diffBase,
+            commit: cached.diffCommit,
+          });
+        }
       }
     } else {
       applyState({ ...initialState(), ...idle, workspaceKey });
