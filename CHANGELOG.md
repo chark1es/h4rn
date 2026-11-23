@@ -489,6 +489,22 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
+  the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
+  All four sources now show the active tab's file against the source on screen, and the wider
+  file lists stay one click away.
+- **Commit mode names the base it reuses.** The commit range has always followed the base chosen
+  for Branch (or the repository default), but the pane never said so. The diff header now reads
+  `since main` — or whichever base — beside the commit, so a review against a non-default base is
+  never implicit.
+- **A superseded diff never speaks for the newer choice.** Starting a newer diff or list request
+  drops the abandoned one's body as well as its spinner, so changing the base, the commit or the
+  lists while a file is still loading never shows the previous comparison's lines under the new
+  one. A Branch or Commits tab switch keeps the scope and re-reads its file list when that list is
+  still out, so the list and the empty commit range survive the switch. A stale branch-list reply
+  no longer stops the newer read's spinner. The revisited-workspace spinner reset and the branch
+  generation's move with the workspace already shipped on main; tests now cover them, so a reply
+  from the workspace you left is still ignored.
 - **Commit, push and pull request follow what git and the forge really say.** A
   branch deleted on the forge no longer skips the push a pull request needs just
   because the local remote-tracking ref is stale: the daemon asks the remote with

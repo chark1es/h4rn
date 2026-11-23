@@ -749,6 +749,17 @@ export function DiffView({
           {diff.label}
           {activeFile?.old_path ? ` · was ${activeFile.old_path}` : ""}
         </span>
+        {source === "commit" && commits?.base ? (
+          // Commit mode keeps the base picked for Branch (or the repository
+          // default): the commit list is everything since that base. Say which
+          // one, so the range is never implicit.
+          <span
+            className="q-faint"
+            title={`Commits are listed since the merge base with ${commits.base}.`}
+          >
+            since {commits.base}
+          </span>
+        ) : null}
         <span className="q-num">
           <span className="q-add">+{added}</span> <span className="q-del">−{removed}</span>
         </span>
