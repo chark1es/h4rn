@@ -17,6 +17,7 @@ import {
   SearchIcon,
   ServerIcon,
   SettingsIcon,
+  Share2Icon,
   ShieldCheckIcon,
   SmartphoneIcon,
   SquareIcon,
@@ -39,6 +40,7 @@ import {
   CommandList,
   CommandShortcut,
 } from "@/components/ui/command";
+import { openGuestShare } from "@/features/guest/guestStore";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
 import { paletteScore } from "@/lib/palette";
@@ -220,6 +222,15 @@ export function CommandPalette() {
               <GitPullRequestIcon aria-hidden />
               Link pull request…
             </CommandItem>
+            {current.tab !== "settled" ? (
+              <CommandItem
+                value="share guest teammate link"
+                onSelect={() => close(() => openGuestShare(current.thread_id))}
+              >
+                <Share2Icon aria-hidden />
+                Share with guest…
+              </CommandItem>
+            ) : null}
             <CommandItem
               value="pin keep working"
               onSelect={() => close(() => void togglePin(current.thread_id))}

@@ -2,8 +2,9 @@
  * Presentation helpers for pairing scopes and the typed short code.
  *
  * Which scopes a device holds, and whether a code is valid, are decided in
- * Rust (`h4rn-connect`). This file only names the five scopes for the UI and
- * formats the code for reading and typing.
+ * Rust (`h4rn-connect`). This file only names the five device scopes for the UI
+ * and formats the code for reading and typing. A guest link carries a token and
+ * no device scope, so pairing never offers guest access (ADR-044).
  */
 
 import type { PairScope } from "@/gen";

@@ -41,6 +41,8 @@ import type { FsWriteResult } from "./FsWriteResult";
 import type { GitCommitResult } from "./GitCommitResult";
 import type { GitPushResult } from "./GitPushResult";
 import type { GitThreadStatus } from "./GitThreadStatus";
+import type { GuestSettings } from "./GuestSettings";
+import type { GuestSharing } from "./GuestSharing";
 import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
@@ -739,7 +741,15 @@ path: string | null, } | { "type": "thread_renamed",
 /**
  * The thread with its new title.
  */
-summary: ThreadSummary, } | { "type": "subscribed", 
+summary: ThreadSummary, } | { "type": "guest_sharing", 
+/**
+ * Whether links are on and the thread's live link, if any.
+ */
+sharing: GuestSharing, } | { "type": "guest_settings", 
+/**
+ * Whether guest links may be created and used.
+ */
+settings: GuestSettings, } | { "type": "subscribed", 
 /**
  * Journal head at the moment the subscription was served.
  */

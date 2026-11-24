@@ -1524,4 +1524,36 @@ host: HostId,
 /**
  * Directory to list; `None` or `~` lists the home directory.
  */
-path: string | null, };
+path: string | null, } | { "type": "get_guest_sharing", 
+/**
+ * Thread to report.
+ */
+thread_id: ThreadId, } | { "type": "share_thread_with_guest", 
+/**
+ * Thread to share.
+ */
+thread_id: ThreadId, } | { "type": "stop_guest_sharing", 
+/**
+ * Thread to stop sharing.
+ */
+thread_id: ThreadId, } | { "type": "send_guest_request", 
+/**
+ * Thread the request belongs to.
+ */
+thread_id: ThreadId, 
+/**
+ * Request to send.
+ */
+request_id: string, } | { "type": "dismiss_guest_request", 
+/**
+ * Thread the request belongs to.
+ */
+thread_id: ThreadId, 
+/**
+ * Request to dismiss.
+ */
+request_id: string, } | { "type": "get_guest_settings" } | { "type": "set_guest_settings", 
+/**
+ * New setting. Turning it off disables every live link at once.
+ */
+enabled: boolean, };

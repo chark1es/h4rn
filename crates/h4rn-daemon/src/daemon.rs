@@ -251,6 +251,9 @@ impl DaemonBuilder {
                     .map_err(|error| anyhow::anyhow!("open event journal: {error}"))?,
             ),
         };
+        // Guest links share the journal database, so take its pool before the
+        // manager owns the trait object (ADR-044).
+        let guest_pool = journal.sql_pool().cloned();
 
         let mut inventory = HostInventory::detect(Arc::clone(&catalog));
         if let Some((id, name)) = self.local_host {
@@ -325,6 +328,20 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open CLIProxyAPI profiles: {error}"))?,
         );
         manager.set_proxy(Arc::clone(&proxy));
+
+        let guest = Arc::new(
+            crate::guest::GuestService::open(
+                &self.config.data_dir,
+                guest_pool.as_ref(),
+                Arc::clone(&manager),
+                Arc::clone(&blobs),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open guest links: {error}"))?,
+        );
+        // The 24-hour auto-settle and a merged branch are derived placements,
+        // so the manager tells the guest service when a thread becomes Settled.
+        manager.set_settle_hook(Arc::clone(&guest) as Arc<dyn crate::threads::SettleHook>);
 
         // Titles can come from an installed coding agent or a configured text
         // generator; the service decides per thread from its saved settings.
@@ -597,6 +614,7 @@ impl DaemonBuilder {
             meter,
             network_access_enabled,
             text_generation,
+            guest,
             schedules,
         })
     }
@@ -632,6 +650,7 @@ pub struct Daemon {
     acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     projects: Arc<crate::projects::ProjectService>,
     text_generation: Arc<crate::text_generation::TextGenerationService>,
+    guest: Arc<crate::guest::GuestService>,
     schedules: Arc<ScheduleService>,
     /// The network-listener setting resolved at build time.
     network_access_enabled: bool,
@@ -707,7 +726,7 @@ impl Daemon {
             .await
             .map_err(|error| anyhow::anyhow!("bind {}: {error}", self.config.bind))?;
         addrs.push(primary.local_addr()?);
-        listeners.push((primary, server::ListenerKind::Loopback));
+        listeners.push((primary, server::ListenerKind::Primary));
 
         if let Some(extra) = self.config.extra_bind
             && extra != self.config.bind
@@ -798,6 +817,7 @@ impl Daemon {
             acp_agents: Arc::clone(&self.acp_agents),
             projects: Arc::clone(&self.projects),
             text_generation: Arc::clone(&self.text_generation),
+            guest: Arc::clone(&self.guest),
             schedules: Arc::clone(&self.schedules),
         };
 
@@ -812,7 +832,33 @@ impl Daemon {
             )
             .await;
 
+        // A guest link without the relay names this machine directly. The
+        // daemon has no TLS listener, so a direct link is loopback only: the
+        // bearer token must never cross a LAN in plaintext. The share dialog
+        // says the link works only on this machine, and Connect is the way to
+        // share with a teammate elsewhere. The name uses the port the primary
+        // listener actually bound: a wildcard bind still answers loopback on
+        // that same port, so the link reaches it.
+        let primary_port = addrs[0].port();
+        self.guest
+            .set_local_base(format!("http://127.0.0.1:{primary_port}/guest"));
+
         let mut remote_tasks = Vec::new();
+        // Guest links expire after 24 hours. Sweeping keeps their waiting
+        // files from outliving them even when nobody opens the page again.
+        remote_tasks.push(tokio::spawn({
+            let guest = Arc::clone(&self.guest);
+            async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(600));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    if let Err(error) = guest.sweep_expired().await {
+                        tracing::warn!(%error, "could not sweep expired guest links");
+                    }
+                }
+            }
+        }));
         // A failed peer admission retries on its own backoff timer instead of
         // waiting for the next topology report, which may never come while the
         // peer set is stable.
@@ -871,6 +917,7 @@ impl Daemon {
             pr_links: self.pr_links,
             schedules: self.schedules,
             mcp: self.mcp,
+            guest: self.guest,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
             remote_tasks,
@@ -893,6 +940,7 @@ pub struct BoundDaemon {
     pr_links: Arc<crate::pr_links::PrLinkService>,
     schedules: Arc<ScheduleService>,
     mcp: Arc<McpService>,
+    guest: Arc<crate::guest::GuestService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
     remote_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -902,6 +950,15 @@ impl BoundDaemon {
     /// Primary bound address (resolves port `0` for tests).
     pub fn local_addr(&self) -> SocketAddr {
         self.addrs[0]
+    }
+
+    /// The shared state the routers and the relay loop use.
+    ///
+    /// Exposed to a unit test that has to drive the real relay loop rather than
+    /// a reimplementation of it.
+    #[doc(hidden)]
+    pub fn app_state(&self) -> &AppState {
+        &self.state
     }
 
     /// Every bound address, primary first.
@@ -934,6 +991,16 @@ impl BoundDaemon {
         Arc::clone(&self.mcp)
     }
 
+    /// Guest links service for in-process tests and diagnostics.
+    pub fn guest(&self) -> Arc<crate::guest::GuestService> {
+        Arc::clone(&self.guest)
+    }
+
+    /// Data directory, for tests that inspect the durable journal.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     /// Serves until `shutdown` resolves, then interrupts turns and kills
     /// registered harness process groups (ADR-021).
     pub async fn serve(
@@ -953,6 +1020,7 @@ impl BoundDaemon {
             pr_links,
             schedules,
             mcp,
+            guest: _guest,
             supervisor,
             data_dir,
             remote_tasks,
@@ -964,10 +1032,14 @@ impl BoundDaemon {
             "h4rn daemon listening"
         );
 
-        let routes: Vec<(TcpListener, axum::Router)> = listeners
-            .into_iter()
-            .map(|(listener, kind)| (listener, kind.router(state.clone())))
-            .collect();
+        let routes: Vec<(TcpListener, axum::Router)> = {
+            let mut routes = Vec::new();
+            for (listener, kind) in listeners {
+                let bound = listener.local_addr()?;
+                routes.push((listener, kind.router(state.clone(), bound)));
+            }
+            routes
+        };
         server::serve_all(routes, shutdown).await?;
         // Close the LAN/tailnet listener before the services it routes to go
         // away, so no new remote session starts during shutdown.
