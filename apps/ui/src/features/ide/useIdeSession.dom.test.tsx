@@ -866,6 +866,207 @@ describe("a stale branch reply leaves its newer load alone", () => {
   });
 });
 
+describe("a tab switch keeps an empty commit range empty", () => {
+  it("re-lists the range instead of asking for a commit it no longer has", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+
+    // The range emptied out since the list was read, so the refresh clears the
+    // commit that was selected from the older list.
+    state.commits = { ...state.commits, commits: [] };
+    await act(async () => {
+      await latest?.refreshDiffLists();
+    });
+    expect(latest?.state.diffCommit).toBeNull();
+    expect(latest?.state.diffError).toBeNull();
+
+    // Switching tabs on the empty range must re-read the list: opening a
+    // commit scope with no commit would answer with an error about a missing
+    // sha instead of the range's own empty state.
+    const diffs = state.requests.filter((request) => request.type === "fs_diff").length;
+    await act(async () => {
+      await latest?.followDiffTab("b.ts");
+    });
+    await flush();
+    expect(latest?.state.diffError).toBeNull();
+    expect(state.requests.filter((request) => request.type === "fs_diff")).toHaveLength(diffs);
+    expect(latest?.state.diffCommit).toBeNull();
+    expect(latest?.state.diffPath).toBeNull();
+  });
+});
+
+describe("a follow re-reads a branch list that never arrived", () => {
+  it("asks for the failed list once when the tab switches", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+
+    // The picker's list fails and the first file list is still out, so the
+    // follow has to take over the load.
+    const releaseFiles = holdNext("fs_diff_files");
+    failNext("fs_branches");
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.branchesError !== null);
+    expect(latest?.state.diffBranches).toBeNull();
+    expect(latest?.state.branchesLoading).toBe(false);
+    expect(latest?.state.filesLoading).toBe(true);
+
+    // The picker has no list to offer; the follow reads it again, exactly once,
+    // so the base picker recovers without a manual refresh.
+    state.requests = [];
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    await releaseHold(releaseFiles);
+    expect(state.requests.filter((request) => request.type === "fs_branches")).toHaveLength(1);
+    expect(latest?.state.diffBranches?.branches).toEqual(["main", "feature"]);
+    expect(latest?.state.branchesError).toBeNull();
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "main" });
+  });
+});
+
+describe("a tab switch during a held commit file list", () => {
+  it("opens the new tab's files and drops the older list", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-1" });
+
+    // The picker moves to commit-2, and its file list is held back.
+    state.commits = {
+      ...state.commits,
+      commits: [
+        {
+          sha: "commit-2",
+          short_sha: "c2",
+          subject: "second",
+          author: "you",
+          authored_at: "2026-03-04T12:03:00Z",
+        },
+        ...state.commits.commits,
+      ],
+    };
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffCommit("commit-2");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // The person moves to another tab before it lands.
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-2" });
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "commit", sha: "commit-2" });
+
+    // The held list for a.ts belongs to the request the follow replaced; it
+    // must not paint its own file list or open a.ts over the tab on screen.
+    await releaseHold(releaseFiles);
+    await flush();
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "commit", sha: "commit-2" });
+    expect(latest?.state.diff?.path).toBe("b.ts");
+    expect(latest?.state.diffPath).toBe("b.ts");
+    expect(latest?.state.filesLoading).toBe(false);
+  });
+});
+
+describe("a resumed review yields to a newer tab switch", () => {
+  it("opens the tab switched back to, and drops the held replies", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+
+    // Branch is started for a.ts and its file list is held.
+    const releaseFirst = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // The person leaves for another workspace mid-load.
+    const home = workspace.path;
+    await switchWorkspace(`${home}-other`);
+
+    // Coming back resumes the review for a.ts, and that read is held too.
+    const releaseResumed = holdNext("fs_diff_files");
+    await switchWorkspace(home);
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // A tab switch to b.ts reads its list while the resumed one is still out.
+    const listReads = () =>
+      state.requests.filter((request) => request.type === "fs_diff_files").length;
+    const before = listReads();
+    const releaseB = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => listReads() === before + 1);
+
+    // Back to a.ts: the resume's note names a.ts, but it belongs to the older
+    // request, so it must not swallow this switch. Without the generation
+    // check the follow would return here and no reply would ever open a.ts.
+    await act(async () => {
+      void latest?.followDiffTab("a.ts");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "main" });
+
+    // The three held replies belong to requests the switch replaced. The b.ts
+    // one would open b.ts if it were applied; a.ts must stay on screen.
+    const diffs = state.requests.filter((request) => request.type === "fs_diff").length;
+    await releaseHold(releaseB);
+    await releaseHold(releaseResumed);
+    await releaseHold(releaseFirst);
+    expect(latest?.state.diff?.path).toBe("a.ts");
+    expect(latest?.state.diffPath).toBe("a.ts");
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "base", base: null });
+    expect(latest?.state.filesLoading).toBe(false);
+    expect(state.requests.filter((request) => request.type === "fs_diff")).toHaveLength(diffs);
+  });
+});
+
+describe("a direct open replaces the finished list's file", () => {
+  it("resumes the file being opened, not the one the list was read for", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+
+    // Branch is read for a.ts and its diff lands.
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts");
+
+    // The list is on screen, so a tab switch opens b.ts directly; that read is
+    // held back.
+    const releaseDiff = holdNext("fs_diff");
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => latest?.state.diffLoading === true);
+    expect(latest?.state.diffPath).toBe("b.ts");
+
+    // The person leaves mid-read and comes back. The open was for b.ts, so the
+    // resume must open b.ts; the finished list's file (a.ts) is history.
+    const home = workspace.path;
+    await switchWorkspace(`${home}-other`);
+    await releaseHold(releaseDiff);
+    await switchWorkspace(home);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    await flush();
+    expect(latest?.state.diffPath).toBe("b.ts");
+    expect(latest?.state.diff?.path).toBe("b.ts");
+  });
+});
+
 describe("a workspace change advances the branch generation", () => {
   it("ignores the previous workspace's branch list and file list", async () => {
     await mount();

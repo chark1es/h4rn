@@ -2826,6 +2826,18 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         self.0.read_wire_since_global(after).await
     }
 
+    async fn read_wire_page(
+        &self,
+        thread_id: &ThreadId,
+        after: u64,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> Result<h4rn_daemon::journal::WirePage, h4rn_daemon::journal::JournalError> {
+        self.0
+            .read_wire_page(thread_id, after, max_events, max_bytes)
+            .await
+    }
+
     async fn head(&self) -> Result<u64, h4rn_daemon::journal::JournalError> {
         self.0.head().await
     }

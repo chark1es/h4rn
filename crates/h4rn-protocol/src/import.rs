@@ -184,6 +184,17 @@ pub fn path_source_key(source: ImportSource, path: &str, size: u64, fingerprint:
     format!("{}:path:{path}:{size}:{fingerprint}", source.as_str())
 }
 
+/// Whether a stored source key names its transcript by path.
+///
+/// A path key carries the file's size and content fingerprint, so it pins one
+/// version of the file: a transcript that keeps growing is a new conversation.
+/// A session-id key names the conversation itself, so it still recognises a
+/// transcript whose head read did not reveal the id.
+pub fn path_keyed_source_key(key: &str) -> bool {
+    key.split_once(':')
+        .is_some_and(|(_, rest)| rest.starts_with("path:"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +209,27 @@ mod tests {
             source_key(ImportSource::Codex, None, "/tmp/a.jsonl"),
             "codex:path:/tmp/a.jsonl"
         );
+    }
+
+    #[test]
+    fn a_path_key_is_told_apart_from_a_session_key() {
+        assert!(path_keyed_source_key(&source_key(
+            ImportSource::Codex,
+            None,
+            "/tmp/a.jsonl"
+        )));
+        assert!(path_keyed_source_key(&path_source_key(
+            ImportSource::Codex,
+            "/tmp/a.jsonl",
+            12,
+            "fingerprint"
+        )));
+        assert!(!path_keyed_source_key(&source_key(
+            ImportSource::ClaudeCode,
+            Some("abc"),
+            "/tmp/a.jsonl"
+        )));
+        assert!(!path_keyed_source_key("codex:path-with-a-colon"));
     }
 
     #[test]
