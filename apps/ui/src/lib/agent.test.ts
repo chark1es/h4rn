@@ -57,9 +57,7 @@ describe("isTurnRunning", () => {
     // rate_limited, but the turn is still the one a steer belongs to.
     expect(isTurnRunning(summary({ agent_state: "rate_limited" }))).toBe(false);
     expect(
-      isTurnRunning(
-        summary({ agent_state: "rate_limited", active_turn_id: "turn_running" }),
-      ),
+      isTurnRunning(summary({ agent_state: "rate_limited", active_turn_id: "turn_running" })),
     ).toBe(true);
   });
 });
