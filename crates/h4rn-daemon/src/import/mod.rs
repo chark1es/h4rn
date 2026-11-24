@@ -1729,6 +1729,16 @@ mod tests {
             std::fs::write(project.join(format!("{session}.jsonl")), body).expect("transcript");
         }
         let old = project.join("session-000.jsonl");
+        // Make it the oldest transcript, so the quota fills before the scan
+        // reaches it and it is only recognised by its stored claim.
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .expect("old transcript")
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+            )
+            .expect("old mtime");
         let imported = imported_claim(&old, "claude_code:session-000");
 
         let outcome = scan_blocking(
@@ -1737,6 +1747,11 @@ mod tests {
             &home_path.join(".codex"),
             &imported,
             &HashSet::new(),
+        );
+        assert_eq!(
+            outcome.peeks,
+            u64::from(MAX_CONVERSATIONS_PER_PROJECT) + 1,
+            "the quota filled before the oldest transcript was reached"
         );
         assert_eq!(
             outcome.scan.projects[0].conversations, 101,
