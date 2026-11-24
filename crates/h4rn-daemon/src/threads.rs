@@ -390,6 +390,8 @@ pub struct ThreadSnapshot {
     pub events: Vec<WireEvent>,
     /// Next sequence the client should ask for.
     pub next_seq: u64,
+    /// Whether more events follow this page.
+    pub more: bool,
 }
 
 /// Manager failures, mapped to protocol errors at the server boundary.
@@ -5735,6 +5737,43 @@ impl ThreadManager {
             summary,
             events,
             next_seq,
+            more: false,
+        })
+    }
+
+    /// One bounded page of a thread's events after `since_seq`.
+    ///
+    /// Used when a paired transport cannot carry the whole replay in one
+    /// frame: the page boundary is decided by the journal query, so each ask
+    /// reads one page rather than the rest of the thread.
+    pub async fn get_thread_page(
+        &self,
+        thread_id: &ThreadId,
+        since_seq: u64,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> Result<ThreadSnapshot, ManagerError> {
+        let handle = self.inner.handle(thread_id).await?;
+        let summary = {
+            let record = handle.lock().await;
+            record.summary(&self.inner.options.settings, self.now())
+        };
+        let page = self
+            .inner
+            .journal
+            .read_wire_page(thread_id, since_seq, max_events, max_bytes)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        let next_seq = page
+            .events
+            .last()
+            .map(|event| event.seq)
+            .unwrap_or(since_seq);
+        Ok(ThreadSnapshot {
+            summary,
+            events: page.events,
+            next_seq,
+            more: page.more,
         })
     }
 
@@ -11911,6 +11950,18 @@ mod tests {
             after: u64,
         ) -> Result<Vec<WireEvent>, crate::journal::JournalError> {
             self.inner.read_wire_since(thread_id, after).await
+        }
+
+        async fn read_wire_page(
+            &self,
+            thread_id: &ThreadId,
+            after: u64,
+            max_events: usize,
+            max_bytes: usize,
+        ) -> Result<crate::journal::WirePage, crate::journal::JournalError> {
+            self.inner
+                .read_wire_page(thread_id, after, max_events, max_bytes)
+                .await
         }
 
         async fn read_wire_since_global(

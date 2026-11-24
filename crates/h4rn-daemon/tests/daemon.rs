@@ -852,6 +852,77 @@ async fn reconnecting_with_since_seq_replays_without_gaps() {
 }
 
 #[tokio::test]
+async fn a_large_plain_replay_arrives_in_one_response() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_host(&mut client, host, "first", HarnessKind::ClaudeCode).await;
+    let thread_id = summary.thread_id.clone();
+    client.wait_for_turn_completed().await;
+    client.wait_for_tab(ThreadTab::Done).await;
+
+    let large = "L".repeat(400 * 1024);
+    client
+        .request(ClientRequest::SendMessage {
+            thread_id: thread_id.clone(),
+            text: large.clone(),
+            attachments: Vec::new(),
+            steer: false,
+            turn_id: None,
+        })
+        .await
+        .expect("send");
+    client.wait_for_turn_completed().await;
+    client.wait_for_tab(ThreadTab::Done).await;
+    drop(client);
+
+    let mut resumed = Client::connect(&daemon).await;
+    resumed.hello().await;
+    let response = resumed
+        .request(ClientRequest::GetThread {
+            thread_id: thread_id.clone(),
+            since_seq: 0,
+        })
+        .await
+        .expect("get thread");
+    let ResponseBody::Thread {
+        events,
+        next_seq,
+        more,
+        ..
+    } = response
+    else {
+        panic!("unexpected get response: {response:?}");
+    };
+    assert!(!more, "a plain loopback replay is never paged");
+    assert_eq!(
+        next_seq,
+        events.last().map(|event| event.seq).unwrap_or(0),
+        "the cursor covers the last event"
+    );
+    let seqs: Vec<u64> = events.iter().map(|event| event.seq).collect();
+    assert_eq!(
+        seqs,
+        (1..=next_seq).collect::<Vec<_>>(),
+        "one response carries every event of the only thread"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            Event::ItemCompleted {
+                item: Item::Message { text, .. },
+                ..
+            } if *text == large
+        )),
+        "the 400 KiB event arrives whole"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn subscribe_answers_with_the_journal_head_it_served() {
     let daemon = boot().await;
     let host = host_id_for(&daemon).await;
