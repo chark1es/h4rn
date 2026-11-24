@@ -5,7 +5,7 @@ in. Agents h4rn did **not** start — Claude Code or Codex in your own terminal,
 clients — can connect to the daemon over OAuth, once you approve a level, and work with your
 projects and threads.
 
-The token model behind both is [ADR-045](decisions.md).
+The token model behind both is [ADR-046](decisions.md).
 
 ## Outside agents are in Labs, off by default
 

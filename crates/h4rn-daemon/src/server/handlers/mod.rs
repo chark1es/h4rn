@@ -16,6 +16,7 @@ pub(super) mod forge;
 pub(super) mod git_actions;
 pub(super) mod guest;
 pub(super) mod harness_versions;
+pub(super) mod import;
 pub(super) mod mcp;
 pub(super) mod network_access;
 pub(super) mod projects;
@@ -92,6 +93,7 @@ declare_services! {
     TextGeneration => text_generation,
     Guest => guest,
     Schedules => schedules,
+    Import => import,
 }
 
 /// Spawns every registered service's forwarder for one connection.

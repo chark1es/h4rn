@@ -1,4 +1,4 @@
-//! End-to-end coverage for h4rn as an MCP server (ADR-045).
+//! End-to-end coverage for h4rn as an MCP server (ADR-046).
 //!
 //! The daemon is real: a FakeHarness session receives the per-thread token,
 //! OAuth runs over the daemon's HTTP listener, and every tool reads the same

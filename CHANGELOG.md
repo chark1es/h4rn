@@ -33,7 +33,7 @@ All notable changes to h4rn are recorded here. The format follows
   A turn already delivered may still finish after its grant is revoked or the switch is turned off,
   and a Full-access grant has no ceiling; the other limits are listed in
   [docs/outside-agents.md](docs/outside-agents.md#known-limitations). See
-  [docs/outside-agents.md](docs/outside-agents.md) and [ADR-045](docs/decisions.md).
+  [docs/outside-agents.md](docs/outside-agents.md) and [ADR-046](docs/decisions.md).
 - **Share one thread with a teammate through an expiring guest link.** A link is
   bound to one thread and one browser, lasts 24 hours, and works through the
   Connect relay when the machine is linked; without Connect it works only in a
@@ -80,6 +80,66 @@ All notable changes to h4rn are recorded here. The format follows
   linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
   `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and
   `LinkIssue`/`UnlinkIssue`/`ListThreadIssues`. See [docs/forges.md](docs/forges.md).
+- **Claude Code and Codex conversations can be imported and continued.** Add
+  project → Import finds the conversations those harnesses already saved on this
+  machine, grouped by git checkout with GitHub remotes named `owner/name` and
+  other folders under "Other folders". Git repositories with three or more
+  conversations active in the last 30 days are checked by default; Review all
+  shows everything with Select all and Select none. Importing registers new
+  projects and creates one thread per conversation with its title, harness,
+  model, working folder and kept messages (the first request plus the newest
+  user and assistant messages, 200 in total, each with its timestamp; tool
+  activity, attachments and setup context are left out — for Codex a turn's
+  canonical user event wins, so the generated environment block and the
+  project's private AGENTS.md instructions never reach the import, while a turn
+  with no canonical event keeps its context). A canonical prompt is stored
+  exactly as written — its indentation and trailing newline included — and only
+  the comparison key is trimmed. A rewound Codex rollout streams the byte prefix
+  it inherits from the rollout it replaced, so its original request and reply
+  stay in the imported conversation. The transcript is kept as it was
+  written — a long first prompt is stored whole and the handoff applies its own
+  ceiling later — and a record is streamed past attachments and tool output
+  instead of being dropped for its size; discovery uses the same streaming
+  reader, so a short prompt beside a 5 MiB attachment is still offered. A single
+  record over 48 MiB — text, a
+  tool result or an attachment — skips the conversation with a warning, and
+  retention stops as soon as a limit is crossed, so one oversized conversation
+  cannot grow memory toward its file size. Each source session id is
+  recorded, so running the import again only adds what is new; a transcript
+  without one is identified by its path, size and content. The claim and the
+  new thread are written in one transaction, so overlapping runs and a crash
+  cannot import a conversation twice, and the claim uses the identity the full
+  parse found, so two copies whose session id sits past the scan's head still
+  import once. Progress is visible and counts the
+  conversations finished, with the limits a scan hit, and the import keeps
+  running if you leave the view; reopening it shows the current counts.
+  Discovery is read-only, skips
+  `~/Downloads` (including through a symlink), offers at most 100
+  not-yet-imported conversations and 4 GiB per project per attempt (once a
+  project's quota is full its other Claude Code transcripts are not read at all,
+  while one already imported is still recognised; Codex rollouts are still
+  peeked to learn their project), and skips
+  transcripts over 4 GiB, conversations over 32 MiB of kept text or 100,000
+  records; the list shows what a scan could not read. Imported threads land in
+  Done with their own message times and stay there after a restart — including
+  their finished agent and their place in the sidebar, which sorts by the newest
+  imported message rather than the moment h4rn wrote the thread; their replies
+  render as finished history — never as a live or paused stream — and the thread
+  says **Imported from** with the conversation's own time instead of a duration
+  and token count it never had. An imported thread starts a session when you send
+  its first message: it prefers the harness's own resume — spent once that session
+  starts — and falls back to a bounded handoff of the saved history (16,000 bytes
+  by default, `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000) before your exact,
+  unshortened request, including when the harness exits after starting a resume it
+  cannot honour, and a Stop during that retry ends the turn interrupted. The
+  request is sent once: the fallback never includes the current turn's own prompt
+  in the history block, so a large request cannot push the recent messages out of
+  the handoff. The handoff reads the history from the thread's journaled messages,
+  so no second copy of the transcript is stored. A long prompt still crosses a
+  paired connection: a replay arrives in bounded pages, and an oversized frame
+  is split into chunks the client joins, so no message is shortened to fit.
+  Message text is never logged and
+  token shapes are redacted before storage. See [docs/import.md](docs/import.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a

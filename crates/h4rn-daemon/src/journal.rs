@@ -112,6 +112,63 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// The saved conversation this thread was imported from, when it was.
+    ///
+    /// An imported thread starts with no live session. The kept messages, with
+    /// their timestamps, are what its first new turn hands to a fresh session
+    /// (or a native resume, when the harness can take one).
+    pub imported: Option<ImportedOrigin>,
+}
+
+/// The saved conversation a thread was imported from.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportedOrigin {
+    /// Which harness saved it.
+    pub source: h4rn_protocol::ImportSource,
+    /// Transcript file it came from (read-only).
+    pub source_path: String,
+    /// Harness-native session id, when the transcript records one.
+    pub session_id: Option<String>,
+    /// The checkout the conversation belongs to, when it differed from the
+    /// working directory it ran in (a linked worktree or a subdirectory).
+    ///
+    /// The working directory stays what a native resume needs; this is only
+    /// the sidebar's grouping, saved so it survives a restart.
+    #[serde(default)]
+    pub project_path: Option<String>,
+    /// Whether the thread's one native resume has not been spent yet.
+    ///
+    /// Cleared when the first session starts: after that the thread has a live
+    /// conversation of its own, and its handoff must not replay the imported
+    /// messages over the turns made in h4rn.
+    pub native_resume: bool,
+}
+
+/// One message of a thread's visible history.
+///
+/// Read back from the journaled items when a handoff needs it, so the imported
+/// origin does not hold a second copy of the transcript.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportedMessage {
+    /// Who authored it.
+    pub role: h4rn_protocol::MessageRole,
+    /// Text, already redacted before it reached the journal.
+    pub text: String,
+    /// When it was written in the source conversation.
+    pub at: DateTime<Utc>,
+}
+
+/// One source conversation already imported, keyed by its identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedSourceRecord {
+    /// Source key: harness plus session id, or the transcript path.
+    pub key: String,
+    /// Thread the conversation became.
+    pub thread_id: ThreadId,
+    /// Transcript path.
+    pub path: String,
+    /// When it was imported.
+    pub imported_at: DateTime<Utc>,
 }
 
 /// A prompt a paused thread still has to deliver, persisted with the thread.
@@ -317,6 +374,28 @@ pub trait Journal: Send + Sync {
         task_id: &ScheduleTaskId,
         limit: usize,
     ) -> Result<Vec<ScheduleRun>, JournalError>;
+
+    /// Every source conversation already imported, oldest first.
+    async fn list_imported_sources(&self) -> Result<Vec<ImportedSourceRecord>, JournalError>;
+
+    /// Remembers that a source conversation became `thread_id`.
+    async fn record_imported_source(
+        &self,
+        record: &ImportedSourceRecord,
+    ) -> Result<(), JournalError>;
+
+    /// Claims a source conversation and writes its thread in one transaction.
+    ///
+    /// Returns the new thread's wire sequence numbers, or `None` when another
+    /// run had already claimed the source. A crash between the claim and the
+    /// thread write rolls both back, so a retry imports the conversation once.
+    async fn commit_thread_import(
+        &self,
+        claim: &ImportedSourceRecord,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+    ) -> Result<Option<Vec<u64>>, JournalError>;
 }
 
 /// SQLite-backed journal.
@@ -341,6 +420,12 @@ impl SqliteJournal {
     /// Opens an in-memory journal for tests.
     pub async fn in_memory() -> Result<Self, JournalError> {
         let store = SqliteEventStore::in_memory().await?;
+        Self::from_store(store).await
+    }
+
+    /// Opens (or creates) a journal file.
+    pub async fn open(path: impl AsRef<std::path::Path>) -> Result<Self, JournalError> {
+        let store = SqliteEventStore::connect(path).await?;
         Self::from_store(store).await
     }
 
@@ -372,7 +457,8 @@ impl SqliteJournal {
                 subagent_id    TEXT,
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
-                parked_json    TEXT
+                parked_json    TEXT,
+                imported_json  TEXT
             )",
         )
         .execute(&self.pool)
@@ -397,6 +483,8 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "agent_fingerprint", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "imported_json", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "reasoning_effort", "TEXT")
             .await?;
@@ -540,6 +628,19 @@ impl SqliteJournal {
         .execute(&self.pool)
         .await?;
 
+        // One row per source conversation that became a thread, so a second
+        // import run never duplicates it.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_imported_sources (
+                source_key  TEXT PRIMARY KEY,
+                thread_id   TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                imported_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -579,10 +680,11 @@ async fn upsert_thread_on(
     let runtime_mode = runtime_mode.trim_matches('"').to_owned();
     let worktree_json = serde_json::to_string(&meta.worktree)?;
     let parked_json = serde_json::to_string(&meta.parked)?;
+    let imported_json = serde_json::to_string(&meta.imported)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -600,7 +702,8 @@ async fn upsert_thread_on(
             subagent_id = excluded.subagent_id,
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
-            parked_json = excluded.parked_json",
+            parked_json = excluded.parked_json,
+            imported_json = excluded.imported_json",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -621,6 +724,7 @@ async fn upsert_thread_on(
     .bind(meta.agent_id.as_deref())
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
+    .bind(imported_json)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -662,7 +766,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -712,6 +816,9 @@ impl Journal for SqliteJournal {
                 agent_fingerprint: row.try_get("agent_fingerprint")?,
                 parked: row
                     .try_get::<Option<String>, _>("parked_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                imported: row
+                    .try_get::<Option<String>, _>("imported_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
             });
         }
@@ -1061,6 +1168,89 @@ impl Journal for SqliteJournal {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(schedule_run_from_row).collect()
+    }
+
+    async fn list_imported_sources(&self) -> Result<Vec<ImportedSourceRecord>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT source_key, thread_id, path, imported_at
+             FROM daemon_imported_sources ORDER BY imported_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            let imported_at: String = row.try_get("imported_at")?;
+            records.push(ImportedSourceRecord {
+                key: row.try_get("source_key")?,
+                thread_id: ThreadId::new(row.try_get::<String, _>("thread_id")?),
+                path: row.try_get("path")?,
+                imported_at: DateTime::parse_from_rfc3339(&imported_at)
+                    .map(|value| value.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            });
+        }
+        Ok(records)
+    }
+
+    async fn record_imported_source(
+        &self,
+        record: &ImportedSourceRecord,
+    ) -> Result<(), JournalError> {
+        sqlx::query(
+            "INSERT INTO daemon_imported_sources (source_key, thread_id, path, imported_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(source_key) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                path = excluded.path,
+                imported_at = excluded.imported_at",
+        )
+        .bind(&record.key)
+        .bind(record.thread_id.as_str())
+        .bind(&record.path)
+        .bind(record.imported_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn commit_thread_import(
+        &self,
+        claim: &ImportedSourceRecord,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+    ) -> Result<Option<Vec<u64>>, JournalError> {
+        // One transaction: the claim, the thread row, the domain log and the
+        // wire log commit together or not at all. A concurrent run loses the
+        // claim insert and writes nothing; a crash rolls everything back, so
+        // the retry is still the conversation's first import.
+        let mut tx = self.pool.begin().await?;
+        let claimed = sqlx::query(
+            "INSERT INTO daemon_imported_sources (source_key, thread_id, path, imported_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(source_key) DO NOTHING",
+        )
+        .bind(&claim.key)
+        .bind(claim.thread_id.as_str())
+        .bind(&claim.path)
+        .bind(claim.imported_at.to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        upsert_thread_on(&mut tx, meta).await?;
+        if !domain.is_empty() {
+            SqliteEventStore::append_in(&mut tx, &meta.thread_id, domain).await?;
+        }
+        let seqs = if wire.is_empty() {
+            Vec::new()
+        } else {
+            append_wire_on(&mut tx, &meta.thread_id, wire).await?
+        };
+        tx.commit().await?;
+        Ok(Some(seqs))
     }
 }
 
@@ -1460,6 +1650,7 @@ mod tests {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            imported: None,
         }
     }
 
@@ -1472,6 +1663,7 @@ mod tests {
             agent_id: None,
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
+            project_path: None,
             branch: Some("h4rn/first-prompt".into()),
             model: "test-model".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,
@@ -1746,6 +1938,66 @@ mod tests {
             journal.list_threads().await.unwrap().is_empty(),
             "a failed append must not leave the thread row behind"
         );
+    }
+
+    #[tokio::test]
+    async fn a_claimed_source_commits_its_thread_once() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let imported_meta = meta("th_imported");
+        let claim = ImportedSourceRecord {
+            key: "claude_code:session-1".into(),
+            thread_id: imported_meta.thread_id.clone(),
+            path: "/tmp/session-1.jsonl".into(),
+            imported_at: Utc::now(),
+        };
+        let wire = vec![Event::ThreadUpserted(summary())];
+
+        let first = journal
+            .commit_thread_import(&claim, &imported_meta, &[], &wire)
+            .await
+            .unwrap();
+        assert!(first.is_some(), "the first claim writes the thread");
+        assert_eq!(journal.list_threads().await.unwrap().len(), 1);
+
+        // A second run with the same source writes nothing, as an overlapping
+        // run or a retry after a completed import would.
+        let second_meta = meta("th_other");
+        let mut second_claim = claim.clone();
+        second_claim.thread_id = second_meta.thread_id.clone();
+        let second = journal
+            .commit_thread_import(&second_claim, &second_meta, &[], &wire)
+            .await
+            .unwrap();
+        assert!(second.is_none(), "an existing claim is not imported again");
+        let metas = journal.list_threads().await.unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].thread_id.as_str(), "th_imported");
+    }
+
+    #[tokio::test]
+    async fn a_failed_import_write_leaves_no_claim_behind() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let imported_meta = meta("th_imported");
+        let claim = ImportedSourceRecord {
+            key: "claude_code:session-2".into(),
+            thread_id: imported_meta.thread_id.clone(),
+            path: "/tmp/session-2.jsonl".into(),
+            imported_at: Utc::now(),
+        };
+        // A wire event that cannot be written rolls the claim back with it.
+        let wire = vec![Event::ThreadUpserted(summary())];
+        sqlx::query("CREATE TRIGGER fail_wire BEFORE INSERT ON daemon_wire_events BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&journal.pool)
+            .await
+            .unwrap();
+        assert!(
+            journal
+                .commit_thread_import(&claim, &imported_meta, &[], &wire)
+                .await
+                .is_err()
+        );
+        assert!(journal.list_imported_sources().await.unwrap().is_empty());
+        assert!(journal.list_threads().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@
 //!   holds the grants, [`outside`] the tools and their scope checks, and
 //!   [`http`] the routes and the approval page.
 //!
-//! The token model is recorded in `docs/decisions.md` (ADR-045).
+//! The token model is recorded in `docs/decisions.md` (ADR-046).
 
 pub mod agent_tools;
 pub mod http;

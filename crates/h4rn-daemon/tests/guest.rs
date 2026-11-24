@@ -2592,6 +2592,30 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
     {
         self.0.issue_links_for_thread(thread_id).await
     }
+
+    async fn list_imported_sources(
+        &self,
+    ) -> Result<Vec<h4rn_daemon::journal::ImportedSourceRecord>, h4rn_daemon::journal::JournalError>
+    {
+        self.0.list_imported_sources().await
+    }
+
+    async fn record_imported_source(
+        &self,
+        record: &h4rn_daemon::journal::ImportedSourceRecord,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.record_imported_source(record).await
+    }
+
+    async fn commit_thread_import(
+        &self,
+        claim: &h4rn_daemon::journal::ImportedSourceRecord,
+        meta: &h4rn_daemon::journal::ThreadMeta,
+        domain: &[h4rn_core::ThreadEvent],
+        wire: &[Event],
+    ) -> Result<Option<Vec<u64>>, h4rn_daemon::journal::JournalError> {
+        self.0.commit_thread_import(claim, meta, domain, wire).await
+    }
 }
 
 #[tokio::test]

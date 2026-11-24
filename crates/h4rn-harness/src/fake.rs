@@ -190,6 +190,13 @@ pub struct FakeHarness {
     starts_seen: Arc<AtomicUsize>,
     /// A test-only message: after the start gate, `start_session` fails.
     start_failure: Option<String>,
+    /// A test-only message: a startup asked to resume fails with it, while a
+    /// fresh startup succeeds. Models a harness that cannot find the session.
+    resume_failure: Option<String>,
+    /// A test-only message: a startup asked to resume starts and then dies
+    /// before it reports a session, the way a real adapter's bad `--resume`
+    /// fails after `start_session` returned `Ok`.
+    resume_death: Option<String>,
     /// How many startups fail before one succeeds; `None` fails every one.
     start_failure_budget: Option<usize>,
     /// Startups attempted so far, so a budget can count down.
@@ -582,6 +589,8 @@ impl Default for FakeHarness {
             start_gate_after: None,
             starts_seen: Arc::new(AtomicUsize::new(0)),
             start_failure: None,
+            resume_failure: None,
+            resume_death: None,
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
@@ -766,6 +775,25 @@ impl FakeHarness {
         self.start_failure = Some(message.into());
         self.start_failure_budget = Some(1);
         self.start_attempts = Some(Arc::new(AtomicUsize::new(0)));
+        self
+    }
+
+    /// Fails a startup that asks to resume, while a fresh startup succeeds.
+    ///
+    /// Models a harness that cannot find the saved session, so the daemon's
+    /// fallback to a handoff is what the test observes.
+    pub fn with_resume_failure(mut self, message: impl Into<String>) -> Self {
+        self.resume_failure = Some(message.into());
+        self
+    }
+
+    /// Starts a resume, then kills it before it reports a session.
+    ///
+    /// Models the real Claude Code adapter, whose `start_session` returns `Ok`
+    /// once the child is spawned: a bad `--resume` exits afterwards, so the
+    /// only report the daemon sees is the transport death.
+    pub fn with_resume_death(mut self, message: impl Into<String>) -> Self {
+        self.resume_death = Some(message.into());
         self
     }
 
@@ -1120,7 +1148,14 @@ impl Harness for FakeHarness {
                 });
             }
         }
-
+        if let Some(message) = &self.resume_failure
+            && spec.resume_id.is_some()
+        {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: message.clone(),
+            });
+        }
         let (sender, receiver): (EventSink, BoxStream<'static, HarnessEvent>) =
             match self.event_queue_capacity {
                 Some(capacity) => {
@@ -1136,9 +1171,28 @@ impl Harness for FakeHarness {
             .resume_id
             .clone()
             .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
-        sender
-            .send(HarnessEvent::SessionStarted { session_id })
-            .await;
+        let dies_on_start = self
+            .resume_death
+            .as_ref()
+            .filter(|_| spec.resume_id.is_some())
+            .cloned();
+        if let Some(message) = &dies_on_start {
+            // The adapter returned `Ok` and the agent then exited before it
+            // reported a session. Its stream carries only that death and then
+            // ends, exactly like a child that failed to resume.
+            sender
+                .send(HarnessEvent::TransportClosed {
+                    message: message.clone(),
+                    retryable: true,
+                    kind: TransportCloseKind::Exit,
+                    reset_at: None,
+                })
+                .await;
+        } else {
+            sender
+                .send(HarnessEvent::SessionStarted { session_id })
+                .await;
+        }
         let health = TransportHealth::new();
         if let Some(injector) = &self.event_injector {
             injector
@@ -1157,8 +1211,8 @@ impl Harness for FakeHarness {
             Some(scripts) => scripts.next_script(),
             None => self.script.clone().unwrap_or_default(),
         };
-        let scripted = session_scripts.is_some() || self.script.is_some();
-        if scripted {
+        let script = session_scripts.is_some() || self.script.is_some();
+        if script && dies_on_start.is_none() {
             for event in &initial {
                 sender.send(event.clone()).await;
             }
@@ -1176,7 +1230,11 @@ impl Harness for FakeHarness {
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
-            sender: Some(sender),
+            sender: if dies_on_start.is_some() {
+                None
+            } else {
+                Some(sender)
+            },
             receiver: Some(receiver),
             script: self.script.clone(),
             session_scripts,

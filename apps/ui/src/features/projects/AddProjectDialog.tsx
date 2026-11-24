@@ -1,4 +1,5 @@
 import {
+  ArrowDownToLineIcon,
   ArrowUpIcon,
   CheckIcon,
   FolderGit2Icon,
@@ -7,7 +8,6 @@ import {
   FolderPlusIcon,
   GitBranchIcon,
   HomeIcon,
-  LoaderCircleIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -23,9 +23,11 @@ import {
 import type { DirectoryListing, ProjectSource } from "@/gen";
 import { closeAddProject, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
+import { ImportPanel, submitImport } from "./ImportPanel";
+import { useImportState } from "./importStore";
 import { addProject, browseDirectories, shortPath } from "./store";
 
-type Mode = "open" | "new" | "clone";
+type Mode = "open" | "new" | "clone" | "import";
 
 const MODES: Array<{ value: Mode; label: string; hint: string; icon: typeof FolderIcon }> = [
   {
@@ -45,6 +47,12 @@ const MODES: Array<{ value: Mode; label: string; hint: string; icon: typeof Fold
     label: "Clone repository",
     hint: "From a git URL",
     icon: GitBranchIcon,
+  },
+  {
+    value: "import",
+    label: "Import",
+    hint: "From Claude Code or Codex",
+    icon: ArrowDownToLineIcon,
   },
 ];
 
@@ -202,6 +210,9 @@ export function AddProjectDialog() {
   const [folderName, setFolderName] = useState("");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  const importSelected = useImportState((state) => state.selected.length);
+  const importStarting = useImportState((state) => state.starting);
+  const importRunning = useImportState((state) => state.progress?.running ?? false);
   const browser = useFolderBrowser(open);
 
   useEffect(() => {
@@ -236,13 +247,20 @@ export function AddProjectDialog() {
   const offline = connection !== "online" || !localHostId;
   const ready =
     !offline &&
-    !busy &&
-    Boolean(listing) &&
-    (mode === "open" ||
-      (mode === "new" && name.trim().length > 0) ||
-      (mode === "clone" && url.trim().length > 0 && cloneName.length > 0));
+    (mode === "import"
+      ? importSelected > 0 && !importStarting && !importRunning
+      : !busy &&
+        Boolean(listing) &&
+        (mode === "open" ||
+          (mode === "new" && name.trim().length > 0) ||
+          (mode === "clone" && url.trim().length > 0 && cloneName.length > 0)));
 
   const submit = async () => {
+    if (mode === "import") {
+      if (!ready) return;
+      await submitImport();
+      return;
+    }
     if (!ready || !listing) return;
     const source: ProjectSource =
       mode === "open"
@@ -272,17 +290,24 @@ export function AddProjectDialog() {
     });
   };
 
-  const submitLabel = busy
-    ? mode === "clone"
-      ? "Cloning…"
-      : mode === "new"
-        ? "Creating…"
-        : "Adding…"
-    : mode === "open"
-      ? `Add ${listing ? (listing.path.split("/").filter(Boolean).pop() ?? "folder") : "folder"}`
-      : mode === "new"
-        ? "Create project"
-        : "Clone";
+  const submitLabel =
+    mode === "import"
+      ? importStarting || importRunning
+        ? "Importing…"
+        : importSelected > 0
+          ? `Import ${importSelected} ${importSelected === 1 ? "project" : "projects"}`
+          : "Import"
+      : busy
+        ? mode === "clone"
+          ? "Cloning…"
+          : mode === "new"
+            ? "Creating…"
+            : "Adding…"
+        : mode === "open"
+          ? `Add ${listing ? (listing.path.split("/").filter(Boolean).pop() ?? "folder") : "folder"}`
+          : mode === "new"
+            ? "Create project"
+            : "Clone";
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeAddProject())}>
@@ -319,99 +344,104 @@ export function AddProjectDialog() {
           ))}
         </div>
 
-        {mode === "clone" ? (
-          <label className="q-addp-field">
-            <span className="lab">Repository</span>
-            <input
-              className="q-input q-mono"
-              value={url}
-              placeholder="https://github.com/owner/repo, git@…, or owner/repo"
-              spellCheck={false}
-              autoComplete="off"
-              onChange={(event) => setUrl(event.target.value)}
-            />
-          </label>
-        ) : null}
+        {mode === "import" ? (
+          <ImportPanel />
+        ) : (
+          <>
+            {mode === "clone" ? (
+              <label className="q-addp-field">
+                <span className="lab">Repository</span>
+                <input
+                  className="q-input q-mono"
+                  value={url}
+                  placeholder="https://github.com/owner/repo, git@…, or owner/repo"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(event) => setUrl(event.target.value)}
+                />
+              </label>
+            ) : null}
 
-        {mode === "new" ? (
-          <label className="q-addp-field">
-            <span className="lab">Name</span>
-            <input
-              className="q-input"
-              value={name}
-              placeholder="my-project"
-              spellCheck={false}
-              autoComplete="off"
-              onChange={(event) => setName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-            />
-          </label>
-        ) : null}
+            {mode === "new" ? (
+              <label className="q-addp-field">
+                <span className="lab">Name</span>
+                <input
+                  className="q-input"
+                  value={name}
+                  placeholder="my-project"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(event) => setName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void submit();
+                    }
+                  }}
+                />
+              </label>
+            ) : null}
 
-        <div className="q-addp-field">
-          <span className="lab">
-            {mode === "open" ? "Folder" : mode === "new" ? "Create in" : "Clone into"}
-          </span>
-          <FolderBrowser
-            listing={listing}
-            loading={browser.loading}
-            error={browser.error}
-            onOpen={(path) => void browser.go(path)}
-          />
-        </div>
+            <div className="q-addp-field">
+              <span className="lab">
+                {mode === "open" ? "Folder" : mode === "new" ? "Create in" : "Clone into"}
+              </span>
+              <FolderBrowser
+                listing={listing}
+                loading={browser.loading}
+                error={browser.error}
+                onOpen={(path) => void browser.go(path)}
+              />
+            </div>
 
-        {mode === "clone" ? (
-          <label className="q-addp-field">
-            <span className="lab">Folder name</span>
-            <input
-              className="q-input q-mono"
-              value={folderName}
-              placeholder={cloneFolderName(url) || "repo"}
-              spellCheck={false}
-              autoComplete="off"
-              onChange={(event) => setFolderName(event.target.value)}
-            />
-          </label>
-        ) : null}
+            {mode === "clone" ? (
+              <label className="q-addp-field">
+                <span className="lab">Folder name</span>
+                <input
+                  className="q-input q-mono"
+                  value={folderName}
+                  placeholder={cloneFolderName(url) || "repo"}
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(event) => setFolderName(event.target.value)}
+                />
+              </label>
+            ) : null}
 
-        {mode === "new" ? (
-          <label className="q-addp-check">
-            <input
-              type="checkbox"
-              className="sr-only"
-              checked={gitInit}
-              onChange={(event) => setGitInit(event.target.checked)}
-            />
-            <span className={cn("q-check", gitInit && "on")} aria-hidden>
-              {gitInit ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
-            </span>
-            Initialize a git repository
-          </label>
-        ) : null}
+            {mode === "new" ? (
+              <label className="q-addp-check">
+                <input
+                  type="checkbox"
+                  className="sr-only"
+                  checked={gitInit}
+                  onChange={(event) => setGitInit(event.target.checked)}
+                />
+                <span className={cn("q-check", gitInit && "on")} aria-hidden>
+                  {gitInit ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+                </span>
+                Initialize a git repository
+              </label>
+            ) : null}
 
-        {summary ? <p className="q-addp-sum q-mono">{summary}</p> : null}
-        {problem ? (
-          <div className="q-banner err" role="alert">
-            {problem}
-          </div>
-        ) : null}
-        {busy && mode === "clone" ? (
-          <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
-            Cloning on {hostName ?? "the host"}. A large repository can take a few minutes.
-          </p>
-        ) : null}
+            {summary ? <p className="q-addp-sum q-mono">{summary}</p> : null}
+            {problem ? (
+              <div className="q-banner err" role="alert">
+                {problem}
+              </div>
+            ) : null}
+            {busy && mode === "clone" ? (
+              <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
+                Cloning on {hostName ?? "the host"}. A large repository can take a few minutes.
+              </p>
+            ) : null}
+          </>
+        )}
 
         <DialogFooter>
           <Button variant="ghost" onClick={closeAddProject}>
             Cancel
           </Button>
           <Button onClick={() => void submit()} disabled={!ready}>
-            {busy ? <LoaderCircleIcon className="q-icon s14 animate-spin" aria-hidden /> : null}
             {submitLabel}
           </Button>
         </DialogFooter>

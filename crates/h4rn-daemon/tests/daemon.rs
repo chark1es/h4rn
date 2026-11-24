@@ -362,7 +362,8 @@ impl Client {
                 | ServerFrame::ProxyEvent { .. }
                 | ServerFrame::UsageEvent { .. }
                 | ServerFrame::HarnessEvent { .. }
-                | ServerFrame::ScheduleEvent { .. } => {}
+                | ServerFrame::ScheduleEvent { .. }
+                | ServerFrame::ImportEvent { .. } => {}
             }
         }
     }
