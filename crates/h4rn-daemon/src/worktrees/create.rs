@@ -1135,6 +1135,7 @@ pub(crate) mod test_hooks {
 
     /// The directory identity a claim for `dest` recorded when it made the
     /// folder, so a test can put a different directory there on purpose.
+    #[cfg(unix)]
     pub(super) fn claim_identity(dest: &std::path::Path) -> Option<super::DirIdentity> {
         CLAIM_IDENTITY
             .lock()
