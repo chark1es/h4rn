@@ -1232,6 +1232,85 @@ async fn two_differently_named_copies_with_a_late_session_id_import_once() {
 }
 
 #[tokio::test]
+async fn an_imported_session_with_a_late_id_is_not_offered_again() {
+    // The scan's head read stops before the record that names the session, so
+    // its provisional identity is the file name. The import claims the
+    // conversation under the full-parse identity. A later scan has to recognise
+    // the transcript anyway, or the session is offered a second time and only
+    // skipped after the person selects it again.
+    let home = tempfile::tempdir().expect("home");
+    let home_path = home.path().to_path_buf();
+    let workspace = home_path.join("code/api");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let (_, manager, import) = services(
+        &home_path,
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let cwd = workspace.display().to_string();
+    let mut records = Vec::new();
+    for index in 0..250 {
+        let kind = if index % 2 == 0 { "user" } else { "assistant" };
+        let mut record = json!({
+            "type": kind,
+            "cwd": cwd,
+            "timestamp": "2026-11-18T09:00:00Z",
+            "message": {
+                "role": kind,
+                "content": [{"type": "text", "text": format!("message {index}")}],
+            },
+        });
+        if kind == "assistant" {
+            record["message"]["model"] = json!("claude-sonnet-5");
+        }
+        if index == 249 {
+            record["sessionId"] = json!("late-session");
+        }
+        records.push(record);
+    }
+    write_jsonl(
+        &home_path
+            .join(".claude/projects/-code-api")
+            .join("late-id.jsonl"),
+        &records,
+    );
+
+    let scan = import.scan().await;
+    assert_eq!(scan.projects.len(), 1, "{:?}", scan.warnings);
+    assert_eq!(
+        scan.projects[0].importable, 1,
+        "the conversation is offered once"
+    );
+    let mut events = import.subscribe();
+    import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    wait_finished(&mut events).await;
+    assert_eq!(
+        manager
+            .list_threads(&ThreadFilter::default())
+            .await
+            .into_iter()
+            .filter(|thread| thread.harness == HarnessKind::ClaudeCode)
+            .count(),
+        1,
+        "the conversation became one thread"
+    );
+
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].importable, 0,
+        "an imported session is not offered again"
+    );
+    assert_eq!(
+        scan.projects[0].conversations, 1,
+        "the transcript still counts for its project"
+    );
+}
+
+#[tokio::test]
 async fn a_transcript_over_four_gigabytes_is_skipped_with_a_warning() {
     let fixture = fixture(
         FakeHarness::new(),

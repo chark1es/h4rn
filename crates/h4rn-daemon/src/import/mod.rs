@@ -996,6 +996,22 @@ impl ImportedSources {
             .get(path.to_string_lossy().as_ref())
             .map(String::as_str)
     }
+
+    /// Whether the claim stored for this path is one this daemon made.
+    fn contains_path(&self, path: &Path) -> bool {
+        self.key_for_path(path)
+            .is_some_and(|key| self.contains(key))
+    }
+
+    /// Whether this transcript was already imported, however it was named.
+    ///
+    /// `head_key` is only what the cheap peek could compute. A transcript whose
+    /// session id appears later in the file was claimed under its full-parse
+    /// key, which is the identity the journal stored against the path, so both
+    /// have to be checked or the session would be offered a second time.
+    fn contains_transcript(&self, path: &Path, head_key: &str) -> bool {
+        self.contains(head_key) || self.contains_path(path)
+    }
 }
 
 fn scan_blocking(
@@ -1051,7 +1067,7 @@ fn scan_blocking(
             // The quota is spent: no head is read. An already-imported source
             // still counts for its project, so older conversations are not
             // hidden behind it on a later attempt.
-            if imported.key_for_path(&candidate.path).is_some()
+            if imported.contains_path(&candidate.path)
                 && let Some(group) = groups.get_mut(key)
             {
                 group.files.push(ConversationFile {
@@ -1111,13 +1127,13 @@ fn scan_blocking(
                 None,
             ),
         };
-        let imported_key = imported_key(
+        let head_key = imported_key(
             candidate.source,
             peek.session_id.as_deref(),
             &candidate.path,
             candidate.size,
         );
-        let already_imported = imported.contains(&imported_key);
+        let already_imported = imported.contains_transcript(&candidate.path, &head_key);
         let group_key = key.clone();
         let group = groups.entry(key).or_insert_with(|| Group {
             key: group_key.clone(),

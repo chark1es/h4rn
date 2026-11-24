@@ -627,6 +627,12 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **An imported conversation is not offered a second time.** When a Claude Code
+  transcript names its session id only in a later record, the import claims it
+  under that full identity while a scan's head read knows only the file. The scan
+  now also checks the identity stored for the transcript, so an already imported
+  session disappears from **Add project → Import** instead of being listed and
+  then skipped again.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,
