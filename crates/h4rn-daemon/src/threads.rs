@@ -2214,6 +2214,11 @@ impl ThreadManager {
         self.inner.events.subscribe()
     }
 
+    /// This daemon's host id.
+    pub fn local_host(&self) -> HostId {
+        self.inner.local_host.clone()
+    }
+
     /// The manager's clock. Every lifecycle decision reads this so a test can
     /// move time without sleeping.
     fn now(&self) -> DateTime<Utc> {
@@ -2611,8 +2616,23 @@ impl ThreadManager {
                 )));
             }
             // An agent configured with a fixed directory runs there whichever
-            // workspace the client sent. The thread row (and Files/Changes)
-            // must name the directory the agent actually uses.
+            // workspace the client sent. A new worktree would be created and
+            // then ignored, so the request is refused before anything is made.
+            let fixes_workspace = harness
+                .as_ref()
+                .is_some_and(|harness| harness.instance_fixes_workspace(agent_id));
+            if fixes_workspace
+                && request
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.is_requested())
+            {
+                return Err(ManagerError::InvalidRequest(format!(
+                    "the ACP agent `{agent_id}` is configured with a fixed directory, so it cannot run in a new worktree; give the agent the thread workspace or start the thread without a worktree"
+                )));
+            }
+            // The thread row (and Files/Changes) must name the directory the
+            // agent actually uses.
             if let Some(effective) = harness.as_ref().and_then(|harness| {
                 harness.instance_workspace(agent_id, std::path::Path::new(&request.workspace_path))
             }) {
@@ -9230,6 +9250,131 @@ mod tests {
             matches!(error, ManagerError::InvalidRequest(ref message) if message.contains("missing")),
             "an unknown instance is refused: {error:?}"
         );
+    }
+
+    /// An ACP agent whose directory is fixed can never run in a checkout h4rn
+    /// would make, so the request is refused before any checkout exists.
+    #[tokio::test]
+    async fn an_acp_agent_with_a_fixed_directory_refuses_a_worktree() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let fixed = tempfile::tempdir().expect("fixed directory");
+        let host = HostId::new("host_test");
+        let spec = h4rn_protocol::AcpAgentSpec {
+            id: "fixed".into(),
+            name: "Fixed".into(),
+            command: "fixed-agent".into(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            working_dir: h4rn_protocol::AcpWorkingDir::FixedPath {
+                path: fixed.path().to_string_lossy().into_owned(),
+            },
+        };
+        let catalog = StaticHarnessCatalog::with(Arc::new(h4rn_harness::GenericAcpHarness::new(
+            Arc::new(h4rn_harness::StaticAcpAgents::new().with(spec)),
+        )));
+        let manager = ThreadManager::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            Arc::new(catalog),
+            host.clone(),
+            ThreadManagerOptions {
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("manager");
+
+        let mut request = new_thread(host, workspace.path(), "in a worktree");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("fixed".into());
+        request.worktree = Some(h4rn_protocol::WorktreeRequest::Generated(true));
+        let error = manager
+            .create_thread(request)
+            .await
+            .expect_err("a fixed-directory agent cannot use a worktree");
+        assert!(
+            matches!(error, ManagerError::InvalidRequest(ref message)
+                if message.contains("fixed directory") && message.contains("worktree")),
+            "the refusal names the fixed directory and the worktree: {error:?}"
+        );
+        // The thread's workspace was not silently rewritten to the fixed
+        // directory, and no thread exists.
+        assert!(
+            manager
+                .list_threads(&ThreadFilter::default())
+                .await
+                .is_empty()
+        );
+    }
+
+    /// A rollback runs off the async runtime: while its git cleanup is held
+    /// open, a current-thread runtime keeps making progress.
+    #[test]
+    fn a_worktree_rollback_does_not_stall_a_current_thread_runtime() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = crate::worktrees::create::create_blocking(
+            repo.path(),
+            &h4rn_protocol::WorktreeRequest::Named("slow/rollback".into()),
+            "rollback",
+            &h4rn_protocol::WorktreeSettings::default(),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        let dest = created.path.clone();
+        // The cleanup is held open long enough that a synchronous rollback
+        // would freeze the runtime's only thread.
+        crate::worktrees::create::test_hooks::hold_rollback(
+            dest.clone(),
+            Duration::from_millis(500),
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ticker = {
+                let ticks = Arc::clone(&ticks);
+                tokio::spawn(async move {
+                    loop {
+                        ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let before = ticks.load(std::sync::atomic::Ordering::Relaxed);
+            // Dropping the guard is what starts the rollback.
+            let guard = WorktreeRollback(Some(created));
+            let rollback = tokio::spawn(async move { drop(guard) });
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let ticks_during = ticks
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(before);
+            ticker.abort();
+            let _ = rollback.await;
+            assert!(
+                ticks_during >= 10,
+                "the runtime kept running while cleanup was held: {ticks_during} ticks"
+            );
+        });
+        crate::worktrees::create::test_hooks::clear_rollback();
+        // The blocking rollback still finishes and removes its checkout.
+        let repo_path = repo.path().to_path_buf();
+        let cleaned = wait_until(|| {
+            crate::worktrees::git::list_worktrees(&repo_path)
+                .map(|listed| listed.is_empty())
+                .unwrap_or(false)
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(cleaned);
     }
 
     #[test]

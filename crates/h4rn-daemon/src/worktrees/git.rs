@@ -883,7 +883,6 @@ pub fn list_worktrees_with(repo: &Path, commons: &CommonDirs) -> Result<Vec<GitW
 
 /// Every worktree registration of `repo`, main checkout included, resolving
 /// its common dir first (see [`registrations_in`]).
-#[cfg(test)]
 pub fn registrations(repo: &Path) -> Result<RegistrationSnapshot, String> {
     let common = common_dir(repo, OBSERVATION_GIT_TIMEOUT)?;
     registrations_in(

@@ -152,6 +152,14 @@ impl WorktreeStore {
              ON CONFLICT(path) DO UPDATE SET
                 repo = excluded.repo,
                 branch = excluded.branch,
+                -- A thread's own checkout must never be relabelled as a
+                -- harness-made one; the stronger owner wins whichever arrived
+                -- first.
+                origin = CASE
+                    WHEN worktrees.origin = 'harness' AND excluded.origin <> 'harness'
+                    THEN excluded.origin
+                    ELSE worktrees.origin
+                END,
                 last_seen = excluded.last_seen",
         )
         .bind(path)
@@ -272,5 +280,96 @@ mod tests {
         assert_eq!(loaded[0].origin, WorktreeOrigin::Thread);
         store.delete("/r/wt").await.expect("delete");
         assert!(store.load().await.expect("load").is_empty());
+    }
+
+    /// A worktree first seen while an agent worked in it becomes the thread's
+    /// own as soon as the thread's workspace names it; a later harness touch
+    /// never takes that back.
+    #[tokio::test]
+    async fn a_thread_origin_beats_a_harness_origin_whichever_is_recorded_first() {
+        let now = Utc::now();
+        let store = WorktreeStore::in_memory().await.expect("store");
+
+        store
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Harness,
+                "th_1",
+                None,
+                now,
+            )
+            .await
+            .expect("harness first");
+        store
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Thread,
+                "th_1",
+                None,
+                now,
+            )
+            .await
+            .expect("thread second");
+        let loaded = store.load().await.expect("load");
+        assert_eq!(
+            loaded[0].origin,
+            WorktreeOrigin::Thread,
+            "a thread's own checkout is not relabelled by an earlier harness sighting"
+        );
+
+        store
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Harness,
+                "th_1",
+                None,
+                now,
+            )
+            .await
+            .expect("harness third");
+        assert_eq!(
+            store.load().await.expect("load")[0].origin,
+            WorktreeOrigin::Thread,
+            "a later harness sighting never takes the thread origin back"
+        );
+
+        store
+            .record(
+                "/r/sub",
+                "/r",
+                Some("h4rn/sa-1"),
+                WorktreeOrigin::Harness,
+                "th_1",
+                Some("sa_1"),
+                now,
+            )
+            .await
+            .expect("harness");
+        store
+            .record(
+                "/r/sub",
+                "/r",
+                Some("h4rn/sa-1"),
+                WorktreeOrigin::Subagent,
+                "th_1",
+                Some("sa_1"),
+                now,
+            )
+            .await
+            .expect("subagent");
+        let subagent = store
+            .load()
+            .await
+            .expect("load")
+            .into_iter()
+            .find(|worktree| worktree.path == "/r/sub")
+            .expect("subagent worktree");
+        assert_eq!(subagent.origin, WorktreeOrigin::Subagent);
     }
 }

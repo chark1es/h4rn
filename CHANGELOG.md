@@ -529,6 +529,22 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A failed worktree create can no longer take another thread's checkout, or
+  leave git state behind.** The claim on a destination folder (now a lock beside
+  the checkouts) lasts until cleanup is done, so a failed `git worktree add` that
+  removes its own folder cannot let a second create register a checkout in the
+  gap; rollback only removes the checkout whose git registration it made (a
+  marker in that registration's admin dir), so a replacement thread at the same
+  folder keeps its files and registration. A failed add removes only the
+  registration, folder and branch that attempt created — including through a
+  symlinked location — and never deletes another registration. A worktree
+  location inside the project's main checkout is refused both when the setting
+  is saved and when a checkout is made, a tag that shares a branch's name no
+  longer hides the branch, and an ACP agent configured with a fixed directory
+  refuses a worktree request instead of silently ignoring the new checkout. A
+  hand-edited settings file that no longer validates no longer stops the daemon
+  from starting, and a worktree first seen through a harness stays a thread's
+  own once the thread's workspace names it. See [docs/worktrees.md](docs/worktrees.md).
 - **Two threads started at once can no longer delete each other's worktree.** A
   new checkout's folder is claimed atomically before git runs, so a create that
   finds the folder taken refuses (or moves to the next generated suffix) instead

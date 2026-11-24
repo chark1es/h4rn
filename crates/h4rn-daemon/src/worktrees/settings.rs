@@ -28,7 +28,17 @@ impl WorktreeSettingsStore {
         let path = data_dir.join("worktree-settings.json");
         let value = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<WorktreeSettings>(&bytes) {
-                Ok(settings) => normalize(settings)?,
+                // A value that no longer validates (saved before a check
+                // existed, or edited by hand) must not stop the daemon: the
+                // defaults are used and the next `set` fixes the file.
+                Ok(settings) => normalize(settings).unwrap_or_else(|error| {
+                    tracing::warn!(
+                        %error,
+                        path = %path.display(),
+                        "ignoring invalid worktree settings; using defaults"
+                    );
+                    WorktreeSettings::default()
+                }),
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -136,6 +146,15 @@ pub fn validate_location(location: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether a worktree location resolved to `location` would put checkouts
+/// inside the main checkout of `repo`.
+///
+/// Paths are resolved first, so `~/code/api/inside`, a symlinked location and a
+/// relative `..` all compare as the filesystem sees them.
+pub fn location_inside_repo(repo: &Path, location: &Path) -> bool {
+    crate::worktrees::git::norm(location).starts_with(crate::worktrees::git::norm(repo))
 }
 
 /// Expands a validated location into a directory on this machine.
@@ -296,5 +315,50 @@ mod tests {
         .expect("write");
         let store = WorktreeSettingsStore::open(dir.path()).expect("open");
         assert_eq!(store.get().branch_prefix, "h4rn/");
+    }
+
+    /// A file edited by hand (or saved before a check existed) must never stop
+    /// the daemon from starting; `set` still refuses the value.
+    #[test]
+    fn an_invalid_saved_file_uses_the_defaults_instead_of_failing_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("worktree-settings.json"),
+            r#"{"branch_prefix":".hidden"}"#,
+        )
+        .expect("write");
+        let store = WorktreeSettingsStore::open(dir.path()).expect("a bad value never fails open");
+        assert_eq!(store.get(), WorktreeSettings::default());
+        assert!(
+            store
+                .set(WorktreeSettings {
+                    branch_prefix: ".hidden".into(),
+                    ..WorktreeSettings::default()
+                })
+                .is_err(),
+            "saving the same bad value is still refused"
+        );
+    }
+
+    /// A location inside a repository's main checkout is refused at creation.
+    #[test]
+    fn a_location_inside_a_checkout_is_detected_through_resolution() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("inside")).expect("inside");
+        assert!(location_inside_repo(
+            repo.path(),
+            &repo.path().join("inside")
+        ));
+        assert!(location_inside_repo(repo.path(), repo.path()));
+        // A sibling whose name only starts with the same letters is outside.
+        let sibling = repo.path().with_file_name(format!(
+            "{}-two",
+            repo.path().file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!location_inside_repo(repo.path(), &sibling));
+        assert!(!location_inside_repo(
+            repo.path(),
+            repo.path().parent().unwrap()
+        ));
     }
 }

@@ -1879,7 +1879,114 @@ async fn worktree_settings_refuse_a_relative_location() {
         .expect_err("a relative location is not a path on the machine");
     assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
     assert!(error.message.contains("absolute path"), "{error:?}");
+    assert!(
+        error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("absolute path")),
+        "the hint fits a relative path: {error:?}"
+    );
 
+    // A branch prefix that cannot start a name gets a hint about the prefix,
+    // not about paths.
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                branch_prefix: ".hidden".into(),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("a prefix that cannot start a branch name is refused");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(error.message.contains("branch prefix"), "{error:?}");
+    assert!(
+        error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("prefix") || hint.contains("branch")),
+        "the hint fits the prefix: {error:?}"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn worktree_settings_refuse_a_location_inside_a_registered_project() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let repo = git_repo();
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: repo.path().to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the project");
+
+    let inside = repo.path().join("inside");
+    std::fs::create_dir(&inside).expect("inside");
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(inside.to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("worktrees under the main checkout would dirty it");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error.message.contains("inside the project checkout"),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("outside the project checkout")),
+        "{error:?}"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_bad_saved_worktree_setting_does_not_stop_the_daemon() {
+    let data_dir = tempfile::tempdir().expect("data");
+    std::fs::write(
+        data_dir.path().join("worktree-settings.json"),
+        r#"{"branch_prefix":".hidden"}"#,
+    )
+    .expect("write the bad setting");
+    // The daemon must still start, with the defaults in place.
+    let daemon = boot_at(
+        data_dir.path().to_path_buf(),
+        Some(data_dir),
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        None,
+        None,
+    )
+    .await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(settings.branch_prefix, "h4rn/");
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
     daemon.stop().await;
 }
 
