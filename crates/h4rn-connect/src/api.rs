@@ -1952,8 +1952,11 @@ async fn guest_page(
 /// Only the guest cookie is forwarded to the daemon; every other cookie in the
 /// request stays on Connect's origin. One parser serves both the page request
 /// and the relayed requests, so the cookie's name has a single source.
+///
+/// The first pair wins: browsers send the cookie with the longest matching
+/// path first (RFC 6265 §5.4), and Connect scopes the binding cookie to the
+/// link's own path, so a broader duplicate never replaces it.
 fn guest_cookie_value(headers: &HeaderMap) -> Option<String> {
-    let mut value = None;
     for header in headers.get_all(axum::http::header::COOKIE) {
         let Ok(header) = header.to_str() else {
             continue;
@@ -1963,11 +1966,11 @@ fn guest_cookie_value(headers: &HeaderMap) -> Option<String> {
                 continue;
             };
             if name == h4rn_protocol::GUEST_COOKIE {
-                value = Some(binding.to_owned());
+                return Some(binding.to_owned());
             }
         }
     }
-    value
+    None
 }
 
 /// The browser's guest binding cookie, if it has a value.
@@ -3172,5 +3175,24 @@ mod tests {
             HeaderValue::from_static("session=secret"),
         );
         assert_eq!(guest_binding_cookie(&other), None);
+    }
+
+    #[test]
+    fn the_link_scoped_guest_cookie_wins_over_a_broader_duplicate() {
+        // Browsers list the longest matching path first, so the link's own
+        // binding comes before any broader `h4rn_guest` cookie.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("h4rn_guest=link_binding; session=x; h4rn_guest=broader"),
+        );
+        assert_eq!(
+            guest_binding_cookie(&headers).as_deref(),
+            Some("link_binding")
+        );
+        assert_eq!(
+            guest_only_cookie(&headers).as_deref(),
+            Some("h4rn_guest=link_binding")
+        );
     }
 }
