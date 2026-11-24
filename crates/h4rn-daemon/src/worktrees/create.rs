@@ -5,6 +5,7 @@
 //! The main checkout is only read: every git command here runs `-C` against
 //! it, and `git worktree add` never touches its index or working tree.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +44,7 @@ pub struct CreatedWorktree {
     head: Option<String>,
     /// The durable record that survives a crash before the thread adopts this
     /// checkout, so the next startup can finish the rollback.
-    record: Option<PathBuf>,
+    record: Option<PendingRecordFile>,
     /// The creates still waiting for their thread. A shutdown rolls them back
     /// and waits, instead of losing the rollback with the process.
     pending: Option<Arc<PendingWorktrees>>,
@@ -51,10 +52,13 @@ pub struct CreatedWorktree {
 
 /// One create that has not been adopted by a thread yet.
 ///
-/// Written under the daemon's data before a create returns. The owner token is
-/// the marker in the registration's admin dir, so a sweep only removes a
-/// checkout this create made and never a worktree someone else made.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+/// Written atomically under the daemon's data before `git worktree add` runs,
+/// and updated as cleanup progresses. The owner token is the marker in the
+/// registration's admin dir, so a sweep only removes a checkout this create
+/// made and never a worktree someone else made. `admin` is filled in as soon
+/// as git has made the registration; a record without it is an intent whose
+/// create was interrupted before ownership could be proved.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct PendingRecord {
     repo: PathBuf,
     path: PathBuf,
@@ -62,6 +66,23 @@ struct PendingRecord {
     created_branch: bool,
     head: Option<String>,
     owner: String,
+    /// The registration's admin dir (`<common>/worktrees/<id>`), once git has
+    /// made it and this create has marked it.
+    #[serde(default)]
+    admin: Option<PathBuf>,
+    /// Whether the checkout and its registration are gone.
+    #[serde(default)]
+    checkout_removed: bool,
+    /// Whether the branch this create made is gone (or was never h4rn's).
+    #[serde(default)]
+    branch_removed: bool,
+}
+
+/// One record on disk, and the data last read or written for it.
+#[derive(Clone, Debug)]
+struct PendingRecordFile {
+    path: PathBuf,
+    data: PendingRecord,
 }
 
 /// Creates whose thread does not exist yet, shared with the creator so a
@@ -71,6 +92,34 @@ struct PendingWorktrees {
     created: std::sync::Mutex<Vec<CreatedWorktree>>,
     /// Rollbacks already started in the background, which a shutdown waits for.
     rollbacks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Create admission. Closing it stops new creates; the wait drains the
+    /// ones already admitted so shutdown never takes a create mid-adoption.
+    admission: std::sync::Mutex<Admission>,
+    admission_changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct Admission {
+    closed: bool,
+    active: usize,
+}
+
+/// One in-flight thread-creation admission.
+///
+/// Held from before the checkout is made until the thread has durably adopted
+/// it (or its rollback was started), so a shutdown can close admission and
+/// wait for either outcome instead of taking the checkout.
+pub struct CreateAdmission {
+    pending: Arc<PendingWorktrees>,
+}
+
+impl Drop for CreateAdmission {
+    fn drop(&mut self) {
+        let mut admission = lock(&self.pending.admission);
+        admission.active = admission.active.saturating_sub(1);
+        drop(admission);
+        self.pending.admission_changed.notify_waiters();
+    }
 }
 
 impl std::fmt::Debug for PendingWorktrees {
@@ -79,6 +128,7 @@ impl std::fmt::Debug for PendingWorktrees {
         f.debug_struct("PendingWorktrees")
             .field("created", &lock(&self.created).len())
             .field("rollbacks", &lock(&self.rollbacks).len())
+            .field("active", &lock(&self.admission).active)
             .finish()
     }
 }
@@ -105,6 +155,32 @@ impl PendingWorktrees {
     fn take_rollbacks(&self) -> Vec<tokio::task::JoinHandle<()>> {
         std::mem::take(&mut *lock(&self.rollbacks))
     }
+
+    fn admit(self: &Arc<Self>) -> Result<CreateAdmission, String> {
+        let mut admission = lock(&self.admission);
+        if admission.closed {
+            return Err("the daemon is shutting down; no worktree was created".to_owned());
+        }
+        admission.active += 1;
+        Ok(CreateAdmission {
+            pending: Arc::clone(self),
+        })
+    }
+
+    fn close_admission(&self) {
+        lock(&self.admission).closed = true;
+        self.admission_changed.notify_waiters();
+    }
+
+    async fn wait_for_admissions(&self) {
+        loop {
+            let notified = self.admission_changed.notified();
+            if lock(&self.admission).active == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 /// Panics in a test would poison the lock; the sets are still usable.
@@ -116,89 +192,230 @@ impl CreatedWorktree {
     /// The thread now owns this checkout, so neither a shutdown nor the next
     /// startup's sweep may remove it.
     pub fn keep(&self) {
-        self.forget();
+        self.retire();
     }
 
     /// Starts the rollback without waiting for it, off the async runtime when
     /// there is one, and records it so a shutdown can wait for it.
     pub fn rollback_detached(self) {
         let pending = self.pending.clone();
+        // The in-flight task now owns this cleanup; leave it out of the
+        // created set so shutdown waits on the task, not on a second rollback
+        // of the same checkout.
+        if let Some(pending) = &pending {
+            pending.remove(&self.path);
+        }
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                let task = handle.spawn_blocking(move || self.rollback());
+                let task = handle.spawn_blocking(move || {
+                    let _ = self.rollback();
+                });
                 if let Some(pending) = pending {
                     pending.track(task);
                 }
             }
             // Outside a runtime (a plain unit test) it runs inline.
-            Err(_) => self.rollback(),
+            Err(_) => {
+                let _ = self.rollback();
+            }
         }
     }
 
     /// Best-effort removal after the thread this was made for never started.
     ///
     /// The cleanup is tied to the registration this checkout had when it was
-    /// made: if git no longer lists it, `.git` names a different admin dir, or
-    /// the marker this call wrote is gone (another thread's checkout now lives
-    /// at the same path), nothing is removed.
-    pub fn rollback(&self) {
+    /// made: if `.git` names a different admin dir, that admin dir's `gitdir`
+    /// no longer points back here, its `HEAD` is another branch, or the marker
+    /// this call wrote is gone (another thread's checkout now lives at the same
+    /// path), nothing is removed. The identity is checked again immediately
+    /// before git is asked to remove anything.
+    ///
+    /// Returns `true` when this attempt's record is finished (the checkout is
+    /// gone, or the path was positively identified as a replacement). A failed
+    /// removal leaves the record for the next startup to retry.
+    pub fn rollback(&self) -> bool {
+        self.rollback_with(true)
+    }
+
+    /// [`Self::rollback`], optionally deferring instead of waiting for another
+    /// create that holds the folder's claim. Startup uses the deferring form so
+    /// a busy create never stalls the daemon.
+    fn rollback_with(&self, wait: bool) -> bool {
         #[cfg(test)]
         test_hooks::before_rollback(&self.path);
         // A retry of the same branch may claim this folder the moment the
         // checkout leaves. Hold the claim across the checks, the removal and
         // the branch step, so it can only start before or after this rollback
         // instead of in the middle of it.
-        let Some(_claim) = self.claim() else {
+        let claim = match self.claim(wait) {
+            Ok(Some(claim)) => claim,
+            Ok(None) => {
+                tracing::info!(
+                    path = %self.path.display(),
+                    "another create holds the worktree folder; deferring recovery"
+                );
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %self.path.display(),
+                    "could not claim the worktree folder; leaving it in place"
+                );
+                return false;
+            }
+        };
+        let _claim = claim;
+        let Some(owner) = self.owner.as_deref() else {
             tracing::warn!(
                 path = %self.path.display(),
-                "could not claim the worktree folder; leaving it in place"
+                "refusing to roll back a worktree whose owner marker was not recorded at creation"
             );
-            return;
+            return false;
         };
-        let (Some(registration), Some(owner)) =
-            (self.registration.as_deref(), self.owner.as_deref())
-        else {
-            tracing::warn!(
-                path = %self.path.display(),
-                "refusing to roll back a worktree whose registration was not recorded at creation"
-            );
-            self.forget();
-            return;
-        };
-        if worktree_gitdir(&self.path).as_deref() != Some(registration)
-            || registration_owner(registration).as_deref() != Some(owner)
+        let mut admin = self.registration.clone().or_else(|| {
+            self.record
+                .as_ref()
+                .and_then(|record| record.data.admin.clone())
+        });
+        // A crash after the marker was written but before the record learned
+        // the admin id still leaves positive proof: the checkout's `.git` and
+        // the marker name the same registration.
+        if admin.is_none()
+            && let Some(found) = worktree_gitdir(&self.path)
+            && registration_owner(&found).as_deref() == Some(owner)
         {
-            // The checkout at this path is no longer the one this call made, so
-            // this attempt has nothing left to remove.
-            self.forget();
-            return;
+            admin = Some(found);
         }
-        let _ = git::run_with_timeout(
-            &self.repo,
-            [
-                std::ffi::OsStr::new("worktree"),
-                std::ffi::OsStr::new("remove"),
-                std::ffi::OsStr::new("--force"),
-                self.path.as_os_str(),
-            ],
-            CREATE_TIMEOUT,
-        );
-        let _ = git::run_with_timeout(&self.repo, ["worktree", "prune"], CREATE_TIMEOUT);
-        if self.created_branch {
-            delete_created_branch(&self.repo, &self.path, &self.branch, self.head.as_deref());
+        let Some(admin) = admin else {
+            tracing::warn!(
+                path = %self.path.display(),
+                "refusing to roll back a worktree whose registration was not proved"
+            );
+            return false;
+        };
+        if !registration_proves(&admin, &self.path, owner, &self.branch) {
+            if self.replacement_now(&admin) {
+                // A different checkout lives here now; this attempt has
+                // nothing left to remove.
+                self.retire();
+                return true;
+            }
+            tracing::warn!(
+                admin = %admin.display(),
+                path = %self.path.display(),
+                "the registration no longer matches the create; leaving it alone"
+            );
+            return false;
         }
-        self.forget();
+        #[cfg(test)]
+        test_hooks::before_rollback_remove(&self.path);
+        #[cfg(test)]
+        test_hooks::before_cleanup_removal(&self.path);
+        // Re-check after any hook and immediately before the destructive step:
+        // the path or its registration may have been replaced in between.
+        if !registration_proves(&admin, &self.path, owner, &self.branch) {
+            if self.replacement_now(&admin) {
+                self.retire();
+                return true;
+            }
+            return false;
+        }
+        if !self.checkout_removed() {
+            let removed = git::run_with_timeout(
+                &self.repo,
+                [
+                    std::ffi::OsStr::new("worktree"),
+                    std::ffi::OsStr::new("remove"),
+                    std::ffi::OsStr::new("--force"),
+                    self.path.as_os_str(),
+                ],
+                CREATE_TIMEOUT,
+            );
+            if removed.is_err() {
+                // A locked worktree is a retry, not a reason to forget the
+                // record: once it is unlocked the next startup can finish.
+                return false;
+            }
+            if !self.save_progress(false, false) {
+                return false;
+            }
+        }
+        if self.created_branch && !self.branch_removed() {
+            if !delete_created_branch(&self.repo, &self.path, &self.branch, self.head.as_deref()) {
+                return false;
+            }
+            if !self.save_progress(true, true) {
+                return false;
+            }
+        }
+        self.retire();
+        true
     }
 
-    /// Drops this attempt's pending record and in-flight entry. Best effort for
-    /// the file: a stale one is swept by the next startup, and the sweep checks
-    /// the owner marker again.
-    fn forget(&self) {
+    /// Whether this path's registration was positively replaced by another
+    /// checkout, rather than merely becoming unreadable.
+    fn replacement_now(&self, expected: &Path) -> bool {
+        match worktree_gitdir(&self.path) {
+            // The path exists and `.git` names a different admin dir.
+            Some(current) if current != expected => true,
+            // Git reuses the admin name when the old registration is removed
+            // and another checkout takes the folder. A fresh registration at
+            // that name does not carry this create's marker.
+            Some(_) => self
+                .owner
+                .as_deref()
+                .is_some_and(|owner| registration_owner(expected).as_deref() != Some(owner)),
+            // The path is gone. A registration that still exists under our
+            // admin id is ours; one that vanished was removed (possibly by
+            // git's own incomplete add), so there is nothing left to retry.
+            None => !expected.exists(),
+        }
+    }
+
+    fn checkout_removed(&self) -> bool {
+        self.record
+            .as_ref()
+            .is_some_and(|record| record.data.checkout_removed)
+    }
+
+    fn branch_removed(&self) -> bool {
+        self.record
+            .as_ref()
+            .is_some_and(|record| record.data.branch_removed)
+    }
+
+    /// Writes cleanup progress before the next destructive step starts.
+    fn save_progress(&self, checkout_removed: bool, branch_removed: bool) -> bool {
+        let Some(record) = &self.record else {
+            return true;
+        };
+        let mut data = record.data.clone();
+        data.checkout_removed |= checkout_removed;
+        data.branch_removed |= branch_removed;
+        match write_pending_record(&record.path, &data) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %record.path.display(),
+                    "could not record worktree cleanup progress"
+                );
+                false
+            }
+        }
+    }
+
+    /// Retires this attempt's durable record and its in-flight entry. Called
+    /// only once the thread owns the checkout, or cleanup is actually done (or
+    /// the path is positively a replacement). A record that cannot be removed
+    /// is harmless: the next sweep checks the same identity again.
+    fn retire(&self) {
         if let Some(pending) = &self.pending {
             pending.remove(&self.path);
         }
         if let Some(record) = &self.record {
-            let _ = std::fs::remove_file(record);
+            let _ = std::fs::remove_file(&record.path);
         }
     }
 
@@ -206,12 +423,49 @@ impl CreatedWorktree {
     ///
     /// The checkout path is always `<location>/<project>/<folder>`, so the
     /// claim is the one a create for the same folder takes.
-    fn claim(&self) -> Option<ClaimLock> {
-        let project_dir = self.path.parent()?;
-        let location = project_dir.parent()?;
-        let project = project_dir.file_name()?.to_str()?;
-        ClaimLock::acquire(location, project, &self.path).ok()
+    fn claim(&self, wait: bool) -> Result<Option<ClaimLock>, String> {
+        let Some(project_dir) = self.path.parent() else {
+            return Ok(None);
+        };
+        let Some(location) = project_dir.parent() else {
+            return Ok(None);
+        };
+        let Some(project) = project_dir.file_name().and_then(|name| name.to_str()) else {
+            return Ok(None);
+        };
+        ClaimLock::acquire_with(location, project, &self.path, wait)
     }
+}
+
+/// Whether `admin` is still the registration this create made for `checkout`.
+fn registration_proves(admin: &Path, checkout: &Path, owner: &str, branch: &str) -> bool {
+    if registration_owner(admin).as_deref() != Some(owner) {
+        return false;
+    }
+    if worktree_gitdir(checkout).as_deref() != Some(admin) {
+        return false;
+    }
+    let Some(target) = git::read_bounded_following(&admin.join("gitdir")) else {
+        return false;
+    };
+    let Ok(target) = String::from_utf8(target) else {
+        return false;
+    };
+    let target = Path::new(target.trim());
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        admin.join(target)
+    };
+    let checkout_from_admin = if target.file_name().is_some_and(|name| name == ".git") {
+        target.parent().map(Path::to_path_buf)
+    } else {
+        Some(target)
+    };
+    if checkout_from_admin.is_none_or(|path| git::norm(&path) != git::norm(checkout)) {
+        return false;
+    }
+    git::read_head(&admin.join("HEAD")) == git::Head::Branch(branch.to_owned())
 }
 
 /// The admin dir a checkout's `.git` file names, resolved against the
@@ -233,22 +487,21 @@ fn worktree_gitdir(checkout: &Path) -> Option<PathBuf> {
 /// The name of the marker a create writes into its registration's admin dir.
 const OWNER_MARKER: &str = "h4rn-owner";
 
-/// Writes this call's ownership token into `admin`, returning it.
+/// Writes this create's ownership token into `admin`.
 ///
 /// The admin dir belongs to this registration, so the marker goes with it when
 /// git removes the registration; a replacement checkout at the same folder
 /// gets a freshly created admin dir without this token.
-fn mark_registration(admin: &Path) -> Option<String> {
-    let owner = uuid::Uuid::now_v7().simple().to_string();
+fn mark_registration(admin: &Path, owner: &str) -> bool {
     match std::fs::write(admin.join(OWNER_MARKER), owner.as_bytes()) {
-        Ok(()) => Some(owner),
+        Ok(()) => true,
         Err(error) => {
             tracing::warn!(
                 %error,
                 admin = %admin.display(),
                 "could not mark a worktree registration; it will not be rolled back"
             );
-            None
+            false
         }
     }
 }
@@ -267,13 +520,8 @@ fn pending_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("worktrees-pending")
 }
 
-/// Writes the record that lets a later startup finish this create's rollback.
-///
-/// Best effort: without it a crash leaves the registration for a person to
-/// clear in Settings, which is what happened before the sweep existed. The
-/// owner token is required, because the sweep only removes a checkout whose
-/// registration still carries it.
-fn write_pending_record(
+/// The intent a create records before it changes anything in git.
+fn new_pending_record(
     data_dir: &Path,
     repo: &Path,
     path: &Path,
@@ -281,43 +529,66 @@ fn write_pending_record(
     created_branch: bool,
     head: Option<&str>,
     owner: &str,
-) -> Option<PathBuf> {
+) -> Result<PendingRecordFile, String> {
     let dir = pending_dir(data_dir);
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(
-            %error,
-            dir = %dir.display(),
-            "could not write a create's recovery record; a crash could leave its worktree behind"
-        );
-        return None;
-    }
-    let record = PendingRecord {
+    std::fs::create_dir_all(&dir).map_err(|error| {
+        format!(
+            "could not create the worktree recovery folder {}: {error}",
+            dir.display()
+        )
+    })?;
+    let data = PendingRecord {
         repo: repo.to_path_buf(),
         path: path.to_path_buf(),
         branch: branch.to_owned(),
         created_branch,
         head: head.map(str::to_owned),
         owner: owner.to_owned(),
+        admin: None,
+        checkout_removed: false,
+        branch_removed: !created_branch,
     };
-    let bytes = match serde_json::to_vec(&record) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(%error, "could not encode a create's recovery record");
-            return None;
-        }
+    let record = PendingRecordFile {
+        path: dir.join(format!("{}.json", uuid::Uuid::now_v7().simple())),
+        data,
     };
-    let record_path = dir.join(format!("{}.json", uuid::Uuid::now_v7().simple()));
-    match std::fs::write(&record_path, bytes) {
-        Ok(()) => Some(record_path),
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                path = %record_path.display(),
-                "could not write a create's recovery record; a crash could leave its worktree behind"
-            );
-            None
+    write_pending_record(&record.path, &record.data)
+        .map_err(|error| format!("could not record the worktree creation intent: {error}"))?;
+    Ok(record)
+}
+
+/// Writes one recovery record atomically: a synced temporary file in the same
+/// folder is renamed over the record, then the folder itself is synced.
+///
+/// A kill at any point leaves either the previous complete record or the new
+/// one, never a half-written JSON file the sweep has to guess about.
+fn write_pending_record(path: &Path, record: &PendingRecord) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("{} has no parent folder", path.display())))?;
+    std::fs::create_dir_all(dir)?;
+    let temp = dir.join(format!(".{}.tmp", uuid::Uuid::now_v7().simple()));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)?;
+        // Syncing the folder makes the rename itself durable; not every
+        // platform can open a folder, and there the rename is still atomic.
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
         }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
+    result
 }
 
 /// Finishes the rollback of creates that never reached a thread, at startup.
@@ -373,13 +644,30 @@ pub fn sweep_pending(data_dir: &Path, in_use: &[String]) -> Vec<PathBuf> {
             repo: record.repo.clone(),
             branch: record.branch.clone(),
             created_branch: record.created_branch,
-            registration: worktree_gitdir(&record.path),
-            owner: Some(record.owner),
-            head: record.head,
-            record: Some(record_file.clone()),
+            // A crash after marking but before the record learned the admin id
+            // is still safe: adoption below requires the marker to match.
+            registration: record
+                .admin
+                .clone()
+                .or_else(|| worktree_gitdir(&record.path)),
+            owner: Some(record.owner.clone()),
+            head: record.head.clone(),
+            record: Some(PendingRecordFile {
+                path: record_file.clone(),
+                data: record.clone(),
+            }),
             pending: None,
         };
-        created.rollback();
+        if created.registration.as_deref().is_some_and(|admin| {
+            registration_owner(admin).as_deref() == Some(record.owner.as_str())
+        }) {
+            created.rollback_with(false);
+        } else {
+            tracing::warn!(
+                path = %record_file.display(),
+                "a create intent has no registration marker yet; leaving it for a later retry"
+            );
+        }
         if !record.path.exists() {
             swept.push(record.path);
         }
@@ -456,16 +744,18 @@ fn branch_checked_out(repo: &Path, branch: &str) -> bool {
 ///
 /// Runs while the destination's claim is held. It re-reads the registrations
 /// at the last moment, so a checkout a retry registered for this branch in the
-/// meantime keeps it.
-fn delete_created_branch(repo: &Path, dest: &Path, branch: &str, head: Option<&str>) {
+/// meantime keeps it. Returns `true` when the branch step is finished: either
+/// the branch is gone, or it is no longer the ref this create made.
+fn delete_created_branch(repo: &Path, dest: &Path, branch: &str, head: Option<&str>) -> bool {
     #[cfg(test)]
     test_hooks::before_branch_delete(dest);
-    if !registered(repo, dest)
-        && !branch_checked_out(repo, branch)
-        && branch_points_at(repo, branch, head)
-    {
-        let _ = git::run_with_timeout(repo, ["branch", "-D", branch], CREATE_TIMEOUT);
+    if registered(repo, dest) || branch_checked_out(repo, branch) {
+        return false;
     }
+    if !branch_points_at(repo, branch, head) {
+        return true;
+    }
+    git::run_with_timeout(repo, ["branch", "-D", branch], CREATE_TIMEOUT).is_ok()
 }
 
 /// Creates thread worktrees with this machine's saved settings.
@@ -493,6 +783,9 @@ impl WorktreeCreator {
         request: &WorktreeRequest,
         prompt: &str,
     ) -> Result<CreatedWorktree, String> {
+        if lock(&self.pending.admission).closed {
+            return Err("the daemon is shutting down; no worktree was created".to_owned());
+        }
         let workspace = PathBuf::from(workspace);
         let settings = self.settings.get();
         let data_dir = self.data_dir.clone();
@@ -516,21 +809,55 @@ impl WorktreeCreator {
         Ok(created)
     }
 
+    /// Stops new thread creates from making a checkout.
+    ///
+    /// Called as soon as the listener stops accepting work. A create that
+    /// already passed this gate finishes through adoption or rollback before
+    /// [`Self::drain_admissions`] returns.
+    pub fn close_admission(&self) {
+        self.pending.close_admission();
+    }
+
+    /// One in-flight thread-creation admission, held until the thread has
+    /// adopted its checkout or its rollback was started.
+    pub fn admit(&self) -> Result<CreateAdmission, String> {
+        self.pending.admit()
+    }
+
+    /// Waits for every admitted thread create to finish adopting or rolling
+    /// back its checkout.
+    pub async fn drain_admissions(&self) {
+        self.pending.wait_for_admissions().await;
+    }
+
     /// Waits for every rollback a shutdown could otherwise lose, then rolls
     /// back each create no thread adopted and waits for that too.
     ///
-    /// Called after the thread manager has stopped, so a create that was still
-    /// running has already dropped its guard and registered its rollback.
-    pub async fn shutdown(&self) {
+    /// A checkout in `in_use` is retired without touching it: a thread that
+    /// committed while shutdown was draining owns it. The admission drain has
+    /// already run, so no new thread can appear here.
+    pub async fn shutdown(&self, in_use: &[String]) {
         for handle in self.pending.take_rollbacks() {
             let _ = handle.await;
         }
+        let in_use: Vec<PathBuf> = in_use
+            .iter()
+            .map(|path| git::norm(Path::new(path)))
+            .collect();
         let created = self.pending.take_created();
         if created.is_empty() {
             return;
         }
         let _ = tokio::task::spawn_blocking(move || {
             for created in created {
+                let path = git::norm(&created.path);
+                if in_use
+                    .iter()
+                    .any(|used| path == *used || path.starts_with(used) || used.starts_with(&path))
+                {
+                    created.keep();
+                    continue;
+                }
                 created.rollback();
             }
         })
@@ -682,17 +1009,50 @@ pub fn create_blocking(
     // this attempt owns only a registration and ref that were not there then.
     let before = git::registrations(&repo).ok();
     let head = git::run_with_timeout(&repo, ["rev-parse", "HEAD"], CREATE_TIMEOUT).ok();
+    let owner = uuid::Uuid::now_v7().simple().to_string();
+    // The intent is durable before git changes anything. A kill during the
+    // registration, the checkout hook or the submodule update therefore leaves
+    // a record that names exactly the attempt and its owner token.
+    let record = match new_pending_record(
+        data_dir,
+        &repo,
+        &dest,
+        &branch,
+        created_branch,
+        head.as_deref(),
+        &owner,
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            if claim.still_ours() {
+                let _ = std::fs::remove_dir_all(&dest);
+            }
+            drop(claim);
+            return Err(error);
+        }
+    };
     let dest_text = dest.to_string_lossy().into_owned();
+    // `--no-checkout` splits registration from checkout: the owner marker is
+    // written while the registration exists, and only then does the checkout
+    // (and its post-checkout hook) run. A kill in that hook leaves both the
+    // marker and the record.
     let add = if created_branch {
         git::run_with_timeout(
             &repo,
-            ["worktree", "add", "-b", &branch, &dest_text],
+            [
+                "worktree",
+                "add",
+                "--no-checkout",
+                "-b",
+                &branch,
+                &dest_text,
+            ],
             CREATE_TIMEOUT,
         )
     } else {
         git::run_with_timeout(
             &repo,
-            ["worktree", "add", &dest_text, &branch],
+            ["worktree", "add", "--no-checkout", &dest_text, &branch],
             CREATE_TIMEOUT,
         )
     };
@@ -701,7 +1061,7 @@ pub fn create_blocking(
         // folder it claimed (still the same directory), and a branch it
         // created at the commit it started from. The claim is held throughout,
         // so no other create can claim the folder until this cleanup is done.
-        clean_failed_add(
+        let cleaned = clean_failed_add(
             &repo,
             &dest,
             &claim,
@@ -709,6 +1069,9 @@ pub fn create_blocking(
             head.as_deref(),
             before.as_ref(),
         );
+        if cleaned {
+            let _ = std::fs::remove_file(&record.path);
+        }
         drop(claim);
         return Err(format!(
             "could not create the worktree at {}: {error}",
@@ -716,30 +1079,73 @@ pub fn create_blocking(
         ));
     }
 
+    let registration = worktree_gitdir(&dest);
+    let marked = registration
+        .as_deref()
+        .is_some_and(|admin| mark_registration(admin, &owner));
+    if !marked {
+        let cleaned = clean_failed_add(
+            &repo,
+            &dest,
+            &claim,
+            created_branch.then_some(branch.as_str()),
+            head.as_deref(),
+            before.as_ref(),
+        );
+        if cleaned {
+            let _ = std::fs::remove_file(&record.path);
+        }
+        drop(claim);
+        return Err(format!(
+            "could not prove ownership of the worktree at {}; nothing was kept",
+            dest.display()
+        ));
+    }
+    let mut record = record;
+    record.data.admin = registration.clone();
+    if let Err(error) = write_pending_record(&record.path, &record.data) {
+        tracing::warn!(
+            %error,
+            path = %record.path.display(),
+            "could not update the worktree recovery record with its registration"
+        );
+    }
+    // Populate the working tree now that ownership is durable. A failing
+    // checkout is rolled back through the same verified registration.
+    if let Err(error) =
+        git::run_with_timeout(&dest, ["checkout", "--quiet", &branch], CREATE_TIMEOUT)
+    {
+        let created = CreatedWorktree {
+            registration,
+            owner: Some(owner),
+            head: head.clone(),
+            record: Some(record),
+            pending: None,
+            path: dest,
+            repo,
+            branch,
+            created_branch,
+        };
+        // The claim cannot be held while `rollback` takes it again.
+        drop(claim);
+        created.rollback();
+        return Err(format!(
+            "could not create the worktree at {}: its checkout failed: {error}",
+            created.path.display()
+        ));
+    }
+
     // New worktrees start without submodule contents. A repository that
     // declares them gets a full recursive checkout, so the agent does not run
     // against empty folders that look like real ones.
-    let registration = worktree_gitdir(&dest);
-    let owner = registration.as_deref().and_then(mark_registration);
-    let record = owner.as_deref().and_then(|owner| {
-        write_pending_record(
-            data_dir,
-            &repo,
-            &dest,
-            &branch,
-            created_branch,
-            head.as_deref(),
-            owner,
-        )
-    });
     if dest.join(".gitmodules").is_file()
         && let Err(error) = git::run_with_timeout(&dest, submodule_args(&dest), CREATE_TIMEOUT)
     {
         let created = CreatedWorktree {
             registration,
-            owner,
+            owner: Some(owner),
             head: head.clone(),
-            record,
+            record: Some(record),
             pending: None,
             path: dest,
             repo,
@@ -754,11 +1160,12 @@ pub fn create_blocking(
         ));
     }
 
+    drop(claim);
     Ok(CreatedWorktree {
         registration,
-        owner,
+        owner: Some(owner),
         head,
-        record,
+        record: Some(record),
         pending: None,
         path: dest,
         repo,
@@ -769,11 +1176,14 @@ pub fn create_blocking(
 
 /// Best-effort cleanup after `git worktree add` failed.
 ///
-/// A failed add can leave a registration (a failing `post-checkout` hook), a
-/// branch (`-b` ran before the checkout failed), or neither (a required smudge
-/// filter makes git remove the folder and registration itself). Each piece is
-/// removed only when it was absent before the add and still names this
-/// attempt's work, so another checkout is never touched.
+/// A failed add can leave a registration, a branch (`-b` ran before the
+/// checkout failed), or neither. Each piece is removed only when it was absent
+/// before the add and still names this attempt's work, so another checkout is
+/// never touched. There is deliberately no repository-wide prune: an unrelated
+/// user worktree that is temporarily moved must keep its registration.
+///
+/// Returns whether every owned piece is gone; a failure leaves the recovery
+/// record for the next startup.
 fn clean_failed_add(
     repo: &Path,
     dest: &Path,
@@ -781,7 +1191,7 @@ fn clean_failed_add(
     created_branch: Option<&str>,
     head: Option<&str>,
     before: Option<&git::RegistrationSnapshot>,
-) {
+) -> bool {
     let dest_norm = git::norm(dest);
     let before_has_dest = match before {
         // A snapshot that could not read every registration cannot prove the
@@ -801,8 +1211,12 @@ fn clean_failed_add(
             })
             .flatten()
     });
+    let mut removed = true;
     if let Some(registration) = registration {
-        let _ = git::run_with_timeout(
+        if !claim.still_ours() {
+            return false;
+        }
+        removed = git::run_with_timeout(
             repo,
             [
                 std::ffi::OsStr::new("worktree"),
@@ -811,22 +1225,21 @@ fn clean_failed_add(
                 registration.path.as_os_str(),
             ],
             CREATE_TIMEOUT,
-        );
+        )
+        .is_ok();
     }
-    // `prune` drops a registration whose folder git already removed; it never
-    // touches a live checkout.
-    let _ = git::run_with_timeout(repo, ["worktree", "prune"], CREATE_TIMEOUT);
     // The recursive fallback only ever removes the very directory this call
     // created, and only while git holds no registration for it.
     let unregistered = !registered(repo, dest);
     #[cfg(test)]
     test_hooks::before_cleanup_removal(dest);
-    if claim.still_ours() && unregistered {
+    if removed && claim.still_ours() && unregistered {
         let _ = std::fs::remove_dir_all(dest);
     }
     if let Some(branch) = created_branch {
-        delete_created_branch(repo, dest, branch, head);
+        removed = delete_created_branch(repo, dest, branch, head) && removed;
     }
+    removed
 }
 
 /// `git submodule update` with the local-path permission a checkout of a
@@ -1034,9 +1447,9 @@ impl Claim {
 
 /// One destination's lock file, held for the life of a [`Claim`].
 struct ClaimLock {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     _file: std::fs::File,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     path: PathBuf,
 }
 
@@ -1053,6 +1466,21 @@ fn claim_path(location: &Path, project: &str, dest: &Path) -> PathBuf {
 
 impl ClaimLock {
     fn acquire(location: &Path, project: &str, dest: &Path) -> Result<Self, String> {
+        Self::acquire_with(location, project, dest, true)?
+            .ok_or_else(|| format!("another worktree create is still using {}", dest.display()))
+    }
+
+    /// Takes the folder's claim, or answers `None` when `wait` is false and
+    /// another create holds it.
+    ///
+    /// Unix and Windows use an OS lock released when the process exits, so a
+    /// crash never leaves a stale marker that makes the next startup wait.
+    fn acquire_with(
+        location: &Path,
+        project: &str,
+        dest: &Path,
+        wait: bool,
+    ) -> Result<Option<Self>, String> {
         let path = claim_path(location, project, dest);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|error| {
@@ -1072,24 +1500,73 @@ impl ClaimLock {
                 .truncate(false)
                 .open(&path)
                 .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+            // A forked child briefly inherits every open descriptor until it
+            // execs. Give a nonblocking sweep that short window before calling
+            // the folder busy; a real create still leaves it deferred.
+            let deferral_deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(40);
             loop {
-                // A blocking lock, released by the kernel if this process dies
-                // mid-create, so a crash never wedges the folder for good.
-                let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+                let operation = if wait {
+                    libc::LOCK_EX
+                } else {
+                    libc::LOCK_EX | libc::LOCK_NB
+                };
+                let locked = unsafe { libc::flock(file.as_raw_fd(), operation) };
                 if locked == 0 {
-                    return Ok(Self { _file: file });
+                    return Ok(Some(Self { _file: file }));
                 }
                 let error = std::io::Error::last_os_error();
                 if error.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
+                if !wait
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::PermissionDenied
+                    )
+                {
+                    if std::time::Instant::now() >= deferral_deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
                 return Err(format!("could not lock {}: {error}", path.display()));
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // Without `flock`, a create-new marker serialises creates; a marker
-            // older than ten minutes is a crash's leftover and is replaced.
+            use std::os::windows::fs::OpenOptionsExt;
+            let deadline = std::time::Instant::now() + Duration::from_secs(600);
+            loop {
+                let opened = std::fs::OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .share_mode(0)
+                    .open(&path);
+                match opened {
+                    Ok(file) => return Ok(Some(Self { _file: file })),
+                    Err(error) if !wait => {
+                        let _ = (dest, error);
+                        return Ok(None);
+                    }
+                    Err(_) if std::time::Instant::now() >= deadline => {
+                        return Err(format!(
+                            "another worktree create is still using {}",
+                            dest.display()
+                        ));
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            if !wait && path.exists() {
+                return Ok(None);
+            }
             let deadline = std::time::Instant::now() + Duration::from_secs(600);
             loop {
                 match std::fs::OpenOptions::new()
@@ -1098,26 +1575,12 @@ impl ClaimLock {
                     .open(&path)
                 {
                     Ok(mut file) => {
-                        use std::io::Write;
                         let _ = writeln!(file, "{}", std::process::id());
-                        return Ok(Self { path });
+                        return Ok(Some(Self { path }));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let stale = path
-                            .metadata()
-                            .and_then(|meta| meta.modified())
-                            .ok()
-                            .and_then(|modified| modified.elapsed().ok())
-                            .is_some_and(|age| age > Duration::from_secs(600));
-                        if stale {
-                            let _ = std::fs::remove_file(&path);
-                            continue;
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            return Err(format!(
-                                "another worktree create is still using {}",
-                                dest.display()
-                            ));
+                        if !wait || std::time::Instant::now() >= deadline {
+                            return Ok(None);
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
@@ -1130,7 +1593,7 @@ impl ClaimLock {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl Drop for ClaimLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -1248,7 +1711,17 @@ fn project_name_of(main: &Path) -> String {
 /// Both the creator and Settings validation use this, so a location they would
 /// disagree about cannot be saved and then fail on the first thread.
 pub(crate) fn destination_refusal(workspace: &Path, location: &Path) -> Option<String> {
-    let main = git::main_checkout(workspace).unwrap_or_else(|| workspace.to_path_buf());
+    let layout = match git::layout(workspace) {
+        Ok(layout) => layout,
+        Err(error) => {
+            return Some(format!(
+                "the worktree location {} could not be checked against {}: {error}; choose a folder after git can read the repository's worktrees",
+                location.display(),
+                workspace.display()
+            ));
+        }
+    };
+    let main = layout.main;
     let project = project_name_of(&main);
     let destination = location.join(&project);
     if location_inside_repo(workspace, &destination) {
@@ -1265,16 +1738,19 @@ pub(crate) fn destination_refusal(workspace: &Path, location: &Path) -> Option<S
         }
         return Some(destination_message(location, &destination, &main));
     }
-    let Ok(snapshot) = git::registrations(workspace) else {
-        return None;
-    };
-    let common = git::common_dir(workspace, git::OBSERVATION_GIT_TIMEOUT).ok();
-    for registration in snapshot.iter().filter(|registration| !registration.bare) {
-        if registration.path == workspace
-            || registration.path == main
+    let workspace_norm = git::norm(workspace);
+    let main_norm = git::norm(&main);
+    let common_norm = git::norm(&layout.common);
+    for registration in layout
+        .snapshot
+        .iter()
+        .filter(|registration| !registration.bare)
+    {
+        if registration.path == workspace_norm
+            || registration.path == main_norm
             // A submodule's main registration names its git dir; it has no
             // working tree of its own, and the working tree was checked above.
-            || common.as_ref() == Some(&registration.path)
+            || registration.path == common_norm
         {
             continue;
         }
@@ -1357,6 +1833,7 @@ pub(crate) mod test_hooks {
     static PAUSE_BEFORE_REMOVE: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
     static PAUSE_BEFORE_BRANCH: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
     static PAUSE_BEFORE_CLAIM: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
+    static PAUSE_BEFORE_ROLLBACK_REMOVE: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
     static HOLD_ROLLBACK: Mutex<Option<(PathBuf, Duration)>> = Mutex::new(None);
     static CLAIM_IDENTITY: Mutex<Vec<(PathBuf, Option<super::DirIdentity>)>> =
         Mutex::new(Vec::new());
@@ -1370,6 +1847,23 @@ pub(crate) mod test_hooks {
     ) {
         install(
             &PAUSE_BEFORE_REMOVE,
+            Pause {
+                dest,
+                paused,
+                release,
+            },
+        );
+    }
+
+    /// Holds a rollback for `dest` after its first identity check and before
+    /// the re-check and destructive command, until a test releases it.
+    pub(crate) fn pause_before_rollback_remove(
+        dest: PathBuf,
+        paused: Arc<Barrier>,
+        release: Arc<Barrier>,
+    ) {
+        install(
+            &PAUSE_BEFORE_ROLLBACK_REMOVE,
             Pause {
                 dest,
                 paused,
@@ -1459,6 +1953,7 @@ pub(crate) mod test_hooks {
             &PAUSE_BEFORE_REMOVE,
             &PAUSE_BEFORE_BRANCH,
             &PAUSE_BEFORE_CLAIM,
+            &PAUSE_BEFORE_ROLLBACK_REMOVE,
         ] {
             slot.lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1511,6 +2006,10 @@ pub(crate) mod test_hooks {
 
     pub(super) fn before_claim(dest: &std::path::Path) {
         pause(&PAUSE_BEFORE_CLAIM, dest);
+    }
+
+    pub(super) fn before_rollback_remove(dest: &std::path::Path) {
+        pause(&PAUSE_BEFORE_ROLLBACK_REMOVE, dest);
     }
 
     /// Waits on the pause a test installed for `dest`, when there is one.
@@ -3042,14 +3541,21 @@ mod tests {
             ],
         );
         let data = tempfile::tempdir().expect("data");
+        let record = PendingRecord {
+            repo: main.clone(),
+            path: user.clone(),
+            branch: "mine".into(),
+            created_branch: false,
+            head: None,
+            owner: "not-h4rns-owner".into(),
+            admin: None,
+            checkout_removed: false,
+            branch_removed: true,
+        };
+        std::fs::create_dir_all(data.path().join("worktrees-pending")).expect("pending dir");
         write_pending_record(
-            data.path(),
-            &main,
-            &user,
-            "mine",
-            false,
-            None,
-            "not-h4rns-owner",
+            &data.path().join("worktrees-pending").join("user.json"),
+            &record,
         )
         .expect("record");
 
@@ -3137,7 +3643,7 @@ mod tests {
             "the checkout exists before shutdown"
         );
 
-        creator.shutdown().await;
+        creator.shutdown(&[]).await;
         assert!(!created.path.exists(), "the checkout is rolled back");
         assert!(
             git::list_worktrees(repo.path()).expect("list").is_empty(),
@@ -3173,7 +3679,7 @@ mod tests {
             .expect("create");
         created.keep();
 
-        creator.shutdown().await;
+        creator.shutdown(&[]).await;
         assert!(created.path.is_dir(), "the thread's checkout stays");
         assert_eq!(
             git::list_worktrees(repo.path()).expect("list").len(),
@@ -3195,6 +3701,351 @@ mod tests {
                 .next()
                 .is_none(),
             "its recovery record is gone"
+        );
+    }
+
+    /// Recovery cleans only the registration it proved it made. A user
+    /// worktree that was moved by hand is stale to git, but its registration
+    /// must survive another create's rollback.
+    #[test]
+    fn a_moved_user_worktree_keeps_its_registration_after_recovery() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let user = data.path().join("user-worktree");
+        run(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "mine",
+                user.to_str().expect("path"),
+            ],
+        );
+        let moved = data.path().join("moved-user-worktree");
+        std::fs::rename(&user, &moved).expect("move the user worktree");
+
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("h4rn/other".into()),
+            "other",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        assert!(created.rollback(), "the h4rn create is cleaned up");
+
+        let registrations = git::registrations(repo.path()).expect("registrations");
+        assert!(
+            registrations
+                .iter()
+                .any(|registration| registration.branch() == Some("mine")),
+            "the moved user worktree still has its registration"
+        );
+    }
+
+    /// A replacement registered at the same path after the first identity
+    /// check survives the rollback.
+    #[test]
+    fn a_replacement_after_verification_survives_the_rollback() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let first = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("race/x".into()),
+            "first",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        let dest = first.path.clone();
+        let paused = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        test_hooks::pause_before_rollback_remove(dest.clone(), paused.clone(), release.clone());
+
+        let repo_path = repo.path().to_path_buf();
+        let rollback = std::thread::spawn(move || first.rollback());
+        paused.wait();
+        // Another actor removes the verified checkout and registers a
+        // different branch at the same path.
+        run(
+            &repo_path,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                dest.to_str().expect("path"),
+            ],
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+        run(
+            &repo_path,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "replacement",
+                dest.to_str().expect("path"),
+            ],
+        );
+        std::fs::write(dest.join("replacement.txt"), "kept\n").expect("replacement file");
+        release.wait();
+
+        assert!(rollback.join().expect("rollback"), "the old record retires");
+        assert!(
+            dest.join("replacement.txt").is_file(),
+            "the replacement's files are untouched"
+        );
+        assert!(
+            git::list_worktrees(&repo_path)
+                .expect("list")
+                .iter()
+                .any(|worktree| worktree.branch.as_deref() == Some("replacement")),
+            "the replacement's registration is untouched"
+        );
+        test_hooks::clear_failed_add_hooks(&dest);
+    }
+
+    /// A locked worktree keeps its recovery record until it can be removed.
+    #[test]
+    fn a_locked_worktree_is_retried_after_it_is_unlocked() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("locked/x".into()),
+            "locked",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        run(
+            repo.path(),
+            &["worktree", "lock", created.path.to_str().expect("path")],
+        );
+
+        assert!(!created.rollback(), "a locked worktree is not removed");
+        assert!(created.path.is_dir());
+        assert_eq!(
+            std::fs::read_dir(data.path().join("worktrees-pending"))
+                .expect("pending dir")
+                .count(),
+            1,
+            "the recovery record remains"
+        );
+
+        run(
+            repo.path(),
+            &["worktree", "unlock", created.path.to_str().expect("path")],
+        );
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(swept, vec![created.path.clone()]);
+        assert!(!created.path.exists(), "the unlocked checkout is removed");
+    }
+
+    /// A create interrupted after its owner marker was written but before its
+    /// checkout completed is finished at the next startup.
+    #[test]
+    fn a_create_interrupted_after_its_marker_is_swept() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let location = data.path().join("worktrees");
+        let project = project_name(repo.path());
+        let dest = checkout_path(&location, &project, "interrupted/after-marker");
+        std::fs::create_dir_all(dest.parent().expect("parent")).expect("parent");
+        let head = git::run_with_timeout(repo.path(), ["rev-parse", "HEAD"], CREATE_TIMEOUT)
+            .expect("head");
+        let record = new_pending_record(
+            data.path(),
+            repo.path(),
+            &dest,
+            "interrupted/after-marker",
+            true,
+            Some(&head),
+            "owner-after-marker",
+        )
+        .expect("intent");
+        run(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "-b",
+                "interrupted/after-marker",
+                dest.to_str().expect("path"),
+            ],
+        );
+        let admin = worktree_gitdir(&dest).expect("registration");
+        assert!(mark_registration(&admin, "owner-after-marker"));
+        let mut saved = record.data.clone();
+        saved.admin = Some(admin);
+        write_pending_record(&record.path, &saved).expect("record admin");
+
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(swept, vec![dest.clone()]);
+        assert!(!dest.exists(), "the interrupted checkout is gone");
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                [
+                    "rev-parse",
+                    "--verify",
+                    "refs/heads/interrupted/after-marker"
+                ],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "its branch is gone"
+        );
+    }
+
+    /// A busy folder is deferred instead of blocking startup on a claim.
+    #[test]
+    fn a_busy_recovery_is_deferred_not_waited_for() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("busy/x".into()),
+            "busy",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        let project_dir = created.path.parent().expect("project dir");
+        let location = project_dir.parent().expect("location");
+        let project = project_dir.file_name().unwrap().to_str().unwrap();
+        let held = ClaimLock::acquire(location, project, &created.path).expect("claim");
+
+        let started = std::time::Instant::now();
+        let swept = sweep_pending(data.path(), &[]);
+        assert!(swept.is_empty(), "a busy record is not swept yet");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the sweep did not wait for the claim"
+        );
+        assert!(created.path.is_dir(), "the checkout is untouched");
+        drop(held);
+
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(swept, vec![created.path.clone()]);
+    }
+
+    /// A `--separate-git-dir` repository whose main checkout sits at the
+    /// destination is refused from the main checkout itself, with the real
+    /// working-tree name rather than the metadata directory.
+    #[test]
+    fn a_separate_git_dir_main_checkout_refuses_a_location_holding_it() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        let gitdir = root.path().join("admin-meta");
+        run(
+            root.path(),
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                gitdir.to_str().unwrap(),
+                main.to_str().unwrap(),
+            ],
+        );
+        run(&main, &["config", "user.email", "wt@example.invalid"]);
+        run(&main, &["config", "user.name", "worktree test"]);
+        std::fs::write(main.join("README.md"), "hello\n").expect("readme");
+        run(&main, &["add", "README.md"]);
+        run(&main, &["commit", "-q", "-m", "init"]);
+
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &main,
+            &WorktreeRequest::Named("separate-main/x".into()),
+            "separate",
+            &settings(Some(root.path())),
+            data.path(),
+            None,
+        )
+        .expect_err("the location holds the main checkout");
+        assert!(error.contains("inside the project checkout"), "{error}");
+        assert!(
+            error.contains("api"),
+            "the refusal names the checkout: {error}"
+        );
+        assert!(
+            !main.join(folder_name("separate-main/x")).exists(),
+            "nothing was created in the main checkout"
+        );
+    }
+
+    /// An unreadable sibling admin entry means containment cannot be proved,
+    /// so the location is refused rather than allowing a nested add.
+    #[test]
+    fn an_unreadable_sibling_registration_refuses_the_location() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        init_repo(&main);
+        let sibling = root.path().join("feature");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                sibling.to_str().unwrap(),
+            ],
+        );
+        let common = git::common_dir(&main, git::OBSERVATION_GIT_TIMEOUT).expect("common");
+        let admin = std::fs::read_dir(common.join("worktrees"))
+            .expect("admin entries")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                std::fs::read_to_string(path.join("gitdir"))
+                    .ok()
+                    .is_some_and(|text| text.contains("feature"))
+            })
+            .expect("sibling admin");
+        std::fs::remove_file(admin.join("gitdir")).expect("remove gitdir");
+        std::fs::create_dir(admin.join("gitdir")).expect("unreadable gitdir");
+
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &main,
+            &WorktreeRequest::Named("sibling/unreadable".into()),
+            "sibling",
+            &settings(Some(&sibling)),
+            data.path(),
+            None,
+        )
+        .expect_err("containment cannot be established");
+        assert!(error.contains("could not be checked"), "{error}");
+        assert!(
+            !sibling
+                .join(project_name(&main))
+                .join(folder_name("sibling/unreadable"))
+                .exists(),
+            "nothing was created inside the unreadable sibling"
+        );
+        assert!(
+            git::run_with_timeout(
+                &main,
+                ["rev-parse", "--verify", "refs/heads/sibling/unreadable"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
         );
     }
 }

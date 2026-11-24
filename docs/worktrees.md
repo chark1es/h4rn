@@ -46,14 +46,18 @@ itself) is refused, and so is the main checkout's parent folder (`~/code` for
 the project `~/code/api`): that would put the new checkout in the main checkout.
 The same holds when the thread starts in a linked worktree, in a worktree of a
 `--separate-git-dir` repository or of a submodule, or in a worktree of a bare
-repository. The project folder is named after the main worktree (or the bare
-repository's git directory), wherever that is: h4rn reads the repository's own
-worktree registrations, so the main checkout is found even when its git
-directory is not named `.git`. The destination is refused inside the workspace,
-the main checkout, or any other linked worktree of the same repository, because
-a checkout there would make that working tree dirty. All of these are refused
-when the setting is saved and when a worktree is created, because a person
-should learn about it while they can still change the location.
+repository. The project folder is named after the real main worktree (or the
+bare repository's git directory), wherever that is: h4rn resolves the checkout
+from `core.worktree`, from the directory whose `.git` file points at the common
+git directory, or from the repository's own worktree registrations. Metadata
+directories such as `api.git` or an admin directory are never mistaken for a
+working tree. The destination is refused inside the workspace, the main
+checkout, or any other linked worktree of the same repository, because a
+checkout there would make that working tree dirty. The check uses one complete
+worktree snapshot; if git cannot read an admin entry, the location is refused
+instead of guessing that the missing worktree is absent. All of these are
+refused when the setting is saved and when a worktree is created, because a
+person should learn about it while they can still change the location.
 
 **Settings → Worktrees → New worktrees → Location** sets another directory:
 
@@ -93,13 +97,31 @@ does not work in an empty-looking folder. A repository whose `.gitmodules`
 names local paths is allowed to use git's `file` transport for that one
 command; repositories with network remotes keep git's stricter default.
 
-While a create is unfinished, h4rn keeps a small recovery record beside its own
-data. If the daemon shuts down, it waits for the failed create's rollback
-instead of leaving it half done. If the daemon is killed first, the next startup
-finishes the rollback: it removes only a checkout whose git registration still
-carries the owner marker h4rn wrote when it made that checkout, and only when no
-thread uses it. A worktree you made yourself, and one a thread works in, are
-never touched by that sweep.
+Only one daemon may use a data folder at a time. It takes an operating-system
+lock when it starts, before restoring threads or finishing any worktree
+recovery, and holds it until shutdown. A second daemon started on the same data
+folder exits without adopting, clearing or restoring anything.
+
+Before h4rn changes a repository, it writes a small recovery intent beside its
+own data. The file is written atomically (a synced temporary file renamed into
+place), so a crash leaves a complete record or the previous one, never half a
+JSON file. The record names the checkout, branch and a random owner token. h4rn
+then registers the worktree without checking it out, writes that token into the
+registration's admin dir, and only then populates the working tree. A crash in
+the checkout hook therefore leaves both the token and the record.
+
+If the daemon shuts down, it closes create admission, waits for every running
+create to adopt its checkout or start its rollback, and then waits for those
+rollbacks. If the daemon is killed first, the next startup finishes each record
+only with positive proof: the checkout's `.git` must name the recorded admin
+dir, that admin dir's `gitdir` must point back at the checkout, its `HEAD` must
+be the recorded branch, and the owner token must match. A record that cannot be
+proved is kept and left alone. A record whose path a thread now uses is retired
+without touching the checkout. Recovery never runs a repository-wide
+`git worktree prune`: a moved worktree you made yourself keeps its registration.
+Cleanup is retried until the checkout, its registration and the branch h4rn made
+are actually gone; a locked worktree keeps its record until it is unlocked. A
+busy folder is deferred rather than stalling startup.
 
 ## Tracking and clearing
 

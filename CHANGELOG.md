@@ -630,17 +630,28 @@ All notable changes to h4rn are recorded here. The format follows
 ### Fixed
 
 - **A worktree location is refused wherever it would put a checkout in a working
-  tree.** Saving the location and creating a thread now find the main checkout
-  even when the repository keeps its git directory elsewhere — a
-  `--separate-git-dir` repository, a submodule — and also refuse a location
-  inside any sibling linked worktree, not only the main one. A bare
-  repository's refusal now says the destination is its git directory and to
-  choose a folder outside it.
+  tree.** Saving the location and creating a thread now find the real main
+  checkout even when the repository keeps its git directory elsewhere — a
+  `--separate-git-dir` repository, a submodule — instead of naming `api.git` or
+  an admin directory, and also refuse a location inside any sibling linked
+  worktree, not only the main one. The check uses one complete worktree
+  snapshot, so an admin entry git cannot read refuses the location rather than
+  allowing a nested checkout. A bare repository's refusal says the destination
+  is its git directory and to choose a folder outside it.
 - **A failed worktree create no longer leaves its checkout behind when the
-  daemon stops.** Shutdown waits for the rollback. If the daemon is killed
-  first, the next startup removes the checkout, registration and branch the
-  interrupted create made, while leaving worktrees h4rn did not make and ones a
-  thread still uses alone.
+  daemon stops.** Create admission closes at shutdown, running creates finish by
+  adopting their checkout or rolling back, and the daemon waits for those
+  rollbacks. A thread that committed in that window keeps its checkout. The
+  create writes an atomic intent before touching git and marks the registration
+  before checking out, so a kill in the checkout hook is recovered next start.
+  Recovery removes only a checkout whose admin dir, branch and owner marker all
+  match, retries a locked worktree after it is unlocked, and never runs a
+  repository-wide prune: a moved worktree h4rn did not make keeps its
+  registration. A thread's checkout is never touched.
+- **One daemon owns one data folder.** Startup takes an operating-system lock
+  before restoring threads or sweeping recovery and holds it until shutdown, so
+  a second daemon on the same folder exits without adopting or clearing the
+  first one's checkouts.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

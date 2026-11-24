@@ -137,6 +137,8 @@ fn settings_hint(message: &str) -> &'static str {
         || message.contains("inside the repository")
     {
         "Choose a folder outside the project checkout"
+    } else if message.contains("could not be checked") {
+        "Repair the repository's git worktree metadata and try again"
     } else {
         "Use an absolute path or one starting with `~/`"
     }
