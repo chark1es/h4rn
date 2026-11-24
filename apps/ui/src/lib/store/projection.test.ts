@@ -169,6 +169,67 @@ describe("foldEvent", () => {
     });
   });
 
+  it("keeps an imported message's own time from the event", () => {
+    const log = foldEvent(createThreadLog(), {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_imported",
+      at: "2026-11-18T09:00:00Z",
+      item: {
+        kind: "message",
+        item_id: "item_imported",
+        role: "user",
+        text: "an imported prompt",
+        attachments: [],
+      },
+    });
+
+    expect(log.turns[0]?.startedAt).toBe("2026-11-18T09:00:00Z");
+    expect(log.turns[0]?.imported).toBe(true);
+  });
+
+  it("settles an imported assistant turn instead of leaving it live", () => {
+    const log = foldEvent(createThreadLog(), {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_imported",
+      at: "2026-11-18T09:01:00Z",
+      item: {
+        kind: "message",
+        item_id: "item_imported",
+        role: "assistant",
+        text: "the imported reply",
+        attachments: [],
+      },
+    });
+
+    expect(log.turns[0]).toMatchObject({
+      id: "turn_imported",
+      status: "completed",
+      imported: true,
+      startedAt: "2026-11-18T09:01:00Z",
+      items: [{ kind: "message", role: "assistant", streaming: false }],
+    });
+  });
+
+  it("leaves a live message's turn running without an imported mark", () => {
+    const log = foldEvent(createThreadLog(), {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_live",
+      item: {
+        kind: "message",
+        item_id: "item_live",
+        role: "assistant",
+        text: "a live reply",
+        attachments: [],
+      },
+    });
+
+    expect(log.turns[0]?.status).toBe("running");
+    expect(log.turns[0]?.imported).toBeUndefined();
+  });
+
   it("replaces a matching pending message with the server's user message", () => {
     const log = createThreadLog();
     log.pending.push({

@@ -36,7 +36,7 @@ export const THREAD_SORT_LABELS: Record<ThreadSort, string> = {
   name: "Name",
 };
 
-type Prefs = { projectSort: ProjectSort; threadSort: ThreadSort; order: string[] };
+export type Prefs = { projectSort: ProjectSort; threadSort: ThreadSort; order: string[] };
 
 export type ProjectsState = {
   projects: Project[];
@@ -303,7 +303,7 @@ export function sidebarProjects(input: {
       const project = registered.get(key) ?? null;
       group = {
         key,
-        name: project?.name ?? projectName(thread.workspace_path),
+        name: project?.name ?? projectName(thread.project_path ?? thread.workspace_path),
         host: thread.host,
         threads: [],
         project,

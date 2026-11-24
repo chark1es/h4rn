@@ -14,7 +14,15 @@ vi.mock("@/lib/client/config", () => ({
 
 import { onManualPlacement } from "@/features/notifications/placement";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
-import { applyEvent, createThread, getState, loadThreads, setThreadTab, store } from "./appStore";
+import {
+  applyEvent,
+  createThread,
+  getState,
+  loadThread,
+  loadThreads,
+  setThreadTab,
+  store,
+} from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
   return {
@@ -112,6 +120,61 @@ describe("loadThreads", () => {
 
     expect(readThreadDraft("load_host_b", "not_in_the_list")).toBe("still unsent");
     expect(readThreadDraft("load_host_other", "another_machine")).toBe("keep for later");
+  });
+});
+
+describe("loadThread", () => {
+  beforeEach(() => {
+    fake.response.current = null;
+    fake.request.mockReset();
+    seedHosts([]);
+  });
+
+  it("follows the daemon's replay pages until there is no more", async () => {
+    const summary = threadSummary({ threadId: "page_thread", host: "page_host" });
+    const message = (seq: number, text: string) => ({
+      seq,
+      event: {
+        type: "item_completed",
+        thread_id: "page_thread",
+        turn_id: `turn-${seq}`,
+        item: {
+          kind: "message",
+          item_id: `item-${seq}`,
+          role: "user",
+          text,
+          attachments: [],
+        },
+      },
+    });
+    fake.request
+      .mockResolvedValueOnce({
+        type: "thread",
+        summary,
+        events: [message(1, "first page")],
+        next_seq: 1,
+        more: true,
+      })
+      .mockResolvedValueOnce({
+        type: "thread",
+        summary,
+        events: [message(2, "second page")],
+        next_seq: 2,
+        more: false,
+      });
+
+    await loadThread("page_thread", 0);
+
+    expect(fake.request).toHaveBeenCalledTimes(2);
+    const second = fake.request.mock.calls[1]?.[0] as { since_seq: number } | undefined;
+    expect(second?.since_seq).toBe(1);
+    const log = getState().logs.page_thread;
+    expect(log?.nextSeq).toBe(2);
+    expect(log?.loaded).toBe(true);
+    const texts = (log?.turns ?? [])
+      .flatMap((turn) => turn.items)
+      .flatMap((item) => (item.kind === "message" ? [item.text] : []));
+    expect(texts).toEqual(["first page", "second page"]);
   });
 });
 

@@ -2198,10 +2198,12 @@ fn guest_event(event: Event) -> Option<Event> {
             thread_id,
             turn_id,
             item,
+            at,
         } => Some(Event::ItemCompleted {
             thread_id,
             turn_id,
             item: guest_item(item)?,
+            at,
         }),
         Event::ToolCall {
             thread_id,
@@ -2573,6 +2575,7 @@ mod tests {
                     item_id: "tc_patch".into(),
                     tool_call: file_change_tool(),
                 },
+                at: None,
             },
         ] {
             let projected = guest_event(event).expect("a tool call is shown");
@@ -2610,6 +2613,7 @@ mod tests {
             agent_id: None,
             title: "shared".into(),
             workspace_path: "/home/secret/work".into(),
+            project_path: None,
             branch: None,
             model: "fake-model".into(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,

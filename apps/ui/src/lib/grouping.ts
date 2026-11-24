@@ -4,6 +4,10 @@ import type { ThreadSummary } from "@/gen";
  * A project is a workspace folder on one host. Threads are grouped by that
  * pair only — the daemon carries both fields on every summary, so no extra
  * project registry is needed.
+ *
+ * A conversation imported from a linked worktree runs there, so its working
+ * folder stays the worktree; `project_path` names the checkout it belongs to,
+ * which is what the sidebar groups by.
  */
 export type ProjectGroup = {
   key: string;
@@ -12,8 +16,10 @@ export type ProjectGroup = {
   threads: ThreadSummary[];
 };
 
-export function projectKey(thread: Pick<ThreadSummary, "host" | "workspace_path">): string {
-  return `${thread.host}\u0000${thread.workspace_path}`;
+export function projectKey(
+  thread: Pick<ThreadSummary, "host" | "workspace_path" | "project_path">,
+): string {
+  return `${thread.host}\u0000${thread.project_path ?? thread.workspace_path}`;
 }
 
 export function projectName(workspacePath: string): string {

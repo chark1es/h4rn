@@ -6,12 +6,13 @@
 //! requests: Streamable HTTP allows a server to answer without a long-lived
 //! stream, so a restart of the daemon only invalidates tokens, not streams.
 //!
-//! JSON-RPC batches are accepted. Notifications return `202 Accepted` with no
+//! JSON-RPC carries one message per request (the 2025-11-25 Streamable HTTP
+//! transport dropped batches). Notifications return `202 Accepted` with no
 //! body. A malformed body returns a JSON-RPC parse error rather than an HTML
 //! error page, because harnesses parse the body.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -33,6 +34,9 @@ use crate::session::AuthorizedSession;
 /// How long a single `tools/call` may take before the hub returns an error.
 const TOOL_TIMEOUT: Duration = crate::upstream::DEFAULT_TOOL_TIMEOUT;
 
+/// Supplies the protected-resource metadata URL for a `401`, when OAuth is on.
+pub type ResourceMetadata = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Shared state for the MCP route.
 #[derive(Clone)]
 pub struct McpServerState {
@@ -40,6 +44,10 @@ pub struct McpServerState {
     pub hub: Arc<McpHub>,
     /// Cancellation tokens for in-flight tool calls, keyed by request id.
     inflight: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// The protected-resource metadata to name on a `401`, when this daemon
+    /// serves OAuth. The supplier reads the switch and the bound address when
+    /// the request is answered, so it follows both.
+    resource_metadata: Arc<RwLock<Option<ResourceMetadata>>>,
 }
 
 impl McpServerState {
@@ -48,7 +56,25 @@ impl McpServerState {
         Self {
             hub,
             inflight: Arc::new(Mutex::new(HashMap::new())),
+            resource_metadata: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Names the protected-resource metadata a `401` points at.
+    pub fn set_resource_metadata(&self, supplier: ResourceMetadata) {
+        *self
+            .resource_metadata
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(supplier);
+    }
+
+    /// The protected-resource metadata URL, when one is configured and live.
+    fn resource_metadata(&self) -> Option<String> {
+        self.resource_metadata
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|supplier| supplier())
     }
 
     /// Handles one Streamable-HTTP `POST /mcp` request.
@@ -100,12 +126,22 @@ fn rpc_error(status: StatusCode, id: Value, error: RpcErrorObject) -> Response {
         .into_response()
 }
 
-fn unauthorized(message: &str) -> Response {
-    rpc_error(
+fn unauthorized(message: &str, resource_metadata: Option<String>) -> Response {
+    let mut response = rpc_error(
         StatusCode::UNAUTHORIZED,
         Value::Null,
         RpcErrorObject::new(jsonrpc::INVALID_REQUEST, message),
-    )
+    );
+    // MCP's authorization spec: a `401` names the protected-resource metadata
+    // so a client that supports OAuth can discover where to sign in.
+    if let Some(metadata) = resource_metadata
+        && let Ok(value) = format!("Bearer resource_metadata=\"{metadata}\"").parse()
+    {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, value);
+    }
+    response
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -120,12 +156,15 @@ fn authorize(
     state: &McpServerState,
     headers: &HeaderMap,
 ) -> Result<AuthorizedSession, Box<Response>> {
-    let token =
-        bearer_token(headers).ok_or_else(|| Box::new(unauthorized("missing bearer token")))?;
-    let session = state
-        .hub
-        .authorize(token)
-        .ok_or_else(|| Box::new(unauthorized("the MCP token is invalid or expired")))?;
+    let metadata = state.resource_metadata();
+    let token = bearer_token(headers)
+        .ok_or_else(|| Box::new(unauthorized("missing bearer token", metadata.clone())))?;
+    let session = state.hub.authorize(token).ok_or_else(|| {
+        Box::new(unauthorized(
+            "the MCP token is invalid or expired",
+            metadata.clone(),
+        ))
+    })?;
     if let Some(header) = headers
         .get("mcp-session-id")
         .and_then(|value| value.to_str().ok())
@@ -159,32 +198,30 @@ async fn mcp_post(
             );
         }
     };
-    match value {
-        Value::Array(items) => {
-            let mut responses = Vec::new();
-            for item in items {
-                if let Some(response) = dispatch(&state, &session, item).await {
-                    responses.push(response.body);
-                }
+    if value.is_array() {
+        // The 2025-11-25 transport carries one JSON-RPC message per POST. A
+        // batch would run several tool calls for one authorization check and
+        // one rate-limit hit, so it is refused rather than half-supported.
+        return rpc_error(
+            StatusCode::BAD_REQUEST,
+            Value::Null,
+            RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                "h4rn accepts one JSON-RPC message per request",
+            ),
+        );
+    }
+    match dispatch(&state, &session, value).await {
+        Some(response) => {
+            let mut http_response = json_response(response.body);
+            if let Some(session_id) = response.session_id
+                && let Ok(value) = session_id.parse()
+            {
+                http_response.headers_mut().insert("mcp-session-id", value);
             }
-            if responses.is_empty() {
-                (StatusCode::ACCEPTED, "").into_response()
-            } else {
-                json_response(Value::Array(responses))
-            }
+            http_response
         }
-        value => match dispatch(&state, &session, value).await {
-            Some(response) => {
-                let mut http_response = json_response(response.body);
-                if let Some(session_id) = response.session_id
-                    && let Ok(value) = session_id.parse()
-                {
-                    http_response.headers_mut().insert("mcp-session-id", value);
-                }
-                http_response
-            }
-            None => (StatusCode::ACCEPTED, "").into_response(),
-        },
+        None => (StatusCode::ACCEPTED, "").into_response(),
     }
 }
 

@@ -152,4 +152,82 @@ describe("TurnBlock", () => {
       expect(markup).not.toContain("Retry");
     }
   });
+
+  it("never calls an imported reply live, even while the agent state is active", () => {
+    const turn: StreamTurn = {
+      ...userOnlyTurn("running"),
+      imported: true,
+      items: [
+        {
+          kind: "message",
+          itemId: "item_2",
+          role: "assistant",
+          text: "the reply imported from Claude Code",
+          attachments: [],
+          streaming: false,
+        },
+      ],
+    };
+    const markup = renderToStaticMarkup(
+      <TurnBlock
+        turn={turn}
+        threadId="thread_1"
+        summary={{ ...summary, tab: "working", agent_state: "thinking" }}
+        onReply={() => {}}
+        staleAt={Date.now()}
+      />,
+    );
+    expect(markup).not.toContain("· live");
+    expect(markup).not.toContain("Stream paused");
+  });
+
+  it("does not call a running turn live when the agent state is not active", () => {
+    const markup = renderToStaticMarkup(
+      <TurnBlock
+        turn={{
+          ...userOnlyTurn("running"),
+          items: [
+            ...userOnlyTurn("running").items,
+            {
+              kind: "message",
+              itemId: "item_2",
+              role: "assistant",
+              text: "a reply",
+              attachments: [],
+              streaming: false,
+            },
+          ],
+        }}
+        threadId="thread_1"
+        summary={{ ...summary, tab: "working", agent_state: "idle" }}
+        onReply={() => {}}
+      />,
+    );
+    expect(markup).not.toContain("· live");
+  });
+
+  it("keeps the live line for a turn the agent is working on", () => {
+    const markup = renderToStaticMarkup(
+      <TurnBlock
+        turn={{
+          ...userOnlyTurn("running"),
+          items: [
+            ...userOnlyTurn("running").items,
+            {
+              kind: "message",
+              itemId: "item_2",
+              role: "assistant",
+              text: "working on it",
+              attachments: [],
+              streaming: true,
+            },
+          ],
+        }}
+        threadId="thread_1"
+        summary={{ ...summary, tab: "working", agent_state: "thinking" }}
+        onReply={() => {}}
+      />,
+    );
+    expect(markup).toContain("· live");
+  });
 });

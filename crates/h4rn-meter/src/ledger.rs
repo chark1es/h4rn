@@ -10,8 +10,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
-    CostSource, HarnessKind, LimitSource, ResumeFailover, ResumeSchedule, ResumeState, ThreadId,
-    UsageProvenance,
+    CostSource, HarnessKind, LimitSource, ResumeFailover, ResumeSchedule, ResumeState, RuntimeMode,
+    ThreadId, UsageProvenance,
 };
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -395,11 +395,22 @@ impl MeterStore {
                 reason        TEXT NOT NULL,
                 prompt        TEXT NOT NULL,
                 failover_json TEXT,
-                last_error    TEXT
+                last_error    TEXT,
+                mode_ceiling  TEXT,
+                grant_json    TEXT
             )",
         )
         .execute(&self.pool)
         .await?;
+        // A database created before the ceiling was part of the schedule: a
+        // resume armed by the old build has no ceiling, which is exactly the
+        // state that build left behind.
+        self.ensure_column("meter_schedules", "mode_ceiling", "TEXT")
+            .await?;
+        // The grant that asked for the paused turn. A row armed before this
+        // column existed names no grant, so its resume runs as that build's did.
+        self.ensure_column("meter_schedules", "grant_json", "TEXT")
+            .await?;
 
         Ok(())
     }
@@ -607,8 +618,8 @@ impl MeterStore {
         sqlx::query(
             "INSERT INTO meter_schedules
              (schedule_id, thread_id, scheduled_at, resume_at, attempt, state, reason, prompt,
-              failover_json, last_error)
-             VALUES (?,?,?,?,?,?,?,?,?,?)
+              failover_json, last_error, mode_ceiling, grant_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(thread_id) DO UPDATE SET
                 schedule_id = excluded.schedule_id,
                 scheduled_at = excluded.scheduled_at,
@@ -618,7 +629,9 @@ impl MeterStore {
                 reason = excluded.reason,
                 prompt = excluded.prompt,
                 failover_json = excluded.failover_json,
-                last_error = excluded.last_error",
+                last_error = excluded.last_error,
+                mode_ceiling = excluded.mode_ceiling,
+                grant_json = excluded.grant_json",
         )
         .bind(&schedule.schedule_id)
         .bind(schedule.thread_id.as_str())
@@ -630,6 +643,14 @@ impl MeterStore {
         .bind(&schedule.prompt)
         .bind(failover)
         .bind(&schedule.last_error)
+        .bind(ceiling_json(schedule.mode_ceiling.as_ref())?)
+        .bind(
+            schedule
+                .grant
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        )
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -879,9 +900,25 @@ fn schedule_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<ResumeSchedule, St
         state: parse_state(&row.try_get::<String, _>("state")?)?,
         reason: row.try_get("reason")?,
         prompt: row.try_get("prompt")?,
+        mode_ceiling: row
+            .try_get::<Option<String>, _>("mode_ceiling")?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?,
+        grant: row
+            .try_get::<Option<String>, _>("grant_json")?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?,
         failover,
         last_error: row.try_get("last_error")?,
     })
+}
+
+/// Serializes a schedule's ceiling for storage.
+fn ceiling_json(ceiling: Option<&RuntimeMode>) -> Result<Option<String>, StoreError> {
+    ceiling
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(Into::into)
 }
 
 fn parse_time(value: &str) -> Result<DateTime<Utc>, StoreError> {
@@ -1140,6 +1177,12 @@ mod tests {
             state: ResumeState::Scheduled,
             reason: "reset".into(),
             prompt: "continue".into(),
+            mode_ceiling: Some(RuntimeMode::ApprovalRequired),
+            grant: Some(h4rn_protocol::WorkGrant {
+                client_id: "client-1".into(),
+                family: "family-1".into(),
+                ceiling: Some(RuntimeMode::ApprovalRequired),
+            }),
             failover: None,
             last_error: None,
         };

@@ -190,6 +190,13 @@ pub struct FakeHarness {
     starts_seen: Arc<AtomicUsize>,
     /// A test-only message: after the start gate, `start_session` fails.
     start_failure: Option<String>,
+    /// A test-only message: a startup asked to resume fails with it, while a
+    /// fresh startup succeeds. Models a harness that cannot find the session.
+    resume_failure: Option<String>,
+    /// A test-only message: a startup asked to resume starts and then dies
+    /// before it reports a session, the way a real adapter's bad `--resume`
+    /// fails after `start_session` returned `Ok`.
+    resume_death: Option<String>,
     /// How many startups fail before one succeeds; `None` fails every one.
     start_failure_budget: Option<usize>,
     /// Startups attempted so far, so a budget can count down.
@@ -205,6 +212,8 @@ pub struct FakeHarness {
     session_count: Option<SessionCount>,
     /// The settings each session started with, and every live switch applied.
     session_settings: Option<SessionSettings>,
+    /// The MCP endpoint and bearer token each session was started with.
+    session_mcp: Option<SessionMcp>,
     /// Model ids the fake session advertises, when a test asks for a catalogue.
     advertised_models: Option<Vec<String>>,
     /// The model a session reports it is running, when a test models an agent
@@ -447,6 +456,36 @@ impl SessionSettings {
     }
 }
 
+/// One session's MCP injection, as the adapter received it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpInjection {
+    /// The endpoint handed to the harness.
+    pub endpoint: Option<String>,
+    /// The bearer token, when the daemon minted one.
+    pub token: Option<String>,
+}
+
+/// A log of every session's MCP injection.
+#[derive(Clone, Debug, Default)]
+pub struct SessionMcp(Arc<Mutex<Vec<McpInjection>>>);
+
+impl SessionMcp {
+    /// Every injection, in startup order.
+    pub fn get(&self) -> Vec<McpInjection> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn note(&self, injection: McpInjection) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(injection);
+    }
+}
+
 /// A shared count of cancels a fake session was asked to send.
 ///
 /// A test reads it to prove a Stop either dropped the prompt or cancelled one
@@ -550,10 +589,13 @@ impl Default for FakeHarness {
             start_gate_after: None,
             starts_seen: Arc::new(AtomicUsize::new(0)),
             start_failure: None,
+            resume_failure: None,
+            resume_death: None,
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
             session_settings: None,
+            session_mcp: None,
             advertised_models: None,
             restored_model: None,
             default_models: Vec::new(),
@@ -736,6 +778,25 @@ impl FakeHarness {
         self
     }
 
+    /// Fails a startup that asks to resume, while a fresh startup succeeds.
+    ///
+    /// Models a harness that cannot find the saved session, so the daemon's
+    /// fallback to a handoff is what the test observes.
+    pub fn with_resume_failure(mut self, message: impl Into<String>) -> Self {
+        self.resume_failure = Some(message.into());
+        self
+    }
+
+    /// Starts a resume, then kills it before it reports a session.
+    ///
+    /// Models the real Claude Code adapter, whose `start_session` returns `Ok`
+    /// once the child is spawned: a bad `--resume` exits afterwards, so the
+    /// only report the daemon sees is the transport death.
+    pub fn with_resume_death(mut self, message: impl Into<String>) -> Self {
+        self.resume_death = Some(message.into());
+        self
+    }
+
     /// Records the model of every session this harness starts.
     pub fn with_session_models(mut self) -> (Self, SessionModels) {
         let models = SessionModels::default();
@@ -749,6 +810,17 @@ impl FakeHarness {
         let settings = SessionSettings::default();
         self.session_settings = Some(settings.clone());
         (self, settings)
+    }
+
+    /// Records the MCP endpoint and token every session is started with.
+    ///
+    /// The daemon mints a token per harness session and passes it through the
+    /// adapter; a test reads this to prove the injection happened and that the
+    /// token is bound to the thread (ADR-044).
+    pub fn with_mcp_injection(mut self) -> (Self, SessionMcp) {
+        let mcp = SessionMcp::default();
+        self.session_mcp = Some(mcp.clone());
+        (self, mcp)
     }
 
     /// A live session that refuses in-place setting changes.
@@ -1042,6 +1114,12 @@ impl Harness for FakeHarness {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(spec.model.clone());
         }
+        if let Some(mcp) = &self.session_mcp {
+            mcp.note(McpInjection {
+                endpoint: spec.mcp_endpoint.clone(),
+                token: spec.env_overrides.get(crate::ENV_MCP_AUTH_TOKEN).cloned(),
+            });
+        }
         if let Some(settings) = &self.session_settings {
             settings.note(SettingChange::Started {
                 model: spec.model.clone(),
@@ -1070,7 +1148,14 @@ impl Harness for FakeHarness {
                 });
             }
         }
-
+        if let Some(message) = &self.resume_failure
+            && spec.resume_id.is_some()
+        {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: message.clone(),
+            });
+        }
         let (sender, receiver): (EventSink, BoxStream<'static, HarnessEvent>) =
             match self.event_queue_capacity {
                 Some(capacity) => {
@@ -1086,9 +1171,28 @@ impl Harness for FakeHarness {
             .resume_id
             .clone()
             .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
-        sender
-            .send(HarnessEvent::SessionStarted { session_id })
-            .await;
+        let dies_on_start = self
+            .resume_death
+            .as_ref()
+            .filter(|_| spec.resume_id.is_some())
+            .cloned();
+        if let Some(message) = &dies_on_start {
+            // The adapter returned `Ok` and the agent then exited before it
+            // reported a session. Its stream carries only that death and then
+            // ends, exactly like a child that failed to resume.
+            sender
+                .send(HarnessEvent::TransportClosed {
+                    message: message.clone(),
+                    retryable: true,
+                    kind: TransportCloseKind::Exit,
+                    reset_at: None,
+                })
+                .await;
+        } else {
+            sender
+                .send(HarnessEvent::SessionStarted { session_id })
+                .await;
+        }
         let health = TransportHealth::new();
         if let Some(injector) = &self.event_injector {
             injector
@@ -1107,8 +1211,8 @@ impl Harness for FakeHarness {
             Some(scripts) => scripts.next_script(),
             None => self.script.clone().unwrap_or_default(),
         };
-        let scripted = session_scripts.is_some() || self.script.is_some();
-        if scripted {
+        let script = session_scripts.is_some() || self.script.is_some();
+        if script && dies_on_start.is_none() {
             for event in &initial {
                 sender.send(event.clone()).await;
             }
@@ -1126,7 +1230,11 @@ impl Harness for FakeHarness {
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
-            sender: Some(sender),
+            sender: if dies_on_start.is_some() {
+                None
+            } else {
+                Some(sender)
+            },
             receiver: Some(receiver),
             script: self.script.clone(),
             session_scripts,

@@ -109,6 +109,35 @@ pub enum RuntimeMode {
     FullAccess,
 }
 
+impl RuntimeMode {
+    /// How much autonomy the mode grants, for clamping.
+    ///
+    /// `Plan` writes nothing, so it sits at the same floor as
+    /// `ApprovalRequired`; the two differ in what the agent may *attempt*, not
+    /// in whether a write can happen unattended.
+    fn autonomy(self) -> u8 {
+        match self {
+            Self::ApprovalRequired | Self::Plan => 0,
+            Self::AutoAcceptEdits => 1,
+            Self::FullAccess => 2,
+        }
+    }
+
+    /// The stricter of `self` and `ceiling`.
+    ///
+    /// A message queued by an outside agent carries the most autonomy its grant
+    /// allows. The turn runs with the thread's own mode clamped to that: raising
+    /// the thread's mode afterwards can never lift the ceiling of a message that
+    /// was already queued.
+    pub fn clamped_to(self, ceiling: Self) -> Self {
+        if self.autonomy() <= ceiling.autonomy() {
+            self
+        } else {
+            ceiling
+        }
+    }
+}
+
 /// Whether to run the thread in an isolated worktree.
 ///
 /// `true` asks the daemon to generate a branch name, while a string names the
@@ -366,6 +395,14 @@ pub struct ThreadSummary {
     pub title: String,
     /// Workspace path on the host.
     pub workspace_path: String,
+    /// Checkout this thread belongs to for grouping, when it differs from the
+    /// workspace it runs in.
+    ///
+    /// A conversation imported from a linked worktree still runs in that
+    /// worktree, but it belongs beside the main checkout in the sidebar.
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_path: Option<String>,
     /// Current git branch of the workspace, when it has one.
     #[serde(default)]
     #[ts(optional)]
@@ -738,6 +775,7 @@ mod tests {
             agent_id: None,
             title: "usage limit".into(),
             workspace_path: "/tmp/work".into(),
+            project_path: None,
             branch: Some("h4rn/usage-limit".into()),
             model: "claude-sonnet-5".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,

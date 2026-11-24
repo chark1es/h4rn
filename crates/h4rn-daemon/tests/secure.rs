@@ -19,9 +19,9 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, FsOmitted,
-    HarnessKind, HostId, PairScope, ProjectSource, ProtoError, ProtoErrorCode, ResponseBody,
-    RuntimeMode, ScheduleDestination, ScheduleDraft, ScheduleSpec, ServerFrame, ThreadSummary,
-    TransportPathKind,
+    HarnessKind, HostId, MessageRole, PairScope, ProjectSource, ProtoError, ProtoErrorCode,
+    ResponseBody, RuntimeMode, ScheduleDestination, ScheduleDraft, ScheduleSpec, ServerFrame,
+    ThreadSummary, TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -140,7 +140,12 @@ struct SecureClient {
     next_id: u64,
     pending: VecDeque<(u64, Event)>,
     ticket: Option<h4rn_transport::session::ResumeTicket>,
+    /// A text frame being joined from `chunk` envelopes.
+    chunk: Option<(u32, String)>,
 }
+
+/// Characters per chunked client frame, matching the browser client.
+const CLIENT_CHUNK_CHARS: usize = 96 * 1024;
 
 /// One frame the daemon sent over the secure session.
 #[derive(Debug)]
@@ -212,6 +217,7 @@ impl SecureClient {
             next_id: 1,
             pending: VecDeque::new(),
             ticket,
+            chunk: None,
         }
     }
 
@@ -220,33 +226,70 @@ impl SecureClient {
         self.next_id += 1;
         let frame = ClientFrame { id, body };
         let text = serde_json::to_string(&frame).expect("serialise frame");
-        self.client
-            .send(h4rn_transport::AppFrame::text(text))
-            .await
-            .expect("send secure frame");
+        // The browser client splits an oversized request the same way; the
+        // daemon joins the pieces before it handles the frame.
+        if text.len() <= CLIENT_CHUNK_CHARS {
+            self.client
+                .send(h4rn_transport::AppFrame::text(text))
+                .await
+                .expect("send secure frame");
+            return id;
+        }
+        let total = text.len().div_ceil(CLIENT_CHUNK_CHARS);
+        for index in 0..total {
+            let start = index * CLIENT_CHUNK_CHARS;
+            let end = (start + CLIENT_CHUNK_CHARS).min(text.len());
+            let envelope = serde_json::json!({
+                "id": id,
+                "chunk": {
+                    "index": index,
+                    "last": index + 1 == total,
+                    "data": &text[start..end],
+                },
+            })
+            .to_string();
+            assert!(
+                envelope.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+                "a client chunk must fit one transport frame"
+            );
+            self.client
+                .send(h4rn_transport::AppFrame::text(envelope))
+                .await
+                .expect("send secure chunk");
+        }
         id
     }
 
     async fn read_frame(&mut self) -> ServerFrame {
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(10), self.client.recv())
-                .await
-                .expect("timed out waiting for a secure frame");
-            match event {
-                Some(ClientEvent::Frame(frame)) => {
-                    let text = frame.as_text().expect("text frame");
-                    return serde_json::from_str(text).expect("parse ServerFrame");
-                }
-                Some(ClientEvent::Closed { reason }) => {
-                    panic!("secure session closed while waiting: {reason}")
-                }
-                Some(ClientEvent::Error { message, .. }) => {
-                    panic!("secure transport error while waiting: {message}")
-                }
-                Some(ClientEvent::Status(_) | ClientEvent::Established(_)) => {}
-                None => panic!("secure client stopped while waiting"),
+            let text = self.read_raw_text().await;
+            if let Some(joined) = self.join_chunk(&text) {
+                return serde_json::from_str(&joined).expect("parse joined ServerFrame");
             }
         }
+    }
+
+    /// Absorbs one raw text frame; returns the joined text once a chunked
+    /// frame is complete, or `None` while pieces are still arriving or when
+    /// the frame was an ordinary one.
+    fn join_chunk(&mut self, text: &str) -> Option<String> {
+        let value: serde_json::Value = serde_json::from_str(text).expect("frame JSON");
+        if value.get("kind").and_then(|kind| kind.as_str()) != Some("chunk") {
+            return Some(text.to_owned());
+        }
+        let index = value["index"].as_u64().expect("chunk index") as u32;
+        let data = value["data"].as_str().expect("chunk data");
+        let last = value["last"].as_bool().expect("chunk last");
+        if index == 0 {
+            self.chunk = Some((1, data.to_owned()));
+        } else if let Some((next, buffer)) = self.chunk.as_mut() {
+            assert_eq!(index, *next, "chunks arrive in order");
+            buffer.push_str(data);
+            *next += 1;
+        } else {
+            panic!("a chunk arrived without its first piece");
+        }
+        last.then(|| self.chunk.take().expect("chunk joined").1)
     }
 
     /// Reads the next frame without assuming it is text, for binary paths.
@@ -356,13 +399,27 @@ impl SecureClient {
     ) -> (Vec<String>, Result<ResponseBody, ProtoError>) {
         let id = self.send(body).await;
         let mut seen = Vec::new();
+        let mut joined: Option<String> = None;
         loop {
             let text = self.read_raw_text().await;
             seen.push(text.clone());
+            let is_chunk = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .is_some_and(|value| {
+                    value.get("kind").and_then(|kind| kind.as_str()) == Some("chunk")
+                });
+            if is_chunk {
+                if let Some(assembled) = self.join_chunk(&text) {
+                    joined = Some(assembled);
+                } else {
+                    continue;
+                }
+            }
+            let candidate = joined.take().unwrap_or_else(|| text.clone());
             if let Ok(ServerFrame::Response {
                 id: response_id,
                 result,
-            }) = serde_json::from_str::<ServerFrame>(&text)
+            }) = serde_json::from_str::<ServerFrame>(&candidate)
                 && response_id == id
             {
                 return (seen, result);
@@ -446,6 +503,130 @@ async fn secure_transport_creates_a_thread() {
     let summary = create_thread_over_secure().await;
     assert_eq!(summary.harness, HarnessKind::ClaudeCode);
     assert!(!summary.thread_id.as_str().is_empty());
+}
+
+#[tokio::test]
+async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
+    // The paired transport refuses a frame over 512 KiB. A long prompt must
+    // still be accepted, journaled once and replayed in pages whose chunks
+    // each fit one frame, with its text unchanged.
+    let client_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(allowed),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = match client
+        .request(ClientRequest::ListHosts)
+        .await
+        .expect("hosts")
+    {
+        ResponseBody::Hosts { hosts } => hosts[0].host_id.clone(),
+        other => panic!("unexpected host response: {other:?}"),
+    };
+    let thread_id = match client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: "/tmp/h4rn-secure-workspace".into(),
+            model: "fake-model".into(),
+            prompt: "start".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+        })
+        .await
+        .expect("create thread")
+    {
+        ResponseBody::ThreadCreated { thread_id, .. } => thread_id,
+        other => panic!("unexpected CreateThread response: {other:?}"),
+    };
+
+    let large = "L".repeat(600 * 1024);
+    let mut prompts = vec![large.clone()];
+    for filler in ["m", "n", "o"] {
+        prompts.push(filler.repeat(100 * 1024));
+    }
+    for text in &prompts {
+        let accepted = client
+            .request(ClientRequest::SendMessage {
+                thread_id: thread_id.clone(),
+                text: text.clone(),
+                attachments: Vec::new(),
+            })
+            .await;
+        assert!(
+            matches!(accepted, Ok(ResponseBody::MessageAccepted { .. })),
+            "the paired path accepts a long message: {accepted:?}"
+        );
+    }
+
+    let mut since = 0;
+    let mut texts = Vec::new();
+    let mut saw_more = false;
+    loop {
+        let (frames, result) = client
+            .request_frames(ClientRequest::GetThread {
+                thread_id: thread_id.clone(),
+                since_seq: since,
+            })
+            .await;
+        for frame in &frames {
+            assert!(
+                frame.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+                "a replayed frame is {} bytes, over the transport limit",
+                frame.len()
+            );
+        }
+        match result {
+            Ok(ResponseBody::Thread {
+                events,
+                next_seq,
+                more,
+                ..
+            }) => {
+                for entry in events {
+                    if let Event::ItemCompleted {
+                        item:
+                            h4rn_protocol::Item::Message {
+                                role: MessageRole::User,
+                                text,
+                                ..
+                            },
+                        ..
+                    } = entry.event
+                    {
+                        texts.push(text);
+                    }
+                }
+                since = next_seq;
+                saw_more |= more;
+                if !more {
+                    break;
+                }
+            }
+            other => panic!("unexpected GetThread answer: {other:?}"),
+        }
+    }
+    assert!(saw_more, "the replay was paged");
+    assert_eq!(
+        texts.iter().filter(|text| **text == large).count(),
+        1,
+        "the long prompt is journaled once and replayed whole"
+    );
+    for text in prompts.iter().skip(1) {
+        assert!(
+            texts.iter().any(|candidate| candidate == text),
+            "every accepted prompt is replayed whole"
+        );
+    }
+    client.close().await;
+    daemon.stop().await;
 }
 
 #[tokio::test]
@@ -565,6 +746,7 @@ async fn a_resumed_path_reattaches_without_forking_the_session() {
         next_id: 1,
         pending: VecDeque::new(),
         ticket: resumed_ticket,
+        chunk: None,
     };
     resumed.hello().await;
     resumed.close().await;

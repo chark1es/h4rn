@@ -102,6 +102,8 @@ pub struct AppState {
     pub proxy: Arc<h4rn_proxy::ProxyService>,
     /// The daemon-owned MCP hub (ADR-006).
     pub mcp: Arc<McpService>,
+    /// Outside-agent OAuth and its MCP endpoint (ADR-046).
+    pub outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Durable metering, limits and auto-resume (ADR-024).
     pub meter: Arc<h4rn_meter::MeterHub>,
     /// Harness CLI versions and updates (ADR-043).
@@ -110,6 +112,8 @@ pub struct AppState {
     pub acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     /// Registered sidebar projects.
     pub projects: Arc<crate::projects::ProjectService>,
+    /// Discovery and import of other harnesses' saved conversations.
+    pub import: Arc<crate::import::ImportService>,
     /// Title generation: coding-agent CLI or a configured text generator.
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// Guest links and messages waiting for the owner (ADR-044).
@@ -123,12 +127,17 @@ pub struct AppState {
 /// Which socket accepted a request.
 ///
 /// Routing is explicit per listener: a webhook path is a bearer secret, so only
-/// the loopback bind and binds the operator named carry it.
+/// the binds the operator named carry it; OAuth and `/mcp` carry plaintext
+/// bearer credentials, so only a socket bound to loopback carries them; a
+/// guest link is a bearer token in a URL, so its direct routes exist only where
+/// the bound address can answer this machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ListenerKind {
-    /// The primary bind (`--bind`).
-    Primary,
-    /// An extra address the operator named (`--extra-bind`).
+    /// A socket this machine reaches as loopback: the primary `--bind` when its
+    /// address is loopback.
+    Loopback,
+    /// An address the operator named that is not loopback: an extra bind, or a
+    /// `--bind` to the wildcard or a LAN address.
     ExtraBind,
     /// The address discovered on the tailnet by Tailscale auto mode.
     Tailnet,
@@ -137,37 +146,111 @@ pub enum ListenerKind {
 }
 
 impl ListenerKind {
+    /// The kind of an operator-named bind, from the address it really has.
+    ///
+    /// The flag cannot say this on its own: `--bind 0.0.0.0:47800` is a
+    /// wildcard socket, not a loopback one, and OAuth plus `/mcp` carry
+    /// plaintext bearer credentials. Only a socket whose bound address is
+    /// loopback serves them.
+    pub fn for_bind(addr: std::net::SocketAddr) -> Self {
+        if addr.ip().is_loopback() {
+            Self::Loopback
+        } else {
+            Self::ExtraBind
+        }
+    }
+
     /// Whether this listener serves `/webhooks/{secret}`.
     ///
-    /// Only the primary bind and an explicitly configured extra bind do. The
-    /// tailnet address and the LAN listener carry the encrypted session routes
-    /// only, so a webhook secret never leaves the listeners the operator chose.
+    /// Only the binds the operator named do. The tailnet address and the LAN
+    /// listener carry the encrypted session routes only, so a webhook secret
+    /// never leaves the listeners the operator chose.
     pub fn serves_webhooks(self) -> bool {
-        matches!(self, Self::Primary | Self::ExtraBind)
+        matches!(self, Self::Loopback | Self::ExtraBind)
     }
 
     /// The router this listener serves.
     ///
-    /// Which guest routes exist is decided from the address the listener
-    /// actually bound, not from the flag that created it: `--bind 0.0.0.0` is
-    /// still the primary listener, but it is not a loopback address.
+    /// Every decision comes from the address the listener actually bound, not
+    /// from the flag that created it: `--bind 0.0.0.0` is still the primary
+    /// listener, but it is not a loopback address, so [`for_bind`] makes it an
+    /// `ExtraBind` and it serves no OAuth. `/mcp` is mounted there behind the
+    /// loopback guard, so a harness on this machine keeps its tools while a
+    /// network peer is refused. [`operator_router`] still mounts the direct
+    /// guest routes for a wildcard bind, because its loopback connection is the
+    /// same socket.
+    ///
+    /// [`for_bind`]: ListenerKind::for_bind
     pub fn router(self, state: AppState, bound: SocketAddr) -> Router {
         match self {
-            Self::Primary | Self::ExtraBind => operator_router(state, bound),
+            Self::Loopback => router(state),
+            Self::ExtraBind => operator_router(state, bound),
             Self::Tailnet => core_router(state),
             Self::NetworkAccess => network_router(state),
         }
     }
 }
 
-/// Builds the router for a listener the operator chose.
+/// Builds the daemon router served by the loopback listener.
+///
+/// This is the router that carries OAuth, `/mcp` and the direct guest routes:
+/// a redirect that finishes on `localhost` is the only one the daemon admits,
+/// the MCP endpoint carries bearer tokens, and a guest link is a bearer token
+/// in a URL. An operator-named bind that is not loopback serves the routes that
+/// are safe there (liveness, the typed socket, webhooks and, through a
+/// loopback connection, the guest page) through [`operator_router`]; a tailnet
+/// or LAN listener serves even less.
+///
+/// `/secure` is always registered so a remote client gets a clear "not enabled"
+/// response instead of a 404, while plain WebSocket access stays loopback-only
+/// (ADR-009).
+pub fn router(state: AppState) -> Router {
+    let outside = Arc::clone(&state.outside);
+    let mcp = mcp_router(state.clone());
+    core_routes()
+        .route("/webhooks/{secret}", post(webhook_post))
+        .merge(guest_router())
+        .with_state(state)
+        .merge(mcp)
+        .merge(crate::mcp_server::router(outside))
+}
+
+/// The `/mcp` route every loopback-serving listener mounts.
+///
+/// It carries bearer tokens for harness sessions and for outside agents, so it
+/// is guarded like the OAuth routes: only this daemon's own page and a loopback
+/// peer may reach it. The operator router mounts this too, so a wildcard or LAN
+/// bind still lets harness sessions on this machine reach their tools while a
+/// peer from the network is refused.
+fn mcp_router(state: AppState) -> Router {
+    let outside = Arc::clone(&state.outside);
+    Router::new()
+        .route(
+            "/mcp",
+            get(mcp_http_get)
+                .post(mcp_http_post)
+                .delete(mcp_http_delete),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&outside),
+            crate::mcp_server::http::loopback_guard,
+        ))
+        .with_state(state)
+}
+
+/// The router an operator-named bind that is not loopback serves.
 ///
 /// It carries the webhook endpoint because the operator chose where it
-/// listens. `/secure` is always registered so a remote client gets a clear
-/// "not enabled" response instead of a 404, while plain WebSocket access stays
-/// loopback-only (ADR-009). Direct guest routes are mounted only where the
-/// bound address can answer this machine: loopback, or the wildcard address,
-/// which still accepts a loopback connection.
+/// listens, and `/mcp` behind the loopback guard so a harness session on this
+/// machine keeps its tools when the daemon is bound to the wildcard or a LAN
+/// address. It never carries OAuth: the redirect and the authorization store
+/// stay on the loopback listener. `/secure` is always registered so a remote
+/// client gets a clear "not enabled" response instead of a 404, while plain
+/// WebSocket access stays loopback-only (ADR-009). Direct guest routes are
+/// mounted only where the bound address can answer this machine: the wildcard
+/// address, whose loopback connection is the same socket. The guest handlers
+/// repeat the check on the peer address, so a wildcard bind still refuses a LAN
+/// peer.
 fn operator_router(state: AppState, bound: SocketAddr) -> Router {
     let app = core_routes().route("/webhooks/{secret}", post(webhook_post));
     let app = if serves_direct_guest(bound) {
@@ -175,7 +258,7 @@ fn operator_router(state: AppState, bound: SocketAddr) -> Router {
     } else {
         app
     };
-    app.with_state(state)
+    app.with_state(state.clone()).merge(mcp_router(state))
 }
 
 /// Whether a listener bound to `bound` may serve the direct guest routes.
@@ -199,25 +282,24 @@ fn core_router(state: AppState) -> Router {
 }
 
 /// The route table before a state is attached.
+///
+/// OAuth and `/mcp` are added by [`router`] only, so a listener that should not
+/// serve them cannot accidentally get them.
 fn core_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
         .route("/secure", get(secure_handler))
         .route("/secure-mcp", get(secure_mcp_handler))
-        .route(
-            "/mcp",
-            get(mcp_http_get)
-                .post(mcp_http_post)
-                .delete(mcp_http_delete),
-        )
 }
 
 /// Router for the network listener: liveness and the encrypted routes.
 ///
 /// Plaintext `/ws` is deliberately absent, so a device on the LAN cannot open
 /// an unencrypted session even if it learns the access token. `/mcp` is absent
-/// too: the hub endpoint carries a bearer token and stays loopback-only.
+/// too: the hub endpoint carries a bearer token and stays loopback-only, and so
+/// do the OAuth routes, because a redirect that finishes on `localhost` is the
+/// only one the daemon admits.
 ///
 /// Guest routes are absent for the same reason a plaintext `/ws` is: a guest
 /// link is a bearer token in a URL, and serving it over a LAN listener would
@@ -253,14 +335,23 @@ fn guest_router() -> Router<AppState> {
 
 /// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
 async fn mcp_http_post(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return state.outside.handle_mcp(headers, body).await;
+    }
     crate::mcp::http_post(state.mcp.http_state(), headers, body).await
 }
 
-async fn mcp_http_get(State(state): State<AppState>) -> Response {
+async fn mcp_http_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return crate::mcp_server::http::outside_get(&state.outside, headers).await;
+    }
     crate::mcp::http_get(state.mcp.http_state()).await
 }
 
 async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return crate::mcp_server::http::outside_delete(&state.outside, headers).await;
+    }
     crate::mcp::http_delete(state.mcp.http_state(), headers).await
 }
 
@@ -933,6 +1024,8 @@ struct Connection {
     origin: SessionOrigin,
     /// One filesystem watcher subscription per requested workspace.
     watches: HashMap<String, JoinHandle<()>>,
+    /// Client frames being reassembled from chunks, by request id.
+    chunks: HashMap<u64, ChunkAssembly>,
     /// Set when this connection must be dropped with a resume hint.
     overflowed: Arc<AtomicBool>,
     /// Wakes the writer loop when a forwarder overflows this connection.
@@ -1062,6 +1155,7 @@ where
         Arc::clone(&overflowed),
         Arc::clone(&notify),
         Arc::clone(&last_seq),
+        origin.is_remote(),
     ));
 
     let viewer_id = state.terminals.next_viewer_id();
@@ -1076,6 +1170,7 @@ where
         tx: tx.clone(),
         origin,
         watches: HashMap::new(),
+        chunks: HashMap::new(),
         overflowed: Arc::clone(&overflowed),
         notify: Arc::clone(&notify),
     };
@@ -1160,6 +1255,63 @@ impl Connection {
         }
     }
     async fn handle_text(&mut self, text: &str) -> Option<String> {
+        if let Some(chunk) = parse_chunk_frame(text) {
+            let id = chunk.id;
+            return match self.accept_chunk(chunk) {
+                Ok(Some(assembled)) => self.handle_frame(&assembled).await,
+                Ok(None) => None,
+                Err(error) => Some(error_frame(id, error)),
+            };
+        }
+        self.handle_frame(text).await
+    }
+
+    /// Adds one piece of a chunked client frame, and returns the joined frame
+    /// text once its last piece arrives.
+    fn accept_chunk(&mut self, frame: ChunkFrame) -> Result<Option<String>, ProtoError> {
+        let part = frame.chunk;
+        if part.index as usize >= MAX_CHUNKS {
+            self.chunks.remove(&frame.id);
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "a chunked frame had too many pieces",
+                "Send fewer, larger chunks",
+            ));
+        }
+        if !self.chunks.contains_key(&frame.id) && self.chunks.len() >= MAX_PENDING_CHUNKS {
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "too many chunked frames are waiting on this connection",
+                "Finish one request before starting another",
+            ));
+        }
+        let entry = self.chunks.entry(frame.id).or_default();
+        if part.index != entry.next {
+            self.chunks.remove(&frame.id);
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "chunked frame pieces arrived out of order",
+                "Send the pieces in order on one connection",
+            ));
+        }
+        if entry.text.len().saturating_add(part.data.len()) > MAX_CHUNKED_FRAME_BYTES {
+            self.chunks.remove(&frame.id);
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "a chunked frame was larger than this daemon accepts",
+                "Send a smaller request",
+            ));
+        }
+        entry.text.push_str(&part.data);
+        entry.next += 1;
+        if !part.last {
+            return Ok(None);
+        }
+        let assembled = self.chunks.remove(&frame.id).map(|entry| entry.text);
+        Ok(assembled)
+    }
+
+    async fn handle_frame(&mut self, text: &str) -> Option<String> {
         let frame: ClientFrame = match serde_json::from_str(text) {
             Ok(frame) => frame,
             Err(error) => {
@@ -1348,17 +1500,27 @@ impl Connection {
                     .manager
                     .get_thread(&thread_id, since_seq)
                     .await
-                    .map(|snapshot| ResponseBody::Thread {
-                        summary: snapshot.summary,
-                        events: snapshot
-                            .events
-                            .into_iter()
-                            .map(|event| SeqEvent {
-                                seq: event.seq,
-                                event: event.event,
-                            })
-                            .collect(),
-                        next_seq: snapshot.next_seq,
+                    .map(|snapshot| {
+                        // A paired transport refuses a frame over 512 KiB and
+                        // closes the session. A long replay therefore comes in
+                        // pages the client asks for again; a single event that
+                        // is itself larger is carried whole in its own page and
+                        // split into wire chunks on the way out.
+                        let (events, more) =
+                            page_thread_events(snapshot.events, self.frame_limit().is_some());
+                        let next_seq = events.last().map(|event| event.seq).unwrap_or(since_seq);
+                        ResponseBody::Thread {
+                            summary: snapshot.summary,
+                            events: events
+                                .into_iter()
+                                .map(|event| SeqEvent {
+                                    seq: event.seq,
+                                    event: event.event,
+                                })
+                                .collect(),
+                            next_seq,
+                            more,
+                        }
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
                 ClientRequest::CreateThread {
@@ -2269,29 +2431,42 @@ async fn writer_loop<S>(
     overflowed: Arc<AtomicBool>,
     notify: Arc<Notify>,
     last_seq: Arc<AtomicU64>,
+    chunked: bool,
 ) where
     S: Sink<Message> + Unpin + Send + 'static,
 {
-    loop {
+    'writer: loop {
         tokio::select! {
             biased;
             _ = notify.notified(), if overflowed.load(Ordering::Relaxed) => {
                 let hint = resume_hint(last_seq.load(Ordering::Relaxed));
-                let _ = tokio::time::timeout(WRITE_TIMEOUT, sink.send(Message::Text(hint.into()))).await;
+                for frame in chunked_frames(&hint, WIRE_CHUNK_BYTES) {
+                    let _ = tokio::time::timeout(WRITE_TIMEOUT, sink.send(Message::Text(frame.into()))).await;
+                }
                 break;
             }
             message = rx.recv() => {
                 let Some(message) = message else { break; };
                 match message {
                     Outbound::Text(text) => {
-                        let sent = tokio::time::timeout(
-                            WRITE_TIMEOUT,
-                            sink.send(Message::Text(text.into())),
-                        )
-                        .await;
-                        if sent.is_err() {
-                            tracing::warn!("client write timed out; closing the connection");
-                            break;
+                        // A paired transport closes on a frame over its limit.
+                        // Split only there; the plain loopback path keeps
+                        // delivering its listings and reads whole.
+                        let frames = if chunked {
+                            chunked_frames(&text, WIRE_CHUNK_BYTES)
+                        } else {
+                            vec![text]
+                        };
+                        for frame in frames {
+                            let sent = tokio::time::timeout(
+                                WRITE_TIMEOUT,
+                                sink.send(Message::Text(frame.into())),
+                            )
+                            .await;
+                            if sent.is_err() {
+                                tracing::warn!("client write timed out; closing the connection");
+                                break 'writer;
+                            }
                         }
                     }
                     Outbound::Binary(bytes) => {
@@ -2345,6 +2520,135 @@ where
             )
         })?
         .map_err(FsError::into_proto)
+}
+
+/// Bytes of thread events sent in one page on a framed session.
+///
+/// The transport's frame is 512 KiB; the summary, the response envelope and
+/// the deliberate headroom stay well inside the rest.
+const THREAD_PAGE_BYTES: usize = 256 * 1024;
+
+/// Bytes of one serialized frame sent as a chunk on a framed session.
+///
+/// A chunk's `data` is JSON-escaped into the chunk frame, which can double its
+/// size at worst, so 192 KiB stays under half of the transport's 512 KiB limit.
+const WIRE_CHUNK_BYTES: usize = 192 * 1024;
+
+/// Pieces in one chunked client frame.
+const MAX_CHUNKS: usize = 128;
+
+/// Largest client frame accepted when joined from chunks.
+const MAX_CHUNKED_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// Client requests that may be mid-chunk on one connection.
+const MAX_PENDING_CHUNKS: usize = 4;
+
+/// A piece of a client frame too large for one transport frame.
+///
+/// This is a wire envelope around the exact bytes of the original
+/// [`h4rn_protocol::ClientFrame`], not a protocol request, so an older daemon
+/// and every typed client stay unchanged.
+#[derive(Debug, serde::Deserialize)]
+struct ChunkFrame {
+    id: u64,
+    chunk: ChunkPart,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ChunkPart {
+    index: u32,
+    last: bool,
+    data: String,
+}
+
+/// A frame being joined from chunks on one connection.
+#[derive(Default)]
+struct ChunkAssembly {
+    /// Next expected piece.
+    next: u32,
+    /// Pieces joined so far.
+    text: String,
+}
+
+/// Reads one chunk envelope, or `None` for an ordinary client frame.
+fn parse_chunk_frame(text: &str) -> Option<ChunkFrame> {
+    // The `chunk` key is what makes this an envelope; a normal ClientFrame
+    // always carries a tagged `body` instead.
+    if !text.contains("\"chunk\"") {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+/// One page of a thread replay, and whether another page follows.
+///
+/// A single oversized event is never dropped or cut: it is included whole even
+/// when it alone passes the budget, and the writer splits its wire frame.
+fn page_thread_events(
+    events: Vec<crate::journal::WireEvent>,
+    framed: bool,
+) -> (Vec<crate::journal::WireEvent>, bool) {
+    if !framed {
+        return (events, false);
+    }
+    let mut used: usize = 0;
+    let mut cut = events.len();
+    for (index, event) in events.iter().enumerate() {
+        let size = serde_json::to_string(&event.event)
+            .map(|text| text.len())
+            .unwrap_or_default();
+        if index > 0 && used.saturating_add(size) > THREAD_PAGE_BYTES {
+            cut = index;
+            break;
+        }
+        used = used.saturating_add(size);
+    }
+    let more = cut < events.len();
+    let mut events = events;
+    events.truncate(cut);
+    (events, more)
+}
+
+/// Splits one serialized frame into the pieces a framed transport may carry.
+///
+/// The receiver joins the pieces and parses the original frame, so no text is
+/// lost or altered. A frame that already fits is returned unchanged, and every
+/// piece is a complete JSON frame of its own.
+fn chunked_frames(text: &str, limit: usize) -> Vec<String> {
+    let size = text.len();
+    if size <= limit {
+        return vec![text.to_owned()];
+    }
+    let chunks = size.div_ceil(limit);
+    let mut frames = Vec::with_capacity(chunks);
+    let mut start = 0;
+    let mut index = 0;
+    while start < size {
+        let mut end = (start + limit).min(size);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        // A one-character chunk is still bounded by the chunk budget; keeping
+        // it separate stops a loop that never advances on a tiny limit.
+        if end == start {
+            end = text[start..]
+                .char_indices()
+                .nth(1)
+                .map(|(offset, _)| start + offset)
+                .unwrap_or(size);
+        }
+        let frame = serde_json::json!({
+            "kind": "chunk",
+            "index": index,
+            "last": end == size,
+            "data": &text[start..end],
+        })
+        .to_string();
+        frames.push(frame);
+        start = end;
+        index += 1;
+    }
+    frames
 }
 
 fn response_frame(id: u64, body: ResponseBody, frame_limit: Option<usize>) -> String {
@@ -2498,8 +2802,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_loopback_bind_serves_oauth_and_mcp() {
+        let loopback: std::net::SocketAddr = "127.0.0.1:47800".parse().expect("addr");
+        let wildcard: std::net::SocketAddr = "0.0.0.0:47800".parse().expect("addr");
+        let lan: std::net::SocketAddr = "192.168.1.20:47800".parse().expect("addr");
+        assert!(matches!(
+            ListenerKind::for_bind(loopback),
+            ListenerKind::Loopback
+        ));
+        assert!(matches!(
+            ListenerKind::for_bind(wildcard),
+            ListenerKind::ExtraBind
+        ));
+        assert!(matches!(
+            ListenerKind::for_bind(lan),
+            ListenerKind::ExtraBind
+        ));
+    }
+
+    #[test]
     fn webhook_routes_are_exposed_only_on_operator_chosen_listeners() {
-        assert!(ListenerKind::Primary.serves_webhooks());
+        assert!(ListenerKind::Loopback.serves_webhooks());
         assert!(ListenerKind::ExtraBind.serves_webhooks());
         assert!(!ListenerKind::Tailnet.serves_webhooks());
         assert!(!ListenerKind::NetworkAccess.serves_webhooks());
@@ -2547,6 +2870,7 @@ mod tests {
             agent_id: None,
             title,
             workspace_path: "/tmp/work".into(),
+            project_path: None,
             branch: None,
             model: "test-model".into(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
@@ -2570,6 +2894,74 @@ mod tests {
             resume_at: None,
             limit: None,
         }
+    }
+
+    #[test]
+    fn a_thread_replay_is_paged_on_a_framed_session() {
+        use h4rn_protocol::{MessageRole, ThreadId, TurnId};
+
+        let thread_id = ThreadId::new("th_page");
+        let event = |seq: u64| crate::journal::WireEvent {
+            seq,
+            thread_id: thread_id.clone(),
+            event: Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: TurnId::new("turn_page"),
+                item: h4rn_protocol::Item::Message {
+                    item_id: format!("item-{seq}"),
+                    role: MessageRole::User,
+                    text: "p".repeat(200 * 1024),
+                    attachments: Vec::new(),
+                },
+                at: None,
+            },
+        };
+
+        let (first, more) = page_thread_events(vec![event(1), event(2), event(3)], true);
+        assert_eq!(first.len(), 1, "one 200 KiB event fits a 256 KiB page");
+        assert_eq!(first[0].seq, 1);
+        assert!(more, "the rest follows in another page");
+
+        let (rest, more) = page_thread_events(vec![event(2), event(3)], true);
+        assert_eq!(rest.len(), 1);
+        assert!(more);
+
+        // A single event over the budget is sent whole, never cut.
+        let (one, more) = page_thread_events(vec![event(4)], true);
+        assert_eq!(one.len(), 1);
+        assert!(!more);
+
+        // The plain loopback path keeps delivering the whole replay at once.
+        let (all, more) = page_thread_events(vec![event(5), event(6)], false);
+        assert_eq!(all.len(), 2);
+        assert!(!more);
+    }
+
+    #[test]
+    fn an_oversized_frame_is_split_into_reassemblable_chunks() {
+        // Quotes escape to two bytes each, and the emoji straddles the byte
+        // budget, so the split must respect character boundaries.
+        let text = format!("{}{}", "\"".repeat(300 * 1024), "🙂".repeat(1000));
+        let frames = chunked_frames(&text, WIRE_CHUNK_BYTES);
+        assert!(frames.len() > 1);
+        let mut joined = String::new();
+        for (index, frame) in frames.iter().enumerate() {
+            assert!(
+                frame.len() <= WIRE_CHUNK_BYTES * 2 + 256,
+                "chunk {} is {} bytes",
+                index,
+                frame.len()
+            );
+            let value: serde_json::Value = serde_json::from_str(frame).expect("chunk JSON");
+            assert_eq!(value["kind"], "chunk");
+            assert_eq!(value["index"], index);
+            assert_eq!(value["last"], index + 1 == frames.len());
+            joined.push_str(value["data"].as_str().expect("chunk data"));
+        }
+        assert_eq!(joined, text, "joining the chunks restores the frame");
+
+        // A frame that already fits is not wrapped.
+        assert_eq!(chunked_frames("small", WIRE_CHUNK_BYTES), vec!["small"]);
     }
 
     #[test]

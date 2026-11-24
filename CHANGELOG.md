@@ -18,8 +18,44 @@ All notable changes to h4rn are recorded here. The format follows
   reason. The thread header and sidebar row show the branch, Settings lists the
   checkout as the thread's own, and clearing still refuses uncommitted work or
   an active session. Thread deletion leaves the checkout alone. New requests:
-  `GetWorktreeSettings` and `SetWorktreeSettings`. See
-  [docs/worktrees.md](docs/worktrees.md).
+  `GetWorktreeSettings` and `SetWorktreeSettings`. A destination is claimed
+  atomically before git runs, so two threads started at once can never delete
+  each other's checkout or branch: a create that finds the folder taken refuses
+  (or moves to the next suffix), and cleanup after a failure removes only the
+  folder, registration and branch that attempt created. A location that would
+  put the checkout inside the project's main checkout is refused both when the
+  setting is saved and when a checkout is made, a tag that shares a branch's
+  name no longer hides the branch, and an ACP agent configured with a fixed
+  directory refuses a worktree request instead of silently ignoring the new
+  checkout. A hand-edited settings file that no longer validates no longer stops
+  the daemon from starting. See [docs/worktrees.md](docs/worktrees.md).
+- **Agents can link pull requests from inside a thread, and outside agents can work with h4rn
+  over MCP.** Every harness session now gets h4rn's own tools through its existing per-session
+  token: `link_pull_request`, `unlink_pull_request`, `list_thread_pull_requests`,
+  `watch_pull_request`, `unwatch_pull_request`, `thread_status` and
+  `list_forge_pull_requests`. They act on the calling thread and accept no thread id, so a token
+  cannot reach another thread; Settings → Sharing & access turns them off per harness. Agents
+  h4rn did not start — Claude Code or Codex in your terminal, and other local MCP clients — can
+  connect to `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). Outside
+  agents are in **Labs** and off by default: Settings → Labs → **Outside agents (OAuth)** turns
+  them on. While it is off, the OAuth and discovery routes answer 404, an outside-agent token is
+  refused on `/mcp`, no sign-in can be created, and Settings → Sharing & access hides the
+  outside-agent section behind one plain line saying the feature is in Labs. Turning the switch
+  off revokes every grant and drops every waiting sign-in in one durable write, so turning it
+  back on does not revive them. Only you can grant one: the client's browser shows who is asking
+  and where it would return, and the request is
+  approved in h4rn → Settings → Sharing & access, where you pick **Read only**, **Supervised**
+  (threads run at approval-required) or **Full access** with no preselected default. Tokens are
+  scoped, expiring, revocable and stored only as digests; a revocation is durable and a replayed
+  code or refresh token kills the grants it produced. A supervised message carries its ceiling, so
+  raising the thread's mode later cannot lift it. The OAuth and MCP routes exist only on the
+  loopback listener and refuse another site's page. The same page shows the MCP URL with a Copy
+  button and lists connected agents with Revoke. Redirects are admitted only to `https` or
+  localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client.
+  A turn already delivered may still finish after its grant is revoked or the switch is turned off,
+  and a Full-access grant has no ceiling; the other limits are listed in
+  [docs/outside-agents.md](docs/outside-agents.md#known-limitations). See
+  [docs/outside-agents.md](docs/outside-agents.md) and [ADR-046](docs/decisions.md).
 - **Share one thread with a teammate through an expiring guest link.** A link is
   bound to one thread and one browser, lasts 24 hours, and works through the
   Connect relay when the machine is linked; without Connect it works only in a
@@ -66,6 +102,66 @@ All notable changes to h4rn are recorded here. The format follows
   linked items. New requests: `ForgeListIssues`, `ForgeGetIssue`, `ForgeListIssueComments`,
   `ForgeCommentIssue`, `ForgeUpdateIssue`, the `Linear*` connection/team/issue requests, and
   `LinkIssue`/`UnlinkIssue`/`ListThreadIssues`. See [docs/forges.md](docs/forges.md).
+- **Claude Code and Codex conversations can be imported and continued.** Add
+  project → Import finds the conversations those harnesses already saved on this
+  machine, grouped by git checkout with GitHub remotes named `owner/name` and
+  other folders under "Other folders". Git repositories with three or more
+  conversations active in the last 30 days are checked by default; Review all
+  shows everything with Select all and Select none. Importing registers new
+  projects and creates one thread per conversation with its title, harness,
+  model, working folder and kept messages (the first request plus the newest
+  user and assistant messages, 200 in total, each with its timestamp; tool
+  activity, attachments and setup context are left out — for Codex a turn's
+  canonical user event wins, so the generated environment block and the
+  project's private AGENTS.md instructions never reach the import, while a turn
+  with no canonical event keeps its context). A canonical prompt is stored
+  exactly as written — its indentation and trailing newline included — and only
+  the comparison key is trimmed. A rewound Codex rollout streams the byte prefix
+  it inherits from the rollout it replaced, so its original request and reply
+  stay in the imported conversation. The transcript is kept as it was
+  written — a long first prompt is stored whole and the handoff applies its own
+  ceiling later — and a record is streamed past attachments and tool output
+  instead of being dropped for its size; discovery uses the same streaming
+  reader, so a short prompt beside a 5 MiB attachment is still offered. A single
+  record over 48 MiB — text, a
+  tool result or an attachment — skips the conversation with a warning, and
+  retention stops as soon as a limit is crossed, so one oversized conversation
+  cannot grow memory toward its file size. Each source session id is
+  recorded, so running the import again only adds what is new; a transcript
+  without one is identified by its path, size and content. The claim and the
+  new thread are written in one transaction, so overlapping runs and a crash
+  cannot import a conversation twice, and the claim uses the identity the full
+  parse found, so two copies whose session id sits past the scan's head still
+  import once. Progress is visible and counts the
+  conversations finished, with the limits a scan hit, and the import keeps
+  running if you leave the view; reopening it shows the current counts.
+  Discovery is read-only, skips
+  `~/Downloads` (including through a symlink), offers at most 100
+  not-yet-imported conversations and 4 GiB per project per attempt (once a
+  project's quota is full its other Claude Code transcripts are not read at all,
+  while one already imported is still recognised; Codex rollouts are still
+  peeked to learn their project), and skips
+  transcripts over 4 GiB, conversations over 32 MiB of kept text or 100,000
+  records; the list shows what a scan could not read. Imported threads land in
+  Done with their own message times and stay there after a restart — including
+  their finished agent and their place in the sidebar, which sorts by the newest
+  imported message rather than the moment h4rn wrote the thread; their replies
+  render as finished history — never as a live or paused stream — and the thread
+  says **Imported from** with the conversation's own time instead of a duration
+  and token count it never had. An imported thread starts a session when you send
+  its first message: it prefers the harness's own resume — spent once that session
+  starts — and falls back to a bounded handoff of the saved history (16,000 bytes
+  by default, `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000) before your exact,
+  unshortened request, including when the harness exits after starting a resume it
+  cannot honour, and a Stop during that retry ends the turn interrupted. The
+  request is sent once: the fallback never includes the current turn's own prompt
+  in the history block, so a large request cannot push the recent messages out of
+  the handoff. The handoff reads the history from the thread's journaled messages,
+  so no second copy of the transcript is stored. A long prompt still crosses a
+  paired connection: a replay arrives in bounded pages, and an oversized frame
+  is split into chunks the client joins, so no message is shortened to fit.
+  Message text is never logged and
+  token shapes are redacted before storage. See [docs/import.md](docs/import.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a
@@ -529,35 +625,68 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
-- **A failed worktree create can no longer take another thread's checkout, or
-  leave git state behind.** The claim on a destination folder (now a lock beside
-  the checkouts) lasts until cleanup is done, so a failed `git worktree add` that
-  removes its own folder cannot let a second create register a checkout in the
-  gap; rollback only removes the checkout whose git registration it made (a
-  marker in that registration's admin dir), so a replacement thread at the same
-  folder keeps its files and registration. A failed add removes only the
-  registration, folder and branch that attempt created — including through a
-  symlinked location — and never deletes another registration. A worktree
-  location inside the project's main checkout is refused both when the setting
-  is saved and when a checkout is made, a tag that shares a branch's name no
-  longer hides the branch, and an ACP agent configured with a fixed directory
-  refuses a worktree request instead of silently ignoring the new checkout. A
-  hand-edited settings file that no longer validates no longer stops the daemon
-  from starting, and a worktree first seen through a harness stays a thread's
-  own once the thread's workspace names it. See [docs/worktrees.md](docs/worktrees.md).
-- **Two threads started at once can no longer delete each other's worktree.** A
-  new checkout's folder is claimed atomically before git runs, so a create that
-  finds the folder taken refuses (or moves to the next generated suffix) instead
-  of cleaning up a checkout another create owns. A failed create removes only
-  the folder it claimed and only when git holds no registration for it, and that
-  cleanup now runs off the async runtime. Saving a branch prefix that can only
-  produce an invalid branch name (`.hidden`, `v1..2`) is refused in Settings with
-  the reason, and the generator never falls back to a name git would refuse. The
-  New thread dialog expands a typed `~` path against the host's home before
-  matching a registered git project, including a subfolder of one. Deleting a
-  thread no longer hides its worktree from Settings: the create-time
-  registration keeps the row listed and clearable. See
-  [docs/worktrees.md](docs/worktrees.md).
+- **An outside agent's grant can no longer be widened, replayed or read from the
+  store.** A supervised ceiling now holds for the whole turn it was attached to:
+  raising the thread's mode partway through that turn no longer switches the live
+  session to full access (the person's next, uncapped turn gets the new mode),
+  and a turn stopped by a provider limit resumes under the same ceiling, including
+  after a daemon restart. `list_threads` and `start_thread` redact the thread
+  title as `get_thread` already did, so a credential pasted into a first prompt
+  never comes back from a read-only grant. A revocation cannot lose a race with a
+  token's last-used write, and revoking an agent frees its registration slot so
+  the "revoke one in h4rn" advice works at the cap; a revocation that could not
+  be saved now reports an error instead of success. The daemon accepts an
+  `Origin` only when it is its own exact `scheme://host:port` (a page on another
+  loopback port is refused) and a `Sec-Fetch-Site` only when it is `same-origin`
+  or `none`; the check runs before the rate limiter, so a refused page cannot
+  spend the aggregate bucket. `/oauth/authorize` is counted in that bucket, and
+  waiting sign-ins are capped per client and in total. The token endpoint checks
+  RFC 8707 `resource` against the code's binding, and an approval keeps its
+  one-time code in memory only, so the store file never holds a live code.
+- **A supervised ceiling now travels with the work it belongs to, and the OAuth
+  routes follow the real socket.** A supervised `start_thread` caps its first
+  prompt, not only the thread's mode, and the resume schedule stores the
+  reporting turn's ceiling in the same ledger write that arms it, so an exit
+  report that arrives after the capped turn settled and a daemon that stops
+  right after arming both resume at the ceiling. A PR watch created in a
+  supervised turn keeps the grant and its ceiling: a revoked grant starts
+  nothing, and a live one starts at most at the ceiling. A live mode switch and
+  the selection of a session for a prompt share one per-thread gate, so an
+  incoming supervised message cannot reuse a session the switch has already made
+  permissive. A grant approved without an RFC 8707 `resource` is bound to the
+  daemon's own `/mcp` audience; exchange, refresh and use check the same
+  binding, and a token with no audience is refused. OAuth and `/mcp` are served
+  only by a socket whose bound address is loopback, so a `0.0.0.0` or LAN bind
+  no longer exposes them, and the guard also refuses a peer that is not this
+  machine. A failed revoke keeps the grant so a retry works and reports
+  `Internal` rather than `NotFound`, a spent code is kept while its token family
+  is live so a late replay still revokes it, a failed replay revocation is
+  reported, a malformed or duplicated `Origin`/`Sec-Fetch-Site` is refused
+  instead of treated as absent, `set_harness` commits a switch only after its
+  write succeeds, and both browser sign-in screens lost their uppercase eyebrow.
+- **A grant is now the exact sign-in that asked for the work, and every later
+  turn is checked against it.** The daemon carries a `(client, token family,
+  ceiling)` triple through everything that can start a turn later: a queued
+  message, a prompt parked by a usage limit, the resume schedule, a PR watch, the
+  wake that watch causes, and a delegated child. Delivery re-checks that exact
+  family and refuses — settling the turn with a plain explanation and starting no
+  session — once it is revoked, including across a restart. Any live token in the
+  family keeps it alive, so a watch no longer dies when the one-hour access token
+  expires while the refresh token is live, and revoking one family stops its work
+  even when the same client holds another live sign-in. A wake turn carries the
+  triple, so a watch it re-creates keeps the grant instead of clearing it, and a
+  delegated child starts at the calling turn's ceiling rather than the thread's
+  newer mode. An auto-resume selects its session through the same per-thread gate
+  as a live mode switch, so it cannot reuse a session the switch already made
+  permissive. A second approval no longer prunes the spent code of a live family,
+  so a late replay still revokes it. Thread titles are redacted before the
+  80-character cut, the redactor removes a partial owner-token prefix and
+  daemon-issued guest links (`/guest/<token>`), and the MCP URL follows the socket
+  that really serves it (`[::1]` for an IPv6 loopback bind, the loopback extra
+  bind when the primary is a wildcard or LAN address, `127.0.0.1` for a wildcard
+  bind, and unavailable when no loopback socket exists); `/mcp` is mounted on a
+  non-loopback bind behind the loopback guard so harness tools keep working,
+  while OAuth stays loopback-only.
 - **A guest exchange never stalls the relay, and a guest request is one decision with its card.**
   Guest work now runs in its own tasks behind a small concurrency cap, so a chunked 10 MB answer, a
   snapshot or a file write can never block the loop that drains the relay socket or starve other

@@ -1369,6 +1369,16 @@ impl McpHub {
             McpRequest::PendingApprovals | McpRequest::RespondApproval { .. } => Err(
                 HubError::Invalid("share approvals are handled by the daemon".into()),
             ),
+            // Outside-agent grants and h4rn's own per-harness switches belong
+            // to the daemon, which answers them before dispatch.
+            McpRequest::ListOutsideAgents
+            | McpRequest::RevokeOutsideAgent { .. }
+            | McpRequest::OutsideAgentSettings
+            | McpRequest::SetOutsideAgentSettingsEnabled { .. }
+            | McpRequest::AgentTools
+            | McpRequest::SetAgentToolsEnabled { .. } => Err(HubError::Invalid(
+                "outside-agent grants are held by the daemon".into(),
+            )),
             McpRequest::TestCall {
                 name,
                 tool,
@@ -1391,6 +1401,14 @@ impl McpHub {
                     truncated: false,
                     duration_ms: started.elapsed().as_millis() as u64,
                 }))
+            }
+            // Outside-agent sign-ins are a daemon-level decision (they grant an
+            // OAuth token), so the hub never answers them; the daemon's MCP
+            // service handles both before the request reaches this match.
+            McpRequest::ListOutsideAgentSignIns | McpRequest::RespondOutsideAgentSignIn { .. } => {
+                Err(HubError::Invalid(
+                    "outside-agent sign-ins are answered by the daemon, not the hub".into(),
+                ))
             }
         }
     }

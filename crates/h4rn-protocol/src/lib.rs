@@ -40,6 +40,7 @@ mod git_actions;
 mod guest;
 mod harness;
 mod ids;
+pub mod import;
 pub mod issues;
 pub mod mcp;
 pub mod projects;
@@ -95,12 +96,18 @@ pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, ScheduleTaskId, SubagentId, TerminalId,
     ThreadId, TurnId,
 };
+pub use import::{
+    ImportEvent, ImportProgress, ImportProject, ImportScan, ImportSource, ImportedSource,
+    path_source_key, source_key,
+};
 pub use issues::*;
 pub use mcp::{
-    McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle, McpImportCandidate,
-    McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest, McpSecretInput,
-    McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval, McpSharePolicy,
-    McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
+    AgentToolSettings, McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle,
+    McpImportCandidate, McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest,
+    McpSecretInput, McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval,
+    McpSharePolicy, McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput,
+    McpTransportView, OutsideAgentLevel, OutsideAgentSettings, OutsideAgentSignIn,
+    OutsideAgentView,
 };
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;

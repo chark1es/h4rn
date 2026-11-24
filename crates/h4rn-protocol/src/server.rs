@@ -79,6 +79,14 @@ pub enum ServerFrame {
         /// The task that was created, changed or deleted.
         event: crate::ScheduleEvent,
     },
+    /// An ephemeral conversation-import progress frame, outside the durable log.
+    ///
+    /// A reconnecting client asks again with
+    /// [`crate::ClientRequest::SessionImportStatus`]; progress is not replayed.
+    ImportEvent {
+        /// The latest state of the run.
+        event: crate::import::ImportEvent,
+    },
 }
 
 /// A device paired directly (LAN/tailnet) with this computer.
@@ -161,6 +169,13 @@ pub enum ResponseBody {
         /// Next sequence the client should ask for.
         #[ts(type = "number")]
         next_seq: u64,
+        /// Whether more events follow this page.
+        ///
+        /// A paired client's answer must fit one transport frame, so a long
+        /// replay arrives in pages; ask again from `next_seq` while this is
+        /// true. Older daemons never set it, and an unset value means no more.
+        #[serde(default)]
+        more: bool,
     },
     /// A thread was created and its first turn is durable.
     ///
@@ -606,6 +621,28 @@ pub enum ResponseBody {
         /// Pending requests, oldest first.
         approvals: Vec<crate::mcp::McpShareApproval>,
     },
+    /// Outside agents connected through OAuth, and the URL they use.
+    OutsideAgents {
+        /// Connected agents, newest first.
+        agents: Vec<crate::mcp::OutsideAgentView>,
+        /// Streamable-HTTP MCP endpoint an outside agent connects to.
+        mcp_url: String,
+    },
+    /// The machine-wide outside-agent Labs switch.
+    OutsideAgentSettings {
+        /// Whether outside-agent access is on.
+        settings: crate::mcp::OutsideAgentSettings,
+    },
+    /// h4rn's own tools and their per-harness switches.
+    AgentTools {
+        /// Current settings.
+        settings: crate::mcp::AgentToolSettings,
+    },
+    /// Outside-agent sign-ins waiting for the person's decision.
+    OutsideAgentSignIns {
+        /// Waiting sign-ins, oldest first.
+        sign_ins: Vec<crate::mcp::OutsideAgentSignIn>,
+    },
     /// Aggregated usage from the durable ledger.
     UsageReport {
         /// The report.
@@ -740,6 +777,16 @@ pub enum ResponseBody {
     Directories {
         /// The listing.
         listing: crate::projects::DirectoryListing,
+    },
+    /// One scan for importable conversations.
+    SessionImports {
+        /// What was found.
+        scan: crate::import::ImportScan,
+    },
+    /// An import run after it was started or asked about.
+    SessionImportStatus {
+        /// The run, or `None` when no import has run on this daemon.
+        progress: Option<crate::import::ImportProgress>,
     },
     /// Configured text generators. Keys are never included.
     TextGenerators {
@@ -931,6 +978,14 @@ pub enum Event {
         turn_id: TurnId,
         /// The completed item.
         item: Item,
+        /// When the item was authored in the conversation it came from.
+        ///
+        /// Imported transcripts carry their own timestamps, so a restored
+        /// thread shows when each message was really written. Absent means the
+        /// item has no source time and the journal's own time applies.
+        #[serde(default)]
+        #[ts(optional)]
+        at: Option<DateTime<Utc>>,
     },
     /// A tool call changed state.
     ToolCall {

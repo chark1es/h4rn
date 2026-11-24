@@ -1624,3 +1624,159 @@ The guest page polls its snapshot every couple of seconds rather than opening a
 second long-lived socket. That keeps one transport (HTTP) working through both
 the direct address and the relay proxy, and the thread still follows live work
 within that interval.
+## ADR-045: Imported conversations resume natively, with a bounded handoff as the fallback
+
+**Status:** Accepted
+
+Claude Code and Codex already keep their conversations on disk, so h4rn reads
+those transcripts instead of asking the person to copy them. Discovery and
+parsing live in `crates/h4rn-daemon/src/import/` and are read-only; a scan reads
+the head of each transcript with the same streaming record reader the import
+uses to group it and to skip a session that never wrote a visible message, and a
+full parse streams one JSONL record at a time and names only the fields it keeps,
+so a megabyte-sized attachment or tool result is read past instead of being
+loaded or deciding that the line is malformed. A Codex rollout that was rewound
+declares a byte prefix of the rollout it replaced; the prefix streams before the
+rollout's own records, under the same limits.
+
+An imported thread is an ordinary thread whose transcript is journaled as message
+items and whose `ThreadMeta` carries the imported origin. That origin holds only
+source facts: the source harness, transcript path, native session id, the project
+it belongs to when that differs from the folder it ran in, and whether a native
+resume is still worth trying. The kept messages live in the journal, the one copy
+h4rn keeps, so an upsert never rewrites a transcript. The thread has no live
+session, so it costs nothing until the person writes again. It lands in Done with
+its hand down; that placement replays from the origin and each message's time
+from the wire events, so a restart shows the same thread, not a Settled or
+freshly-timed one.
+
+The first new message prefers the harness's own resume (`--resume` for Claude
+Code, `thread/resume` for Codex) because that restores the provider's real
+context, including tool work the import intentionally leaves out. When the
+harness refuses the resume — either by failing the start, or, as the real Claude
+Code adapter does, by exiting after it returned a session that never reported
+`SessionStarted` — the daemon clears the dead id, records `native_resume: false`
+in the same turn, and retries once with a bounded handoff: the original request
+plus the newest messages, in order, under a byte budget (16,000 by default,
+`H4RN_HANDOFF_BYTES` clamped to 1,024–64,000). The budget covers the serialised
+envelope and the person's request, which is appended verbatim and never
+shortened. The journal keeps the transcript as it was imported (only the hard
+32 MiB kept-text limit applies); the handoff applies its own ceiling when the
+person writes again.
+
+The handoff builder is separate (`crates/h4rn-daemon/src/handoff.rs`) and takes
+only roles and text, so provider switching and forking can reuse the same
+selection later. Import identity is the source session id, or the transcript path
+with its size and a content fingerprint when none exists, recorded in
+`daemon_imported_sources`. The claim uses the identity the full parse found, not
+the scan's head, so a session id in a later record still identifies both copies.
+The source is claimed and its thread written in one
+transaction, so overlapping runs, two copies of one session in a run, or a crash
+between the claim and the write all import the conversation exactly once. A long
+imported transcript crosses a paired connection in bounded pages, and a frame
+over the secure transport's limit is split into chunks the client joins, so a
+large message is never shortened to fit.
+
+Discovery caps each attempt at 100 not-yet-imported conversations and 4 GiB per
+project, newest first, and skips a transcript over 4 GiB, a conversation over
+32 MiB of kept text or 100,000 records. Once a project's quota is full its
+remaining transcripts are not read, which only a Claude Code folder can be known
+to hold without reading: Codex stores every project's rollouts in shared date
+folders, so each one is still peeked to learn which project it belongs to.
+Paths are compared after canonicalising them and stripping a Windows
+extended-length prefix, so a symlinked `~/Downloads` stays excluded. Warnings say
+a limit was reached without naming message text. Kept text and titles pass
+through the existing token redactor before they reach the journal, and nothing is
+logged from a transcript.
+
+
+## ADR-046: Two token populations for the two MCP audiences
+
+**Status:** Accepted
+
+h4rn is an MCP server twice, and the two callers must not share a credential.
+
+**Agents h4rn runs** already reach the hub through a token minted for one harness session (ADR-006).
+That token lives in memory, is bound to a thread and a scope, expires with a monotonic liveness
+window and dies with the daemon. The tools it unlocks are h4rn's own (`link_pull_request`,
+`thread_status`, the PR watch). A provider reads the thread id from the token's scope and accepts
+no thread argument, so a token for thread A has no syntax that names thread B. The per-harness
+switch is a second gate, stored beside the hub's own enable matrix.
+
+**Outside agents** are not h4rn's sessions. They connect with OAuth 2.1 over the daemon's loopback
+HTTP listener. The authorization code flow uses PKCE (S256 only) and dynamic client registration
+for public clients, because a hosted assistant cannot be given a pre-shared secret and a local
+client should not need one either.
+
+**Only the person grants access, and only from inside h4rn.** The browser the client opens shows
+who is asking and where the code would go, but it has no h4rn session and every grant is answered
+over the authenticated WebSocket instead: the request appears in Settings → Sharing & access and
+the person picks a level there. The earlier design let that page post the approval, which meant
+anything that could reach the listener — a local process, or a page that reached it through DNS
+rebinding — could grant itself full access. The page's role is now purely informational, and the
+daemon refuses a cross-site `Origin`/`Sec-Fetch-Site` and any `Host` that is not a loopback name.
+The level is the person's explicit choice: nothing the client sent preselects one.
+
+The same rule decides where the routes live. OAuth and `/mcp` are served only on the loopback
+listener, because a redirect that finishes on `localhost` is the only one admitted; a LAN or
+tailnet listener answers 404 to both. The Connect relay carries Noise, not HTTP, so a hosted agent
+still has no path in.
+
+Outside tokens are opaque random values, not JWTs. They last one hour (refresh: thirty days,
+rotating) and are stored only as BLAKE3 digests in `outside_agents.json`, so the file is not a
+credential dump and revocation is a lookup, not a key rotation. A signed token would avoid the
+lookup but would make "revoke now" depend on a denylist that can drift between restarts; the
+daemon already has the store open for every request.
+
+**The store is one lock.** Every read, mutation and write of `outside_agents.json` happens under a
+single mutex, and the file is replaced atomically after `fsync`, so a revocation or a spent code
+can never be overwritten by a slower writer that took its snapshot before the change. Last-used is
+still written lazily, but always from the live state. A revocation answers only after the write
+committed. A corrupted or older file is quarantined beside it and the daemon starts with no
+grants, which is the safe direction.
+
+**The feature is a Labs switch, and it is off by default.** The answer lives in the same store as
+the grants (`enabled`), not in a second file: turning it off revokes every family and drops every
+waiting code and sign-in in the same durable write, so a crash cannot leave one half behind. While
+it is off the OAuth routes answer 404, no sign-in can be created, and an outside token is refused
+on `/mcp`; harness sessions keep their own token and tools. A file written before the switch
+existed counts as off, and opening it revokes the grants it holds, so an upgrade cannot revive one
+when the switch is later turned on.
+
+**A replay is an attack.** Presenting an authorization code a second time revokes the pair it
+issued, and presenting a rotated refresh token a second time revokes its whole family: either
+means two parties hold the same credential.
+
+**A grant is `(client, token family, ceiling)`.** A supervised grant is not allowed to change the
+person's thread mode. Every piece of work that can start a turn later — a queued message, a prompt
+parked by a provider limit, the resume schedule, a PR watch, the wake that watch causes and a
+delegated child — carries the triple and stores it durably. Every message it sends carries
+`approval_required` as an immutable ceiling; the turn runs on a session started (or replaced) at the
+stricter of the thread's mode and that ceiling, and the ceiling survives a rate-limit pause and a
+restart. Raising the thread's mode afterwards cannot lift a ceiling that is already queued.
+
+The family is the grant's identity, not the client: a client can hold several sign-ins, and work
+asked for under one must not survive that one's revocation because another is still live. At the
+moment work is delivered the exact family is re-checked, and a family with no live, unrevoked token
+— access or refresh — refuses delivery rather than starting a session. A delegated child inherits
+the calling turn's triple, so a supervised turn cannot delegate its way past its ceiling.
+
+Tokens also carry the RFC 8707 `resource` they were issued for, when the client names one, and
+`/mcp` refuses a token bound to another resource. Tool results for `get_thread` redact the daemon's
+own credentials and the token shapes h4rn and forge clients use, so a token pasted into a thread
+cannot be read back out.
+
+The alternatives were considered and rejected: reusing the local access token would give any
+outside client the owner's full authority; giving outside agents the same in-memory session tokens
+as harnesses would let a restart silently invalidate a thirty-day sign-in (and would make the
+harness token's thread scope meaningless); accepting any redirect would let a code be posted
+anywhere. The redirect allow-list (`https` or loopback `http`, no credentials, no fragment) and
+PKCE are therefore part of the model, not conveniences.
+
+The endpoint shares `/mcp` with the hub and dispatches on the token prefix: a harness token
+(`h4rn_mcp_`) reaches the hub, an outside token (`h4rn_at_`) reaches the outside tool set. An
+outside agent therefore sees a small, fixed tool set and never the person's upstream servers. Both
+MCP paths accept one JSON-RPC message per request and refuse a batch, which is what the 2025-11-25
+transport specifies and what keeps one scope check and one rate-limit hit attached to one call. It
+is loopback-only, and the Connect relay does not yet carry HTTP, so the copied URL is the local
+address and a hosted agent has no path in this phase.

@@ -2,6 +2,7 @@
 import type { AcpAgent } from "./AcpAgent";
 import type { AcpAgentProbe } from "./AcpAgentProbe";
 import type { AcpAgentSpec } from "./AcpAgentSpec";
+import type { AgentToolSettings } from "./AgentToolSettings";
 import type { BlobDownload } from "./BlobDownload";
 import type { BlobInfo } from "./BlobInfo";
 import type { DeviceId } from "./DeviceId";
@@ -46,6 +47,8 @@ import type { GuestSharing } from "./GuestSharing";
 import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
+import type { ImportProgress } from "./ImportProgress";
+import type { ImportScan } from "./ImportScan";
 import type { LimitsReport } from "./LimitsReport";
 import type { LinearAccount } from "./LinearAccount";
 import type { LinearIssue } from "./LinearIssue";
@@ -58,6 +61,9 @@ import type { McpServerView } from "./McpServerView";
 import type { McpShareApproval } from "./McpShareApproval";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
+import type { OutsideAgentSettings } from "./OutsideAgentSettings";
+import type { OutsideAgentSignIn } from "./OutsideAgentSignIn";
+import type { OutsideAgentView } from "./OutsideAgentView";
 import type { PairScope } from "./PairScope";
 import type { PairingConfirmation } from "./PairingConfirmation";
 import type { PrLinkedThread } from "./PrLinkedThread";
@@ -163,7 +169,15 @@ events: Array<SeqEvent>,
 /**
  * Next sequence the client should ask for.
  */
-next_seq: number, } | { "type": "thread_created", 
+next_seq: number, 
+/**
+ * Whether more events follow this page.
+ *
+ * A paired client's answer must fit one transport frame, so a long
+ * replay arrives in pages; ask again from `next_seq` while this is
+ * true. Older daemons never set it, and an unset value means no more.
+ */
+more: boolean, } | { "type": "thread_created", 
 /**
  * New thread id.
  */
@@ -574,7 +588,27 @@ result: McpTestCallResult, } | { "type": "mcp_approvals",
 /**
  * Pending requests, oldest first.
  */
-approvals: Array<McpShareApproval>, } | { "type": "usage_report", 
+approvals: Array<McpShareApproval>, } | { "type": "outside_agents", 
+/**
+ * Connected agents, newest first.
+ */
+agents: Array<OutsideAgentView>, 
+/**
+ * Streamable-HTTP MCP endpoint an outside agent connects to.
+ */
+mcp_url: string, } | { "type": "outside_agent_settings", 
+/**
+ * Whether outside-agent access is on.
+ */
+settings: OutsideAgentSettings, } | { "type": "agent_tools", 
+/**
+ * Current settings.
+ */
+settings: AgentToolSettings, } | { "type": "outside_agent_sign_ins", 
+/**
+ * Waiting sign-ins, oldest first.
+ */
+sign_ins: Array<OutsideAgentSignIn>, } | { "type": "usage_report", 
 /**
  * The report.
  */
@@ -701,7 +735,15 @@ project: Project, } | { "type": "directories",
 /**
  * The listing.
  */
-listing: DirectoryListing, } | { "type": "text_generators", 
+listing: DirectoryListing, } | { "type": "session_imports", 
+/**
+ * What was found.
+ */
+scan: ImportScan, } | { "type": "session_import_status", 
+/**
+ * The run, or `None` when no import has run on this daemon.
+ */
+progress: ImportProgress | null, } | { "type": "text_generators", 
 /**
  * Generators, oldest first.
  */
