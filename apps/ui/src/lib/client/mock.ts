@@ -2049,6 +2049,7 @@ class MockDaemon {
             state: "scheduled",
             reason: "The provider reset time is known.",
             prompt: this.resumePolicy.prompt,
+            mode_ceiling: null,
             failover: {
               model: "claude-sonnet-5-5",
               account: "anthropic-work.json",
@@ -3797,6 +3798,7 @@ class MockDaemon {
       state: "scheduled",
       reason: "The provider reported a reset time; auto-resume is armed.",
       prompt: this.resumePolicy.prompt,
+      mode_ceiling: null,
       failover: this.resumePolicy.failover
         ? {
             model: "claude-sonnet-5-5",

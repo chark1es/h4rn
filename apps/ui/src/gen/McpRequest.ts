@@ -5,6 +5,7 @@ import type { HostId } from "./HostId";
 import type { McpConflictResolution } from "./McpConflictResolution";
 import type { McpServerInput } from "./McpServerInput";
 import type { McpSharePolicy } from "./McpSharePolicy";
+import type { OutsideAgentLevel } from "./OutsideAgentLevel";
 
 /**
  * One MCP operation from the UI.
@@ -112,4 +113,32 @@ tool: string,
 /**
  * JSON arguments.
  */
-arguments: unknown, };
+arguments: unknown, } | { "type": "list_outside_agents" } | { "type": "outside_agent_settings" } | { "type": "set_outside_agent_settings_enabled", 
+/**
+ * New value.
+ */
+enabled: boolean, } | { "type": "revoke_outside_agent", 
+/**
+ * Client id from [`OutsideAgentView::client_id`].
+ */
+client_id: string, } | { "type": "agent_tools" } | { "type": "set_agent_tools_enabled", 
+/**
+ * Harness whose sessions get the tools.
+ */
+harness: HarnessKind, 
+/**
+ * New value.
+ */
+enabled: boolean, } | { "type": "list_outside_agent_sign_ins" } | { "type": "respond_outside_agent_sign_in", 
+/**
+ * `request_id` from [`OutsideAgentSignIn`].
+ */
+request_id: string, 
+/**
+ * Approve or deny.
+ */
+decision: ApprovalDecision, 
+/**
+ * Level to grant, when approving.
+ */
+level: OutsideAgentLevel | null, };

@@ -1,0 +1,277 @@
+# Agents and MCP
+
+h4rn is an MCP server in two directions. Agents h4rn runs get tools for the thread they are working
+in. Agents h4rn did **not** start — Claude Code or Codex in your own terminal, and other local MCP
+clients — can connect to the daemon over OAuth, once you approve a level, and work with your
+projects and threads.
+
+The token model behind both is [ADR-046](decisions.md).
+
+## Outside agents are in Labs, off by default
+
+Outside-agent access is not on until you turn it on: **Settings → Labs → Outside agents
+(OAuth)**. While the switch is off:
+
+- the OAuth and discovery routes (`/.well-known/oauth-*` and `/oauth/*`) answer **404**, so a
+  client cannot discover or start a sign-in;
+- an outside-agent bearer token is refused on `/mcp`, while h4rn's own sessions keep their tools;
+- no sign-in request can be created;
+- Settings → Sharing & access hides the outside-agent section and says the feature is in Labs.
+
+Turning the switch off ends every outside-agent grant: every token family is revoked, and every
+waiting sign-in is dropped. The setting and the revocations are one durable write, so a crash
+cannot leave a grant that comes back when the switch is turned on again. Turning it back on does
+not revive anything; each agent signs in again.
+
+## Tools for agents h4rn runs
+
+Every harness session is already given the hub endpoint and a bearer token minted for that one
+session (ADR-006). The same token is bound to the session's thread, so the tools below act on
+the calling thread and accept no thread id:
+
+| Tool | What it does |
+|---|---|
+| `link_pull_request` | Links a PR from the thread's workspace repository, after one forge read. |
+| `unlink_pull_request` | Removes the link and stops watching it. |
+| `list_thread_pull_requests` | The thread's links with their latest forge state. |
+| `watch_pull_request` | Starts the two-minute PR watch; a change starts a turn in the thread. |
+| `unwatch_pull_request` | Stops the watch; the link stays. |
+| `thread_status` | The thread's state and how many messages wait behind the running turn. |
+| `list_forge_pull_requests` | Open, mine or review-requested PRs in the workspace repository. |
+
+`link_pull_request` names a repository only when the workspace has more than one forge remote;
+otherwise it uses the one remote. A failed forge read is reported as exactly that, never cached as
+a state.
+
+Tools are listed only to sessions that have a thread and whose harness switch is on. Settings →
+**Sharing & access** shows one switch per harness. Turning a switch off hides the tools from new
+sessions and refuses direct calls from live ones. The switch is stored in
+`mcp-agent-tools.json` in the data directory; a missing entry means enabled.
+
+## Outside agents
+
+An outside agent connects to:
+
+```text
+http://127.0.0.1:<port>/mcp
+```
+
+The URL is on Settings → Sharing & access with a **Copy MCP URL** button. It names a socket that
+really serves sign-in, which is always a loopback listener: the primary `--bind` when it is a
+loopback address (`[::1]` for an IPv6 bind), or a loopback extra bind when the primary is a wildcard
+or LAN address. A wildcard bind on its own serves the hub's `/mcp` to harnesses on this machine, but
+it is not a loopback listener, so outside agents are unavailable there; a primary bound only to one
+LAN address with no loopback extra bind has no path either. In both cases the page says **Outside
+agents need a loopback listener** instead of printing an address whose socket serves no sign-in.
+
+The OAuth routes stay on the loopback listener: their redirect must finish on `https` or a
+localhost address. The MCP endpoint carries a bearer token, so it is never served to a network
+peer. A non-loopback bind mounts `/mcp` behind the same guard, which lets a harness session on this
+machine keep its tools while a request from another machine is refused; a concrete LAN bind without
+a loopback socket has no such path. A request through a loopback socket is also refused unless its
+peer address is this machine and its `Host` is a loopback name; the header is the client's claim,
+the socket is not.
+
+### Sign in
+
+The daemon is its own OAuth 2.1 authorization server:
+
+- `GET /.well-known/oauth-authorization-server` — endpoints and supported methods;
+- `GET /.well-known/oauth-protected-resource` — the `/mcp` resource;
+- `POST /oauth/register` — dynamic client registration (public clients, no secret);
+- `GET /oauth/authorize` — the page the client's browser opens;
+- `GET /oauth/authorize/pending` — the page's own navigation once the person answered;
+- `POST /oauth/token` — authorization code with PKCE (S256) and refresh tokens;
+- `POST /oauth/revoke` — revocation.
+
+There is no unauthenticated approve endpoint. The client's browser cannot grant anything: the
+person answers the request inside h4rn.
+
+Redirect URIs are admitted only when they are `https`, or plain `http` to `localhost`,
+`127.0.0.1` or `[::1]`, with no embedded credential and no fragment. Everything else is refused at
+registration, before a browser is sent anywhere. A token request may omit `redirect_uri` (PKCE
+binds the exchange); when it sends one, it must match the authorization request exactly. RFC 8707
+`resource` is one binding on every path: a client that omits it is bound to this daemon's own
+`/mcp` audience rather than to "any", the exchange must name exactly what the code was approved
+for, a refresh must name the same audience even when it omits the parameter, and `/mcp` refuses a
+token that has no audience or a different one. A mismatch is `invalid_target` before a code is
+spent.
+
+For Claude Code:
+
+```sh
+claude mcp add --transport http h4rn http://127.0.0.1:<port>/mcp
+claude mcp login h4rn
+```
+
+For Codex:
+
+```sh
+codex mcp add h4rn --url http://127.0.0.1:<port>/mcp
+codex mcp login h4rn
+```
+
+The first request without a token answers `401` with a `WWW-Authenticate` header pointing at the
+protected-resource metadata, so a client that supports OAuth discovers the rest.
+
+### Approving a sign-in
+
+The authorize page names the client, labels that name **unverified (the app chose it)**, shows the
+exact callback origin the browser will return to, and says: approve this in h4rn. It never offers a
+level and has no form.
+
+Open h4rn → Settings → Sharing & access. The request is listed under **Waiting for you** with the
+same callback. Pick one of:
+
+- **Read only** — list projects, threads, providers and models, and read a thread.
+- **Supervised** — read, and start or message threads. Every thread it starts runs at
+  `approval_required`, and every message it sends carries that ceiling with it.
+- **Full access** — read, start and message threads at the mode the call asks for.
+
+Nothing is preselected: Supervised and Full access need an explicit choice. The browser then
+follows the answer to the callback on its own, so no form ever posts to another site.
+
+Answering without a level is refused. The level is written into the grant and checked again on
+every tool call, so a client cannot call a write tool by guessing its name.
+
+Only approve a sign-in you just started. A hostile page cannot approve one for you either: the
+daemon refuses an `Origin` that is not its own exact `scheme://host:port` (another loopback port is
+still another site), a `Sec-Fetch-Site` other than `same-origin` or `none` (so `same-site` is
+refused too) and any `Host` that is not loopback. The sign-in list itself is bounded: at most three
+requests per client and sixteen in total wait for you at once, and a request that this check refuses
+never spends a rate-limit hit.
+
+### Tokens
+
+- Access tokens last **one hour**; refresh tokens last **thirty days** and rotate on every use. A
+  grant is live while **any** token in its family is: a watch or a parked prompt does not die when
+  the one-hour access token expires if the refresh token is still live.
+- Both are random 256-bit values with a recognisable prefix (`h4rn_at_`, `h4rn_rt_`).
+- Only a BLAKE3 digest is written to `outside_agents.json`; a copy of the file is not a copy of the
+  credentials. No token is ever logged or returned in a tool result. An approval's redirect carries
+  the one-time code, so it is kept in memory only: the store file never contains a live code, and a
+  restart asks the browser to start the sign-in again instead of replaying one.
+- Revoking an agent in Settings → Sharing & access marks every token in its family revoked, deletes
+  its codes and pending approvals, and frees its registration slot (so the next agent can register
+  once the cap is reached). The answer comes only after the file is on disk, so a restart cannot
+  resurrect the grant. The next request gets `401`; a revocation that could not be saved reports an
+  error rather than success.
+- A replayed authorization code revokes the tokens it issued, and a replayed rotated refresh token
+  revokes its whole family: either one means two parties hold the same credential. A spent code's
+  record is kept while its family is live, so a replay after the code's own ten-minute lifetime is
+  still recognised as a replay and still revokes the family; a revocation that could not be
+  written is reported, not swallowed.
+- If `outside_agents.json` cannot be read (corrupt, or written by an older build), the daemon
+  quarantines it as `outside_agents.corrupt-<time>.json`, starts with no grants, and logs a
+  warning. Agents reconnect by signing in again.
+- Registration is capped and unused registrations expire after a day. The unauthenticated OAuth
+  endpoints — registration, authorize, the token endpoint and revocation — have an aggregate rate
+  limit checked before the body is read, and the per-client buckets are keyed only on identifiers
+  the daemon has registered — a flood of random values grows nothing.
+
+### What an outside agent can call
+
+| Tool | Level |
+|---|---|
+| `list_projects` | read |
+| `list_threads` | read |
+| `get_thread` | read |
+| `list_providers` | read (harnesses, models recent threads used, proxy models) |
+| `start_thread` | supervised, full |
+| `send_thread_message` | supervised, full |
+| `stop_thread` | supervised, full |
+
+`start_thread` needs a project id or an absolute workspace, plus a harness and a model from
+`list_providers`. It never creates a worktree. A thread it starts cannot run with more permission
+than its grant allows: a supervised grant always starts at `approval_required`, and a message it
+sends to an existing thread is clamped to that mode for the turn without changing the person's own
+thread setting.
+
+The grant is a `(client, token family, ceiling)` triple, and every piece of work that can start a
+turn later carries it: a queued message, a prompt parked by a provider limit, the resume schedule, a
+PR watch, the wake that watch causes, and a delegated child. The triple is stored durably where the
+work waits, and delivery re-checks the exact token family before anything reaches the harness: a
+revoked family means the turn fails with a plain explanation and no session is started, including
+after a restart. A child inherits the calling turn's triple and can never run wider than it, so a
+supervised turn cannot delegate its way to full access. The ceiling belongs to the work, not to
+whichever dispatch is active: a supervised `start_thread` attaches it to the first prompt as well as
+to the thread's mode, so raising the mode while that first prompt runs changes the live session only
+as far as the ceiling allows and the person's next turn gets the new mode.
+
+A turn stopped by a provider limit stores the ceiling and the grant on the resume schedule itself, in
+the same write that arms it, so the resume runs under them even if the daemon stopped before
+anything else was recorded. A PR watch created inside a supervised turn keeps the exact token family
+and the ceiling: every wake asks whether that family is still live (a revoked family starts nothing
+and ends the watch) and starts at most at the ceiling. The wake turn itself carries the same triple,
+so a watch it re-creates keeps the grant rather than clearing it. A live mode switch, a prompt
+dispatch and a resume's session selection share one per-thread gate, so a switch that has already
+applied full access to the session cannot be read as the old setting by an incoming supervised
+message or an auto-resume.
+
+`thread_status`, `start_thread`, `list_threads` and `get_thread` share one redactor. A thread's
+title is redacted before the 80-character cut, so the journal never stores a credential or a
+fragment of one, and the same redactor also removes a partial owner-token prefix left by an older
+stored title. Guest links (`/guest/<token>`) are redacted too: a guest link is a bearer credential
+in a URL.
+
+An outside agent never sees the person's own upstream MCP servers; it sees only this tool set.
+
+Both MCP endpoints accept one JSON-RPC message per request. A batch is refused, and a request whose
+`Origin` is another site is refused, so one scope check and one rate-limit hit always belong to one
+call.
+
+`get_thread` and `list_threads` redact credentials before they build either output form, including
+the thread title (which is the first line of the person's first prompt): the daemon's own access
+token, `h4rn_`-prefixed tokens, and the forge token shapes h4rn already recognises (`ghp_`,
+`glpat-`, `ATATT` and the rest).
+
+## Removal
+
+Settings → Sharing & access lists connected agents with their level, when they last used a token
+and when the sign-in expires. **Revoke** cuts off future work at once: a queued message, a parked
+prompt, a watch wake or a delegated child starts nothing after it. A turn that is already running
+finishes first; see [Known limitations](#known-limitations).
+
+## Relay
+
+The Connect relay carries the daemon's Noise transport (ADR-018/031), not an HTTP MCP endpoint, so
+this phase offers the copied URL only on the local machine. A hosted agent needs a future HTTP
+route on the relay; the UI does not pretend one exists: when h4rn is open as a remote client, the
+Copy button is not shown and the page says the URL is the loopback address of the other computer
+and cannot be reached by an agent on the internet yet.
+
+## Known limitations
+
+- A turn that has already been delivered keeps running when its grant's family is revoked or the
+  Labs switch is turned off. Its harness session also keeps the tool token it was given until the
+  session ends; only the next delivery is refused.
+- A prompt that was claimed a moment before a revocation is still written.
+- A Full-access grant has no ceiling, so work it starts runs at the thread's mode when that work is
+  delivered.
+- A watch or a delegation created by a tool call that lands outside the grant's own turn carries no
+  grant with it.
+- A grant's level is frozen when it is approved. To change it, revoke the grant and sign in again.
+- A re-watch cannot bring back a watch whose family was revoked.
+- On a wildcard or LAN-only bind, outside agents cannot sign in: there is no loopback listener for
+  the OAuth routes.
+
+## Tests
+
+- `crates/h4rn-daemon/tests/mcp_server.rs` boots a real daemon: a FakeHarness session receives the
+  thread-bound token; the hub lists and calls the tools; OAuth registration, PKCE (including a
+  rejected `plain` challenge), the sign-in answered over the protocol, the page's redirect shape,
+  level enforcement, aggregate and per-client rate limits, revocation, hashed storage and the
+  protocol operations are exercised; approval without an owner session, a cross-site `Origin`, a
+  page on another loopback port, `same-site`, a rebinding `Host`, a non-loopback listener, a foreign
+  `resource`, a resource named at the token endpoint, a JSON-RPC batch, a supervised ceiling raised
+  after queueing, refresh rotation, redacted titles and tool output, and a revocation that cannot be
+  saved are proved; and the PR-link tools run against a scripted forge.
+- Unit tests in `crates/h4rn-daemon/src/mcp_server/` cover redirect allow-listing, PKCE vectors,
+  expiry, one-time codes, replay revocation, resource binding at the token endpoint, the
+  revocation-versus-use race, a revocation freeing its registration slot, an approval never writing
+  its code to disk, sign-in caps, registration caps, the bounded rate limiter, quarantine of an
+  unreadable store, and the page having no form.
+- `crates/h4rn-daemon/src/threads.rs` covers the ceiling through a capped turn, across a mode change,
+  on a reused session, and through a usage limit and restart.
+- `apps/ui/src/features/access/` covers the Sharing & access list, the waiting sign-in (unverified
+  name, callback origin, no preselected level), copy, revoke, and the remote-copy explanation.

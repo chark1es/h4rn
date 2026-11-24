@@ -102,10 +102,12 @@ pub use import::{
 };
 pub use issues::*;
 pub use mcp::{
-    McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle, McpImportCandidate,
-    McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest, McpSecretInput,
-    McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval, McpSharePolicy,
-    McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
+    AgentToolSettings, McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle,
+    McpImportCandidate, McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest,
+    McpSecretInput, McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval,
+    McpSharePolicy, McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput,
+    McpTransportView, OutsideAgentLevel, OutsideAgentSettings, OutsideAgentSignIn,
+    OutsideAgentView,
 };
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;

@@ -74,4 +74,5 @@ h4rn-connect.workspace = true
 reqwest = { workspace = true, features = ["cookies"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
+tower.workspace = true
 wiremock.workspace = true

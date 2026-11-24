@@ -109,6 +109,35 @@ pub enum RuntimeMode {
     FullAccess,
 }
 
+impl RuntimeMode {
+    /// How much autonomy the mode grants, for clamping.
+    ///
+    /// `Plan` writes nothing, so it sits at the same floor as
+    /// `ApprovalRequired`; the two differ in what the agent may *attempt*, not
+    /// in whether a write can happen unattended.
+    fn autonomy(self) -> u8 {
+        match self {
+            Self::ApprovalRequired | Self::Plan => 0,
+            Self::AutoAcceptEdits => 1,
+            Self::FullAccess => 2,
+        }
+    }
+
+    /// The stricter of `self` and `ceiling`.
+    ///
+    /// A message queued by an outside agent carries the most autonomy its grant
+    /// allows. The turn runs with the thread's own mode clamped to that: raising
+    /// the thread's mode afterwards can never lift the ceiling of a message that
+    /// was already queued.
+    pub fn clamped_to(self, ceiling: Self) -> Self {
+        if self.autonomy() <= ceiling.autonomy() {
+            self
+        } else {
+            ceiling
+        }
+    }
+}
+
 /// Whether to run the thread in an isolated worktree.
 ///
 /// `true` asks the daemon to generate a branch name, while a string names the

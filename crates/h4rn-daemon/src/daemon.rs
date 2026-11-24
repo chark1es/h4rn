@@ -1,6 +1,6 @@
 //! Daemon assembly: builder, bound listeners and graceful shutdown.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -388,6 +388,13 @@ impl DaemonBuilder {
 
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
+        // Outside-agent grants are opened before the PR watch: a watch wakes
+        // through the same grant check that revocation writes, so the sink and
+        // the OAuth endpoint must read one store.
+        let oauth = Arc::new(
+            crate::mcp_server::OAuthStore::open(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open outside-agent grants: {error}"))?,
+        );
         // Imports read the harnesses' own transcripts and turn selected
         // conversations into ordinary threads on this daemon.
         let import = Arc::new(crate::import::ImportService::open(
@@ -400,7 +407,10 @@ impl DaemonBuilder {
         let pr_links = crate::pr_links::PrLinkService::new(
             Arc::clone(&journal),
             Arc::new(crate::pr_links::ForgePrSource::new(Arc::clone(&forge))),
-            Arc::new(crate::pr_links::ThreadWakeSink::new(Arc::clone(&manager))),
+            Arc::new(crate::pr_links::ThreadWakeSink::new(
+                Arc::clone(&manager),
+                Arc::clone(&oauth),
+            )),
         );
         pr_links.start();
         let linear = match self.linear_endpoint.as_deref() {
@@ -544,6 +554,41 @@ impl DaemonBuilder {
         // `None` and a session starts without MCP rather than with a bogus URL.
         manager.set_mcp_provider(Arc::clone(&mcp) as Arc<dyn McpSessionProvider>);
 
+        // h4rn's own tools for the agents it runs act on the calling thread
+        // (ADR-046); the hub's per-session token names that thread.
+        let agent_tool_settings = Arc::new(crate::mcp_server::AgentToolSettingsStore::open(
+            &self.config.data_dir,
+            hosts.local_id().clone(),
+        ));
+        mcp.set_agent_tools(Arc::clone(&agent_tool_settings));
+        // One redactor for both seats: h4rn's own tools and the outside tools
+        // answer with the same redacted title, and one token store feeds it.
+        let redactor = Arc::new(crate::mcp_server::Redactor::new());
+        // Titles are cleaned at the source, before the 80-character cut.
+        manager.set_redactor(Arc::clone(&redactor));
+        mcp.hub()
+            .register_provider(Arc::new(crate::mcp_server::AgentToolsProvider::new(
+                Arc::clone(&manager),
+                Arc::clone(&pr_links),
+                Arc::clone(&forge),
+                agent_tool_settings,
+                Arc::clone(&redactor),
+                hosts.local_id().clone(),
+            )));
+
+        // Outside agents connect through OAuth to `/mcp`; they never
+        // see the person's own upstream servers.
+        let outside = Arc::new(crate::mcp_server::OutsideAgents::new(
+            oauth,
+            Arc::clone(&manager),
+            Arc::clone(&projects),
+            Arc::clone(&hosts),
+            Arc::clone(&proxy),
+            Arc::clone(&redactor),
+            hosts.local_id().clone(),
+        ));
+        mcp.set_outside_agents(Arc::clone(&outside));
+
         // Delegation rides the same hub and namespace as the diagnostic tools;
         // each session's bearer token scopes a call to its own thread.
         let subagents = Arc::new(
@@ -606,6 +651,7 @@ impl DaemonBuilder {
             remote,
             devices,
             mcp,
+            outside,
             relay_dialer: Arc::new(crate::remote::RelayDialer::new()),
             supervisor: self.supervisor,
             proxy,
@@ -638,6 +684,8 @@ pub struct Daemon {
     remote: Option<Arc<RemoteState>>,
     devices: Arc<DeviceRegistry>,
     mcp: Arc<McpService>,
+    /// Outside-agent OAuth and its MCP endpoint.
+    outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Multiplexes peer MCP sessions over the daemon's one relay socket.
     relay_dialer: Arc<crate::remote::RelayDialer>,
     supervisor: Arc<ProcessSupervisor>,
@@ -654,12 +702,60 @@ pub struct Daemon {
     network_access_enabled: bool,
 }
 
+/// The OAuth store as the thread manager's grant authority.
+struct OAuthGrantAuthority(Arc<crate::mcp_server::OutsideAgents>);
+
+impl crate::threads::GrantAuthority for OAuthGrantAuthority {
+    fn family_is_live(&self, family: &str) -> bool {
+        self.0.store().grant_is_live(family)
+    }
+}
+
+/// The loopback socket that really serves MCP, from the sockets that bound.
+///
+/// A listener whose bound address is loopback is used as it is, so `[::1]` stays
+/// `[::1]`. A wildcard bind answers this machine on its own port, so its
+/// loopback name is advertised. Any other bind has no eligible socket and the
+/// caller reports the feature unavailable.
+fn mcp_serving_socket(listeners: &[(SocketAddr, server::ListenerKind)]) -> Option<SocketAddr> {
+    let mut wildcard = None;
+    for (addr, _kind) in listeners {
+        if addr.ip().is_loopback() {
+            return Some(*addr);
+        }
+        if addr.ip().is_unspecified() && wildcard.is_none() {
+            wildcard = Some(*addr);
+        }
+    }
+    wildcard.map(|addr| {
+        let ip = if addr.is_ipv6() {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        } else {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        };
+        SocketAddr::new(ip, addr.port())
+    })
+}
+
+/// The loopback socket outside agents may use, from the sockets that bound.
+///
+/// OAuth finishes only on a loopback listener, so a wildcard bind cannot serve
+/// an outside agent even though the hub reaches this machine through it. Only a
+/// socket whose listener kind is [`server::ListenerKind::Loopback`] qualifies;
+/// any other bind has no eligible socket and the feature reports itself
+/// unavailable.
+fn outside_serving_socket(listeners: &[(SocketAddr, server::ListenerKind)]) -> Option<SocketAddr> {
+    listeners
+        .iter()
+        .find(|(addr, kind)| *kind == server::ListenerKind::Loopback && addr.ip().is_loopback())
+        .map(|(addr, _kind)| *addr)
+}
+
 impl Daemon {
     /// Bound configuration.
     pub fn config(&self) -> &Config {
         &self.config
     }
-
     /// The secure transport service, when enabled.
     pub fn secure(&self) -> Option<Arc<SecureService>> {
         self.secure.clone()
@@ -717,14 +813,21 @@ impl Daemon {
 
     /// Binds the primary and optional extra listener.
     pub async fn bind(self) -> anyhow::Result<BoundDaemon> {
+        // Every durable piece of outside-grant work is re-checked against the
+        // OAuth store's live token families when it is delivered.
+        self.manager
+            .set_grant_authority(Arc::new(OAuthGrantAuthority(Arc::clone(&self.outside))));
         let mut listeners = Vec::new();
         let mut addrs = Vec::new();
 
         let primary = TcpListener::bind(self.config.bind)
             .await
             .map_err(|error| anyhow::anyhow!("bind {}: {error}", self.config.bind))?;
-        addrs.push(primary.local_addr()?);
-        listeners.push((primary, server::ListenerKind::Primary));
+        let primary_addr = primary.local_addr()?;
+        addrs.push(primary_addr);
+        // Classified from the address the socket really has, not from which
+        // flag named it: a wildcard or LAN bind must not serve OAuth or `/mcp`.
+        listeners.push((primary, server::ListenerKind::for_bind(primary_addr)));
 
         if let Some(extra) = self.config.extra_bind
             && extra != self.config.bind
@@ -760,13 +863,42 @@ impl Daemon {
             }
         }
 
-        // The hub endpoint is always loopback: harness children run on this
-        // machine and must not expose the token over a LAN interface.
-        let mcp_url = format!(
-            "http://{}/mcp",
-            SocketAddr::from(([127, 0, 0, 1], addrs[0].port()))
-        );
-        self.mcp.set_endpoint(mcp_url).await;
+        // The hub endpoint is served by a socket this machine can reach as
+        // loopback. Derive it from the sockets that really bound rather than
+        // assuming the primary is `127.0.0.1`: an IPv6 loopback bind answers on
+        // `[::1]`, and a wildcard bind answers loopback on its own port while
+        // the advertised name stays `127.0.0.1`/`[::1]`. A concrete LAN bind
+        // with no loopback socket has no eligible listener, and the features
+        // that need one are reported unavailable instead of advertising an
+        // address that does not answer.
+        let serving = listeners
+            .iter()
+            .filter_map(|(listener, kind)| listener.local_addr().ok().map(|addr| (addr, *kind)))
+            .collect::<Vec<_>>();
+        match mcp_serving_socket(&serving) {
+            Some(socket) => self.mcp.set_endpoint(format!("http://{socket}/mcp")).await,
+            None => {
+                tracing::warn!(
+                    bind = %self.config.bind,
+                    "no loopback socket serves MCP; harness tools are unavailable"
+                );
+            }
+        }
+        // Outside agents are stricter than the hub: OAuth finishes only on a
+        // loopback listener, so a wildcard or LAN-only bind must not advertise
+        // an address whose socket serves no sign-in.
+        match outside_serving_socket(&serving) {
+            Some(socket) => self.outside.set_base_url(format!("http://{socket}")),
+            None => {
+                tracing::warn!(
+                    bind = %self.config.bind,
+                    "no loopback listener serves outside agents; sign-in is unavailable"
+                );
+            }
+        }
+        // A thread may quote the person's own access token; an outside agent
+        // must never read it back out of `get_thread`.
+        self.outside.set_owner_token(&self.tokens);
         // With a secure transport this daemon can reach its peers' shared MCP
         // servers, authenticating as its own daemon key.
         if let Some(service) = &self.secure {
@@ -781,6 +913,7 @@ impl Daemon {
         let devices = self.devices;
         let secure = self.secure;
         let mcp = Arc::clone(&self.mcp);
+        let outside = Arc::clone(&self.outside);
         let config = self.config.clone();
         let (network, network_commands) = NetworkAccess::new(
             config.data_dir.clone(),
@@ -807,6 +940,7 @@ impl Daemon {
             devices: Arc::clone(&devices),
             network: Arc::clone(&network),
             mcp: Arc::clone(&mcp),
+            outside: Arc::clone(&outside),
             started: std::time::Instant::now(),
             proxy: Arc::clone(&self.proxy),
             meter: Arc::clone(&self.meter),
@@ -915,11 +1049,13 @@ impl Daemon {
             manager: self.manager,
             subagents: self.subagents,
             worktrees: self.worktrees,
+            hosts: self.hosts,
             terminals: self.terminals,
             forge: self.forge,
             pr_links: self.pr_links,
             schedules: self.schedules,
             mcp: self.mcp,
+            outside: self.outside,
             guest: self.guest,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
@@ -933,16 +1069,20 @@ pub struct BoundDaemon {
     state: AppState,
     /// The dedicated LAN/tailnet listener, when network access is on.
     network: Arc<NetworkAccess>,
+    /// One socket and the routes it serves. OAuth and `/mcp` exist only where
+    /// [`server::ListenerKind::router`] says they are safe.
     listeners: Vec<(TcpListener, server::ListenerKind)>,
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
     pr_links: Arc<crate::pr_links::PrLinkService>,
     schedules: Arc<ScheduleService>,
     mcp: Arc<McpService>,
+    outside: Arc<crate::mcp_server::OutsideAgents>,
     guest: Arc<crate::guest::GuestService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
@@ -994,9 +1134,19 @@ impl BoundDaemon {
         Arc::clone(&self.mcp)
     }
 
+    /// Outside-agent access for in-process tests and diagnostics.
+    pub fn outside_agents(&self) -> Arc<crate::mcp_server::OutsideAgents> {
+        Arc::clone(&self.outside)
+    }
+
     /// Guest links service for in-process tests and diagnostics.
     pub fn guest(&self) -> Arc<crate::guest::GuestService> {
         Arc::clone(&self.guest)
+    }
+
+    /// Host inventory for in-process tests.
+    pub fn host_inventory(&self) -> Arc<HostInventory> {
+        Arc::clone(&self.hosts)
     }
 
     /// Data directory, for tests that inspect the durable journal.
@@ -1018,11 +1168,13 @@ impl BoundDaemon {
             manager,
             subagents,
             worktrees,
+            hosts: _,
             terminals,
             forge,
             pr_links,
             schedules,
             mcp,
+            outside: _,
             guest: _guest,
             supervisor,
             data_dir,
@@ -1415,4 +1567,59 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let bound = daemon.bind().await?;
     tracing::info!(addr = %bound.local_addr(), "h4rnd ready");
     bound.serve(crate::supervisor::shutdown_signal()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bound(addr: &str) -> (SocketAddr, server::ListenerKind) {
+        let addr: SocketAddr = addr.parse().expect("address");
+        (addr, server::ListenerKind::for_bind(addr))
+    }
+
+    #[test]
+    fn the_mcp_socket_follows_the_loopback_socket_it_serves() {
+        let ipv6 = bound("[::1]:47800");
+        assert_eq!(mcp_serving_socket(&[ipv6]), Some(ipv6.0));
+
+        // A wildcard bind answers this machine on its own port, under the
+        // matching loopback name.
+        assert_eq!(
+            mcp_serving_socket(&[bound("0.0.0.0:47800")]),
+            Some("127.0.0.1:47800".parse().expect("addr"))
+        );
+        assert_eq!(
+            mcp_serving_socket(&[bound("[::]:47800")]),
+            Some("[::1]:47800".parse().expect("addr"))
+        );
+
+        // A loopback extra bind is the eligible socket when the primary is not.
+        let extra = bound("127.0.0.1:5000");
+        assert_eq!(
+            mcp_serving_socket(&[bound("192.168.1.5:47800"), extra]),
+            Some(extra.0)
+        );
+
+        // A concrete LAN bind with no loopback socket has nowhere to serve.
+        assert_eq!(mcp_serving_socket(&[bound("192.168.1.5:47800")]), None);
+    }
+
+    /// Only a real loopback listener serves OAuth, so only it is advertised.
+    #[test]
+    fn outside_agents_are_named_only_by_a_loopback_listener() {
+        let loopback = bound("127.0.0.1:47800");
+        assert_eq!(outside_serving_socket(&[loopback]), Some(loopback.0));
+
+        // The hub may use a wildcard's loopback name; OAuth cannot.
+        assert_eq!(outside_serving_socket(&[bound("0.0.0.0:47800")]), None);
+        assert_eq!(outside_serving_socket(&[bound("[::]:47800")]), None);
+
+        let extra = bound("127.0.0.1:5000");
+        assert_eq!(
+            outside_serving_socket(&[bound("192.168.1.5:47800"), extra]),
+            Some(extra.0)
+        );
+        assert_eq!(outside_serving_socket(&[bound("192.168.1.5:47800")]), None);
+    }
 }
