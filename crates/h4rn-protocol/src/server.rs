@@ -193,19 +193,38 @@ pub enum ResponseBody {
         queued_message_id: Option<crate::ids::QueuedMessageId>,
     },
     /// A thread's queue changed.
+    ///
+    /// `queued` is one bounded page (see [`crate::common::queue_page`]),
+    /// starting at the first message; `total` is the whole queue's length.
     QueueUpdated {
         /// Thread whose queue changed.
         thread_id: ThreadId,
-        /// The queue after the change, oldest first.
+        /// The queue after the change, oldest first, bounded.
         queued: Vec<crate::common::QueuedMessage>,
+        /// How many messages wait in total.
+        total: u32,
+        /// The revision this page came from; see
+        /// [`crate::ThreadSummary::queue_revision`].
+        #[ts(type = "number")]
+        revision: u64,
         /// Durable daemon-global sequence of the summary event.
         #[ts(type = "number")]
         seq: u64,
     },
-    /// What each harness adapter can do beyond the common trait.
-    HarnessCapabilities {
-        /// One row per harness, in stable order.
-        harnesses: Vec<crate::HarnessCapabilityEntry>,
+    /// One page of a thread's queue.
+    ThreadQueue {
+        /// Thread whose queue was read.
+        thread_id: ThreadId,
+        /// Messages from `offset`, in queue order, bounded by the frame limit.
+        queued: Vec<crate::common::QueuedMessage>,
+        /// How many messages wait in total.
+        total: u32,
+        /// Index of the first message in the next page.
+        next_offset: u32,
+        /// The revision this page came from; see
+        /// [`crate::ThreadSummary::queue_revision`].
+        #[ts(type = "number")]
+        revision: u64,
     },
     /// A terminal was opened.
     TerminalOpened {

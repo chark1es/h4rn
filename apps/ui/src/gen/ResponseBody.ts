@@ -43,7 +43,6 @@ import type { GitPushResult } from "./GitPushResult";
 import type { GitThreadStatus } from "./GitThreadStatus";
 import type { GuestSettings } from "./GuestSettings";
 import type { GuestSharing } from "./GuestSharing";
-import type { HarnessCapabilityEntry } from "./HarnessCapabilityEntry";
 import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
@@ -203,17 +202,43 @@ queued_message_id?: QueuedMessageId, } | { "type": "queue_updated",
  */
 thread_id: ThreadId, 
 /**
- * The queue after the change, oldest first.
+ * The queue after the change, oldest first, bounded.
  */
 queued: Array<QueuedMessage>, 
 /**
+ * How many messages wait in total.
+ */
+total: number, 
+/**
+ * The revision this page came from; see
+ * [`crate::ThreadSummary::queue_revision`].
+ */
+revision: number, 
+/**
  * Durable daemon-global sequence of the summary event.
  */
-seq: number, } | { "type": "harness_capabilities", 
+seq: number, } | { "type": "thread_queue", 
 /**
- * One row per harness, in stable order.
+ * Thread whose queue was read.
  */
-harnesses: Array<HarnessCapabilityEntry>, } | { "type": "terminal_opened", 
+thread_id: ThreadId, 
+/**
+ * Messages from `offset`, in queue order, bounded by the frame limit.
+ */
+queued: Array<QueuedMessage>, 
+/**
+ * How many messages wait in total.
+ */
+total: number, 
+/**
+ * Index of the first message in the next page.
+ */
+next_offset: number, 
+/**
+ * The revision this page came from; see
+ * [`crate::ThreadSummary::queue_revision`].
+ */
+revision: number, } | { "type": "terminal_opened", 
 /**
  * The new terminal, including its effective size.
  */

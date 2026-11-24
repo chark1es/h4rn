@@ -115,8 +115,6 @@ export type * from "./GuestLink";
 export type * from "./GuestRequest";
 export type * from "./GuestSettings";
 export type * from "./GuestSharing";
-export type * from "./HarnessCapabilities";
-export type * from "./HarnessCapabilityEntry";
 export type * from "./HarnessKind";
 export type * from "./HarnessOutputStream";
 export type * from "./HarnessUpdateEvent";

@@ -67,9 +67,9 @@ pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, Uploa
 pub use client::{ClientFrame, ClientRequest, QueueAction, QueueDirection};
 pub use common::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,
-    HostSummary, Item, MatchUnit, MessageRole, PlanStep, QueuedMessage, RuntimeMode, ThreadFilter,
-    ThreadSummary, ThreadTab, ToolCall, ToolCallStatus, ToolStats, Topic, TurnStatus, Usage,
-    WorktreeRequest,
+    HostSummary, Item, MatchUnit, MessageRole, PlanStep, QUEUE_PAGE_BYTES, QUEUE_PAGE_MESSAGES,
+    QueuedMessage, RuntimeMode, ThreadFilter, ThreadSummary, ThreadTab, ToolCall, ToolCallStatus,
+    ToolStats, Topic, TurnStatus, Usage, WorktreeRequest, queue_page,
 };
 pub use connect::*;
 pub use forge::*;
@@ -90,8 +90,7 @@ pub use guest::{
     GuestThreadView, guest_page_csp, guest_page_html, redact_guest_path,
 };
 pub use harness::{
-    HarnessCapabilities, HarnessCapabilityEntry, HarnessOutputStream, HarnessUpdateEvent,
-    HarnessUpdateMethod, HarnessVersionInfo,
+    HarnessOutputStream, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo,
 };
 pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, QueuedMessageId, ScheduleTaskId, SubagentId,

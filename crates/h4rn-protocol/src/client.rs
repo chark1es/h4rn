@@ -9,7 +9,7 @@ use crate::common::{
     ApprovalDecision, DeviceInfo, HarnessKind, RuntimeMode, ThreadFilter, ThreadTab, Topic,
     WorktreeRequest,
 };
-use crate::ids::{AttachmentId, DeviceId, HostId, TerminalId, ThreadId};
+use crate::ids::{AttachmentId, DeviceId, HostId, TerminalId, ThreadId, TurnId};
 
 /// One request sent by a client.
 ///
@@ -138,6 +138,14 @@ pub enum ClientRequest {
         /// running this behaves like an ordinary send.
         #[serde(default)]
         steer: bool,
+        /// The running turn this client observed, when it knows one.
+        ///
+        /// A steer names its target so a turn that ended between the person's
+        /// click and the request is refused instead of catching a newer turn.
+        /// Omitted (or `None`) means "whatever turn is running now".
+        #[serde(default)]
+        #[ts(optional)]
+        turn_id: Option<TurnId>,
     },
     /// Change one message waiting in a thread's queue.
     ///
@@ -151,6 +159,19 @@ pub enum ClientRequest {
         message_id: crate::ids::QueuedMessageId,
         /// What to do with it.
         action: QueueAction,
+    },
+    /// Read one bounded page of a thread's queue.
+    ///
+    /// Answered with [`crate::ResponseBody::ThreadQueue`]. The queue is not part
+    /// of [`crate::ThreadSummary`] because a full queue can be larger than the
+    /// paired transport's frame; a client fetches it separately and pages it
+    /// when `total` is larger than the returned page.
+    GetThreadQueue {
+        /// Thread owning the queue.
+        thread_id: ThreadId,
+        /// How many messages to skip, for the next page.
+        #[serde(default)]
+        offset: u32,
     },
     /// Interrupt the running turn.
     Interrupt {
@@ -1387,11 +1408,6 @@ pub enum ClientRequest {
     /// The latest version comes from the npm registry and is cached for a few
     /// hours. An offline registry is reported as unknown, never as an error.
     ListHarnessVersions,
-    /// Report what each harness adapter can do beyond the common trait.
-    ///
-    /// Answered with [`crate::ResponseBody::HarnessCapabilities`]. Today this
-    /// says whether the adapter takes a message into a running turn.
-    ListHarnessCapabilities,
     /// Update one harness CLI and stream its output as events.
     ///
     /// Refused while that harness has an active turn. The command runs with no
@@ -1632,7 +1648,7 @@ impl ClientRequest {
             | Self::ListFailoverOptions { .. }
             | Self::ListHarnessVersions
             | Self::ListAcpAgents
-            | Self::ListHarnessCapabilities
+            | Self::GetThreadQueue { .. }
             | Self::ListWorktrees
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
@@ -1838,12 +1854,35 @@ mod tests {
         }))
         .expect("an older frame still parses");
         match frame.body {
-            ClientRequest::SendMessage { steer, text, .. } => {
+            ClientRequest::SendMessage {
+                steer,
+                turn_id,
+                text,
+                ..
+            } => {
                 assert!(!steer, "a frame without the flag queues");
+                assert_eq!(turn_id, None, "an older frame names no turn");
                 assert_eq!(text, "hello");
             }
             other => panic!("expected send_message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_steer_names_the_turn_it_observed() {
+        let request = ClientRequest::SendMessage {
+            thread_id: ThreadId::new("th_1"),
+            text: "go left".into(),
+            attachments: Vec::new(),
+            steer: true,
+            turn_id: Some(TurnId::new("turn_1")),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], "send_message");
+        assert_eq!(value["steer"], true);
+        assert_eq!(value["turn_id"], "turn_1");
+        let back: ClientRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(back, request);
     }
 
     #[test]
@@ -1868,8 +1907,13 @@ mod tests {
             "changing a queue is the owner's approval"
         );
         assert_eq!(
-            ClientRequest::ListHarnessCapabilities.required_scope(),
-            crate::connect::PairScope::View
+            ClientRequest::GetThreadQueue {
+                thread_id: ThreadId::new("th_1"),
+                offset: 0,
+            }
+            .required_scope(),
+            crate::connect::PairScope::View,
+            "reading the queue is a view, like the summary that counts it"
         );
     }
 

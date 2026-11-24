@@ -3,10 +3,10 @@ import type { AgentState } from "./AgentState";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { LimitBrief } from "./LimitBrief";
-import type { QueuedMessage } from "./QueuedMessage";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
+import type { TurnId } from "./TurnId";
 import type { Usage } from "./Usage";
 
 /**
@@ -158,13 +158,33 @@ resume_at: string | null,
  */
 limit: LimitBrief | null, 
 /**
- * Messages waiting for the thread's next turn, oldest first.
+ * How many messages wait for the thread's next turn.
  *
- * A queued message is durable and not yet in the transcript. It is
- * delivered as the next turn's first message, or steered into the running
- * turn by an explicit Send now.
+ * The contents are not in the summary: a full queue can be larger than the
+ * paired transport's frame. A client reads them with
+ * [`crate::ClientRequest::GetThreadQueue`] and refetches when
+ * `queue_revision` changes. A queued message is durable and not yet in the
+ * transcript; it is delivered as the next turn's first message, or steered
+ * into the running turn by an explicit Send now.
  */
-queued: Array<QueuedMessage>, 
+queued_count: number, 
+/**
+ * A counter that changes whenever the queue's contents or order change.
+ *
+ * Clients compare it with the revision their cached queue came from: a
+ * different value means the cached rows are stale and must be refetched.
+ * It is a per-daemon-run counter, not a durable sequence.
+ */
+queue_revision: number, 
+/**
+ * The turn that is running now, when one is.
+ *
+ * A client steers by naming it, so a turn that ended in the meantime is
+ * refused rather than catching a newer one. It stays set while a running
+ * turn is paused by a limit, which is why it is the honest answer to "is a
+ * turn running" and `agent_state` alone is not.
+ */
+active_turn_id?: TurnId, 
 /**
  * Whether the running harness can accept a message mid-turn.
  *

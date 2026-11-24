@@ -450,13 +450,33 @@ pub struct ThreadSummary {
     /// The limit currently blocking the thread, when one was observed.
     #[serde(default)]
     pub limit: Option<crate::usage::LimitBrief>,
-    /// Messages waiting for the thread's next turn, oldest first.
+    /// How many messages wait for the thread's next turn.
     ///
-    /// A queued message is durable and not yet in the transcript. It is
-    /// delivered as the next turn's first message, or steered into the running
-    /// turn by an explicit Send now.
+    /// The contents are not in the summary: a full queue can be larger than the
+    /// paired transport's frame. A client reads them with
+    /// [`crate::ClientRequest::GetThreadQueue`] and refetches when
+    /// `queue_revision` changes. A queued message is durable and not yet in the
+    /// transcript; it is delivered as the next turn's first message, or steered
+    /// into the running turn by an explicit Send now.
     #[serde(default)]
-    pub queued: Vec<QueuedMessage>,
+    pub queued_count: u32,
+    /// A counter that changes whenever the queue's contents or order change.
+    ///
+    /// Clients compare it with the revision their cached queue came from: a
+    /// different value means the cached rows are stale and must be refetched.
+    /// It is a per-daemon-run counter, not a durable sequence.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub queue_revision: u64,
+    /// The turn that is running now, when one is.
+    ///
+    /// A client steers by naming it, so a turn that ended in the meantime is
+    /// refused rather than catching a newer one. It stays set while a running
+    /// turn is paused by a limit, which is why it is the honest answer to "is a
+    /// turn running" and `agent_state` alone is not.
+    #[serde(default)]
+    #[ts(optional)]
+    pub active_turn_id: Option<crate::ids::TurnId>,
     /// Whether the running harness can accept a message mid-turn.
     ///
     /// Capabilities are advertised per harness; a client offers Steer only when
@@ -477,6 +497,40 @@ pub struct QueuedMessage {
     pub attachments: Vec<crate::blob::Attachment>,
     /// When the message was queued.
     pub queued_at: DateTime<Utc>,
+}
+
+/// The most queue bytes one response carries.
+///
+/// A full queue is unbounded, but a paired transport refuses a frame over its
+/// limit, so no response may carry the whole thing. Half the default 512 KiB
+/// frame leaves room for the envelope and for the one message that overflows
+/// the budget (a message that was queued had to arrive in a frame that fit).
+pub const QUEUE_PAGE_BYTES: usize = 256 * 1024;
+
+/// The most messages one queue page carries, whatever their size.
+pub const QUEUE_PAGE_MESSAGES: usize = 100;
+
+/// Selects one bounded page of `queued`, starting after `offset` messages.
+///
+/// Whole messages are only, in queue order: a page never splits a message, so a
+/// client renders exactly what the person saved. The first message after
+/// `offset` is always included, even when it alone is larger than
+/// [`QUEUE_PAGE_BYTES`]; every message that could be queued had to fit a
+/// transport frame to get there.
+pub fn queue_page(queued: &[QueuedMessage], offset: usize) -> Vec<QueuedMessage> {
+    let mut page = Vec::new();
+    let mut bytes = 0usize;
+    for message in queued.iter().skip(offset).take(QUEUE_PAGE_MESSAGES) {
+        let size = serde_json::to_vec(message)
+            .map(|encoded| encoded.len())
+            .unwrap_or_default();
+        if !page.is_empty() && bytes + size > QUEUE_PAGE_BYTES {
+            break;
+        }
+        bytes += size;
+        page.push(message.clone());
+    }
+    page
 }
 
 /// One completed stream item.
@@ -787,7 +841,9 @@ mod tests {
             unread: false,
             resume_at,
             limit,
-            queued: Vec::new(),
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
             steer: false,
         }
     }
@@ -821,5 +877,61 @@ mod tests {
         let json = serde_json::to_value(&summary).expect("serialise the summary");
         assert!(json["resume_at"].is_null());
         assert!(json["limit"].is_null());
+    }
+
+    fn queued(text: &str) -> QueuedMessage {
+        QueuedMessage {
+            message_id: crate::ids::QueuedMessageId::new_uuid_v7(),
+            text: text.into(),
+            attachments: Vec::new(),
+            queued_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_queue_page_keeps_whole_messages_under_the_budget() {
+        let queue: Vec<QueuedMessage> = (0..QUEUE_PAGE_MESSAGES + 5)
+            .map(|index| queued(&format!("message {index}")))
+            .collect();
+        let page = queue_page(&queue, 0);
+        assert_eq!(
+            page.len(),
+            QUEUE_PAGE_MESSAGES,
+            "a page is bounded by count"
+        );
+        assert_eq!(page[0].message_id, queue[0].message_id);
+
+        let next = queue_page(&queue, page.len());
+        assert_eq!(next.len(), 5, "the rest is the next page");
+        assert_eq!(next[0].message_id, queue[QUEUE_PAGE_MESSAGES].message_id);
+    }
+
+    #[test]
+    fn a_queue_page_stops_before_the_byte_budget_and_never_splits_a_message() {
+        let big = "x".repeat(QUEUE_PAGE_BYTES / 2);
+        let queue = vec![queued(&big), queued(&big), queued("small")];
+        let page = queue_page(&queue, 0);
+        assert_eq!(
+            page.len(),
+            1,
+            "a second message would put the page over the budget"
+        );
+        assert_eq!(page[0].text.len(), big.len(), "the text is whole");
+        let rest = queue_page(&queue, 1);
+        assert_eq!(
+            rest.len(),
+            2,
+            "the next page starts with the second big message, and the small one still fits"
+        );
+        assert_eq!(rest[0].text.len(), big.len());
+        assert_eq!(rest[1].text, "small");
+    }
+
+    #[test]
+    fn an_oversized_first_message_is_still_returned_whole() {
+        let huge = queued(&"y".repeat(QUEUE_PAGE_BYTES + 1024));
+        let page = queue_page(std::slice::from_ref(&huge), 0);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].text.len(), huge.text.len());
     }
 }

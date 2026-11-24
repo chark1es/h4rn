@@ -143,7 +143,15 @@ attachments: Array<AttachmentId>,
  * Refused when the harness has no real mid-turn input. With no turn
  * running this behaves like an ordinary send.
  */
-steer: boolean, } | { "type": "queue_message", 
+steer: boolean, 
+/**
+ * The running turn this client observed, when it knows one.
+ *
+ * A steer names its target so a turn that ended between the person's
+ * click and the request is refused instead of catching a newer turn.
+ * Omitted (or `None`) means "whatever turn is running now".
+ */
+turn_id?: TurnId, } | { "type": "queue_message", 
 /**
  * Thread owning the queue.
  */
@@ -155,7 +163,15 @@ message_id: QueuedMessageId,
 /**
  * What to do with it.
  */
-action: QueueAction, } | { "type": "interrupt", 
+action: QueueAction, } | { "type": "get_thread_queue", 
+/**
+ * Thread owning the queue.
+ */
+thread_id: ThreadId, 
+/**
+ * How many messages to skip, for the next page.
+ */
+offset: number, } | { "type": "interrupt", 
 /**
  * Thread whose turn should stop.
  */
@@ -1418,7 +1434,7 @@ number: number, } | { "type": "subagent",
 /**
  * Operation to perform.
  */
-request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "list_harness_capabilities" } | { "type": "update_harness", 
+request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "update_harness", 
 /**
  * Harness to update.
  */

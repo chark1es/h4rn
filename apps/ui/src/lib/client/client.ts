@@ -27,334 +27,317 @@ type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello"
     ? Extract<ResponseBody, { type: "subscribed" }>
     : T extends "list_harness_versions"
       ? Extract<ResponseBody, { type: "harness_versions" }>
-      : T extends "list_harness_capabilities"
-        ? Extract<ResponseBody, { type: "harness_capabilities" }>
-        : T extends "pairing_confirmations"
-          ? Extract<ResponseBody, { type: "pairing_confirmations" }>
-          : T extends "list_hosts"
-            ? Extract<ResponseBody, { type: "hosts" }>
-            : T extends "list_threads"
-              ? Extract<ResponseBody, { type: "threads" }>
-              : T extends "get_thread"
-                ? Extract<ResponseBody, { type: "thread" }>
-                : T extends "create_thread"
-                  ? Extract<ResponseBody, { type: "thread_created" }>
-                  : T extends "send_message"
-                    ? Extract<ResponseBody, { type: "message_accepted" }>
-                    : T extends "queue_message"
-                      ? Extract<ResponseBody, { type: "queue_updated" }>
-                      : T extends "terminal_open"
-                        ? Extract<ResponseBody, { type: "terminal_opened" }>
-                        : T extends "terminal_attach"
-                          ? Extract<ResponseBody, { type: "terminal_attached" }>
-                          : T extends "terminal_list"
-                            ? Extract<ResponseBody, { type: "terminals" }>
-                            : T extends "fs_list"
-                              ? Extract<ResponseBody, { type: "fs_listing" }>
-                              : T extends "fs_read"
-                                ? Extract<ResponseBody, { type: "fs_file" }>
-                                : T extends "fs_write"
-                                  ? Extract<ResponseBody, { type: "fs_written" }>
-                                  : T extends "fs_create" | "fs_rename"
-                                    ? Extract<ResponseBody, { type: "fs_entry_created" }>
-                                    : T extends "fs_delete"
-                                      ? Extract<ResponseBody, { type: "fs_deleted" }>
-                                      : T extends "fs_restore"
-                                        ? Extract<ResponseBody, { type: "fs_restored" }>
-                                        : T extends "fs_search"
-                                          ? Extract<ResponseBody, { type: "fs_search_started" }>
-                                          : T extends "fs_watch"
-                                            ? Extract<ResponseBody, { type: "fs_watching" }>
-                                            : T extends "fs_diff"
-                                              ? Extract<ResponseBody, { type: "fs_diff" }>
-                                              : T extends "fs_turn_changes"
-                                                ? Extract<ResponseBody, { type: "fs_turn_changes" }>
-                                                : T extends "fs_diff_files"
-                                                  ? Extract<ResponseBody, { type: "fs_diff_files" }>
-                                                  : T extends "fs_diff_commits"
+      : T extends "pairing_confirmations"
+        ? Extract<ResponseBody, { type: "pairing_confirmations" }>
+        : T extends "list_hosts"
+          ? Extract<ResponseBody, { type: "hosts" }>
+          : T extends "list_threads"
+            ? Extract<ResponseBody, { type: "threads" }>
+            : T extends "get_thread"
+              ? Extract<ResponseBody, { type: "thread" }>
+              : T extends "create_thread"
+                ? Extract<ResponseBody, { type: "thread_created" }>
+                : T extends "send_message"
+                  ? Extract<ResponseBody, { type: "message_accepted" }>
+                  : T extends "terminal_open"
+                    ? Extract<ResponseBody, { type: "terminal_opened" }>
+                    : T extends "terminal_attach"
+                      ? Extract<ResponseBody, { type: "terminal_attached" }>
+                      : T extends "terminal_list"
+                        ? Extract<ResponseBody, { type: "terminals" }>
+                        : T extends "fs_list"
+                          ? Extract<ResponseBody, { type: "fs_listing" }>
+                          : T extends "fs_read"
+                            ? Extract<ResponseBody, { type: "fs_file" }>
+                            : T extends "fs_write"
+                              ? Extract<ResponseBody, { type: "fs_written" }>
+                              : T extends "fs_create" | "fs_rename"
+                                ? Extract<ResponseBody, { type: "fs_entry_created" }>
+                                : T extends "fs_delete"
+                                  ? Extract<ResponseBody, { type: "fs_deleted" }>
+                                  : T extends "fs_restore"
+                                    ? Extract<ResponseBody, { type: "fs_restored" }>
+                                    : T extends "fs_search"
+                                      ? Extract<ResponseBody, { type: "fs_search_started" }>
+                                      : T extends "fs_watch"
+                                        ? Extract<ResponseBody, { type: "fs_watching" }>
+                                        : T extends "fs_diff"
+                                          ? Extract<ResponseBody, { type: "fs_diff" }>
+                                          : T extends "fs_turn_changes"
+                                            ? Extract<ResponseBody, { type: "fs_turn_changes" }>
+                                            : T extends "fs_diff_files"
+                                              ? Extract<ResponseBody, { type: "fs_diff_files" }>
+                                              : T extends "fs_diff_commits"
+                                                ? Extract<ResponseBody, { type: "fs_diff_commits" }>
+                                                : T extends "fs_branches"
+                                                  ? Extract<ResponseBody, { type: "fs_branches" }>
+                                                  : T extends "begin_upload"
                                                     ? Extract<
                                                         ResponseBody,
-                                                        { type: "fs_diff_commits" }
+                                                        { type: "upload_started" }
                                                       >
-                                                    : T extends "fs_branches"
+                                                    : T extends "commit_upload"
                                                       ? Extract<
                                                           ResponseBody,
-                                                          { type: "fs_branches" }
+                                                          { type: "upload_committed" }
                                                         >
-                                                      : T extends "begin_upload"
+                                                      : T extends "query_upload"
                                                         ? Extract<
                                                             ResponseBody,
-                                                            { type: "upload_started" }
+                                                            { type: "upload_status" }
                                                           >
-                                                        : T extends "commit_upload"
-                                                          ? Extract<
-                                                              ResponseBody,
-                                                              { type: "upload_committed" }
-                                                            >
-                                                          : T extends "query_upload"
+                                                        : T extends "get_blob"
+                                                          ? Extract<ResponseBody, { type: "blob" }>
+                                                          : T extends "subagent"
                                                             ? Extract<
                                                                 ResponseBody,
-                                                                { type: "upload_status" }
+                                                                | { type: "subagents" }
+                                                                | { type: "subagent" }
                                                               >
-                                                            : T extends "get_blob"
-                                                              ? Extract<
-                                                                  ResponseBody,
-                                                                  { type: "blob" }
-                                                                >
-                                                              : T extends "subagent"
+                                                            : T extends "mcp"
+                                                              ? ResponseBody
+                                                              : T extends "mcp_list"
                                                                 ? Extract<
                                                                     ResponseBody,
-                                                                    | { type: "subagents" }
-                                                                    | { type: "subagent" }
+                                                                    { type: "mcp_servers" }
                                                                   >
-                                                                : T extends "mcp"
-                                                                  ? ResponseBody
-                                                                  : T extends "mcp_list"
+                                                                : T extends "mcp_upsert"
+                                                                  ? Extract<
+                                                                      ResponseBody,
+                                                                      { type: "mcp_server" }
+                                                                    >
+                                                                  : T extends "skills_list"
                                                                     ? Extract<
                                                                         ResponseBody,
-                                                                        { type: "mcp_servers" }
+                                                                        { type: "skills" }
                                                                       >
-                                                                    : T extends "mcp_upsert"
+                                                                    : T extends
+                                                                          | "skills_add"
+                                                                          | "skills_update"
+                                                                          | "skills_set_enabled"
                                                                       ? Extract<
                                                                           ResponseBody,
-                                                                          { type: "mcp_server" }
+                                                                          { type: "skill_added" }
                                                                         >
-                                                                      : T extends "skills_list"
-                                                                        ? Extract<
-                                                                            ResponseBody,
-                                                                            { type: "skills" }
-                                                                          >
-                                                                        : T extends
-                                                                              | "skills_add"
-                                                                              | "skills_update"
-                                                                              | "skills_set_enabled"
+                                                                      : T extends
+                                                                            | "skills_import_preview"
+                                                                            | "skills_conflicts"
+                                                                            | "skills_diff"
+                                                                            | "skills_sync_now"
+                                                                        ? ResponseBody
+                                                                        : T extends "skills_import_commit"
                                                                           ? Extract<
                                                                               ResponseBody,
-                                                                              {
-                                                                                type: "skill_added";
-                                                                              }
+                                                                              { type: "ack" }
                                                                             >
-                                                                          : T extends
-                                                                                | "skills_import_preview"
-                                                                                | "skills_conflicts"
-                                                                                | "skills_diff"
-                                                                                | "skills_sync_now"
-                                                                            ? ResponseBody
-                                                                            : T extends "skills_import_commit"
+                                                                          : T extends "get_usage"
+                                                                            ? Extract<
+                                                                                ResponseBody,
+                                                                                {
+                                                                                  type: "usage_report";
+                                                                                }
+                                                                              >
+                                                                            : T extends "get_limits"
                                                                               ? Extract<
                                                                                   ResponseBody,
-                                                                                  { type: "ack" }
+                                                                                  { type: "limits" }
                                                                                 >
-                                                                              : T extends "get_usage"
+                                                                              : T extends "list_failover_options"
                                                                                 ? Extract<
                                                                                     ResponseBody,
                                                                                     {
-                                                                                      type: "usage_report";
+                                                                                      type: "failover_options";
                                                                                     }
                                                                                   >
-                                                                                : T extends "get_limits"
+                                                                                : T extends "list_resets"
                                                                                   ? Extract<
                                                                                       ResponseBody,
                                                                                       {
-                                                                                        type: "limits";
+                                                                                        type: "resets";
                                                                                       }
                                                                                     >
-                                                                                  : T extends "list_failover_options"
+                                                                                  : T extends
+                                                                                        | "cancel_resume"
+                                                                                        | "fail_over"
+                                                                                        | "resume_now"
                                                                                     ? Extract<
                                                                                         ResponseBody,
                                                                                         {
-                                                                                          type: "failover_options";
+                                                                                          type: "resume_changed";
                                                                                         }
                                                                                       >
-                                                                                    : T extends "list_resets"
+                                                                                    : T extends
+                                                                                          | "list_proxy_profiles"
+                                                                                          | "remove_proxy_profile"
                                                                                       ? Extract<
                                                                                           ResponseBody,
                                                                                           {
-                                                                                            type: "resets";
+                                                                                            type: "proxy_profiles";
                                                                                           }
                                                                                         >
                                                                                       : T extends
-                                                                                            | "cancel_resume"
-                                                                                            | "fail_over"
-                                                                                            | "resume_now"
+                                                                                            | "add_proxy_profile"
+                                                                                            | "update_proxy_profile"
+                                                                                            | "set_proxy_harness_override"
                                                                                         ? Extract<
                                                                                             ResponseBody,
                                                                                             {
-                                                                                              type: "resume_changed";
+                                                                                              type: "proxy_profile";
                                                                                             }
                                                                                           >
-                                                                                        : T extends
-                                                                                              | "list_proxy_profiles"
-                                                                                              | "remove_proxy_profile"
+                                                                                        : T extends "test_proxy_profile"
                                                                                           ? Extract<
                                                                                               ResponseBody,
                                                                                               {
-                                                                                                type: "proxy_profiles";
+                                                                                                type: "proxy_tested";
                                                                                               }
                                                                                             >
-                                                                                          : T extends
-                                                                                                | "add_proxy_profile"
-                                                                                                | "update_proxy_profile"
-                                                                                                | "set_proxy_harness_override"
+                                                                                          : T extends "list_proxy_models"
                                                                                             ? Extract<
                                                                                                 ResponseBody,
                                                                                                 {
-                                                                                                  type: "proxy_profile";
+                                                                                                  type: "proxy_models";
                                                                                                 }
                                                                                               >
-                                                                                            : T extends "test_proxy_profile"
+                                                                                            : T extends "apply_proxy_overrides"
                                                                                               ? Extract<
                                                                                                   ResponseBody,
                                                                                                   {
-                                                                                                    type: "proxy_tested";
+                                                                                                    type: "proxy_applied";
                                                                                                   }
                                                                                                 >
-                                                                                              : T extends "list_proxy_models"
+                                                                                              : T extends "list_proxy_limits"
                                                                                                 ? Extract<
                                                                                                     ResponseBody,
                                                                                                     {
-                                                                                                      type: "proxy_models";
+                                                                                                      type: "proxy_limits";
                                                                                                     }
                                                                                                   >
-                                                                                                : T extends "apply_proxy_overrides"
+                                                                                                : T extends "pick_proxy_failover"
                                                                                                   ? Extract<
                                                                                                       ResponseBody,
                                                                                                       {
-                                                                                                        type: "proxy_applied";
+                                                                                                        type: "proxy_failover";
                                                                                                       }
                                                                                                     >
-                                                                                                  : T extends "list_proxy_limits"
+                                                                                                  : T extends "list_text_generators"
                                                                                                     ? Extract<
                                                                                                         ResponseBody,
                                                                                                         {
-                                                                                                          type: "proxy_limits";
+                                                                                                          type: "text_generators";
                                                                                                         }
                                                                                                       >
-                                                                                                    : T extends "pick_proxy_failover"
+                                                                                                    : T extends
+                                                                                                          | "add_text_generator"
+                                                                                                          | "update_text_generator"
                                                                                                       ? Extract<
                                                                                                           ResponseBody,
                                                                                                           {
-                                                                                                            type: "proxy_failover";
+                                                                                                            type: "text_generator";
                                                                                                           }
                                                                                                         >
-                                                                                                      : T extends "list_text_generators"
+                                                                                                      : T extends "test_text_generator"
                                                                                                         ? Extract<
                                                                                                             ResponseBody,
                                                                                                             {
-                                                                                                              type: "text_generators";
+                                                                                                              type: "text_generator_tested";
                                                                                                             }
                                                                                                           >
                                                                                                         : T extends
-                                                                                                              | "add_text_generator"
-                                                                                                              | "update_text_generator"
+                                                                                                              | "get_text_generation_settings"
+                                                                                                              | "set_text_generation_settings"
                                                                                                           ? Extract<
                                                                                                               ResponseBody,
                                                                                                               {
-                                                                                                                type: "text_generator";
+                                                                                                                type: "text_generation_settings";
                                                                                                               }
                                                                                                             >
-                                                                                                          : T extends "test_text_generator"
+                                                                                                          : T extends
+                                                                                                                | "get_guest_sharing"
+                                                                                                                | "share_thread_with_guest"
                                                                                                             ? Extract<
                                                                                                                 ResponseBody,
                                                                                                                 {
-                                                                                                                  type: "text_generator_tested";
+                                                                                                                  type: "guest_sharing";
                                                                                                                 }
                                                                                                               >
                                                                                                             : T extends
-                                                                                                                  | "get_text_generation_settings"
-                                                                                                                  | "set_text_generation_settings"
+                                                                                                                  | "get_guest_settings"
+                                                                                                                  | "set_guest_settings"
                                                                                                               ? Extract<
                                                                                                                   ResponseBody,
                                                                                                                   {
-                                                                                                                    type: "text_generation_settings";
+                                                                                                                    type: "guest_settings";
                                                                                                                   }
                                                                                                                 >
-                                                                                                              : T extends
-                                                                                                                    | "get_guest_sharing"
-                                                                                                                    | "share_thread_with_guest"
+                                                                                                              : T extends "rename_thread"
                                                                                                                 ? Extract<
                                                                                                                     ResponseBody,
                                                                                                                     {
-                                                                                                                      type: "guest_sharing";
+                                                                                                                      type: "thread_renamed";
                                                                                                                     }
                                                                                                                   >
                                                                                                                 : T extends
-                                                                                                                      | "get_guest_settings"
-                                                                                                                      | "set_guest_settings"
+                                                                                                                      | "get_network_access"
+                                                                                                                      | "set_network_access"
                                                                                                                   ? Extract<
                                                                                                                       ResponseBody,
                                                                                                                       {
-                                                                                                                        type: "guest_settings";
+                                                                                                                        type: "network_access";
                                                                                                                       }
                                                                                                                     >
-                                                                                                                  : T extends "rename_thread"
+                                                                                                                  : T extends
+                                                                                                                        | "list_direct_devices"
+                                                                                                                        | "revoke_direct_device"
                                                                                                                     ? Extract<
                                                                                                                         ResponseBody,
                                                                                                                         {
-                                                                                                                          type: "thread_renamed";
+                                                                                                                          type: "direct_devices";
                                                                                                                         }
                                                                                                                       >
-                                                                                                                    : T extends
-                                                                                                                          | "get_network_access"
-                                                                                                                          | "set_network_access"
+                                                                                                                    : T extends "create_direct_pairing"
                                                                                                                       ? Extract<
                                                                                                                           ResponseBody,
                                                                                                                           {
-                                                                                                                            type: "network_access";
+                                                                                                                            type: "direct_pairing_offer";
                                                                                                                           }
                                                                                                                         >
-                                                                                                                      : T extends
-                                                                                                                            | "list_direct_devices"
-                                                                                                                            | "revoke_direct_device"
+                                                                                                                      : T extends "get_acp_agent"
                                                                                                                         ? Extract<
                                                                                                                             ResponseBody,
                                                                                                                             {
-                                                                                                                              type: "direct_devices";
+                                                                                                                              type: "acp_agent_spec";
                                                                                                                             }
                                                                                                                           >
-                                                                                                                        : T extends "create_direct_pairing"
+                                                                                                                        : T extends "list_acp_agents"
                                                                                                                           ? Extract<
                                                                                                                               ResponseBody,
                                                                                                                               {
-                                                                                                                                type: "direct_pairing_offer";
+                                                                                                                                type: "acp_agents";
                                                                                                                               }
                                                                                                                             >
-                                                                                                                          : T extends "get_acp_agent"
+                                                                                                                          : T extends
+                                                                                                                                | "add_acp_agent"
+                                                                                                                                | "update_acp_agent"
                                                                                                                             ? Extract<
                                                                                                                                 ResponseBody,
                                                                                                                                 {
-                                                                                                                                  type: "acp_agent_spec";
+                                                                                                                                  type: "acp_agent";
                                                                                                                                 }
                                                                                                                               >
-                                                                                                                            : T extends "list_acp_agents"
+                                                                                                                            : T extends "probe_acp_agent"
                                                                                                                               ? Extract<
                                                                                                                                   ResponseBody,
                                                                                                                                   {
-                                                                                                                                    type: "acp_agents";
+                                                                                                                                    type: "acp_agent_probe";
                                                                                                                                   }
                                                                                                                                 >
-                                                                                                                              : T extends
-                                                                                                                                    | "add_acp_agent"
-                                                                                                                                    | "update_acp_agent"
-                                                                                                                                ? Extract<
-                                                                                                                                    ResponseBody,
-                                                                                                                                    {
-                                                                                                                                      type: "acp_agent";
-                                                                                                                                    }
-                                                                                                                                  >
-                                                                                                                                : T extends "probe_acp_agent"
-                                                                                                                                  ? Extract<
-                                                                                                                                      ResponseBody,
-                                                                                                                                      {
-                                                                                                                                        type: "acp_agent_probe";
-                                                                                                                                      }
-                                                                                                                                    >
-                                                                                                                                  : Extract<
-                                                                                                                                      ResponseBody,
-                                                                                                                                      {
-                                                                                                                                        type: "ack";
-                                                                                                                                      }
-                                                                                                                                    >;
+                                                                                                                              : Extract<
+                                                                                                                                  ResponseBody,
+                                                                                                                                  {
+                                                                                                                                    type: "ack";
+                                                                                                                                  }
+                                                                                                                                >;
 
 export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktrees"
   ? Extract<ResponseBody, { type: "worktrees" }>
