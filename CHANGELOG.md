@@ -30,8 +30,9 @@ All notable changes to h4rn are recorded here. The format follows
   loopback listener and refuse another site's page. The same page shows the MCP URL with a Copy
   button and lists connected agents with Revoke. Redirects are admitted only to `https` or
   localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client.
-  Work started under a grant may still finish its current turn after the grant is revoked; the
-  remaining review findings are listed on the pull request. See
+  A turn already delivered may still finish after its grant is revoked or the switch is turned off,
+  and a Full-access grant has no ceiling; the other limits are listed in
+  [docs/outside-agents.md](docs/outside-agents.md#known-limitations). See
   [docs/outside-agents.md](docs/outside-agents.md) and [ADR-045](docs/decisions.md).
 - **Share one thread with a teammate through an expiring guest link.** A link is
   bound to one thread and one browser, lasts 24 hours, and works through the

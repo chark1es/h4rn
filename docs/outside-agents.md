@@ -56,13 +56,13 @@ An outside agent connects to:
 http://127.0.0.1:<port>/mcp
 ```
 
-The URL is on Settings → Sharing & access with a **Copy MCP URL** button. It names the socket that
-really serves MCP: the loopback listener the daemon bound, `[::1]` when that socket is IPv6, or the
-loopback extra bind when the primary is a wildcard or LAN address. A wildcard primary answers this
-machine on its own port, so its URL is `127.0.0.1`/`[::1]` on that port. When no loopback socket
-exists (a primary bound only to one LAN address, with no loopback extra bind), there is nowhere to
-serve it and the feature reports itself unavailable instead of printing an address that does not
-answer.
+The URL is on Settings → Sharing & access with a **Copy MCP URL** button. It names a socket that
+really serves sign-in, which is always a loopback listener: the primary `--bind` when it is a
+loopback address (`[::1]` for an IPv6 bind), or a loopback extra bind when the primary is a wildcard
+or LAN address. A wildcard bind on its own serves the hub's `/mcp` to harnesses on this machine, but
+it is not a loopback listener, so outside agents are unavailable there; a primary bound only to one
+LAN address with no loopback extra bind has no path either. In both cases the page says **Outside
+agents need a loopback listener** instead of printing an address whose socket serves no sign-in.
 
 The OAuth routes stay on the loopback listener: their redirect must finish on `https` or a
 localhost address. The MCP endpoint carries a bearer token, so it is never served to a network
@@ -228,7 +228,9 @@ token, `h4rn_`-prefixed tokens, and the forge token shapes h4rn already recognis
 ## Removal
 
 Settings → Sharing & access lists connected agents with their level, when they last used a token
-and when the sign-in expires. **Revoke** cuts one off immediately.
+and when the sign-in expires. **Revoke** cuts off future work at once: a queued message, a parked
+prompt, a watch wake or a delegated child starts nothing after it. A turn that is already running
+finishes first; see [Known limitations](#known-limitations).
 
 ## Relay
 
@@ -240,12 +242,18 @@ and cannot be reached by an agent on the internet yet.
 
 ## Known limitations
 
-- Work already running under a grant may still finish its current turn after the grant is
-  revoked. The revocation is checked before work starts -- a queued message, a parked prompt, a
-  watch wake or a delegated child starts nothing once its family is revoked -- but it does not
-  reach into a turn that is already running.
-- The remaining review findings for this feature live on the pull request rather than in this
-  document.
+- A turn that has already been delivered keeps running when its grant's family is revoked or the
+  Labs switch is turned off. Its harness session also keeps the tool token it was given until the
+  session ends; only the next delivery is refused.
+- A prompt that was claimed a moment before a revocation is still written.
+- A Full-access grant has no ceiling, so work it starts runs at the thread's mode when that work is
+  delivered.
+- A watch or a delegation created by a tool call that lands outside the grant's own turn carries no
+  grant with it.
+- A grant's level is frozen when it is approved. To change it, revoke the grant and sign in again.
+- A re-watch cannot bring back a watch whose family was revoked.
+- On a wildcard or LAN-only bind, outside agents cannot sign in: there is no loopback listener for
+  the OAuth routes.
 
 ## Tests
 

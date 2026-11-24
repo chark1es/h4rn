@@ -88,6 +88,32 @@ describe("the Sharing & access page", () => {
     ).toContain("Copied");
   });
 
+  it("asks for a loopback listener when the daemon advertises no URL", async () => {
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      switch (body.request.type) {
+        case "outside_agent_settings":
+          return ok({ type: "outside_agent_settings", settings: { enabled: true } });
+        case "list_outside_agents":
+          return ok({ type: "outside_agents", agents: [], mcp_url: "" });
+        case "list_outside_agent_sign_ins":
+          return ok({ type: "outside_agent_sign_ins", sign_ins: [] });
+        default:
+          return ok({
+            type: "agent_tools",
+            settings: { enabled: { by_harness: [], by_machine: [] } },
+          });
+      }
+    });
+    render(<AccessSettings />);
+    expect(await screen.findByText("Outside agents need a loopback listener")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("Waiting for the daemon");
+    const copy = screen.getByRole("button", {
+      name: "Copy the outside-agent MCP URL",
+    }) as HTMLButtonElement;
+    expect(copy.disabled).toBe(true);
+  });
+
   it("revokes an agent after confirmation", async () => {
     render(<AccessSettings />);
     await screen.findByText("Claude Code");

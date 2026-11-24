@@ -2290,6 +2290,47 @@ mod tests {
         ));
     }
 
+    /// A switch-off that cannot be saved leaves the switch on and retryable.
+    ///
+    /// The switch and the revocations are one write. If that write fails, the
+    /// state must stay exactly as the person left it: still on, grants still
+    /// working, and the next attempt able to turn it off for real.
+    #[test]
+    fn a_failed_switch_off_leaves_the_switch_and_the_grants_retryable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = OAuthStore::open(dir.path()).expect("store");
+        store.set_enabled(true).expect("turn on");
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+
+        store.fail_next_persists_for_tests(1);
+        let error = store
+            .set_enabled(false)
+            .expect_err("a write that fails is an error");
+        assert!(matches!(error, OAuthError::Storage(_)), "{error:?}");
+        // The switch is still on and the grant still answers.
+        assert!(store.enabled(), "a failed write turned the switch off");
+        assert!(
+            store.verify_access(&pair.access_token, None).is_some(),
+            "a failed write revoked the grant"
+        );
+
+        assert!(
+            !store.set_enabled(false).expect("the retry turns it off"),
+            "the retry must report the new state"
+        );
+        assert!(!store.enabled());
+        assert!(store.verify_access(&pair.access_token, None).is_none());
+        assert!(store.connected_agents().is_empty());
+        drop(store);
+
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        assert!(!reopened.enabled(), "the retry was not durable");
+        assert!(reopened.verify_access(&pair.access_token, None).is_none());
+    }
+
     /// A spent code outlives the code lifetime while its family lives.
     ///
     /// Pruning at code expiry forgot the only record that the family was issued

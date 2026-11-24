@@ -15,6 +15,7 @@ export function GuestSettingsForm() {
   const { settingsEnabled, settingsLoading, settingsSaving, error } = useGuest();
   const outsideEnabled = useAccess((state) => state.outsideEnabled);
   const outsideSaving = useAccess((state) => Boolean(state.pending["outside:switch"]));
+  const outsideError = useAccess((state) => state.error);
 
   useEffect(() => {
     void loadGuestSettings();
@@ -65,6 +66,11 @@ export function GuestSettingsForm() {
             {error}
           </p>
         ) : null}
+        <p className="q-muted" style={{ fontSize: 12.5 }}>
+          Turning guest links off ends every existing guest link on this machine and deletes the
+          messages waiting for you; turning it back on does not revive them. Settling a thread,
+          creating a new link or choosing Stop sharing also ends a link for good.
+        </p>
       </div>
       <div className="q-group">
         <h2>Outside agents</h2>
@@ -89,16 +95,17 @@ export function GuestSettingsForm() {
             />
           </div>
         </div>
+        {outsideError ? (
+          <p className="q-danger" role="alert" style={{ margin: "8px 0 0", fontSize: 12 }}>
+            {outsideError.message}
+            {outsideError.hint ? ` ${outsideError.hint}` : ""}
+          </p>
+        ) : null}
         <p className="q-faint" style={{ margin: "8px 0 0", fontSize: 12.5 }}>
           While this is off, h4rn&rsquo;s OAuth routes do not exist, outside-agent tokens are
           refused, and no sign-in can be created. Agents h4rn runs keep their own tools.
         </p>
       </div>
-      <p className="q-muted" style={{ fontSize: 12.5 }}>
-        Turning guest links off ends every existing guest link on this machine and deletes the
-        messages waiting for you; turning it back on does not revive them. Settling a thread,
-        creating a new link or choosing Stop sharing also ends a link for good.
-      </p>
     </div>
   );
 }

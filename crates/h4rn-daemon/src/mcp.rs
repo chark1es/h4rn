@@ -236,6 +236,18 @@ impl McpService {
 
     /// Wires the outside-agent surface. Called once by the daemon builder.
     pub fn set_outside_agents(&self, outside: Arc<crate::mcp_server::OutsideAgents>) {
+        // A `401` from `/mcp` points at the protected-resource metadata only
+        // while outside agents are on and a loopback listener has bound: the
+        // discovery routes answer 404 otherwise, and a pointer to them would
+        // mislead the client.
+        let supplier = Arc::clone(&outside);
+        self.state.set_resource_metadata(Arc::new(move || {
+            if !supplier.enabled() {
+                return None;
+            }
+            let base = supplier.base_url()?;
+            Some(format!("{base}/.well-known/oauth-protected-resource"))
+        }));
         let _ = self.outside.set(outside);
     }
 

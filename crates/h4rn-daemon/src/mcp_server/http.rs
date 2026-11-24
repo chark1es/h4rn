@@ -49,18 +49,20 @@ pub fn router(service: Arc<OutsideAgents>) -> Router {
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&service),
-            labs_guard,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&service),
             aggregate_guard,
         ))
-        // The loopback check is outermost: a request this daemon did not serve
-        // as its own page is refused before it costs a rate-limit hit or any
-        // other work.
+        // The loopback check comes before a request costs a rate-limit hit or
+        // any other work.
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&service),
             loopback_guard,
+        ))
+        // The Labs switch is outermost: while the feature is off its routes
+        // must answer 404 even to a request from another site or one that would
+        // otherwise be over the limit, and such a request must not spend a hit.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&service),
+            labs_guard,
         ))
         .with_state(service)
 }

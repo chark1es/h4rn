@@ -65,4 +65,28 @@ describe("Settings → Labs", () => {
       request: { type: "set_outside_agent_settings_enabled", enabled: true },
     });
   });
+
+  it("keeps the guest-link consequences in the Sharing group", async () => {
+    render(<GuestSettingsForm />);
+    const sharing = (await screen.findByRole("heading", { name: "Sharing" })).closest(".q-group");
+    expect(sharing?.textContent).toContain(
+      "Turning guest links off ends every existing guest link",
+    );
+  });
+
+  it("shows a failed outside-agent setting load under its switch", async () => {
+    request.mockImplementation((body: { type: string; request?: { type: string } }) => {
+      if (body.type === "guest_settings") {
+        return Promise.resolve({ type: "guest_settings", settings: { enabled: false } });
+      }
+      if (body.type === "mcp" && body.request?.type === "outside_agent_settings") {
+        return Promise.reject(new Error("daemon unavailable"));
+      }
+      throw new Error(`unexpected request ${body.type}`);
+    });
+    render(<GuestSettingsForm />);
+    expect(await screen.findByText(/daemon unavailable/)).toBeTruthy();
+    const group = screen.getByRole("heading", { name: "Outside agents" }).closest(".q-group");
+    expect(group?.querySelector('[role="alert"]')?.textContent).toContain("daemon unavailable");
+  });
 });

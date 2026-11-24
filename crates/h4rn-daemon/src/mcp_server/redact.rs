@@ -185,20 +185,42 @@ fn redact_guest_urls(value: &str) -> String {
     output
 }
 
+/// The length a thread title is cut to when it is created.
+const TITLE_MAX_CHARS: usize = 80;
+
+/// The shortest fragment that can be the start of a token prefix.
+///
+/// Two characters are too common in ordinary words: `"enough"` ends in `gh`,
+/// the start of `ghp_`, and a longer title was being saved as `"enou[redacted]"`.
+const MIN_TOKEN_FRAGMENT: usize = 3;
+
 /// Removes a fragment of a token prefix that a truncation left at the end.
 ///
 /// A title cut at 80 characters can end in `ghp` or `github_pa`: the whole
 /// prefix is gone, so [`h4rn_forge::redact`] has nothing to match, but the
 /// fragment is still part of a credential. The longest proper prefix of any
-/// known token prefix (at least two characters) at the very end is replaced.
+/// known token prefix is replaced, but only when the title really hit the cut,
+/// the fragment is long enough to be a credential (`MIN_TOKEN_FRAGMENT`), and it
+/// starts a word instead of continuing one.
 fn trim_partial_token_tail(value: &str) -> String {
+    if value.chars().count() < TITLE_MAX_CHARS {
+        return value.to_owned();
+    }
     let mut best = 0;
     for prefix in H4RN_TOKEN_PREFIXES
         .iter()
         .chain(h4rn_forge::token_prefixes().iter())
     {
-        for cut in (2..prefix.len()).rev() {
-            if cut > best && value.ends_with(&prefix[..cut]) {
+        for cut in (MIN_TOKEN_FRAGMENT..prefix.len()).rev() {
+            if cut <= best || !value.ends_with(&prefix[..cut]) {
+                continue;
+            }
+            let start = value.len() - cut;
+            let starts_a_word = value[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|previous| !previous.is_alphanumeric() && previous != '_');
+            if starts_a_word {
                 best = cut;
                 break;
             }
@@ -227,6 +249,33 @@ mod tests {
         let redacted = redactor.title(&title);
         assert!(!redacted.contains("ghp"), "{redacted}");
         assert!(redacted.ends_with("[redacted]"), "{redacted}");
+    }
+
+    /// An ordinary word that ends in the start of a token prefix is still a word.
+    #[test]
+    fn plain_titles_that_end_in_a_prefix_fragment_are_left_alone() {
+        let redactor = Redactor::new();
+        // Each title is exactly the 80-character cut, so only the word boundary
+        // keeps the fragment; each ends in `gh`, `gl`, `li`, `h4` or `AT`
+        // inside a word rather than at the start of one.
+        for fragment in ["gh", "gl", "li", "h4", "AT"] {
+            let title = format!("{}x{fragment}", "a".repeat(79 - fragment.len()));
+            assert_eq!(title.chars().count(), 80, "{title}");
+            assert_eq!(redactor.title(&title), title);
+        }
+        assert_eq!(
+            redactor.title("Fix the flaky build enough"),
+            "Fix the flaky build enough"
+        );
+    }
+
+    /// A title shorter than the cut has no fragment to remove.
+    #[test]
+    fn a_title_below_the_cut_keeps_a_token_shaped_word() {
+        let redactor = Redactor::new();
+        let title = format!("{} ghp", "a".repeat(75));
+        assert_eq!(title.chars().count(), 79);
+        assert_eq!(redactor.title(&title), title);
     }
 
     #[test]

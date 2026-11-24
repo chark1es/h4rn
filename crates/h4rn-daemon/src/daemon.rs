@@ -726,6 +726,20 @@ fn mcp_serving_socket(listeners: &[(SocketAddr, server::ListenerKind)]) -> Optio
     })
 }
 
+/// The loopback socket outside agents may use, from the sockets that bound.
+///
+/// OAuth finishes only on a loopback listener, so a wildcard bind cannot serve
+/// an outside agent even though the hub reaches this machine through it. Only a
+/// socket whose listener kind is [`server::ListenerKind::Loopback`] qualifies;
+/// any other bind has no eligible socket and the feature reports itself
+/// unavailable.
+fn outside_serving_socket(listeners: &[(SocketAddr, server::ListenerKind)]) -> Option<SocketAddr> {
+    listeners
+        .iter()
+        .find(|(addr, kind)| *kind == server::ListenerKind::Loopback && addr.ip().is_loopback())
+        .map(|(addr, _kind)| *addr)
+}
+
 impl Daemon {
     /// Bound configuration.
     pub fn config(&self) -> &Config {
@@ -846,23 +860,28 @@ impl Daemon {
         // with no loopback socket has no eligible listener, and the features
         // that need one are reported unavailable instead of advertising an
         // address that does not answer.
-        match mcp_serving_socket(
-            &listeners
-                .iter()
-                .filter_map(|(listener, kind)| listener.local_addr().ok().map(|addr| (addr, *kind)))
-                .collect::<Vec<_>>(),
-        ) {
-            Some(socket) => {
-                self.mcp.set_endpoint(format!("http://{socket}/mcp")).await;
-                // Outside agents use the same loopback address: OAuth only
-                // finishes over https or localhost, and this listener is
-                // loopback-only.
-                self.outside.set_base_url(format!("http://{socket}"));
-            }
+        let serving = listeners
+            .iter()
+            .filter_map(|(listener, kind)| listener.local_addr().ok().map(|addr| (addr, *kind)))
+            .collect::<Vec<_>>();
+        match mcp_serving_socket(&serving) {
+            Some(socket) => self.mcp.set_endpoint(format!("http://{socket}/mcp")).await,
             None => {
                 tracing::warn!(
                     bind = %self.config.bind,
-                    "no loopback socket serves MCP; harness tools and outside agents are unavailable"
+                    "no loopback socket serves MCP; harness tools are unavailable"
+                );
+            }
+        }
+        // Outside agents are stricter than the hub: OAuth finishes only on a
+        // loopback listener, so a wildcard or LAN-only bind must not advertise
+        // an address whose socket serves no sign-in.
+        match outside_serving_socket(&serving) {
+            Some(socket) => self.outside.set_base_url(format!("http://{socket}")),
+            None => {
+                tracing::warn!(
+                    bind = %self.config.bind,
+                    "no loopback listener serves outside agents; sign-in is unavailable"
                 );
             }
         }
@@ -1567,5 +1586,23 @@ mod tests {
 
         // A concrete LAN bind with no loopback socket has nowhere to serve.
         assert_eq!(mcp_serving_socket(&[bound("192.168.1.5:47800")]), None);
+    }
+
+    /// Only a real loopback listener serves OAuth, so only it is advertised.
+    #[test]
+    fn outside_agents_are_named_only_by_a_loopback_listener() {
+        let loopback = bound("127.0.0.1:47800");
+        assert_eq!(outside_serving_socket(&[loopback]), Some(loopback.0));
+
+        // The hub may use a wildcard's loopback name; OAuth cannot.
+        assert_eq!(outside_serving_socket(&[bound("0.0.0.0:47800")]), None);
+        assert_eq!(outside_serving_socket(&[bound("[::]:47800")]), None);
+
+        let extra = bound("127.0.0.1:5000");
+        assert_eq!(
+            outside_serving_socket(&[bound("192.168.1.5:47800"), extra]),
+            Some(extra.0)
+        );
+        assert_eq!(outside_serving_socket(&[bound("192.168.1.5:47800")]), None);
     }
 }

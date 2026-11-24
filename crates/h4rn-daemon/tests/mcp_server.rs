@@ -11,6 +11,7 @@ use h4rn_core::LifecycleSettings;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::{BoundDaemon, DaemonBuilder};
 use h4rn_daemon::mcp_server::OutsideAgents;
+use h4rn_daemon::mcp_server::rate::RateLimiter;
 use h4rn_daemon::threads::{NewThread, ThreadManager, ThreadManagerOptions};
 use h4rn_harness::{FakeHarness, SessionMcp};
 use h4rn_protocol::{
@@ -1020,6 +1021,92 @@ async fn outside_agents_are_off_by_default_and_harness_tools_still_work() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "harness session refused: {body}");
+    daemon.stop().await;
+}
+
+/// While the switch is off, the answer is "not here" before anything else.
+///
+/// A cross-site page or a caller that would be over the aggregate limit must
+/// still see the same 404, and that request must not spend a rate-limit hit:
+/// otherwise the switch's own state leaks through a 403 or a 429.
+#[tokio::test]
+async fn while_outside_agents_are_off_the_oauth_routes_answer_404_before_anything_else() {
+    let daemon = boot_default_off(None).await;
+    let client = http();
+
+    let cross_site = client
+        .post(format!("{}/oauth/register", daemon.base()))
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .header("sec-fetch-site", "cross-site")
+        .json(&json!({"client_name": "x", "redirect_uris": ["http://localhost:1455/cb"]}))
+        .send()
+        .await
+        .expect("cross-site register");
+    assert_eq!(
+        cross_site.status(),
+        StatusCode::NOT_FOUND,
+        "a cross-site request learned that the OAuth route exists"
+    );
+
+    // With a limit of one, a single counted request would show as a 429.
+    daemon
+        .outside
+        .set_aggregate_limits(RateLimiter::new(1, Duration::from_secs(60)));
+    for attempt in 0..5 {
+        let response = client
+            .post(format!("{}/oauth/register", daemon.base()))
+            .json(&json!({"client_name": "x", "redirect_uris": ["http://localhost:1455/cb"]}))
+            .send()
+            .await
+            .expect("register while off");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "attempt {attempt} stopped answering 404 while the switch was off"
+        );
+    }
+
+    // Not one of those requests spent the aggregate bucket: the first call
+    // after the switch is on still passes with a limit of one.
+    daemon
+        .outside_agents()
+        .handle(McpRequest::SetOutsideAgentSettingsEnabled { enabled: true })
+        .await
+        .expect("turn on");
+    let (status, _) = register(&client, &daemon.base(), "http://localhost:1455/cb").await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "requests made while the switch was off used up the aggregate limit"
+    );
+    daemon.stop().await;
+}
+
+/// A `/mcp` request with no token names the protected-resource metadata.
+#[tokio::test]
+async fn a_request_without_a_token_names_the_protected_resource_metadata() {
+    let daemon = boot(None).await;
+    let response = http()
+        .post(daemon.mcp_url())
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}))
+        .send()
+        .await
+        .expect("mcp");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let header = response
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert_eq!(
+        header,
+        format!(
+            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+            daemon.base()
+        ),
+        "the 401 did not name the resource metadata"
+    );
     daemon.stop().await;
 }
 
@@ -3405,11 +3492,13 @@ async fn a_delegated_child_inherits_the_turns_ceiling_and_grant() {
     daemon.stop().await;
 }
 
-/// A wildcard primary bind serves MCP to loopback peers, never OAuth.///
+/// A wildcard primary bind serves MCP to loopback peers, never OAuth.
+///
 /// The advertised hub URL names `127.0.0.1` on the wildcard socket's port, so a
 /// harness on this machine keeps its tools; a request from another machine is
 /// refused by the guard. The OAuth routes stay absent: their redirect only
-/// finishes on a loopback listener.
+/// finishes on a loopback listener. The outside-agent URL follows the stricter
+/// rule and stays empty, because the wildcard socket serves no sign-in.
 #[tokio::test]
 async fn a_wildcard_primary_bind_serves_mcp_to_loopback_only() {
     let daemon = boot_on(
@@ -3420,6 +3509,15 @@ async fn a_wildcard_primary_bind_serves_mcp_to_loopback_only() {
         false,
     )
     .await;
+    assert!(
+        daemon.mcp_service.endpoint().is_some(),
+        "the harness hub lost its wildcard loopback fallback"
+    );
+    assert!(
+        daemon.outside.mcp_url().is_empty(),
+        "a wildcard-only bind advertised an outside-agent URL: {}",
+        daemon.outside.mcp_url()
+    );
     let base = format!("http://127.0.0.1:{}", daemon.addr.port());
     let client = http();
     // The socket is alive; it serves liveness and the typed socket.

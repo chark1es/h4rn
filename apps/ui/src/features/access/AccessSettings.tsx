@@ -227,7 +227,7 @@ export function AccessSettings() {
               <div className="t">MCP URL</div>
               <div className="s">
                 <span className="q-mono" style={{ wordBreak: "break-all" }}>
-                  {mcpUrl || "Waiting for the daemon to bind its listener"}
+                  {mcpUrl || "Outside agents need a loopback listener"}
                 </span>
               </div>
             </div>
