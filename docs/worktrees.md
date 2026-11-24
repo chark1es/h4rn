@@ -44,12 +44,16 @@ and so must the folder h4rn puts a project's checkouts in. Checkouts go to
 `<location>/<project>/<branch>`, so an inside path (including the project folder
 itself) is refused, and so is the main checkout's parent folder (`~/code` for
 the project `~/code/api`): that would put the new checkout in the main checkout.
-The same holds when the thread starts in a linked worktree or in a worktree of a
-bare repository: the project folder is named after the main checkout (or the
-bare repository's git directory), wherever that is, and the destination is
-refused inside either it or the workspace. Both are refused when the setting is
-saved and when a worktree is created, because a checkout inside the main
-checkout would make it dirty and confuse every command run there.
+The same holds when the thread starts in a linked worktree, in a worktree of a
+`--separate-git-dir` repository or of a submodule, or in a worktree of a bare
+repository. The project folder is named after the main worktree (or the bare
+repository's git directory), wherever that is: h4rn reads the repository's own
+worktree registrations, so the main checkout is found even when its git
+directory is not named `.git`. The destination is refused inside the workspace,
+the main checkout, or any other linked worktree of the same repository, because
+a checkout there would make that working tree dirty. All of these are refused
+when the setting is saved and when a worktree is created, because a person
+should learn about it while they can still change the location.
 
 **Settings → Worktrees → New worktrees → Location** sets another directory:
 
@@ -88,6 +92,14 @@ Repositories with submodules get them initialised recursively, so the agent
 does not work in an empty-looking folder. A repository whose `.gitmodules`
 names local paths is allowed to use git's `file` transport for that one
 command; repositories with network remotes keep git's stricter default.
+
+While a create is unfinished, h4rn keeps a small recovery record beside its own
+data. If the daemon shuts down, it waits for the failed create's rollback
+instead of leaving it half done. If the daemon is killed first, the next startup
+finishes the rollback: it removes only a checkout whose git registration still
+carries the owner marker h4rn wrote when it made that checkout, and only when no
+thread uses it. A worktree you made yourself, and one a thread works in, are
+never touched by that sweep.
 
 ## Tracking and clearing
 

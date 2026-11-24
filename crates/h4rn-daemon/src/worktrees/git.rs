@@ -715,6 +715,39 @@ pub(crate) fn repo_of_with(workspace: &Path, commons: &CommonDirs) -> Option<Pat
     }
 }
 
+/// The main worktree of the repository containing `workspace`.
+///
+/// [`repo_of`] answers from the common dir's name, so a `--separate-git-dir`
+/// repository and a submodule (whose common dir is not named `.git`) have no
+/// answer there even though they do have a main worktree. This asks the
+/// registrations instead: every one of them lists the main checkout, bare
+/// repositories included. `None` when git cannot answer either question.
+pub(crate) fn main_checkout(workspace: &Path) -> Option<PathBuf> {
+    if let Some(repo) = repo_of(workspace) {
+        return Some(repo);
+    }
+    let common = common_dir(workspace, OBSERVATION_GIT_TIMEOUT).ok()?;
+    let snapshot = registrations_in(
+        workspace,
+        &common,
+        OBSERVATION_GIT_TIMEOUT,
+        &CommonDirs::default(),
+    )
+    .ok()?;
+    let main = snapshot
+        .registrations
+        .iter()
+        .find(|registration| !registration.bare)?;
+    // A submodule's main registration names its git dir, not the working tree
+    // the superproject checks out; `core.worktree` points at that tree.
+    if main.path == common
+        && let Ok(Some(worktree)) = core_worktree(&common, OBSERVATION_GIT_TIMEOUT)
+    {
+        return Some(worktree);
+    }
+    Some(main.path.clone())
+}
+
 /// Whether the repository whose common dir is `common` is bare, as git
 /// itself answers (`git --git-dir=<common> rev-parse --is-bare-repository`).
 ///

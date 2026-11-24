@@ -200,7 +200,9 @@ struct WorktreeRollback(Option<crate::worktrees::create::CreatedWorktree>);
 impl WorktreeRollback {
     /// The thread now owns the worktree.
     fn keep(mut self) {
-        self.0 = None;
+        if let Some(created) = self.0.take() {
+            created.keep();
+        }
     }
 }
 
@@ -211,14 +213,9 @@ impl Drop for WorktreeRollback {
         };
         // The rollback removes the checkout and deletes the branch, both by
         // shelling out to git. A `Drop` cannot await, so it runs on the blocking
-        // pool instead of stalling an async worker; the checkout is gone a
-        // moment later. Outside a runtime (a plain unit test) it runs inline.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn_blocking(move || created.rollback());
-            }
-            Err(_) => created.rollback(),
-        }
+        // pool instead of stalling an async worker; the creator's shutdown
+        // waits for it, and a crash leaves a record the next startup sweeps.
+        created.rollback_detached();
     }
 }
 

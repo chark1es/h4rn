@@ -295,10 +295,11 @@ impl DaemonBuilder {
             crate::worktrees::settings::WorktreeSettingsStore::open(&self.config.data_dir)
                 .map_err(|error| anyhow::anyhow!("open worktree settings: {error}"))?,
         );
-        manager.set_worktree_creator(Arc::new(crate::worktrees::create::WorktreeCreator::new(
+        let worktree_creator = Arc::new(crate::worktrees::create::WorktreeCreator::new(
             self.config.data_dir.clone(),
             Arc::clone(&worktree_settings),
-        )));
+        ));
+        manager.set_worktree_creator(Arc::clone(&worktree_creator));
 
         // Scheduled tasks share the journal so the timer, secrets and run
         // history survive a restart. The runner starts once the worktree
@@ -648,6 +649,7 @@ impl DaemonBuilder {
             manager,
             subagents,
             worktrees,
+            worktree_creator,
             worktree_settings,
             hosts,
             terminals,
@@ -682,6 +684,8 @@ pub struct Daemon {
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    /// Waits for a create's rollback when the daemon stops.
+    worktree_creator: Arc<crate::worktrees::create::WorktreeCreator>,
     worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
@@ -1063,6 +1067,7 @@ impl Daemon {
             manager: self.manager,
             subagents: self.subagents,
             worktrees: self.worktrees,
+            worktree_creator: self.worktree_creator,
             hosts: self.hosts,
             terminals: self.terminals,
             forge: self.forge,
@@ -1090,6 +1095,7 @@ pub struct BoundDaemon {
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    worktree_creator: Arc<crate::worktrees::create::WorktreeCreator>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
@@ -1182,6 +1188,7 @@ impl BoundDaemon {
             manager,
             subagents,
             worktrees,
+            worktree_creator,
             hosts: _,
             terminals,
             forge,
@@ -1225,6 +1232,9 @@ impl BoundDaemon {
         worktrees.shutdown().await;
         subagents.shutdown().await;
         manager.shutdown().await;
+        // Every create whose thread never started rolls back here; the wait
+        // keeps a shutdown from losing that cleanup with the process.
+        worktree_creator.shutdown().await;
         terminals.shutdown().await;
         supervisor.shutdown().await;
         tracing::info!("h4rn daemon stopped");

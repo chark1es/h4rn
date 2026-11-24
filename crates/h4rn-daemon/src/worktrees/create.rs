@@ -20,7 +20,7 @@ use super::settings::{
 const CREATE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A worktree created for a thread.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct CreatedWorktree {
     /// Absolute checkout path.
     pub path: PathBuf,
@@ -41,9 +41,100 @@ pub struct CreatedWorktree {
     /// The commit `HEAD` named before the add, for verifying a branch this
     /// call made before deleting it.
     head: Option<String>,
+    /// The durable record that survives a crash before the thread adopts this
+    /// checkout, so the next startup can finish the rollback.
+    record: Option<PathBuf>,
+    /// The creates still waiting for their thread. A shutdown rolls them back
+    /// and waits, instead of losing the rollback with the process.
+    pending: Option<Arc<PendingWorktrees>>,
+}
+
+/// One create that has not been adopted by a thread yet.
+///
+/// Written under the daemon's data before a create returns. The owner token is
+/// the marker in the registration's admin dir, so a sweep only removes a
+/// checkout this create made and never a worktree someone else made.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct PendingRecord {
+    repo: PathBuf,
+    path: PathBuf,
+    branch: String,
+    created_branch: bool,
+    head: Option<String>,
+    owner: String,
+}
+
+/// Creates whose thread does not exist yet, shared with the creator so a
+/// shutdown can wait for every rollback.
+#[derive(Default)]
+struct PendingWorktrees {
+    created: std::sync::Mutex<Vec<CreatedWorktree>>,
+    /// Rollbacks already started in the background, which a shutdown waits for.
+    rollbacks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for PendingWorktrees {
+    /// The created entries hold this set, so printing them would recurse.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingWorktrees")
+            .field("created", &lock(&self.created).len())
+            .field("rollbacks", &lock(&self.rollbacks).len())
+            .finish()
+    }
+}
+
+impl PendingWorktrees {
+    fn add(&self, created: CreatedWorktree) {
+        lock(&self.created).push(created);
+    }
+
+    fn remove(&self, path: &Path) {
+        lock(&self.created).retain(|created| created.path != path);
+    }
+
+    fn track(&self, handle: tokio::task::JoinHandle<()>) {
+        let mut rollbacks = lock(&self.rollbacks);
+        rollbacks.retain(|handle| !handle.is_finished());
+        rollbacks.push(handle);
+    }
+
+    fn take_created(&self) -> Vec<CreatedWorktree> {
+        std::mem::take(&mut *lock(&self.created))
+    }
+
+    fn take_rollbacks(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        std::mem::take(&mut *lock(&self.rollbacks))
+    }
+}
+
+/// Panics in a test would poison the lock; the sets are still usable.
+fn lock<T>(set: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl CreatedWorktree {
+    /// The thread now owns this checkout, so neither a shutdown nor the next
+    /// startup's sweep may remove it.
+    pub fn keep(&self) {
+        self.forget();
+    }
+
+    /// Starts the rollback without waiting for it, off the async runtime when
+    /// there is one, and records it so a shutdown can wait for it.
+    pub fn rollback_detached(self) {
+        let pending = self.pending.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let task = handle.spawn_blocking(move || self.rollback());
+                if let Some(pending) = pending {
+                    pending.track(task);
+                }
+            }
+            // Outside a runtime (a plain unit test) it runs inline.
+            Err(_) => self.rollback(),
+        }
+    }
+
     /// Best-effort removal after the thread this was made for never started.
     ///
     /// The cleanup is tied to the registration this checkout had when it was
@@ -71,11 +162,15 @@ impl CreatedWorktree {
                 path = %self.path.display(),
                 "refusing to roll back a worktree whose registration was not recorded at creation"
             );
+            self.forget();
             return;
         };
         if worktree_gitdir(&self.path).as_deref() != Some(registration)
             || registration_owner(registration).as_deref() != Some(owner)
         {
+            // The checkout at this path is no longer the one this call made, so
+            // this attempt has nothing left to remove.
+            self.forget();
             return;
         }
         let _ = git::run_with_timeout(
@@ -91,6 +186,19 @@ impl CreatedWorktree {
         let _ = git::run_with_timeout(&self.repo, ["worktree", "prune"], CREATE_TIMEOUT);
         if self.created_branch {
             delete_created_branch(&self.repo, &self.path, &self.branch, self.head.as_deref());
+        }
+        self.forget();
+    }
+
+    /// Drops this attempt's pending record and in-flight entry. Best effort for
+    /// the file: a stale one is swept by the next startup, and the sweep checks
+    /// the owner marker again.
+    fn forget(&self) {
+        if let Some(pending) = &self.pending {
+            pending.remove(&self.path);
+        }
+        if let Some(record) = &self.record {
+            let _ = std::fs::remove_file(record);
         }
     }
 
@@ -151,6 +259,132 @@ fn registration_owner(admin: &Path) -> Option<String> {
         .ok()
         .map(|owner| owner.trim().to_owned())
         .filter(|owner| !owner.is_empty())
+}
+
+/// The folder, under the daemon's data, that one file per unadopted create is
+/// written to.
+fn pending_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("worktrees-pending")
+}
+
+/// Writes the record that lets a later startup finish this create's rollback.
+///
+/// Best effort: without it a crash leaves the registration for a person to
+/// clear in Settings, which is what happened before the sweep existed. The
+/// owner token is required, because the sweep only removes a checkout whose
+/// registration still carries it.
+fn write_pending_record(
+    data_dir: &Path,
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    created_branch: bool,
+    head: Option<&str>,
+    owner: &str,
+) -> Option<PathBuf> {
+    let dir = pending_dir(data_dir);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            %error,
+            dir = %dir.display(),
+            "could not write a create's recovery record; a crash could leave its worktree behind"
+        );
+        return None;
+    }
+    let record = PendingRecord {
+        repo: repo.to_path_buf(),
+        path: path.to_path_buf(),
+        branch: branch.to_owned(),
+        created_branch,
+        head: head.map(str::to_owned),
+        owner: owner.to_owned(),
+    };
+    let bytes = match serde_json::to_vec(&record) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "could not encode a create's recovery record");
+            return None;
+        }
+    };
+    let record_path = dir.join(format!("{}.json", uuid::Uuid::now_v7().simple()));
+    match std::fs::write(&record_path, bytes) {
+        Ok(()) => Some(record_path),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %record_path.display(),
+                "could not write a create's recovery record; a crash could leave its worktree behind"
+            );
+            None
+        }
+    }
+}
+
+/// Finishes the rollback of creates that never reached a thread, at startup.
+///
+/// A create that fails after its checkout exists rolls back immediately; a
+/// shutdown during that rollback would otherwise leave an h4rn-owned
+/// registration nothing uses. The records are written before a create returns,
+/// so whatever is left here belongs to an attempt no thread adopted. A record
+/// that names a checkout a thread now uses is dropped without touching it, and
+/// the rollback itself still refuses a registration whose owner marker does not
+/// match, so a worktree h4rn did not make is never removed.
+///
+/// Returns the checkout paths that are gone afterwards. Best effort: every
+/// failure is logged, and a record that cannot be handled now is retried at the
+/// next startup.
+pub fn sweep_pending(data_dir: &Path, in_use: &[String]) -> Vec<PathBuf> {
+    let dir = pending_dir(data_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let in_use: Vec<PathBuf> = in_use
+        .iter()
+        .map(|path| git::norm(Path::new(path)))
+        .collect();
+    let mut swept = Vec::new();
+    for entry in entries.flatten() {
+        let record_file = entry.path();
+        if record_file.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&record_file) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<PendingRecord>(&bytes) else {
+            tracing::warn!(
+                path = %record_file.display(),
+                "skipping a create recovery record that could not be read"
+            );
+            continue;
+        };
+        let path = git::norm(&record.path);
+        // A thread may have been created just before the crash; it owns the
+        // checkout now, so the record is finished, not swept.
+        if in_use
+            .iter()
+            .any(|used| path == *used || path.starts_with(used) || used.starts_with(&path))
+        {
+            let _ = std::fs::remove_file(&record_file);
+            continue;
+        }
+        let created = CreatedWorktree {
+            path: record.path.clone(),
+            repo: record.repo.clone(),
+            branch: record.branch.clone(),
+            created_branch: record.created_branch,
+            registration: worktree_gitdir(&record.path),
+            owner: Some(record.owner),
+            head: record.head,
+            record: Some(record_file.clone()),
+            pending: None,
+        };
+        created.rollback();
+        if !record.path.exists() {
+            swept.push(record.path);
+        }
+    }
+    swept
 }
 
 /// Whether `repo` still has a registration whose checkout is `path`.
@@ -239,12 +473,17 @@ fn delete_created_branch(repo: &Path, dest: &Path, branch: &str, head: Option<&s
 pub struct WorktreeCreator {
     data_dir: PathBuf,
     settings: Arc<WorktreeSettingsStore>,
+    pending: Arc<PendingWorktrees>,
 }
 
 impl WorktreeCreator {
     /// A creator rooted at the daemon's data directory.
     pub fn new(data_dir: PathBuf, settings: Arc<WorktreeSettingsStore>) -> Self {
-        Self { data_dir, settings }
+        Self {
+            data_dir,
+            settings,
+            pending: Arc::default(),
+        }
     }
 
     /// Creates the requested worktree, off the async runtime.
@@ -260,7 +499,7 @@ impl WorktreeCreator {
         let prompt = prompt.to_owned();
         let request = request.clone();
         // Every probe and `git worktree add` shells out and blocks.
-        tokio::task::spawn_blocking(move || {
+        let mut created = tokio::task::spawn_blocking(move || {
             create_blocking(
                 &workspace,
                 &request,
@@ -271,7 +510,31 @@ impl WorktreeCreator {
             )
         })
         .await
-        .map_err(|error| format!("the worktree setup task failed: {error}"))?
+        .map_err(|error| format!("the worktree setup task failed: {error}"))??;
+        created.pending = Some(Arc::clone(&self.pending));
+        self.pending.add(created.clone());
+        Ok(created)
+    }
+
+    /// Waits for every rollback a shutdown could otherwise lose, then rolls
+    /// back each create no thread adopted and waits for that too.
+    ///
+    /// Called after the thread manager has stopped, so a create that was still
+    /// running has already dropped its guard and registered its rollback.
+    pub async fn shutdown(&self) {
+        for handle in self.pending.take_rollbacks() {
+            let _ = handle.await;
+        }
+        let created = self.pending.take_created();
+        if created.is_empty() {
+            return;
+        }
+        let _ = tokio::task::spawn_blocking(move || {
+            for created in created {
+                created.rollback();
+            }
+        })
+        .await;
     }
 }
 
@@ -336,26 +599,11 @@ pub fn create_blocking(
     // `repo` is the workspace's own checkout, which for a linked worktree (or
     // a bare repository's worktree) is not the main one, while `project` is
     // named after the main checkout. The destination must be outside both, or
-    // a location that holds the main checkout leaks new checkouts into it.
-    let main = git::repo_of(&repo).unwrap_or_else(|| repo.clone());
+    // a location that holds the main checkout leaks new checkouts into it. The
+    // same check also refuses a location inside a sibling linked worktree.
     let project = project_name(&repo);
-    // Checkouts go to `<location>/<project>/<branch>`, so the location itself
-    // may be outside the repository while the folder it holds for this project
-    // is the repository (Location `~/code` for the project `~/code/api`).
-    let destination_root = location.join(&project);
-    let destination_in = if location_inside_repo(&repo, &destination_root) {
-        Some(&repo)
-    } else if location_inside_repo(&main, &destination_root) {
-        Some(&main)
-    } else {
-        None
-    };
-    if let Some(checkout) = destination_in {
-        return Err(format!(
-            "the worktree location {} would put new checkouts inside the repository {}, so they would sit in the main checkout; choose a folder outside it",
-            location.display(),
-            checkout.display()
-        ));
+    if let Some(message) = destination_refusal(&repo, &location) {
+        return Err(message);
     }
 
     // The folder is claimed atomically before any git call (see [`claim_dir`]),
@@ -473,6 +721,17 @@ pub fn create_blocking(
     // against empty folders that look like real ones.
     let registration = worktree_gitdir(&dest);
     let owner = registration.as_deref().and_then(mark_registration);
+    let record = owner.as_deref().and_then(|owner| {
+        write_pending_record(
+            data_dir,
+            &repo,
+            &dest,
+            &branch,
+            created_branch,
+            head.as_deref(),
+            owner,
+        )
+    });
     if dest.join(".gitmodules").is_file()
         && let Err(error) = git::run_with_timeout(&dest, submodule_args(&dest), CREATE_TIMEOUT)
     {
@@ -480,6 +739,8 @@ pub fn create_blocking(
             registration,
             owner,
             head: head.clone(),
+            record,
+            pending: None,
             path: dest,
             repo,
             branch,
@@ -497,6 +758,8 @@ pub fn create_blocking(
         registration,
         owner,
         head,
+        record,
+        pending: None,
         path: dest,
         repo,
         branch,
@@ -959,7 +1222,12 @@ fn folder_name(branch: &str) -> String {
 
 /// The project folder name: the main worktree's folder.
 fn project_name(repo: &Path) -> String {
-    let main = git::repo_of(repo).unwrap_or_else(|| repo.to_path_buf());
+    let main = git::main_checkout(repo).unwrap_or_else(|| repo.to_path_buf());
+    project_name_of(&main)
+}
+
+/// [`project_name`] from an already resolved main checkout.
+fn project_name_of(main: &Path) -> String {
     main.file_name()
         .and_then(|name| name.to_str())
         .map(folder_name)
@@ -967,13 +1235,69 @@ fn project_name(repo: &Path) -> String {
         .unwrap_or_else(|| "project".to_owned())
 }
 
-/// The folder a project's checkouts are grouped under.
+/// Why `location` may not hold this project's checkouts, when it may not.
 ///
-/// Settings validation uses the same name the creator will use, so a location
-/// that would hold this project's checkouts inside the checkout is refused
-/// before the person's first worktree request.
-pub(crate) fn project_folder(repo: &Path) -> String {
-    project_name(repo)
+/// Checkouts go to `<location>/<project>/<branch>`, so the location itself may
+/// be outside every checkout while the folder it holds for this project is one
+/// (Location `~/code` for the project `~/code/api`). The destination is refused
+/// inside the workspace's own checkout, its main checkout — which a linked
+/// worktree, a `--separate-git-dir` repository, a submodule or a bare
+/// repository's worktree keep somewhere else — and inside any other linked
+/// worktree of the same repository.
+///
+/// Both the creator and Settings validation use this, so a location they would
+/// disagree about cannot be saved and then fail on the first thread.
+pub(crate) fn destination_refusal(workspace: &Path, location: &Path) -> Option<String> {
+    let main = git::main_checkout(workspace).unwrap_or_else(|| workspace.to_path_buf());
+    let project = project_name_of(&main);
+    let destination = location.join(&project);
+    if location_inside_repo(workspace, &destination) {
+        return Some(destination_message(location, &destination, workspace));
+    }
+    if location_inside_repo(&main, &destination) {
+        if git::is_bare(&main, git::OBSERVATION_GIT_TIMEOUT).ok() == Some(true) {
+            return Some(format!(
+                "the worktree location {} would put new checkouts (under {}) inside the bare repository's git directory {}, which has no working tree to hold them; choose a folder outside it",
+                location.display(),
+                destination.display(),
+                main.display()
+            ));
+        }
+        return Some(destination_message(location, &destination, &main));
+    }
+    let Ok(snapshot) = git::registrations(workspace) else {
+        return None;
+    };
+    let common = git::common_dir(workspace, git::OBSERVATION_GIT_TIMEOUT).ok();
+    for registration in snapshot.iter().filter(|registration| !registration.bare) {
+        if registration.path == workspace
+            || registration.path == main
+            // A submodule's main registration names its git dir; it has no
+            // working tree of its own, and the working tree was checked above.
+            || common.as_ref() == Some(&registration.path)
+        {
+            continue;
+        }
+        if location_inside_repo(&registration.path, &destination) {
+            return Some(format!(
+                "the worktree location {} would put new checkouts (under {}) inside another worktree of this repository, {}; choose a folder outside it",
+                location.display(),
+                destination.display(),
+                registration.path.display()
+            ));
+        }
+    }
+    None
+}
+
+/// The refusal shared by every checkout that would hold the destination.
+fn destination_message(location: &Path, destination: &Path, checkout: &Path) -> String {
+    format!(
+        "the worktree location {} would put new checkouts (under {}) inside the project checkout {}; choose a folder outside it",
+        location.display(),
+        destination.display(),
+        checkout.display()
+    )
 }
 
 /// Whether `git` accepts `name` as a branch.
@@ -2223,7 +2547,7 @@ mod tests {
             None,
         )
         .expect_err("a checkout inside the main checkout is refused");
-        assert!(error.contains("inside the repository"), "{error}");
+        assert!(error.contains("inside the project checkout"), "{error}");
         assert!(
             !inside.join(project_name(repo.path())).exists(),
             "nothing was created inside the main checkout"
@@ -2258,7 +2582,7 @@ mod tests {
             None,
         )
         .expect_err("the destination is the main checkout");
-        assert!(error.contains("inside the repository"), "{error}");
+        assert!(error.contains("inside the project checkout"), "{error}");
         assert!(
             !git::run_with_timeout(
                 &repo,
@@ -2306,7 +2630,7 @@ mod tests {
             None,
         )
         .expect_err("the destination is the main checkout, not the linked one");
-        assert!(error.contains("inside the repository"), "{error}");
+        assert!(error.contains("inside the project checkout"), "{error}");
         assert!(
             error.contains(&main.to_string_lossy().into_owned()),
             "{error}"
@@ -2368,7 +2692,14 @@ mod tests {
             None,
         )
         .expect_err("the destination is the bare repository's git directory");
-        assert!(error.contains("inside the repository"), "{error}");
+        assert!(
+            error.contains("inside the bare repository's git directory"),
+            "{error}"
+        );
+        assert!(
+            error.contains("choose a folder outside it"),
+            "the refusal says what to do: {error}"
+        );
         assert!(
             error.contains(&bare.to_string_lossy().into_owned()),
             "{error}"
@@ -2434,5 +2765,436 @@ mod tests {
         assert_eq!(branch_prefix(""), "");
         assert_eq!(branch_prefix("  "), "");
         assert_eq!(branch_prefix("a  b"), "a--b/");
+    }
+
+    /// A `--separate-git-dir` repository names its common dir something other
+    /// than `.git`, so the main checkout is not found by the common dir's name.
+    /// The registration still names it, and a location that holds it must be
+    /// refused from a linked worktree of that repository.
+    #[test]
+    fn a_separate_git_dir_worktree_refuses_a_location_inside_the_main_checkout() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        let gitdir = root.path().join("api.git");
+        run(
+            root.path(),
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                gitdir.to_str().unwrap(),
+                main.to_str().unwrap(),
+            ],
+        );
+        run(&main, &["config", "user.email", "wt@example.invalid"]);
+        run(&main, &["config", "user.name", "worktree test"]);
+        std::fs::write(main.join("README.md"), "hello\n").expect("readme");
+        run(&main, &["add", "README.md"]);
+        run(&main, &["commit", "-q", "-m", "init"]);
+        assert_eq!(git::repo_of(&main), None, "the common dir is not `.git`");
+
+        let linked = root.path().join("linked");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                linked.to_str().unwrap(),
+            ],
+        );
+
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &linked,
+            &WorktreeRequest::Named("separate/x".into()),
+            "separate",
+            &settings(Some(root.path())),
+            data.path(),
+            None,
+        )
+        .expect_err("the destination is the separate git dir repository's main checkout");
+        assert!(error.contains("inside the project checkout"), "{error}");
+        assert!(
+            error.contains(&main.to_string_lossy().into_owned()),
+            "the refusal names the main checkout: {error}"
+        );
+        let dest = main.join(folder_name("separate/x"));
+        assert!(
+            !dest.exists(),
+            "nothing was created inside the main checkout"
+        );
+        assert!(
+            git::run_with_timeout(
+                &main,
+                ["rev-parse", "--verify", "refs/heads/separate/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
+        );
+        assert!(
+            git::list_worktrees(&main)
+                .expect("list")
+                .iter()
+                .all(|worktree| worktree.branch.as_deref() != Some("separate/x")),
+            "only the linked checkout that was already there is registered"
+        );
+    }
+
+    /// A submodule's common dir lives under its superproject, so the main
+    /// checkout is not found by the common dir's name either. Its registration
+    /// names it, and a location that holds it must be refused from a linked
+    /// worktree of the submodule.
+    #[test]
+    fn a_submodule_worktree_refuses_a_location_inside_its_main_checkout() {
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+        init_repo(&source);
+        let host = root.path().join("host");
+        std::fs::create_dir(&host).expect("host");
+        init_repo(&host);
+        run(
+            &host,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                source.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        run(&host, &["commit", "-q", "-m", "add a submodule"]);
+
+        let sub = host.join("sub");
+        let linked = root.path().join("linked");
+        run(
+            &sub,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                linked.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(git::repo_of(&linked), None, "the common dir is not `.git`");
+
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &linked,
+            &WorktreeRequest::Named("submodule/x".into()),
+            "submodule",
+            &settings(Some(host.as_path())),
+            data.path(),
+            None,
+        )
+        .expect_err("the destination is the submodule's main checkout");
+        assert!(error.contains("inside the project checkout"), "{error}");
+        assert!(
+            error.contains(&sub.to_string_lossy().into_owned()),
+            "the refusal names the submodule checkout: {error}"
+        );
+        let dest = sub.join(folder_name("submodule/x"));
+        assert!(
+            !dest.exists(),
+            "nothing was created inside the submodule checkout"
+        );
+        assert!(
+            git::run_with_timeout(
+                &sub,
+                ["rev-parse", "--verify", "refs/heads/submodule/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
+        );
+        assert!(
+            git::list_worktrees(&sub)
+                .expect("list")
+                .iter()
+                .all(|worktree| worktree.branch.as_deref() != Some("submodule/x")),
+            "only the linked checkout that was already there is registered"
+        );
+    }
+
+    /// A location inside a sibling linked worktree puts the new checkout in a
+    /// working tree that belongs to another thread, so it is refused as well.
+    #[test]
+    fn a_location_inside_a_sibling_worktree_is_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        init_repo(&main);
+        let sibling = root.path().join("feature");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                sibling.to_str().unwrap(),
+            ],
+        );
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &main,
+            &WorktreeRequest::Named("sibling/x".into()),
+            "sibling",
+            &settings(Some(&sibling)),
+            data.path(),
+            None,
+        )
+        .expect_err("the destination is inside another worktree");
+        assert!(error.contains("another worktree"), "{error}");
+        assert!(
+            error.contains(&sibling.to_string_lossy().into_owned()),
+            "the refusal names the sibling: {error}"
+        );
+        let dest = sibling
+            .join(project_name(&main))
+            .join(folder_name("sibling/x"));
+        assert!(!dest.exists(), "nothing was created inside the sibling");
+        assert!(
+            git::run_with_timeout(
+                &main,
+                ["rev-parse", "--verify", "refs/heads/sibling/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
+        );
+        assert_eq!(
+            git::list_worktrees(&main).expect("list").len(),
+            1,
+            "the sibling is still the only linked checkout"
+        );
+    }
+
+    /// A create that never reaches its thread leaves a record; the next startup
+    /// removes the checkout, its registration and the branch h4rn made.
+    #[test]
+    fn an_interrupted_create_is_swept_before_the_next_start() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("interrupted/x".into()),
+            "interrupted",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        assert!(created.path.is_dir());
+        assert!(
+            data.path().join("worktrees-pending").is_dir(),
+            "the create wrote a recovery record"
+        );
+
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(swept, vec![created.path.clone()]);
+        assert!(!created.path.exists(), "the checkout is gone");
+        assert!(
+            git::list_worktrees(repo.path()).expect("list").is_empty(),
+            "the registration is gone"
+        );
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/interrupted/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "the branch this create made is gone"
+        );
+    }
+
+    /// A worktree h4rn did not make is never removed, even when a recovery
+    /// record happens to name its path: the owner marker does not match.
+    #[test]
+    fn a_worktree_h4rn_did_not_make_survives_the_sweep() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        init_repo(&main);
+        let user = root.path().join("user-worktree");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "mine",
+                user.to_str().unwrap(),
+            ],
+        );
+        let data = tempfile::tempdir().expect("data");
+        write_pending_record(
+            data.path(),
+            &main,
+            &user,
+            "mine",
+            false,
+            None,
+            "not-h4rns-owner",
+        )
+        .expect("record");
+
+        sweep_pending(data.path(), &[]);
+        assert!(user.is_dir(), "the user's checkout is left alone");
+        assert_eq!(
+            git::list_worktrees(&main).expect("list").len(),
+            1,
+            "its registration is left alone"
+        );
+        assert!(
+            git::run_with_timeout(
+                &main,
+                ["rev-parse", "--verify", "refs/heads/mine"],
+                CREATE_TIMEOUT,
+            )
+            .is_ok(),
+            "its branch is left alone"
+        );
+    }
+
+    /// A record whose checkout a thread now uses is finished, not swept: the
+    /// thread owns it, so both stay.
+    #[test]
+    fn an_in_use_worktree_survives_the_sweep() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("in-use/x".into()),
+            "in use",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+
+        let in_use = vec![created.path.to_string_lossy().into_owned()];
+        assert!(sweep_pending(data.path(), &in_use).is_empty());
+        assert!(created.path.is_dir(), "the thread's checkout stays");
+        assert_eq!(
+            git::list_worktrees(repo.path()).expect("list").len(),
+            1,
+            "its registration stays"
+        );
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/in-use/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_ok(),
+            "its branch stays"
+        );
+        assert!(
+            std::fs::read_dir(data.path().join("worktrees-pending"))
+                .expect("pending dir")
+                .next()
+                .is_none(),
+            "the recovered record is gone"
+        );
+    }
+
+    /// A shutdown rolls back every create no thread adopted before it returns.
+    #[tokio::test]
+    async fn shutdown_rolls_back_every_create_no_thread_kept() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let creator = WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        );
+        let created = creator
+            .create_for_thread(
+                repo.path().to_str().unwrap(),
+                &WorktreeRequest::Named("shutdown/x".into()),
+                "shutdown",
+            )
+            .await
+            .expect("create");
+        assert!(created.path.is_dir());
+        assert_eq!(
+            git::list_worktrees(repo.path()).expect("list").len(),
+            1,
+            "the checkout exists before shutdown"
+        );
+
+        creator.shutdown().await;
+        assert!(!created.path.exists(), "the checkout is rolled back");
+        assert!(
+            git::list_worktrees(repo.path()).expect("list").is_empty(),
+            "the registration is rolled back"
+        );
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/shutdown/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "the branch this create made is rolled back"
+        );
+    }
+
+    /// A checkout its thread kept is not rolled back by a later shutdown.
+    #[tokio::test]
+    async fn shutdown_leaves_a_create_its_thread_kept() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let creator = WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        );
+        let created = creator
+            .create_for_thread(
+                repo.path().to_str().unwrap(),
+                &WorktreeRequest::Named("kept/x".into()),
+                "kept",
+            )
+            .await
+            .expect("create");
+        created.keep();
+
+        creator.shutdown().await;
+        assert!(created.path.is_dir(), "the thread's checkout stays");
+        assert_eq!(
+            git::list_worktrees(repo.path()).expect("list").len(),
+            1,
+            "its registration stays"
+        );
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/kept/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_ok(),
+            "its branch stays"
+        );
+        assert!(
+            std::fs::read_dir(data.path().join("worktrees-pending"))
+                .expect("pending dir")
+                .next()
+                .is_none(),
+            "its recovery record is gone"
+        );
     }
 }

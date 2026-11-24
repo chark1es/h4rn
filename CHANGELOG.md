@@ -629,6 +629,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A worktree location is refused wherever it would put a checkout in a working
+  tree.** Saving the location and creating a thread now find the main checkout
+  even when the repository keeps its git directory elsewhere — a
+  `--separate-git-dir` repository, a submodule — and also refuse a location
+  inside any sibling linked worktree, not only the main one. A bare
+  repository's refusal now says the destination is its git directory and to
+  choose a folder outside it.
+- **A failed worktree create no longer leaves its checkout behind when the
+  daemon stops.** Shutdown waits for the rollback. If the daemon is killed
+  first, the next startup removes the checkout, registration and branch the
+  interrupted create made, while leaving worktrees h4rn did not make and ones a
+  thread still uses alone.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

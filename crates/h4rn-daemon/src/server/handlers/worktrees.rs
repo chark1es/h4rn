@@ -9,7 +9,7 @@ use h4rn_protocol::{ClientRequest, ProtoError, ProtoErrorCode, ResponseBody};
 use tokio::task::JoinHandle;
 
 use crate::server::Connection;
-use crate::worktrees::settings::{expand_location, location_inside_repo, validate_location};
+use crate::worktrees::settings::{expand_location, validate_location};
 
 /// Requests owned by this service.
 pub(super) fn matches(request: &ClientRequest) -> bool {
@@ -92,32 +92,19 @@ async fn validate_for_save(
     // Checkouts go to `<location>/<project>/<branch>`, so the location may be
     // outside the repository while the folder it holds for a project is the
     // repository itself (Location `~/code` for the project `~/code/api`). The
-    // destination must be outside the project's own checkout *and* its main
-    // checkout: a project registered as a linked worktree (or a linked worktree
-    // of a bare repository) is named after the main checkout, so the folder the
-    // location holds for it can be the main checkout even though it is nowhere
-    // near the registered path. Resolving the project folders shells out to
-    // git, so it runs off the runtime.
+    // destination must be outside the project's own checkout, its main checkout
+    // and every sibling worktree: a project registered as a linked worktree (or
+    // a separate-git-dir repository, a submodule, or a linked worktree of a bare
+    // repository) is named after the main checkout, so the folder the location
+    // holds for it can be the main checkout even though it is nowhere near the
+    // registered path. Resolving the project folders shells out to git, so it
+    // runs off the runtime.
     let refused = tokio::task::spawn_blocking(move || {
         for path in projects {
             let registered = Path::new(&path).to_path_buf();
             let repo = crate::worktrees::git::toplevel(&registered).unwrap_or(registered);
-            let main = crate::worktrees::git::repo_of(&repo).unwrap_or_else(|| repo.clone());
-            let destination = expanded.join(crate::worktrees::create::project_folder(&main));
-            let inside = if location_inside_repo(&repo, &destination) {
-                Some(&repo)
-            } else if location_inside_repo(&main, &destination) {
-                Some(&main)
-            } else {
-                None
-            };
-            if let Some(checkout) = inside {
-                return Some(format!(
-                    "the worktree location {} would put new checkouts (under {}) inside the project checkout {}; choose a folder outside it",
-                    expanded.display(),
-                    destination.display(),
-                    checkout.display()
-                ));
+            if let Some(message) = crate::worktrees::create::destination_refusal(&repo, &expanded) {
+                return Some(message);
             }
         }
         None
@@ -145,6 +132,8 @@ fn settings_hint(message: &str) -> &'static str {
     if message.contains("branch prefix") {
         "Use letters, digits and `-`, `_`, `.` or `/` for the branch prefix, with each `/` part not starting with `.`"
     } else if message.contains("inside the project checkout")
+        || message.contains("inside another worktree")
+        || message.contains("inside the bare repository's git directory")
         || message.contains("inside the repository")
     {
         "Choose a folder outside the project checkout"
