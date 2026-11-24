@@ -326,19 +326,19 @@ impl IssueLinkService {
 
 /// The message a failed refresh shows.
 ///
-/// A missing issue is named from what the link stored (`ENG-123`), never by
-/// the provider id the refresh asked with; a link made before the identifier
-/// was stored falls back to a plain label.
+/// Only a Linear miss is rewritten: the link names the issue from what it
+/// stored (`ENG-123`), never by the provider id the refresh asked with. Other
+/// forges already explain their own miss (for example, GitHub says the number
+/// is a pull request), so their message is kept.
 fn refresh_error(record: &IssueLinkRecord, error: &IssueLinkError) -> String {
-    if !matches!(error, IssueLinkError::IssueNotFound(_)) {
-        return error.to_string();
-    }
-    match &record.scope {
-        IssueScope::Linear { .. } => match record.identifier.as_deref() {
-            Some(identifier) => format!("{identifier} was not found in Linear"),
-            None => "the Linear issue was not found".into(),
-        },
-        IssueScope::Forge { .. } => format!("issue #{} was not found", record.issue_id),
+    match (&record.scope, error) {
+        (IssueScope::Linear { .. }, IssueLinkError::IssueNotFound(_)) => {
+            match record.identifier.as_deref() {
+                Some(identifier) => format!("{identifier} was not found in Linear"),
+                None => "the Linear issue was not found".into(),
+            }
+        }
+        _ => error.to_string(),
     }
 }
 
@@ -423,6 +423,7 @@ mod tests {
         calls: Mutex<Vec<String>>,
         fail: Mutex<bool>,
         missing: Mutex<bool>,
+        forge_missing: Mutex<bool>,
     }
 
     impl MockSource {
@@ -437,6 +438,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 fail: Mutex::new(false),
                 missing: Mutex::new(false),
+                forge_missing: Mutex::new(false),
             }
         }
     }
@@ -458,6 +460,12 @@ mod tests {
             number: u32,
         ) -> Result<ForgeIssueSummary, IssueLinkError> {
             self.calls.lock().unwrap().push(format!("forge:{number}"));
+            if *self.forge_missing.lock().unwrap() {
+                // GitHub's own words when the number is really a pull request.
+                return Err(IssueLinkError::IssueNotFound(format!(
+                    "#{number} is a pull request, not an issue"
+                )));
+            }
             if *self.fail.lock().unwrap() {
                 return Err(IssueLinkError::Tracker("forge is down".into()));
             }
@@ -635,6 +643,23 @@ mod tests {
         assert!(listed[0].state.is_none());
         assert_eq!(listed[0].identifier, None);
         assert_eq!(listed[0].title, None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_forge_issue_keeps_the_forges_own_reason() {
+        let (service, source, _journal) = service().await;
+        let thread = ThreadId::new("th_1");
+        let scope = IssueScope::Forge {
+            repo: source.repo.clone(),
+        };
+        service.link(&thread, None, &scope, "12").await.unwrap();
+
+        // GitHub answers a pull-request number with a reason worth keeping;
+        // rewriting every forge miss to "issue #12 was not found" hides it.
+        *source.forge_missing.lock().unwrap() = true;
+        let listed = service.list(&thread).await.unwrap();
+        let error = listed[0].error.as_deref().expect("the refresh reports why");
+        assert_eq!(error, "#12 is a pull request, not an issue");
     }
 
     #[tokio::test]

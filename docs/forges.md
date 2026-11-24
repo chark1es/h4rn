@@ -465,14 +465,13 @@ the same token can read: those labels keep working. Only names the repository
 catalogue does not carry are looked up in `GET /orgs/{org}/labels`, which
 needs an organization-scoped token. When that organization catalogue answers
 `403`, the repository labels still resolve and the organization labels are
-left out of the lookup; if a requested name is one of them, the edit is
-refused before any replacement is sent, and the error names the label so the
-person can create it on the repository or connect an account with organization
-access. The refusal comes after the issue PATCH, though, so the other fields
-in the same update (title, body, state, assignees) were already sent and may
-already be saved. The daemon
-only sends the fields the caller
-named, so an edit never clears the others. GitHub closes with a
+left out of the lookup. The label replacement is refused when any requested
+name cannot be resolved: nothing is sent to the label endpoint, and the error
+names the label so the person can create it on the repository or connect an
+account with organization access. The refusal comes after the issue PATCH,
+though, so the other fields in the same update (title, body, state, assignees)
+were already sent and may already be saved. The daemon only sends the fields
+the caller named, so an edit never clears the others. GitHub closes with a
 `state_reason`, and a duplicate close also sends `duplicate_issue_id`; the UI
 collects the duplicate's number, and the daemon reads that issue so it can
 send GitHub's 64-bit issue id, which is not the number. GitLab, Gitea/Forgejo
