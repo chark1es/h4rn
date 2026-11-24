@@ -188,6 +188,7 @@ describe("usage stream", () => {
       state: "scheduled" as const,
       reason: "Known reset",
       prompt: "Continue.",
+      mode_ceiling: null,
       failover: null,
       last_error: null,
     };

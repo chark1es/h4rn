@@ -39,7 +39,8 @@ line comments are in [docs/diffs.md](docs/diffs.md); scheduled tasks and webhook
 [docs/scheduled-tasks.md](docs/scheduled-tasks.md); thread titles written by a model are described
 in [docs/text-generation.md](docs/text-generation.md). Packaging and the tag-driven release process
 are in [docs/release.md](docs/release.md); relay deployment is in
-[docs/self-hosting.md](docs/self-hosting.md).
+[docs/self-hosting.md](docs/self-hosting.md). Tools for agents h4rn runs, and OAuth access for
+outside agents, are in [docs/outside-agents.md](docs/outside-agents.md).
 
 ## Known limits
 

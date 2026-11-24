@@ -663,6 +663,28 @@ pub enum ResponseBody {
         /// Pending requests, oldest first.
         approvals: Vec<crate::mcp::McpShareApproval>,
     },
+    /// Outside agents connected through OAuth, and the URL they use.
+    OutsideAgents {
+        /// Connected agents, newest first.
+        agents: Vec<crate::mcp::OutsideAgentView>,
+        /// Streamable-HTTP MCP endpoint an outside agent connects to.
+        mcp_url: String,
+    },
+    /// The machine-wide outside-agent Labs switch.
+    OutsideAgentSettings {
+        /// Whether outside-agent access is on.
+        settings: crate::mcp::OutsideAgentSettings,
+    },
+    /// h4rn's own tools and their per-harness switches.
+    AgentTools {
+        /// Current settings.
+        settings: crate::mcp::AgentToolSettings,
+    },
+    /// Outside-agent sign-ins waiting for the person's decision.
+    OutsideAgentSignIns {
+        /// Waiting sign-ins, oldest first.
+        sign_ins: Vec<crate::mcp::OutsideAgentSignIn>,
+    },
     /// Aggregated usage from the durable ledger.
     UsageReport {
         /// The report.

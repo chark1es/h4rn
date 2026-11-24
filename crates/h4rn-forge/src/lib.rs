@@ -46,7 +46,10 @@ pub use error::{ForgeError, Result};
 pub use gitea::GiteaClient;
 pub use github::GitHubClient;
 pub use gitlab::GitLabClient;
-pub use http::{DEFAULT_REQUESTS_PER_MINUTE, ForgeHttp, HttpResponse, next_link, page_of, redact};
+pub use http::{
+    DEFAULT_REQUESTS_PER_MINUTE, ForgeHttp, HttpResponse, next_link, page_of, redact,
+    token_prefixes,
+};
 pub use remote::{
     ForgeHost, ForgeHosts, api_base_url, base_urls_match, detect_remote, detect_repos,
     parse_remote, validate_base_url_for, validate_cloud_base_url,

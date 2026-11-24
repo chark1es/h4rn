@@ -68,8 +68,8 @@ pub use codex::{
     detect_codex,
 };
 pub use fake::{
-    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionCount,
-    SessionModels, SessionSettings, SettingChange, SteerCount, test_spec,
+    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, McpInjection, SendCount,
+    SessionCount, SessionMcp, SessionModels, SessionSettings, SettingChange, SteerCount, test_spec,
 };
 pub use homes::{HomeError, harness_home, home_variable, resolve_home};
 pub use opencode::{

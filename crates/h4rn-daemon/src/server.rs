@@ -100,6 +100,8 @@ pub struct AppState {
     pub proxy: Arc<h4rn_proxy::ProxyService>,
     /// The daemon-owned MCP hub (ADR-006).
     pub mcp: Arc<McpService>,
+    /// Outside-agent OAuth and its MCP endpoint (ADR-046).
+    pub outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Durable metering, limits and auto-resume (ADR-024).
     pub meter: Arc<h4rn_meter::MeterHub>,
     /// Harness CLI versions and updates (ADR-043).
@@ -123,12 +125,17 @@ pub struct AppState {
 /// Which socket accepted a request.
 ///
 /// Routing is explicit per listener: a webhook path is a bearer secret, so only
-/// the loopback bind and binds the operator named carry it.
+/// the binds the operator named carry it; OAuth and `/mcp` carry plaintext
+/// bearer credentials, so only a socket bound to loopback carries them; a
+/// guest link is a bearer token in a URL, so its direct routes exist only where
+/// the bound address can answer this machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ListenerKind {
-    /// The primary bind (`--bind`).
-    Primary,
-    /// An extra address the operator named (`--extra-bind`).
+    /// A socket this machine reaches as loopback: the primary `--bind` when its
+    /// address is loopback.
+    Loopback,
+    /// An address the operator named that is not loopback: an extra bind, or a
+    /// `--bind` to the wildcard or a LAN address.
     ExtraBind,
     /// The address discovered on the tailnet by Tailscale auto mode.
     Tailnet,
@@ -137,37 +144,111 @@ pub enum ListenerKind {
 }
 
 impl ListenerKind {
+    /// The kind of an operator-named bind, from the address it really has.
+    ///
+    /// The flag cannot say this on its own: `--bind 0.0.0.0:47800` is a
+    /// wildcard socket, not a loopback one, and OAuth plus `/mcp` carry
+    /// plaintext bearer credentials. Only a socket whose bound address is
+    /// loopback serves them.
+    pub fn for_bind(addr: std::net::SocketAddr) -> Self {
+        if addr.ip().is_loopback() {
+            Self::Loopback
+        } else {
+            Self::ExtraBind
+        }
+    }
+
     /// Whether this listener serves `/webhooks/{secret}`.
     ///
-    /// Only the primary bind and an explicitly configured extra bind do. The
-    /// tailnet address and the LAN listener carry the encrypted session routes
-    /// only, so a webhook secret never leaves the listeners the operator chose.
+    /// Only the binds the operator named do. The tailnet address and the LAN
+    /// listener carry the encrypted session routes only, so a webhook secret
+    /// never leaves the listeners the operator chose.
     pub fn serves_webhooks(self) -> bool {
-        matches!(self, Self::Primary | Self::ExtraBind)
+        matches!(self, Self::Loopback | Self::ExtraBind)
     }
 
     /// The router this listener serves.
     ///
-    /// Which guest routes exist is decided from the address the listener
-    /// actually bound, not from the flag that created it: `--bind 0.0.0.0` is
-    /// still the primary listener, but it is not a loopback address.
+    /// Every decision comes from the address the listener actually bound, not
+    /// from the flag that created it: `--bind 0.0.0.0` is still the primary
+    /// listener, but it is not a loopback address, so [`for_bind`] makes it an
+    /// `ExtraBind` and it serves no OAuth. `/mcp` is mounted there behind the
+    /// loopback guard, so a harness on this machine keeps its tools while a
+    /// network peer is refused. [`operator_router`] still mounts the direct
+    /// guest routes for a wildcard bind, because its loopback connection is the
+    /// same socket.
+    ///
+    /// [`for_bind`]: ListenerKind::for_bind
     pub fn router(self, state: AppState, bound: SocketAddr) -> Router {
         match self {
-            Self::Primary | Self::ExtraBind => operator_router(state, bound),
+            Self::Loopback => router(state),
+            Self::ExtraBind => operator_router(state, bound),
             Self::Tailnet => core_router(state),
             Self::NetworkAccess => network_router(state),
         }
     }
 }
 
-/// Builds the router for a listener the operator chose.
+/// Builds the daemon router served by the loopback listener.
+///
+/// This is the router that carries OAuth, `/mcp` and the direct guest routes:
+/// a redirect that finishes on `localhost` is the only one the daemon admits,
+/// the MCP endpoint carries bearer tokens, and a guest link is a bearer token
+/// in a URL. An operator-named bind that is not loopback serves the routes that
+/// are safe there (liveness, the typed socket, webhooks and, through a
+/// loopback connection, the guest page) through [`operator_router`]; a tailnet
+/// or LAN listener serves even less.
+///
+/// `/secure` is always registered so a remote client gets a clear "not enabled"
+/// response instead of a 404, while plain WebSocket access stays loopback-only
+/// (ADR-009).
+pub fn router(state: AppState) -> Router {
+    let outside = Arc::clone(&state.outside);
+    let mcp = mcp_router(state.clone());
+    core_routes()
+        .route("/webhooks/{secret}", post(webhook_post))
+        .merge(guest_router())
+        .with_state(state)
+        .merge(mcp)
+        .merge(crate::mcp_server::router(outside))
+}
+
+/// The `/mcp` route every loopback-serving listener mounts.
+///
+/// It carries bearer tokens for harness sessions and for outside agents, so it
+/// is guarded like the OAuth routes: only this daemon's own page and a loopback
+/// peer may reach it. The operator router mounts this too, so a wildcard or LAN
+/// bind still lets harness sessions on this machine reach their tools while a
+/// peer from the network is refused.
+fn mcp_router(state: AppState) -> Router {
+    let outside = Arc::clone(&state.outside);
+    Router::new()
+        .route(
+            "/mcp",
+            get(mcp_http_get)
+                .post(mcp_http_post)
+                .delete(mcp_http_delete),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&outside),
+            crate::mcp_server::http::loopback_guard,
+        ))
+        .with_state(state)
+}
+
+/// The router an operator-named bind that is not loopback serves.
 ///
 /// It carries the webhook endpoint because the operator chose where it
-/// listens. `/secure` is always registered so a remote client gets a clear
-/// "not enabled" response instead of a 404, while plain WebSocket access stays
-/// loopback-only (ADR-009). Direct guest routes are mounted only where the
-/// bound address can answer this machine: loopback, or the wildcard address,
-/// which still accepts a loopback connection.
+/// listens, and `/mcp` behind the loopback guard so a harness session on this
+/// machine keeps its tools when the daemon is bound to the wildcard or a LAN
+/// address. It never carries OAuth: the redirect and the authorization store
+/// stay on the loopback listener. `/secure` is always registered so a remote
+/// client gets a clear "not enabled" response instead of a 404, while plain
+/// WebSocket access stays loopback-only (ADR-009). Direct guest routes are
+/// mounted only where the bound address can answer this machine: the wildcard
+/// address, whose loopback connection is the same socket. The guest handlers
+/// repeat the check on the peer address, so a wildcard bind still refuses a LAN
+/// peer.
 fn operator_router(state: AppState, bound: SocketAddr) -> Router {
     let app = core_routes().route("/webhooks/{secret}", post(webhook_post));
     let app = if serves_direct_guest(bound) {
@@ -175,7 +256,7 @@ fn operator_router(state: AppState, bound: SocketAddr) -> Router {
     } else {
         app
     };
-    app.with_state(state)
+    app.with_state(state.clone()).merge(mcp_router(state))
 }
 
 /// Whether a listener bound to `bound` may serve the direct guest routes.
@@ -199,25 +280,24 @@ fn core_router(state: AppState) -> Router {
 }
 
 /// The route table before a state is attached.
+///
+/// OAuth and `/mcp` are added by [`router`] only, so a listener that should not
+/// serve them cannot accidentally get them.
 fn core_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
         .route("/secure", get(secure_handler))
         .route("/secure-mcp", get(secure_mcp_handler))
-        .route(
-            "/mcp",
-            get(mcp_http_get)
-                .post(mcp_http_post)
-                .delete(mcp_http_delete),
-        )
 }
 
 /// Router for the network listener: liveness and the encrypted routes.
 ///
 /// Plaintext `/ws` is deliberately absent, so a device on the LAN cannot open
 /// an unencrypted session even if it learns the access token. `/mcp` is absent
-/// too: the hub endpoint carries a bearer token and stays loopback-only.
+/// too: the hub endpoint carries a bearer token and stays loopback-only, and so
+/// do the OAuth routes, because a redirect that finishes on `localhost` is the
+/// only one the daemon admits.
 ///
 /// Guest routes are absent for the same reason a plaintext `/ws` is: a guest
 /// link is a bearer token in a URL, and serving it over a LAN listener would
@@ -253,14 +333,23 @@ fn guest_router() -> Router<AppState> {
 
 /// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
 async fn mcp_http_post(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return state.outside.handle_mcp(headers, body).await;
+    }
     crate::mcp::http_post(state.mcp.http_state(), headers, body).await
 }
 
-async fn mcp_http_get(State(state): State<AppState>) -> Response {
+async fn mcp_http_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return crate::mcp_server::http::outside_get(&state.outside, headers).await;
+    }
     crate::mcp::http_get(state.mcp.http_state()).await
 }
 
 async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::mcp_server::outside::is_outside_request(&headers) {
+        return crate::mcp_server::http::outside_delete(&state.outside, headers).await;
+    }
     crate::mcp::http_delete(state.mcp.http_state(), headers).await
 }
 
@@ -2757,8 +2846,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_loopback_bind_serves_oauth_and_mcp() {
+        let loopback: std::net::SocketAddr = "127.0.0.1:47800".parse().expect("addr");
+        let wildcard: std::net::SocketAddr = "0.0.0.0:47800".parse().expect("addr");
+        let lan: std::net::SocketAddr = "192.168.1.20:47800".parse().expect("addr");
+        assert!(matches!(
+            ListenerKind::for_bind(loopback),
+            ListenerKind::Loopback
+        ));
+        assert!(matches!(
+            ListenerKind::for_bind(wildcard),
+            ListenerKind::ExtraBind
+        ));
+        assert!(matches!(
+            ListenerKind::for_bind(lan),
+            ListenerKind::ExtraBind
+        ));
+    }
+
+    #[test]
     fn webhook_routes_are_exposed_only_on_operator_chosen_listeners() {
-        assert!(ListenerKind::Primary.serves_webhooks());
+        assert!(ListenerKind::Loopback.serves_webhooks());
         assert!(ListenerKind::ExtraBind.serves_webhooks());
         assert!(!ListenerKind::Tailnet.serves_webhooks());
         assert!(!ListenerKind::NetworkAccess.serves_webhooks());
