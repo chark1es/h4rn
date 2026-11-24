@@ -638,6 +638,19 @@ All notable changes to h4rn are recorded here. The format follows
   never sent a second time, and a refused steer's row is written again instead of being kept only in
   memory. Move down is disabled on the last queued row, and Cancel on an edit restores the draft
   another tab saved while the edit was open.
+- **A queued message or steer reaches the turn it belongs to, once, with the limits it was saved
+  with.** A queued message keeps its sender's grant and ceiling when it is steered: a revoked grant
+  is refused, and a message with its own permission limit is never steered into a running turn
+  (Send now puts it first in line instead). A steer is now held in a durable claim with a known
+  state, so a daemon that stops before the agent answers, or a refusal whose restore write failed,
+  puts the message back in the queue at startup instead of losing it; an unclear outcome is
+  reported as "may have been delivered" instead of inviting a resend. A direct steer that names a
+  turn that has ended is refused even when the thread is idle. A promote or Send now that starts a
+  turn takes the same settings gate a live mode switch holds, a failed write leaves no phantom
+  running turn, and a settlement whose write fails keeps the waiting message queued rather than
+  handing the agent a prompt storage still lists as waiting. A delayed summary with an older queue
+  revision no longer clears loaded rows or ends an edit, and a late Save reply only closes the edit
+  that submitted it. Long unbroken text in a queued row wraps at phone width.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,

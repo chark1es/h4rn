@@ -1833,20 +1833,44 @@ and so does a queue action: `QueueMessage`'s `SendNow` and `Steer` carry the tur
 the daemon refuses a stale id and a turn whose first prompt the harness has not accepted yet. The
 check runs again under the lock that claims the message, so a turn that ends between the client's
 look and the claim cannot receive it; `Send now` then moves the message to the front instead, while
-`Steer` refuses, because moving it is not what it promised.
-Sending now from the queue claims the message durably before the adapter sees it: the queue row is
-journaled without the message first. If the journal write fails the claim is undone and nothing was
-delivered; if the adapter definitely refuses (unsupported, missing binary, a protocol error answer)
-the message goes back where it was and the restore append is retried, because a row that only exists
-in memory is lost on the next restart; if the outcome is unclear (a timeout, a dead transport) the
-claim stands and the error is reported, because a second automatic delivery is worse than a row the
-person has to retype. The claim also reads the message under the same lock that removes it, so an
-edit committed in between cannot send text the person already replaced.
+`Steer` refuses, because moving it is not what it promised. A direct steer that names an ended turn
+is refused even when the thread is idle: it never starts a fresh turn the person did not choose.
+
+Sending now from the queue **claims the message durably before the adapter sees it**, as a row in the
+thread's `claimed_json` holding the message, the position it waited in and the turn it was claimed
+for. The row's state says what is known: `claimed` (written, the adapter has not answered),
+`delivered` (the adapter took it, or the outcome was unclear) and `refused` (the adapter definitely
+refused it). A failed claim append is undone and nothing was delivered. On a definite refusal
+(unsupported, missing binary, a protocol error answer) the refusal is written down and the message
+goes back where it was; if the restore append fails, its retries run, and a restart still finds the
+refusal and restores the message. On an unclear outcome (a timeout, a dead transport) the claim is
+marked delivered and the error says the message may have reached the agent, because a second
+automatic delivery is worse than a row the person has to check. At startup a `claimed` or `refused`
+row goes back to the queue at its old position, and a `delivered` row is dropped: neither a crash
+before the adapter nor a failed restore can lose the only copy. The claim reads the message under the
+same lock that removes it, so an edit committed in between cannot send text the person already
+replaced.
+
+**A queued steer obeys the message's sender.** The stored ceiling and grant are read with the
+message: a message that carries a ceiling is never steered into a running turn, because a steer
+cannot narrow permissions the turn already started with; `Send now` moves it to the front and
+`Steer` refuses. The sender's grant is re-checked under the claim lock, so work asked for by a token
+family revoked while it waited never reaches the turn.
+
+**Every idle way into a turn selects its session behind the same gate.** `Send now`, and an ordinary
+send that promotes an older queued message, take the per-thread switch lock a live settings change
+holds between switching the session and recording the value. Without it the new turn could trust a
+session whose recorded mode is not what it runs, and the summary, journal and session would disagree.
+A start whose journal write fails puts the turn, its last-turn marker, the queue and the lifecycle
+state back, so there is no phantom Working turn and the message is still deliverable.
 
 A steer the harness already took is **reported as delivered even when its transcript row could not
 be written**: `MessageAccepted.unrecorded` says the words are in the turn and only the row is
 missing. Reporting that as a failure would invite a resend, and the running turn would hold the same
-words twice.
+words twice. A direct steer whose outcome is unclear is reported the same way, as
+`ProtoErrorCode::DeliveryUnclear`: the client says the message may have landed instead of offering a
+resend.
+
 
 Queue edits, removals, moves and Send now are one daemon request (`QueueMessage`). Every mutation
 and the promotion of the next turn take the same thread-record lock, so a message that has just
@@ -1877,14 +1901,17 @@ A client's queue is **the daemon's queue after a reload**. Every reconnect drops
 refetch the queue of every thread whose summary counts messages; waiting for an unrelated event
 would hide the rows for as long as a rate-limit pause lasts. A summary that counts zero keeps an
 empty entry at its own revision rather than deleting the cached one, so a fetch still in flight is
-recognised as older and dropped.
+recognised as older and dropped. A summary whose `queue_revision` is older than the rows this client
+already holds is delayed, not news: it is ignored, so it can neither clear loaded rows nor end an
+edit of a row that still exists.
 
 The composer keeps three texts apart while editing a queued message: the edit buffer in the box, the
 message's saved text, and the thread's own draft (which stays in storage, untouched by the edit). A
 second Edit leaves that draft alone too, another tab's draft write never replaces an active edit, and
 when the message starts under the edit the composer refills only with text that actually changed. Cancel
 reads the stored draft back rather than the copy taken when the edit began, so a draft another tab
-saved during the edit is what the person gets.
+saved during the edit is what the person gets. A Save's answer closes only the edit that submitted
+it: if the person opened another message while the reply was in flight, their newer edit stays open.
 
 Clients choose a per-device default for follow-ups (Queue or Steer) in Settings → Chat. Enter (or
 Cmd/Ctrl+Enter when `Enter inserts a new line` is on) uses that default; Cmd/Ctrl+Enter (or adding
