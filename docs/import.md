@@ -99,7 +99,11 @@ conversation. Each source file's identity (its session id, or its path with size
 and content fingerprint when it names none) is recorded, so running the import
 again only adds conversations h4rn has not seen. The id used for the claim comes
 from the full parse, not the scan's head, so two differently named copies whose
-session id sits in a later record still import once. A source is claimed and its
+session id sits in a later record still import once. The scan also checks the
+identity stored for each transcript, not only the one its head revealed, so an
+already imported conversation is not listed again. A transcript that named no
+id keeps its path, size and content fingerprint as its identity, so one that
+keeps growing is offered again as a new conversation. A source is claimed and its
 thread written in one transaction: two copies of a conversation in one run, two
 runs at once, or a crash between the claim and the write cannot produce a second
 thread. Progress appears in the dialog, with any limit a scan hit, and the import
@@ -112,7 +116,9 @@ wrote it.
 A long replay crosses a paired connection without shortening anything: the
 daemon sends a thread's history in bounded pages, and a frame too large for the
 secure transport is split into chunks the client joins before reading it, so a
-600 KiB prompt stays whole.
+600 KiB prompt stays whole. The journal decides where each page ends from its
+byte budget, so asking for the next page reads one page rather than the rest of
+the thread.
 
 ## Continuing an imported thread
 

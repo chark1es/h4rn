@@ -345,7 +345,9 @@ All notable changes to h4rn are recorded here. The format follows
   picker's own list belongs to the repository, so it still arrives after the diff. The picker shows
   the new source while it loads. The path bar always names the file on screen, including a diff
   whose tab was closed since the diff outlives its tab. Replies for a previous workspace are
-  dropped too, so switching threads never shows one project's diff in another.
+  dropped too, so switching threads never shows one project's diff in another. A Branch or Commits
+  review that was still loading when you left comes back with one file-list read, reopening the
+  tab the review was started for.
 - **Line review comments go to the thread's composer as plain context.** Select a line or range in
   any diff mode (click, Shift-click, or the keyboard) and write a comment. Each comment remembers
   the exact diff it was written on — the turn's id, the commit's sha, the resolved base's name —
@@ -652,7 +654,14 @@ All notable changes to h4rn are recorded here. The format follows
   replaced session is resolved on every client, the Changes panel no longer counts
   the switch divider as a turn, and a switch to a configured ACP agent lists that
   agent's own models. See [docs/provider-switch.md](docs/provider-switch.md).
-
+- **An imported conversation is not offered a second time.** When a Claude Code
+  transcript names its session id only in a later record, the import claims it
+  under that full identity while a scan's head read knows only the file. The scan
+  now also checks the identity stored for the transcript, so an already imported
+  session disappears from **Add project → Import** instead of being listed and
+  then skipped again. A transcript that names no session id is still keyed by its
+  path, size and fingerprint, so a Codex rollout that keeps growing is offered
+  again as a new conversation.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,
