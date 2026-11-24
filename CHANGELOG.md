@@ -7,6 +7,33 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Agents can link pull requests from inside a thread, and outside agents can work with h4rn
+  over MCP.** Every harness session now gets h4rn's own tools through its existing per-session
+  token: `link_pull_request`, `unlink_pull_request`, `list_thread_pull_requests`,
+  `watch_pull_request`, `unwatch_pull_request`, `thread_status` and
+  `list_forge_pull_requests`. They act on the calling thread and accept no thread id, so a token
+  cannot reach another thread; Settings → Sharing & access turns them off per harness. Agents
+  h4rn did not start — Claude Code or Codex in your terminal, and other local MCP clients — can
+  connect to `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). Outside
+  agents are in **Labs** and off by default: Settings → Labs → **Outside agents (OAuth)** turns
+  them on. While it is off, the OAuth and discovery routes answer 404, an outside-agent token is
+  refused on `/mcp`, no sign-in can be created, and Settings → Sharing & access hides the
+  outside-agent section behind one plain line saying the feature is in Labs. Turning the switch
+  off revokes every grant and drops every waiting sign-in in one durable write, so turning it
+  back on does not revive them. Only you can grant one: the client's browser shows who is asking
+  and where it would return, and the request is
+  approved in h4rn → Settings → Sharing & access, where you pick **Read only**, **Supervised**
+  (threads run at approval-required) or **Full access** with no preselected default. Tokens are
+  scoped, expiring, revocable and stored only as digests; a revocation is durable and a replayed
+  code or refresh token kills the grants it produced. A supervised message carries its ceiling, so
+  raising the thread's mode later cannot lift it. The OAuth and MCP routes exist only on the
+  loopback listener and refuse another site's page. The same page shows the MCP URL with a Copy
+  button and lists connected agents with Revoke. Redirects are admitted only to `https` or
+  localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client.
+  A turn already delivered may still finish after its grant is revoked or the switch is turned off,
+  and a Full-access grant has no ceiling; the other limits are listed in
+  [docs/outside-agents.md](docs/outside-agents.md#known-limitations). See
+  [docs/outside-agents.md](docs/outside-agents.md) and [ADR-046](docs/decisions.md).
 - **Share one thread with a teammate through an expiring guest link.** A link is
   bound to one thread and one browser, lasts 24 hours, and works through the
   Connect relay when the machine is linked; without Connect it works only in a
@@ -576,6 +603,68 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **An outside agent's grant can no longer be widened, replayed or read from the
+  store.** A supervised ceiling now holds for the whole turn it was attached to:
+  raising the thread's mode partway through that turn no longer switches the live
+  session to full access (the person's next, uncapped turn gets the new mode),
+  and a turn stopped by a provider limit resumes under the same ceiling, including
+  after a daemon restart. `list_threads` and `start_thread` redact the thread
+  title as `get_thread` already did, so a credential pasted into a first prompt
+  never comes back from a read-only grant. A revocation cannot lose a race with a
+  token's last-used write, and revoking an agent frees its registration slot so
+  the "revoke one in h4rn" advice works at the cap; a revocation that could not
+  be saved now reports an error instead of success. The daemon accepts an
+  `Origin` only when it is its own exact `scheme://host:port` (a page on another
+  loopback port is refused) and a `Sec-Fetch-Site` only when it is `same-origin`
+  or `none`; the check runs before the rate limiter, so a refused page cannot
+  spend the aggregate bucket. `/oauth/authorize` is counted in that bucket, and
+  waiting sign-ins are capped per client and in total. The token endpoint checks
+  RFC 8707 `resource` against the code's binding, and an approval keeps its
+  one-time code in memory only, so the store file never holds a live code.
+- **A supervised ceiling now travels with the work it belongs to, and the OAuth
+  routes follow the real socket.** A supervised `start_thread` caps its first
+  prompt, not only the thread's mode, and the resume schedule stores the
+  reporting turn's ceiling in the same ledger write that arms it, so an exit
+  report that arrives after the capped turn settled and a daemon that stops
+  right after arming both resume at the ceiling. A PR watch created in a
+  supervised turn keeps the grant and its ceiling: a revoked grant starts
+  nothing, and a live one starts at most at the ceiling. A live mode switch and
+  the selection of a session for a prompt share one per-thread gate, so an
+  incoming supervised message cannot reuse a session the switch has already made
+  permissive. A grant approved without an RFC 8707 `resource` is bound to the
+  daemon's own `/mcp` audience; exchange, refresh and use check the same
+  binding, and a token with no audience is refused. OAuth and `/mcp` are served
+  only by a socket whose bound address is loopback, so a `0.0.0.0` or LAN bind
+  no longer exposes them, and the guard also refuses a peer that is not this
+  machine. A failed revoke keeps the grant so a retry works and reports
+  `Internal` rather than `NotFound`, a spent code is kept while its token family
+  is live so a late replay still revokes it, a failed replay revocation is
+  reported, a malformed or duplicated `Origin`/`Sec-Fetch-Site` is refused
+  instead of treated as absent, `set_harness` commits a switch only after its
+  write succeeds, and both browser sign-in screens lost their uppercase eyebrow.
+- **A grant is now the exact sign-in that asked for the work, and every later
+  turn is checked against it.** The daemon carries a `(client, token family,
+  ceiling)` triple through everything that can start a turn later: a queued
+  message, a prompt parked by a usage limit, the resume schedule, a PR watch, the
+  wake that watch causes, and a delegated child. Delivery re-checks that exact
+  family and refuses — settling the turn with a plain explanation and starting no
+  session — once it is revoked, including across a restart. Any live token in the
+  family keeps it alive, so a watch no longer dies when the one-hour access token
+  expires while the refresh token is live, and revoking one family stops its work
+  even when the same client holds another live sign-in. A wake turn carries the
+  triple, so a watch it re-creates keeps the grant instead of clearing it, and a
+  delegated child starts at the calling turn's ceiling rather than the thread's
+  newer mode. An auto-resume selects its session through the same per-thread gate
+  as a live mode switch, so it cannot reuse a session the switch already made
+  permissive. A second approval no longer prunes the spent code of a live family,
+  so a late replay still revokes it. Thread titles are redacted before the
+  80-character cut, the redactor removes a partial owner-token prefix and
+  daemon-issued guest links (`/guest/<token>`), and the MCP URL follows the socket
+  that really serves it (`[::1]` for an IPv6 loopback bind, the loopback extra
+  bind when the primary is a wildcard or LAN address, `127.0.0.1` for a wildcard
+  bind, and unavailable when no loopback socket exists); `/mcp` is mounted on a
+  non-loopback bind behind the loopback guard so harness tools keep working,
+  while OAuth stays loopback-only.
 - **A guest exchange never stalls the relay, and a guest request is one decision with its card.**
   Guest work now runs in its own tasks behind a small concurrency cap, so a chunked 10 MB answer, a
   snapshot or a file write can never block the loop that drains the relay socket or starve other

@@ -10,8 +10,10 @@ and [ADR-037](decisions.md#adr-037-mcp-configuration-and-secrets-live-apart-shar
 ## The endpoint
 
 - `POST /mcp` implements MCP revision `2025-06-18` (with `2025-03-26` and `2024-11-05` accepted for
-  older harnesses). It speaks JSON-RPC in, JSON-RPC out; batches are accepted and notifications get
-  `202 Accepted`.
+  older harnesses). It speaks JSON-RPC in, JSON-RPC out; one message per request, as the 2025-11-25
+  transport specifies, and notifications get `202 Accepted`. A batch is refused.
+- A request whose `Origin` is another site, or whose `Host` is not a loopback name, is refused: the
+  endpoint carries a bearer token and must not answer a page that reached it by rebinding.
 - `GET /mcp` returns `405`: the hub does not open a server-initiated stream, so a daemon restart
   only invalidates tokens rather than streams.
 - `DELETE /mcp` revokes the caller's token.
@@ -200,11 +202,13 @@ noticed on the next relay event, not instantly.
 `ClientRequest::Mcp { request }` carries every operation:
 
 `ListServers`, `Upsert`, `Remove`, `SetEnabled`, `Import`, `ApplyImport`, `ResolveConflict`,
-`Share`, `Unshare`, `PendingApprovals`, `RespondApproval`, `ListTools`, `TestCall`.
+`Share`, `Unshare`, `PendingApprovals`, `RespondApproval`, `ListTools`, `TestCall`,
+`ListOutsideAgents`, `RevokeOutsideAgent`, `AgentTools`, `SetAgentToolsEnabled`.
 
 The legacy `McpList`, `McpUpsert` and `McpRemove` requests are mapped onto `ListServers`, `Upsert`
 and `Remove` for older clients. Responses use `McpServers`, `McpServer`, `McpImportPreview`,
-`McpTools`, `McpCall`, or `Ack`; errors use the standard protocol error shape.
+`McpTools`, `McpCall`, `OutsideAgents`, `AgentTools`, or `Ack`; errors use the standard protocol
+error shape.
 
 ## Extension point
 
@@ -212,6 +216,10 @@ h4rn's own tool sets register a `ToolProvider` with `McpHub::register_provider`.
 namespace, lists tools for a scope, and executes calls. The built-in `EchoProvider` exposes
 `h4rn__echo` (and `h4rn__server_info`); subagent, preview/render and forge tools plug in the same
 way without changing the hub, the HTTP layer or any adapter.
+
+The thread-scoped PR tools and `thread_status` are the `AgentToolsProvider` in
+`crates/h4rn-daemon/src/mcp_server/agent_tools.rs`. Outside agents use the same `/mcp` route with
+an OAuth token and a smaller tool set; see [outside-agents.md](outside-agents.md).
 
 ## Tests
 

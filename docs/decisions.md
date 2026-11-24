@@ -1687,3 +1687,95 @@ extended-length prefix, so a symlinked `~/Downloads` stays excluded. Warnings sa
 a limit was reached without naming message text. Kept text and titles pass
 through the existing token redactor before they reach the journal, and nothing is
 logged from a transcript.
+
+
+## ADR-046: Two token populations for the two MCP audiences
+
+**Status:** Accepted
+
+h4rn is an MCP server twice, and the two callers must not share a credential.
+
+**Agents h4rn runs** already reach the hub through a token minted for one harness session (ADR-006).
+That token lives in memory, is bound to a thread and a scope, expires with a monotonic liveness
+window and dies with the daemon. The tools it unlocks are h4rn's own (`link_pull_request`,
+`thread_status`, the PR watch). A provider reads the thread id from the token's scope and accepts
+no thread argument, so a token for thread A has no syntax that names thread B. The per-harness
+switch is a second gate, stored beside the hub's own enable matrix.
+
+**Outside agents** are not h4rn's sessions. They connect with OAuth 2.1 over the daemon's loopback
+HTTP listener. The authorization code flow uses PKCE (S256 only) and dynamic client registration
+for public clients, because a hosted assistant cannot be given a pre-shared secret and a local
+client should not need one either.
+
+**Only the person grants access, and only from inside h4rn.** The browser the client opens shows
+who is asking and where the code would go, but it has no h4rn session and every grant is answered
+over the authenticated WebSocket instead: the request appears in Settings → Sharing & access and
+the person picks a level there. The earlier design let that page post the approval, which meant
+anything that could reach the listener — a local process, or a page that reached it through DNS
+rebinding — could grant itself full access. The page's role is now purely informational, and the
+daemon refuses a cross-site `Origin`/`Sec-Fetch-Site` and any `Host` that is not a loopback name.
+The level is the person's explicit choice: nothing the client sent preselects one.
+
+The same rule decides where the routes live. OAuth and `/mcp` are served only on the loopback
+listener, because a redirect that finishes on `localhost` is the only one admitted; a LAN or
+tailnet listener answers 404 to both. The Connect relay carries Noise, not HTTP, so a hosted agent
+still has no path in.
+
+Outside tokens are opaque random values, not JWTs. They last one hour (refresh: thirty days,
+rotating) and are stored only as BLAKE3 digests in `outside_agents.json`, so the file is not a
+credential dump and revocation is a lookup, not a key rotation. A signed token would avoid the
+lookup but would make "revoke now" depend on a denylist that can drift between restarts; the
+daemon already has the store open for every request.
+
+**The store is one lock.** Every read, mutation and write of `outside_agents.json` happens under a
+single mutex, and the file is replaced atomically after `fsync`, so a revocation or a spent code
+can never be overwritten by a slower writer that took its snapshot before the change. Last-used is
+still written lazily, but always from the live state. A revocation answers only after the write
+committed. A corrupted or older file is quarantined beside it and the daemon starts with no
+grants, which is the safe direction.
+
+**The feature is a Labs switch, and it is off by default.** The answer lives in the same store as
+the grants (`enabled`), not in a second file: turning it off revokes every family and drops every
+waiting code and sign-in in the same durable write, so a crash cannot leave one half behind. While
+it is off the OAuth routes answer 404, no sign-in can be created, and an outside token is refused
+on `/mcp`; harness sessions keep their own token and tools. A file written before the switch
+existed counts as off, and opening it revokes the grants it holds, so an upgrade cannot revive one
+when the switch is later turned on.
+
+**A replay is an attack.** Presenting an authorization code a second time revokes the pair it
+issued, and presenting a rotated refresh token a second time revokes its whole family: either
+means two parties hold the same credential.
+
+**A grant is `(client, token family, ceiling)`.** A supervised grant is not allowed to change the
+person's thread mode. Every piece of work that can start a turn later — a queued message, a prompt
+parked by a provider limit, the resume schedule, a PR watch, the wake that watch causes and a
+delegated child — carries the triple and stores it durably. Every message it sends carries
+`approval_required` as an immutable ceiling; the turn runs on a session started (or replaced) at the
+stricter of the thread's mode and that ceiling, and the ceiling survives a rate-limit pause and a
+restart. Raising the thread's mode afterwards cannot lift a ceiling that is already queued.
+
+The family is the grant's identity, not the client: a client can hold several sign-ins, and work
+asked for under one must not survive that one's revocation because another is still live. At the
+moment work is delivered the exact family is re-checked, and a family with no live, unrevoked token
+— access or refresh — refuses delivery rather than starting a session. A delegated child inherits
+the calling turn's triple, so a supervised turn cannot delegate its way past its ceiling.
+
+Tokens also carry the RFC 8707 `resource` they were issued for, when the client names one, and
+`/mcp` refuses a token bound to another resource. Tool results for `get_thread` redact the daemon's
+own credentials and the token shapes h4rn and forge clients use, so a token pasted into a thread
+cannot be read back out.
+
+The alternatives were considered and rejected: reusing the local access token would give any
+outside client the owner's full authority; giving outside agents the same in-memory session tokens
+as harnesses would let a restart silently invalidate a thirty-day sign-in (and would make the
+harness token's thread scope meaningless); accepting any redirect would let a code be posted
+anywhere. The redirect allow-list (`https` or loopback `http`, no credentials, no fragment) and
+PKCE are therefore part of the model, not conveniences.
+
+The endpoint shares `/mcp` with the hub and dispatches on the token prefix: a harness token
+(`h4rn_mcp_`) reaches the hub, an outside token (`h4rn_at_`) reaches the outside tool set. An
+outside agent therefore sees a small, fixed tool set and never the person's upstream servers. Both
+MCP paths accept one JSON-RPC message per request and refuse a batch, which is what the 2025-11-25
+transport specifies and what keeps one scope check and one rate-limit hit attached to one call. It
+is loopback-only, and the Connect relay does not yet carry HTTP, so the copied URL is the local
+address and a hosted agent has no path in this phase.

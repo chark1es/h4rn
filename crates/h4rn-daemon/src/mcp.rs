@@ -46,11 +46,30 @@ use tokio::task::JoinHandle;
 
 use crate::config::Config;
 use crate::mcp_peers::{GRANTS_HANDSHAKE, PeerDirectory, PeerLinks, serve_grants};
+use crate::mcp_server::oauth::OAuthError;
 use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::threads::{McpSession, McpSessionProvider};
 
 /// Version marker for the internal tunnel handshake.
 const TUNNEL_HANDSHAKE: &str = "h4rn-mcp-tunnel-1";
+
+/// Maps a failed outside-agent revocation to the protocol.
+///
+/// Only a genuinely unknown client is `NotFound`. A grant whose revocation
+/// could not be saved is an internal failure: reporting it as "not found" hid
+/// the fact that the agent is still connected and made a retry look pointless.
+fn revoke_error(error: OAuthError) -> ProtoError {
+    let code = match error {
+        OAuthError::NotFound(_) => h4rn_protocol::ProtoErrorCode::NotFound,
+        OAuthError::Storage(_) => h4rn_protocol::ProtoErrorCode::Internal,
+        OAuthError::InvalidClient
+        | OAuthError::InvalidRedirect(_)
+        | OAuthError::InvalidGrant(_)
+        | OAuthError::InvalidRequest(_)
+        | OAuthError::InvalidTarget(_) => h4rn_protocol::ProtoErrorCode::InvalidRequest,
+    };
+    ProtoError::plain(code, error.description())
+}
 
 /// How long `/secure-mcp` waits for the tunnel handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -76,6 +95,10 @@ pub struct McpService {
     devices: std::sync::RwLock<Option<Arc<crate::remote::DeviceRegistry>>>,
     peers: Arc<PeerDirectory>,
     peering: std::sync::Mutex<Option<(tokio::sync::watch::Sender<bool>, JoinHandle<()>)>>,
+    /// Outside-agent OAuth, wired after the daemon's other services exist.
+    outside: std::sync::OnceLock<Arc<crate::mcp_server::OutsideAgents>>,
+    /// Per-harness switches for h4rn's own tools.
+    agent_tools: std::sync::OnceLock<Arc<crate::mcp_server::AgentToolSettingsStore>>,
 }
 
 impl McpService {
@@ -145,6 +168,8 @@ impl McpService {
             devices: std::sync::RwLock::new(None),
             peers: Arc::new(PeerDirectory::new()),
             peering: std::sync::Mutex::new(None),
+            outside: std::sync::OnceLock::new(),
+            agent_tools: std::sync::OnceLock::new(),
         };
         service.start_background();
         Ok(service)
@@ -199,6 +224,41 @@ impl McpService {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(endpoint.clone());
         self.hub.set_endpoint(endpoint).await;
+    }
+
+    /// The loopback hub endpoint, once the listener is bound.
+    pub fn endpoint(&self) -> Option<String> {
+        self.endpoint
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Wires the outside-agent surface. Called once by the daemon builder.
+    pub fn set_outside_agents(&self, outside: Arc<crate::mcp_server::OutsideAgents>) {
+        // A `401` from `/mcp` points at the protected-resource metadata only
+        // while outside agents are on and a loopback listener has bound: the
+        // discovery routes answer 404 otherwise, and a pointer to them would
+        // mislead the client.
+        let supplier = Arc::clone(&outside);
+        self.state.set_resource_metadata(Arc::new(move || {
+            if !supplier.enabled() {
+                return None;
+            }
+            let base = supplier.base_url()?;
+            Some(format!("{base}/.well-known/oauth-protected-resource"))
+        }));
+        let _ = self.outside.set(outside);
+    }
+
+    /// The outside-agent surface, when this daemon has one.
+    pub fn outside_agents(&self) -> Option<Arc<crate::mcp_server::OutsideAgents>> {
+        self.outside.get().cloned()
+    }
+
+    /// Wires h4rn's own tool switches. Called once by the daemon builder.
+    pub fn set_agent_tools(&self, settings: Arc<crate::mcp_server::AgentToolSettingsStore>) {
+        let _ = self.agent_tools.set(settings);
     }
 
     /// Starts the periodic upstream health and token-expiry pass.
@@ -284,6 +344,122 @@ impl McpService {
                 .await
                 .map(|server| ResponseBody::McpServer { server })
                 .map_err(HubError::into_proto),
+            McpRequest::OutsideAgentSettings => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgentSettings {
+                    settings: h4rn_protocol::OutsideAgentSettings {
+                        enabled: outside.enabled(),
+                    },
+                })
+            }
+            McpRequest::SetOutsideAgentSettingsEnabled { enabled } => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                let enabled = outside.set_enabled(enabled).map_err(|error| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Internal,
+                        format!("could not save the outside-agent switch: {error}"),
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgentSettings {
+                    settings: h4rn_protocol::OutsideAgentSettings { enabled },
+                })
+            }
+            McpRequest::ListOutsideAgents => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgents {
+                    agents: outside.store().connected_agents(),
+                    mcp_url: outside.mcp_url(),
+                })
+            }
+            McpRequest::RevokeOutsideAgent { client_id } => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                outside
+                    .store()
+                    .revoke_client(&client_id)
+                    .map_err(revoke_error)?;
+                Ok(ResponseBody::Ack)
+            }
+            McpRequest::ListOutsideAgentSignIns => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgentSignIns {
+                    sign_ins: outside.pending_sign_ins(),
+                })
+            }
+            McpRequest::RespondOutsideAgentSignIn {
+                request_id,
+                decision,
+                level,
+            } => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                outside
+                    .respond_sign_in(&request_id, decision, level)
+                    .map_err(|error| {
+                        let code =
+                            if matches!(error, crate::mcp_server::oauth::OAuthError::NotFound(_)) {
+                                h4rn_protocol::ProtoErrorCode::NotFound
+                            } else {
+                                h4rn_protocol::ProtoErrorCode::InvalidRequest
+                            };
+                        ProtoError::plain(code, error.description())
+                    })?;
+                Ok(ResponseBody::Ack)
+            }
+            McpRequest::AgentTools => {
+                let settings = self.agent_tools.get().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not expose h4rn's own tool switches",
+                    )
+                })?;
+                Ok(ResponseBody::AgentTools {
+                    settings: settings.settings(),
+                })
+            }
+            McpRequest::SetAgentToolsEnabled { harness, enabled } => {
+                let settings = self.agent_tools.get().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not expose h4rn's own tool switches",
+                    )
+                })?;
+                let settings = settings.set_harness(harness, enabled).map_err(|error| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Internal,
+                        format!("could not save the h4rn tool switch: {error}"),
+                    )
+                })?;
+                Ok(ResponseBody::AgentTools { settings })
+            }
             other => self
                 .hub
                 .handle_request(other)
@@ -1132,5 +1308,13 @@ mod tests {
     fn conflict_resolution_is_reachable() {
         // A compile-time check that the protocol enum stays wired here.
         let _ = h4rn_protocol::McpConflictResolution::KeepMine;
+    }
+
+    #[test]
+    fn a_failed_revocation_is_an_internal_failure_not_not_found() {
+        let storage = revoke_error(OAuthError::Storage("disk is full".into()));
+        assert_eq!(storage.code, h4rn_protocol::ProtoErrorCode::Internal);
+        let missing = revoke_error(OAuthError::NotFound("no such client".into()));
+        assert_eq!(missing.code, h4rn_protocol::ProtoErrorCode::NotFound);
     }
 }

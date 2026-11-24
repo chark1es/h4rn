@@ -180,6 +180,19 @@ pub struct ParkedPrompt {
     pub text: String,
     /// Attachments to deliver with it.
     pub attachments: Vec<ParkedAttachment>,
+    /// The permission ceiling the sender attached to this prompt, if any.
+    ///
+    /// It survives a restart with the prompt: a supervised agent's message must
+    /// not come back at a more permissive mode just because the daemon paused.
+    #[serde(default)]
+    pub mode_ceiling: Option<h4rn_protocol::RuntimeMode>,
+    /// The outside grant that asked for this prompt, when one did.
+    ///
+    /// It survives a restart with the prompt: the resumed turn must re-check
+    /// that the exact token family is still live, and refuse to run if the grant
+    /// was revoked while the daemon was down.
+    #[serde(default)]
+    pub grant: Option<h4rn_protocol::WorkGrant>,
 }
 
 /// One attachment of a [`ParkedPrompt`].
@@ -1674,6 +1687,39 @@ mod tests {
             resume_at: None,
             limit: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_parked_prompt_keeps_its_mode_ceiling_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.sqlite");
+        let journal = SqliteJournal::connect(&path).await.expect("journal");
+        let mut one = meta("th_parked");
+        one.parked = Some(ParkedPrompt {
+            turn_id: h4rn_protocol::TurnId::new("turn_one"),
+            text: "carry on".into(),
+            attachments: Vec::new(),
+            mode_ceiling: Some(RuntimeMode::ApprovalRequired),
+            grant: Some(h4rn_protocol::WorkGrant {
+                client_id: "client-1".into(),
+                family: "family-1".into(),
+                ceiling: Some(RuntimeMode::ApprovalRequired),
+            }),
+        });
+        journal.upsert_thread(&one).await.unwrap();
+        drop(journal);
+
+        let reopened = SqliteJournal::connect(&path).await.expect("reopen");
+        let rows = reopened.list_threads().await.unwrap();
+        assert_eq!(rows, vec![one]);
+        assert_eq!(
+            rows[0]
+                .parked
+                .as_ref()
+                .and_then(|parked| parked.mode_ceiling),
+            Some(RuntimeMode::ApprovalRequired),
+            "the parked prompt lost its ceiling"
+        );
     }
 
     #[tokio::test]
