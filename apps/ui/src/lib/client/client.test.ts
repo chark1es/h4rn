@@ -19,6 +19,8 @@ type Reply = (body: ResponseBody) => void;
 class FakeTransport implements Transport {
   readonly kind = "mock" as const;
   readonly sent: ClientFrame[] = [];
+  /** Every string frame as sent, including chunk envelopes. */
+  readonly raw: string[] = [];
   handlers: TransportHandlers | null = null;
   closed = false;
   /** When false, frames other than hello are ignored. */
@@ -34,7 +36,12 @@ class FakeTransport implements Transport {
 
   send(data: string | ArrayBuffer | Uint8Array): void {
     if (typeof data !== "string") return;
-    const frame = JSON.parse(data) as ClientFrame;
+    this.raw.push(data);
+    const envelope = JSON.parse(data) as ClientFrame & { chunk?: unknown };
+    // A chunked request's pieces are joined by the daemon; this transport
+    // only needs to record them.
+    if (envelope.chunk !== undefined) return;
+    const frame = envelope as ClientFrame;
     this.sent.push(frame);
     const reply: Reply = (body) => this.reply(frame.id, body);
     if (this.onSend?.(frame, reply)) return;
@@ -303,6 +310,60 @@ describe("H4rnClient", () => {
     transport.emit(4, { type: "agent_state_changed", thread_id: "t1", state: "done" });
 
     expect(events.map((envelope) => envelope.seq)).toEqual([3, 4]);
+  });
+
+  it("joins a frame the daemon split for the transport", async () => {
+    const transport = new FakeTransport();
+    const { client, events } = harness(() => transport);
+
+    client.start();
+    await settle();
+
+    const frame = JSON.stringify({
+      kind: "event",
+      seq: 4,
+      event: { type: "agent_state_changed", thread_id: "t1", state: "thinking" },
+    });
+    const middle = Math.floor(frame.length / 2);
+    const deliver = (index: number, last: boolean, data: string) =>
+      transport.handlers?.onMessage(JSON.stringify({ kind: "chunk", index, last, data }));
+
+    deliver(0, false, frame.slice(0, middle));
+    expect(events).toHaveLength(0);
+    deliver(1, true, frame.slice(middle));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.seq).toBe(4);
+  });
+
+  it("splits an oversized request into frames the transport accepts", async () => {
+    const transport = new FakeTransport();
+    const { client } = harness(() => transport);
+    client.start();
+    await settle();
+    transport.raw.length = 0;
+
+    const text = "x".repeat(200 * 1024);
+    const request = client.request(
+      { type: "send_message", thread_id: "t1", text, attachments: [] },
+      { timeoutMs: 20 },
+    );
+    await expect(request).rejects.toMatchObject({ proto: { code: "internal" } });
+
+    const chunks = transport.raw.map(
+      (frame) =>
+        JSON.parse(frame) as {
+          id?: number;
+          chunk?: { index: number; last: boolean; data: string };
+        },
+    );
+    expect(chunks.every((frame) => frame.chunk !== undefined)).toBe(true);
+    expect(chunks.length).toBeGreaterThan(1);
+    const joined = chunks.map((frame) => frame.chunk?.data ?? "").join("");
+    const body = JSON.parse(joined) as ClientFrame;
+    expect(body.body.type).toBe("send_message");
+    expect(body.body.type === "send_message" && body.body.text).toBe(text);
+    expect(chunks.at(-1)?.chunk?.last).toBe(true);
   });
 
   it("tags frames held for a slow resumed subscribe as replayed history", async () => {

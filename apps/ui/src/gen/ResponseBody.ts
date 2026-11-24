@@ -164,7 +164,15 @@ events: Array<SeqEvent>,
 /**
  * Next sequence the client should ask for.
  */
-next_seq: number, } | { "type": "thread_created", 
+next_seq: number, 
+/**
+ * Whether more events follow this page.
+ *
+ * A paired client's answer must fit one transport frame, so a long
+ * replay arrives in pages; ask again from `next_seq` while this is
+ * true. Older daemons never set it, and an unset value means no more.
+ */
+more: boolean, } | { "type": "thread_created", 
 /**
  * New thread id.
  */

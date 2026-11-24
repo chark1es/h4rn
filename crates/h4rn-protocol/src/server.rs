@@ -169,6 +169,13 @@ pub enum ResponseBody {
         /// Next sequence the client should ask for.
         #[ts(type = "number")]
         next_seq: u64,
+        /// Whether more events follow this page.
+        ///
+        /// A paired client's answer must fit one transport frame, so a long
+        /// replay arrives in pages; ask again from `next_seq` while this is
+        /// true. Older daemons never set it, and an unset value means no more.
+        #[serde(default)]
+        more: bool,
     },
     /// A thread was created and its first turn is durable.
     ///
