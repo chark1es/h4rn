@@ -45,7 +45,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
-use h4rn_protocol::{AgentState, ApprovalDecision, HarnessKind, RuntimeMode, TurnStatus};
+use h4rn_protocol::{
+    AgentState, ApprovalDecision, HarnessKind, RewindMethod, RuntimeMode, SessionRewind, TurnStatus,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -133,10 +135,20 @@ impl Harness for CodexHarness {
         self.install.clone().or_else(detect_codex)
     }
 
+    fn rewind_method(&self) -> RewindMethod {
+        RewindMethod::Native
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        if matches!(spec.rewind, Some(SessionRewind::ResumeAtMessage { .. })) {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind(),
+                feature: "that rewind boundary; Codex reverts to a provider turn".into(),
+            });
+        }
         let install = self
             .detect()
             .ok_or(HarnessError::NotDetected { kind: self.kind() })?;
@@ -327,6 +339,11 @@ struct SharedState {
     last_turn: Option<TurnReport>,
     touched_paths: Vec<String>,
     turn_id: Option<String>,
+    /// Provider turn ids, oldest first.
+    ///
+    /// `thread/revert` names one of these, and `thread/resume` reports the
+    /// history again, so a restarted daemon can still land on the same turn.
+    turns: Vec<String>,
 }
 
 impl SharedState {
@@ -338,6 +355,7 @@ impl SharedState {
             last_turn: None,
             touched_paths: Vec::new(),
             turn_id: None,
+            turns: Vec::new(),
         }
     }
 }
@@ -464,11 +482,38 @@ impl CodexSession {
             .or_else(|| result["thread"]["model"].as_str())
             .map(str::to_string);
 
+        let resumed_turns: Vec<String> = result["thread"]["turns"]
+            .as_array()
+            .map(|turns| {
+                turns
+                    .iter()
+                    .filter_map(|turn| turn["id"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         {
             let mut shared = lock(&self.shared);
-            shared.session_id = Some(thread_id);
+            shared.session_id = Some(thread_id.clone());
             shared.model = model;
             shared.state = AgentState::Idle;
+            shared.turns = resumed_turns;
+        }
+
+        // A rewind recorded before this start drops the provider turns after
+        // the boundary. It runs before the first prompt, so the session the
+        // daemon receives really has the edited history.
+        if let Some(SessionRewind::KeepTurns { keep }) = spec.rewind.as_ref() {
+            let turns = lock(&self.shared).turns.clone();
+            let keep = *keep as usize;
+            if keep < turns.len() {
+                let before = turns[keep].clone();
+                self.request(
+                    "thread/revert",
+                    json!({ "threadId": thread_id, "beforeTurnId": before }),
+                )
+                .await?;
+                lock(&self.shared).turns.truncate(keep);
+            }
         }
 
         // The model catalogue says which efforts and speed tiers this thread
@@ -758,7 +803,9 @@ impl HarnessSession for CodexSession {
         let result = self.request("turn/start", params).await?;
 
         if let Some(turn_id) = result["turn"]["id"].as_str() {
-            lock(&self.shared).turn_id = Some(turn_id.to_string());
+            let mut shared = lock(&self.shared);
+            shared.turn_id = Some(turn_id.to_string());
+            shared.turns.push(turn_id.to_string());
         }
         self.interrupt_requested.store(false, Ordering::SeqCst);
         self.mark_state(AgentState::Thinking);

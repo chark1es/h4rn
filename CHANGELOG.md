@@ -7,6 +7,23 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Edit an earlier prompt to rewind a thread.** Every sent message has an
+  **Edit from here** action. The message and everything after it leave the
+  active thread and the harness's own history, and the prompt and its
+  attachments return to the composer above any unsent draft. Codex and Claude
+  Code truncate their provider conversation natively (`thread/revert` and
+  `--resume-session-at`); OpenCode, Antigravity and configured ACP agents start
+  a fresh session with a bounded handoff of the kept history, and the dialog
+  says which one will run. **Revert files too** puts a thread's own linked
+  worktree back to the checkpoint from before the message; it is offered only
+  there, warns that it also undoes the person's own later edits, and is refused
+  when another thread or agent session shares the directory (finished
+  subagents of the same thread do not block it). A rewind is refused while a
+  turn runs, a message is queued or parked, an approval is pending or an
+  automatic resume is armed. One durable event records the cut, and the
+  provider boundary survives a daemon restart; a failed file restore leaves
+  the conversation unchanged. See [docs/rewind.md](docs/rewind.md) and
+  ADR-047.
 - **A new thread can run in its own git worktree.** Choose **Run in a new
   worktree** in the New thread dialog, with an optional branch name. The daemon
   checks out the project's current `HEAD` on a generated `h4rn/<name>` branch

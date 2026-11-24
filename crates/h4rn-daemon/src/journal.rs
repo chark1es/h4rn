@@ -112,6 +112,12 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// A provider-history rewind the next session start must apply.
+    ///
+    /// The thread's transcript is already truncated when this is written; it
+    /// survives a restart so the provider conversation is truncated too, even
+    /// if the daemon stops before the next prompt.
+    pub pending_rewind: Option<h4rn_protocol::PendingRewind>,
     /// The saved conversation this thread was imported from, when it was.
     ///
     /// An imported thread starts with no live session. The kept messages, with
@@ -458,7 +464,8 @@ impl SqliteJournal {
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
                 parked_json    TEXT,
-                imported_json  TEXT
+                imported_json  TEXT,
+                rewind_json    TEXT
             )",
         )
         .execute(&self.pool)
@@ -485,6 +492,8 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "imported_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "rewind_json", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "reasoning_effort", "TEXT")
             .await?;
@@ -681,10 +690,11 @@ async fn upsert_thread_on(
     let worktree_json = serde_json::to_string(&meta.worktree)?;
     let parked_json = serde_json::to_string(&meta.parked)?;
     let imported_json = serde_json::to_string(&meta.imported)?;
+    let rewind_json = serde_json::to_string(&meta.pending_rewind)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, rewind_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -703,7 +713,8 @@ async fn upsert_thread_on(
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json,
-            imported_json = excluded.imported_json",
+            imported_json = excluded.imported_json,
+            rewind_json = excluded.rewind_json",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -725,6 +736,7 @@ async fn upsert_thread_on(
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
     .bind(imported_json)
+    .bind(rewind_json)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -766,7 +778,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, rewind_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -819,6 +831,9 @@ impl Journal for SqliteJournal {
                     .and_then(|json| serde_json::from_str(&json).ok()),
                 imported: row
                     .try_get::<Option<String>, _>("imported_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                pending_rewind: row
+                    .try_get::<Option<String>, _>("rewind_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
             });
         }
@@ -1621,6 +1636,7 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "resume_id": meta.resume_id,
         "agent_fingerprint": meta.agent_fingerprint,
         "parked": meta.parked,
+        "pending_rewind": meta.pending_rewind,
     })
 }
 
@@ -1650,6 +1666,7 @@ mod tests {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            pending_rewind: None,
             imported: None,
         }
     }
@@ -1686,6 +1703,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            rewind: Default::default(),
+            file_rewind: false,
         }
     }
 

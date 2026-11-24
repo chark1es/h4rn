@@ -1,0 +1,129 @@
+//! Editing an earlier prompt rewinds the conversation, and optionally its files.
+//!
+//! A rewind is one durable decision (ADR-047). The daemon truncates the thread
+//! at the chosen user message, tells the harness to drop that message and
+//! everything after it from its own history, and can put the workspace back to
+//! the turn snapshot taken before the message. The wire types here are shared
+//! by that request, its answer and the event every client folds.
+
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+/// How a harness drops the rewound turns from its own history.
+///
+/// The method is advertised per thread so the UI can say what will really
+/// happen instead of guessing. A native truncation keeps the provider session
+/// and its earlier turns; a handoff starts a fresh session and carries the
+/// kept conversation in a bounded preface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindMethod {
+    /// The harness can drop the turns itself.
+    Native,
+    /// h4rn starts a fresh session with the kept history as a handoff.
+    Handoff,
+    /// Neither is possible for this thread's harness.
+    #[default]
+    Unsupported,
+}
+
+/// What a session started after a rewind must do to its provider history.
+///
+/// The daemon records this with the thread until the next session starts, so a
+/// restarted daemon still rewinds the provider instead of silently resuming
+/// the old conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionRewind {
+    /// Resume the session but discard the prompt with this harness message id
+    /// and everything after it (Claude Code's truncating resume).
+    ResumeAtMessage {
+        /// The prompt uuid the harness recorded for the first removed turn.
+        message: String,
+    },
+    /// Resume the session, then keep only this many provider turns (Codex's
+    /// `thread/revert`).
+    KeepTurns {
+        /// Provider turns kept, oldest first.
+        #[ts(type = "number")]
+        keep: u32,
+    },
+}
+
+/// A pending rewind that the next session start must apply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingRewind {
+    /// Keep the provider session and truncate it at the next start.
+    Native {
+        /// The boundary the adapter applies.
+        session: SessionRewind,
+    },
+    /// Start a fresh session and give the kept conversation as a handoff.
+    Handoff,
+}
+
+/// The prompt a rewind returns to the composer, with its attachments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RewoundPrompt {
+    /// Thread that was rewound.
+    pub thread_id: crate::ThreadId,
+    /// The user message the active thread now ends before.
+    pub before_item_id: String,
+    /// The prompt text exactly as it was sent.
+    pub prompt: String,
+    /// Attachments that came with it, in their original order.
+    #[serde(default)]
+    pub attachments: Vec<crate::Attachment>,
+    /// Whether the workspace files went back to the pre-message checkpoint.
+    #[serde(default)]
+    pub files_restored: bool,
+    /// What the harness history did.
+    pub method: RewindMethod,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rewind_method_has_an_unsupported_default() {
+        assert_eq!(RewindMethod::default(), RewindMethod::Unsupported);
+        assert_eq!(
+            serde_json::to_string(&RewindMethod::Handoff).unwrap(),
+            "\"handoff\""
+        );
+    }
+
+    #[test]
+    fn a_pending_native_rewind_names_its_boundary() {
+        let pending = PendingRewind::Native {
+            session: SessionRewind::KeepTurns { keep: 2 },
+        };
+        let value = serde_json::to_value(&pending).unwrap();
+        assert_eq!(value["kind"], "native");
+        assert_eq!(value["session"]["kind"], "keep_turns");
+        assert_eq!(value["session"]["keep"], 2);
+        assert_eq!(
+            serde_json::from_value::<PendingRewind>(value).unwrap(),
+            pending
+        );
+        assert_eq!(
+            serde_json::to_string(&PendingRewind::Handoff).unwrap(),
+            "{\"kind\":\"handoff\"}"
+        );
+    }
+
+    #[test]
+    fn an_older_rewound_prompt_without_file_or_attachment_fields_parses() {
+        let value = serde_json::json!({
+            "thread_id": "th_1",
+            "before_item_id": "item_user_1",
+            "prompt": "try again",
+            "method": "handoff"
+        });
+        let prompt: RewoundPrompt = serde_json::from_value(value).unwrap();
+        assert!(prompt.attachments.is_empty());
+        assert!(!prompt.files_restored);
+    }
+}

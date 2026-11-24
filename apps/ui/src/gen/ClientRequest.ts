@@ -135,7 +135,19 @@ text: string,
 /**
  * Attachments uploaded before this request.
  */
-attachments: Array<AttachmentId>, } | { "type": "interrupt", 
+attachments: Array<AttachmentId>, } | { "type": "rewind_thread", 
+/**
+ * Thread to rewind.
+ */
+thread_id: ThreadId, 
+/**
+ * The sent user message everything is removed from.
+ */
+before_item_id: string, 
+/**
+ * Also restore the workspace to the pre-message snapshot.
+ */
+restore_files: boolean, } | { "type": "interrupt", 
 /**
  * Thread whose turn should stop.
  */

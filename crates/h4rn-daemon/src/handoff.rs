@@ -65,11 +65,25 @@ pub fn clamp_budget(bytes: usize) -> usize {
 /// the caller appends `request` verbatim with [`with_request`], so the result
 /// never exceeds the budget.
 pub fn build(messages: &[HandoffMessage<'_>], budget: usize, request: &str) -> Option<String> {
+    build_with_header(messages, budget, request, IMPORT_HEADER)
+}
+
+/// [`build`] with a preface that names why the history is being handed over.
+///
+/// An imported conversation and a rewound one both need the same bounded
+/// history block, but telling the agent it was imported when it was actually
+/// rewound would be misleading. The header is part of the budget.
+pub fn build_with_header(
+    messages: &[HandoffMessage<'_>],
+    budget: usize,
+    request: &str,
+    header: &str,
+) -> Option<String> {
     if messages.is_empty() {
         return None;
     }
     let budget = clamp_budget(budget).min(IMPORTED_HISTORY_BYTES);
-    let envelope = HEADER.len() + REQUEST_LEAD.len() + request.len();
+    let envelope = header.len() + REQUEST_LEAD.len() + request.len();
     if envelope >= budget {
         return None;
     }
@@ -107,7 +121,7 @@ pub fn build(messages: &[HandoffMessage<'_>], budget: usize, request: &str) -> O
     }
     indices.sort_unstable();
     indices.dedup();
-    let mut block = String::from(HEADER);
+    let mut block = String::from(header);
     for index in indices {
         let message = messages[index];
         block.push_str(label(message.role));
@@ -125,7 +139,11 @@ pub fn with_request(block: &str, request: &str) -> String {
     format!("{block}{request}")
 }
 
-const HEADER: &str = "Earlier conversation history, imported from another harness. Older messages may be omitted.\n\n";
+/// The preface for a conversation imported from another harness.
+pub const IMPORT_HEADER: &str = "Earlier conversation history, imported from another harness. Older messages may be omitted.\n\n";
+
+/// The preface when a fresh session continues an edited conversation.
+pub const REWIND_HEADER: &str = "Earlier conversation history, after an earlier message was edited and the turns after it removed. Older messages may be omitted.\n\n";
 
 const REQUEST_LEAD: &str = "My next message:\n";
 
@@ -189,7 +207,7 @@ mod tests {
         let request = "what next?";
         let text = "x".repeat(2_000);
         let history = [message(MessageRole::User, &text)];
-        let envelope = HEADER.len() + REQUEST_LEAD.len() + request.len();
+        let envelope = IMPORT_HEADER.len() + REQUEST_LEAD.len() + request.len();
         let message_cost = "User:\n".len() + text.len() + 2;
 
         // Exactly at the budget: the first prompt fits.

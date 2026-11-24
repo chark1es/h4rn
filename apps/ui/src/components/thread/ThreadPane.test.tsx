@@ -33,6 +33,8 @@ const mock = vi.hoisted(() => {
     needs_attention: false,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
   };
   const state = {
@@ -83,6 +85,9 @@ vi.mock("@/lib/store/appStore", () => ({
   openInIde: mock.openInIde,
   openThread: mock.openThread,
   sendMessage: mock.sendMessage,
+  rewindRefusal: () => null,
+  rewindThread: vi.fn(),
+  consumeComposerRestore: vi.fn(),
   getClient: () => {
     throw new Error("The test never reads the workspace.");
   },
@@ -107,6 +112,7 @@ vi.mock("@/features/attachments/use-attachments", () => ({
     remove: () => undefined,
     retry: () => undefined,
     clear: () => undefined,
+    restore: () => undefined,
   }),
   useAttachShortcut: () => undefined,
 }));

@@ -7,7 +7,7 @@ import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel } from "@/lib/entities";
 import { absoluteTime, cost, duration, tokens } from "@/lib/format";
-import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
+import type { MessageItem, PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { TurnBlock } from "./TurnBlock";
 
@@ -64,6 +64,8 @@ export function ThreadStream({
   turns,
   pending,
   onReply,
+  onEditFromHere,
+  editDisabledReason = null,
   staleAt = null,
 }: {
   threadId: string;
@@ -71,6 +73,8 @@ export function ThreadStream({
   turns: StreamTurn[];
   pending: PendingMessage[];
   onReply: () => void;
+  onEditFromHere?: ((item: MessageItem) => void) | undefined;
+  editDisabledReason?: string | null | undefined;
   staleAt?: number | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -171,6 +175,8 @@ export function ThreadStream({
                   threadId={threadId}
                   summary={summary}
                   onReply={onReply}
+                  onEditFromHere={onEditFromHere}
+                  editDisabledReason={editDisabledReason}
                   staleAt={item.index === rows.length - 1 ? staleAt : null}
                 />
               ) : (

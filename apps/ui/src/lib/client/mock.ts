@@ -521,6 +521,8 @@ function summary(input: {
     pending_guest_requests: 0,
     unread: input.unread ?? false,
     resume_at: input.resumeAtMs === undefined ? null : iso(input.resumeAtMs),
+    rewind: "handoff",
+    file_rewind: false,
     ttft_ms: input.ttftMs ?? 640,
     context_window: input.contextWindow ?? 200_000,
     context_fill_percent: 6,
@@ -2327,6 +2329,8 @@ class MockDaemon {
           pending_guest_requests: 0,
           unread: false,
           resume_at: null,
+          rewind: "handoff",
+          file_rewind: false,
           limit: null,
           ttft_ms: 0,
           context_window: 200_000,
@@ -2883,6 +2887,8 @@ class MockDaemon {
           thread.summary = {
             ...thread.summary,
             resume_at: null,
+            rewind: "handoff",
+            file_rewind: false,
             agent_state: "thinking",
             tab: "working",
           };
@@ -2926,6 +2932,8 @@ class MockDaemon {
             ...thread.summary,
             model: body.model ?? "claude-opus-5-5",
             resume_at: null,
+            rewind: "handoff",
+            file_rewind: false,
             agent_state: "thinking",
             tab: "working",
           };

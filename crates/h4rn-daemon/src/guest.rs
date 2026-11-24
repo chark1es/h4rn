@@ -2236,6 +2236,17 @@ fn guest_event(event: Event) -> Option<Event> {
             turn_id,
             entries,
         }),
+        Event::ThreadRewound {
+            thread_id,
+            before_item_id,
+            files_restored,
+            at,
+        } => Some(Event::ThreadRewound {
+            thread_id,
+            before_item_id,
+            files_restored,
+            at,
+        }),
         Event::AgentStateChanged { thread_id, state } => {
             Some(Event::AgentStateChanged { thread_id, state })
         }
@@ -2655,6 +2666,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            rewind: Default::default(),
+            file_rewind: false,
         };
         assert!(guest_event(Event::ThreadUpserted(summary)).is_none());
         assert!(

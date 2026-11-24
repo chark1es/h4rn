@@ -24,6 +24,12 @@ const mock = vi.hoisted(() => {
       newThreadOpen: boolean;
       phone: boolean;
       layout: { terminalOpen: boolean; view: "thread" | "ide" };
+      composerRestore: {
+        threadId: string;
+        token: number;
+        prompt: string;
+        attachments: unknown[];
+      } | null;
     };
   } = {
     connection: { status: "online" },
@@ -34,6 +40,7 @@ const mock = vi.hoisted(() => {
       newThreadOpen: false,
       phone: false,
       layout: { terminalOpen: false, view: "thread" },
+      composerRestore: null,
     },
   };
   return {
@@ -45,6 +52,8 @@ const mock = vi.hoisted(() => {
     toggleView: vi.fn(),
     setPanelTab: vi.fn(),
     openNewThread: vi.fn(),
+    consumeComposerRestore: vi.fn(),
+    restoreAttachments: vi.fn(),
     attachments: () => ({
       attachments: [] as unknown[],
       tasks: [] as unknown[],
@@ -59,6 +68,7 @@ const mock = vi.hoisted(() => {
       remove: () => undefined,
       retry: () => undefined,
       clear: () => undefined,
+      restore: mock.restoreAttachments,
     }),
   };
 });
@@ -72,6 +82,7 @@ vi.mock("@/lib/store/appStore", () => ({
   toggleView: mock.toggleView,
   setPanelTab: mock.setPanelTab,
   openNewThread: mock.openNewThread,
+  consumeComposerRestore: mock.consumeComposerRestore,
   getClient: () => {
     throw new Error("Tests inject a workspace file lister.");
   },
@@ -139,6 +150,8 @@ const summary: ThreadSummary = {
   pending_guest_requests: 0,
   unread: false,
   resume_at: null,
+  rewind: "handoff",
+  file_rewind: false,
   limit: null,
 };
 
@@ -1360,5 +1373,40 @@ describe("Composer / command menu", () => {
       await Promise.resolve();
     });
     expect(screen.queryByRole("dialog", { name: "Files" })).toBeNull();
+  });
+});
+
+describe("Composer rewind restore", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("puts the restored prompt below the unsent draft and adopts its attachments", () => {
+    writeThreadDraft(HOST, THREAD, "my unsent draft");
+    mock.state.ui.composerRestore = {
+      threadId: THREAD,
+      token: 9,
+      prompt: "the edited prompt",
+      attachments: [],
+    };
+    renderComposer();
+    runAnimationFrames();
+    expect(textarea().value).toBe("my unsent draft\n\nthe edited prompt");
+    expect(mock.consumeComposerRestore).toHaveBeenCalledWith(9);
+  });
+
+  it("keeps the draft alone when the restore belongs to another thread", () => {
+    writeThreadDraft(HOST, THREAD, "my unsent draft");
+    mock.state.ui.composerRestore = {
+      threadId: "other_thread",
+      token: 10,
+      prompt: "elsewhere",
+      attachments: [],
+    };
+    renderComposer();
+    runAnimationFrames();
+    expect(textarea().value).toBe("my unsent draft");
+    expect(mock.consumeComposerRestore).not.toHaveBeenCalled();
+    mock.state.ui.composerRestore = null;
   });
 });

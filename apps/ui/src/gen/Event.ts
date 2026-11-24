@@ -196,7 +196,23 @@ status: TurnStatus,
  * The stream renders its change-set card from this; older journals
  * simply omit it and the card falls back to the Changes panel.
  */
-changes?: FsTurnChanges, } | { "type": "agent_state_changed", 
+changes?: FsTurnChanges, } | { "type": "thread_rewound", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * The user message the active thread now ends before.
+ */
+before_item_id: string, 
+/**
+ * Whether workspace files were put back to the pre-message snapshot.
+ */
+files_restored: boolean, 
+/**
+ * When the rewind happened.
+ */
+at: string, } | { "type": "agent_state_changed", 
 /**
  * Thread.
  */

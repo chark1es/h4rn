@@ -72,6 +72,8 @@ function threadSummary(input: { threadId: string; host: string }): ThreadSummary
     pending_guest_requests: 0,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
   };
 }

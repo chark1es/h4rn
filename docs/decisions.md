@@ -1803,3 +1803,31 @@ MCP paths accept one JSON-RPC message per request and refuse a batch, which is w
 transport specifies and what keeps one scope check and one rate-limit hit attached to one call. It
 is loopback-only, and the Connect relay does not yet carry HTTP, so the copied URL is the local
 address and a hosted agent has no path in this phase.
+
+## ADR-047: A rewind is one durable conversation edit, with an optional file checkpoint
+
+**Context.** People want to change an earlier prompt instead of adding another
+one, and they expect the provider to forget the turns that followed. They also
+sometimes want the files back, but a worktree can be shared with a subagent or
+another thread. A partial rewind — transcript edited but files half-restored,
+or files restored but history unchanged — is worse than refusing.
+
+**Decision.** **Edit from here** removes the chosen message and every later
+turn. One journaled `ThreadRewound` event is the durable cut; the UI folds it
+on replay, and the prompt returns only in the answer to the requesting device.
+The provider boundary is recorded with the thread and applied by the next
+session start (`--resume-session-at` for Claude Code, `thread/revert` for
+Codex); a harness without a native truncation gets a fresh session with a
+bounded handoff of the kept history. The file choice exists only for a thread
+in its own linked worktree, is refused when another thread or agent session
+shares the directory (completed subagents of the same thread excepted), and is
+performed before the journal write. A failed restore journals nothing, and its
+own bytes are rolled back. Current bytes are captured in memory for that
+rollback.
+
+**Consequences.** The transcript and provider history can be at slightly
+different points between the rewind and the next prompt, but no session that
+still holds the removed turns is ever written to. The word "rewind" in the UI
+means the conversation; file restore is a separate, explicitly warned choice.
+A provider that loses its native boundary degrades to a handoff rather than
+resuming the wrong history.

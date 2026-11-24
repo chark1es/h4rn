@@ -2300,6 +2300,7 @@ fn idle_thread_meta(
         resume_id: None,
         agent_fingerprint: None,
         parked: None,
+        pending_rewind: None,
         imported: None,
     }
 }

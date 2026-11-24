@@ -40,6 +40,8 @@ function thread(
     context_window: null,
     context_fill_percent: null,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
     pending_guest_requests: 0,
   } as ThreadSummary;

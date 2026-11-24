@@ -1655,6 +1655,32 @@ impl Connection {
                         seq: accepted.seq,
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::RewindThread {
+                    thread_id,
+                    before_item_id,
+                    restore_files,
+                } => {
+                    let result = self
+                        .state
+                        .manager
+                        .rewind_thread(&thread_id, &before_item_id, restore_files)
+                        .await;
+                    if let Ok(prompt) = &result {
+                        self.audit(
+                            "thread.rewound",
+                            Some("thread"),
+                            Some(thread_id.as_ref()),
+                            json!({
+                                "before_item_id": before_item_id,
+                                "files_restored": prompt.files_restored,
+                                "method": prompt.method,
+                            }),
+                        );
+                    }
+                    result
+                        .map(|prompt| ResponseBody::Rewound { prompt })
+                        .map_err(crate::threads::ManagerError::into_proto)
+                }
                 ClientRequest::Interrupt { thread_id } => self
                     .state
                     .manager
@@ -3005,6 +3031,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            rewind: Default::default(),
+            file_rewind: false,
         }
     }
 

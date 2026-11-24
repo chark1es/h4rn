@@ -10,6 +10,7 @@ import type {
   LimitStatus,
   ProtoError,
   ResumeSchedule,
+  RewoundPrompt,
   RuntimeMode,
   ThreadId,
   ThreadSummary,
@@ -81,6 +82,18 @@ export type UiState = {
   preview: { threadId: ThreadId; path: string } | null;
   /** The preview is open full-width in the main area instead of the panel. */
   previewExpanded: boolean;
+  /**
+   * A prompt a rewind returned, waiting for its composer to adopt it.
+   *
+   * The draft that was already in the box stays above it; the token lets the
+   * composer consume exactly one restore and lets a newer one win.
+   */
+  composerRestore: {
+    threadId: ThreadId;
+    token: number;
+    prompt: string;
+    attachments: Attachment[];
+  } | null;
   pendingRouteFocus: boolean;
   layout: LayoutState;
 };
@@ -257,6 +270,7 @@ function createInitialState(): AppState {
       ideActivePath: null,
       preview: null,
       previewExpanded: false,
+      composerRestore: null,
       pendingRouteFocus: true,
       layout: {
         ...readLayout(),
@@ -1408,6 +1422,118 @@ export async function respondApproval(
 
 let localCounter = 0;
 
+let composerRestoreToken = 0;
+
+/**
+ * Edits an earlier prompt: the daemon removes it and everything after it.
+ *
+ * On success the prompt and its attachments wait in `ui.composerRestore`, and
+ * the composer keeps whatever draft was already there above them.
+ */
+export async function rewindThread(
+  threadId: ThreadId,
+  beforeItemId: string,
+  restoreFiles: boolean,
+): Promise<RewoundPrompt | null> {
+  const state = getState();
+  setState({
+    ...state,
+    pendingActions: { ...state.pendingActions, [threadId]: "Rewinding" },
+  });
+  try {
+    const response = await getClient().request({
+      type: "rewind_thread",
+      thread_id: threadId,
+      before_item_id: beforeItemId,
+      restore_files: restoreFiles,
+    });
+    if (response.type !== "rewound") return null;
+    const prompt = response.prompt;
+    composerRestoreToken += 1;
+    const current = getState();
+    setState({
+      ...current,
+      ui: {
+        ...current.ui,
+        composerRestore: {
+          threadId,
+          token: composerRestoreToken,
+          prompt: prompt.prompt,
+          attachments: prompt.attachments,
+        },
+        focusComposerNonce: current.ui.focusComposerNonce + 1,
+      },
+    });
+    return prompt;
+  } catch (error) {
+    const proto = toProtoError(error);
+    pushToast({
+      variant: "error",
+      title: `Couldn't rewind ${getState().threads[threadId]?.title ?? "the thread"}.`,
+      description: proto.hint ?? proto.message,
+    });
+    return null;
+  } finally {
+    const current = getState();
+    setState({
+      ...current,
+      pendingActions: { ...current.pendingActions, [threadId]: undefined },
+    });
+  }
+}
+
+/** Marks one restored prompt as adopted by its composer. */
+export function consumeComposerRestore(token: number): void {
+  const state = getState();
+  if (state.ui.composerRestore?.token !== token) return;
+  setState({ ...state, ui: { ...state.ui, composerRestore: null } });
+}
+
+/** The prompt and everything after it leave the active thread. */
+export function rewindRefusal(
+  summary: ThreadSummary | undefined,
+  log: ThreadLog | undefined,
+): string | null {
+  if (!summary) return "The thread is not loaded yet.";
+  if (summary.rewind === "unsupported") {
+    return `${harnessName(summary.harness)} cannot drop turns from its own history.`;
+  }
+  if (summary.agent_state === "awaiting_approval" || pendingApprovalIn(log)) {
+    return "Answer the pending approval first.";
+  }
+  if (summary.agent_state === "queued") {
+    return "A message is waiting to run. Let it finish first.";
+  }
+  if (
+    summary.agent_state === "thinking" ||
+    summary.agent_state === "searching" ||
+    summary.agent_state === "reading" ||
+    summary.agent_state === "editing" ||
+    summary.agent_state === "running_tool"
+  ) {
+    return "Wait for the current turn to finish, or stop it first.";
+  }
+  if (summary.agent_state === "scheduled" || summary.agent_state === "rate_limited") {
+    return "Cancel the automatic resume first.";
+  }
+  return null;
+}
+
+function harnessName(harness: ThreadSummary["harness"]): string {
+  switch (harness) {
+    case "claude_code":
+      return "Claude Code";
+    case "codex":
+      return "Codex";
+    case "opencode":
+      return "OpenCode";
+    case "antigravity":
+      return "Antigravity";
+    case "acp":
+      return "This agent";
+  }
+}
+
 export async function sendMessage(
   threadId: ThreadId,
   text: string,
@@ -1575,6 +1701,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     pending_guest_requests: 0,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
     ttft_ms: null,
     context_window: null,

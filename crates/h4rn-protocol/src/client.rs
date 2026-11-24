@@ -97,6 +97,22 @@ pub enum ClientRequest {
         /// Attachments uploaded before this request.
         attachments: Vec<AttachmentId>,
     },
+    /// Edit an earlier prompt: remove it and everything after it.
+    ///
+    /// The chosen message and every later item leave the active thread and
+    /// the harness's own history. The prompt and its attachments come back in
+    /// the answer for the composer. `restore_files` also puts the workspace
+    /// back to the checkpoint taken before that message; it is only offered
+    /// for a thread in its own worktree (ADR-047).
+    RewindThread {
+        /// Thread to rewind.
+        thread_id: ThreadId,
+        /// The sent user message everything is removed from.
+        before_item_id: String,
+        /// Also restore the workspace to the pre-message snapshot.
+        #[serde(default)]
+        restore_files: bool,
+    },
     /// Interrupt the running turn.
     Interrupt {
         /// Thread whose turn should stop.
@@ -1645,6 +1661,7 @@ impl ClientRequest {
             | Self::GitStatus { .. } => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
+            | Self::RewindThread { .. }
             | Self::Interrupt { .. }
             | Self::RespondApproval { .. }
             | Self::BeginUpload { .. }

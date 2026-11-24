@@ -199,6 +199,11 @@ pub enum ResponseBody {
         #[ts(type = "number")]
         seq: u64,
     },
+    /// A thread was rewound to before one of its prompts.
+    Rewound {
+        /// The prompt to put back in the composer.
+        prompt: crate::RewoundPrompt,
+    },
     /// A terminal was opened.
     TerminalOpened {
         /// The new terminal, including its effective size.
@@ -1077,6 +1082,23 @@ pub enum Event {
         #[serde(default)]
         #[ts(optional)]
         changes: Option<crate::fs::FsTurnChanges>,
+    },
+    /// An earlier prompt was edited: the named message and everything after it
+    /// are no longer part of the thread.
+    ///
+    /// A client folds this by dropping the user message's cue turn and every
+    /// later turn. The prompt itself comes back only to the device that asked,
+    /// in the `Rewound` answer, so a replay never reopens a composer.
+    ThreadRewound {
+        /// Thread.
+        thread_id: ThreadId,
+        /// The user message the active thread now ends before.
+        before_item_id: String,
+        /// Whether workspace files were put back to the pre-message snapshot.
+        #[serde(default)]
+        files_restored: bool,
+        /// When the rewind happened.
+        at: DateTime<Utc>,
     },
     /// The agent state changed; drives the orb or static glyph.
     AgentStateChanged {

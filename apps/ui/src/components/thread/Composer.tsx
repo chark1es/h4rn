@@ -1,5 +1,5 @@
 import { ArrowUpIcon, AtSignIcon, PaperclipIcon, PlusIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
@@ -31,7 +31,7 @@ import {
 } from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
 import { openPhonePanel } from "@/lib/phonePanels";
-import { getState, sendMessage, useApp } from "@/lib/store/appStore";
+import { consumeComposerRestore, getState, sendMessage, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { ComposerMenu, type ComposerMenuRow } from "./ComposerMenu";
 import { ThreadControls } from "./ThreadControls";
@@ -237,6 +237,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     });
   }, [summary.host, summary.thread_id]);
 
+  const composerRestore = useApp((state) => state.ui.composerRestore);
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, !newThreadOpen);
 
@@ -247,12 +248,37 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     element.style.height = `${Math.min(element.scrollHeight, 132)}px`;
   };
 
-  const update = (value: string) => {
-    historyIndex.current = -1;
-    historyDraft.current = "";
-    setText(value);
-    revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
-  };
+  const update = useCallback(
+    (value: string) => {
+      historyIndex.current = -1;
+      historyDraft.current = "";
+      setText(value);
+      revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
+    },
+    [summary.host, summary.thread_id],
+  );
+
+  // A rewind hands back the edited prompt. The draft that was already in the
+  // box stays above it instead of being replaced.
+  useEffect(() => {
+    if (!composerRestore || composerRestore.threadId !== summary.thread_id) return;
+    const token = composerRestore.token;
+    const current = readThreadDraft(summary.host, summary.thread_id);
+    const merged = current.trim()
+      ? `${current.trimEnd()}\n\n${composerRestore.prompt}`
+      : composerRestore.prompt;
+    update(merged);
+    attachments.restore(composerRestore.attachments);
+    consumeComposerRestore(token);
+    requestAnimationFrame(() => {
+      const element = ref.current;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(element.value.length, element.value.length);
+      element.style.height = "auto";
+      element.style.height = `${Math.min(element.scrollHeight, 132)}px`;
+    });
+  }, [composerRestore, summary.host, summary.thread_id, attachments.restore, update]);
 
   const recall = (direction: "backward" | "forward"): boolean => {
     const element = ref.current;

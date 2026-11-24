@@ -357,6 +357,8 @@ function threadRow(id: ThreadId, path: string, title: string) {
     needs_attention: false,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
   };
 }

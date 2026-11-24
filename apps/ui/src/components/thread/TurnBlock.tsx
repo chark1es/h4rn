@@ -6,6 +6,7 @@ import {
   ClockIcon,
   CornerDownLeftIcon,
   PauseIcon,
+  PencilLineIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -35,13 +36,35 @@ function AssistantMessage({ item, streaming }: { item: MessageItem; streaming: b
   return <Markdown text={text} interceptHtmlLinks />;
 }
 
-function UserMessage({ item, at }: { item: MessageItem; at: string }) {
+function UserMessage({
+  item,
+  at,
+  onEdit,
+  editDisabledReason = null,
+}: {
+  item: MessageItem;
+  at: string;
+  onEdit?: ((item: MessageItem) => void) | undefined;
+  editDisabledReason?: string | null | undefined;
+}) {
   return (
     <div className="q-turn q-you-msg">
       {item.text ? <div className="q-bubble">{item.text}</div> : null}
       <MessageAttachments attachments={item.attachments} align="end" />
       <div className="q-you-meta">
         <span>{absoluteTime(at)}</span>
+        {onEdit ? (
+          <button
+            type="button"
+            className="q-btn ghost q-edit-here"
+            disabled={Boolean(editDisabledReason)}
+            title={editDisabledReason ?? "Edit this prompt and resend it"}
+            onClick={() => onEdit(item)}
+          >
+            <PencilLineIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            Edit from here
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -168,6 +191,8 @@ export function TurnBlock({
   threadId,
   summary,
   onReply,
+  onEditFromHere,
+  editDisabledReason = null,
   staleAt = null,
 }: {
   turn: StreamTurn;
@@ -175,6 +200,10 @@ export function TurnBlock({
   summary: ThreadSummary;
   /** Focus the composer so the person can reply to a stopped or failed turn. */
   onReply: () => void;
+  /** Rewind to before one of this turn's sent prompts. */
+  onEditFromHere?: ((item: MessageItem) => void) | undefined;
+  /** Why the action is unavailable right now, if it is. */
+  editDisabledReason?: string | null | undefined;
   staleAt?: number | null;
 }) {
   const userItems = turn.items.filter(
@@ -195,7 +224,13 @@ export function TurnBlock({
     return (
       <>
         {userItems.map((item) => (
-          <UserMessage key={item.itemId} item={item} at={turn.startedAt} />
+          <UserMessage
+            key={item.itemId}
+            item={item}
+            at={turn.startedAt}
+            onEdit={onEditFromHere}
+            editDisabledReason={editDisabledReason}
+          />
         ))}
         {stopped !== null ? (
           <div className={cn("q-live-line", "q-warn")}>
@@ -233,7 +268,13 @@ export function TurnBlock({
     flushTools();
     content.push(
       item.kind === "message" && item.role === "user" ? (
-        <UserMessage key={`${turn.id}:${item.itemId}`} item={item} at={turn.startedAt} />
+        <UserMessage
+          key={`${turn.id}:${item.itemId}`}
+          item={item}
+          at={turn.startedAt}
+          onEdit={onEditFromHere}
+          editDisabledReason={editDisabledReason}
+        />
       ) : (
         <Item key={`${turn.id}:${item.itemId}`} item={item} threadId={threadId} />
       ),

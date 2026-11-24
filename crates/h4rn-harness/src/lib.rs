@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
 use h4rn_protocol::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, AttachmentId, HarnessKind,
-    RuntimeMode, ToolCall, TurnStatus, Usage,
+    RewindMethod, RuntimeMode, SessionRewind, ToolCall, TurnStatus, Usage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -68,8 +68,8 @@ pub use codex::{
     detect_codex,
 };
 pub use fake::{
-    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, McpInjection, SendCount,
-    SessionCount, SessionMcp, SessionModels, SessionSettings, SettingChange, test_spec,
+    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, McpInjection, RewindSpecs,
+    SendCount, SessionCount, SessionMcp, SessionModels, SessionSettings, SettingChange, test_spec,
 };
 pub use homes::{HomeError, harness_home, home_variable, resolve_home};
 pub use opencode::{
@@ -79,6 +79,20 @@ pub use opencode::{
     provider_config,
 };
 pub use registry::{HarnessRegistry, builtin_adapters};
+
+/// How a harness kind drops rewound turns from its own history.
+///
+/// This is the static capability a thread row advertises before any session
+/// exists. A live adapter still answers [`Harness::rewind_method`] itself, and
+/// the daemon falls back to a handoff when the adapter cannot keep a native
+/// promise (for example because the thread never had a provider session).
+pub fn rewind_method(kind: HarnessKind) -> RewindMethod {
+    match kind {
+        HarnessKind::ClaudeCode | HarnessKind::Codex => RewindMethod::Native,
+        HarnessKind::Antigravity | HarnessKind::Acp => RewindMethod::Handoff,
+        HarnessKind::Opencode => RewindMethod::Handoff,
+    }
+}
 pub use versions::{
     NpmRegistry, ProcessUpdateRunner, RegistryClient, UpdateLine, UpdateRunner,
     detect_update_method, is_newer, npm_package, parse_registry_latest, parse_version,
@@ -133,6 +147,12 @@ pub struct SessionSpec {
     pub attachments: Vec<AttachmentRef>,
     /// Configured ACP agent instance, for [`HarnessKind::Acp`].
     pub agent_id: Option<String>,
+    /// A provider history boundary this start must apply before the first
+    /// prompt (a rewind the previous session did not live to apply).
+    ///
+    /// An adapter whose harness cannot apply the named boundary refuses the
+    /// start; the daemon only sets the one its adapter advertised.
+    pub rewind: Option<SessionRewind>,
 }
 
 /// One message from the user or daemon to the harness.
@@ -508,6 +528,19 @@ pub trait HarnessSession: Send {
     /// runs, a prompt whose `send` returned has already reached the harness.
     async fn interrupt(&mut self) -> Result<(), HarnessError>;
 
+    /// Sends a user message tagged with the prompt id the harness records.
+    ///
+    /// The daemon tags a turn with its own UUID so a later native rewind can
+    /// name the message it drops. Adapters that do not record prompt ids keep
+    /// the default, which ignores the tag.
+    async fn send_tagged(
+        &mut self,
+        input: UserInput,
+        _prompt_id: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        self.send(input).await
+    }
+
     /// Answers an approval request raised by the harness.
     ///
     /// `option_id` is the selected [`ApprovalOption`] when the hand is a
@@ -680,6 +713,15 @@ pub trait Harness: Send + Sync {
 
     /// Detects an installation on this host.
     fn detect(&self) -> Option<HarnessInstall>;
+
+    /// How this harness drops rewound turns from its own history.
+    ///
+    /// A native harness truncates the provider conversation; every other
+    /// harness starts a fresh session with a bounded handoff of the kept
+    /// history (ADR-047). Adapters must not claim a method they cannot honour.
+    fn rewind_method(&self) -> RewindMethod {
+        RewindMethod::Handoff
+    }
 
     /// Whether this adapter can run the named configured instance.
     ///

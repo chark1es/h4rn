@@ -34,6 +34,7 @@ async fn real_claude_code_round_trip() {
         env_overrides: Default::default(),
         attachments: Vec::new(),
         agent_id: None,
+        rewind: None,
     };
 
     let mut session = harness.start_session(spec).await.expect("start session");

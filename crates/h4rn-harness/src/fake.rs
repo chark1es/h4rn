@@ -15,7 +15,10 @@ use async_trait::async_trait;
 use futures::channel::mpsc::{self, UnboundedSender, unbounded};
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
-use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, TurnStatus, Usage};
+use h4rn_protocol::{
+    ApprovalDecision, HarnessKind, RewindMethod, SessionRewind, ToolCall, ToolCallStatus,
+    TurnStatus, Usage,
+};
 
 use crate::{
     Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, LimitSignal, SessionSpec,
@@ -260,6 +263,10 @@ pub struct FakeHarness {
     generic_death_gate: Option<Gate>,
     /// A test's handle on the live session's event stream.
     event_injector: Option<EventInjector>,
+    /// How this fake harness says it rewinds provider history.
+    rewind_method: RewindMethod,
+    /// Every rewind boundary a session was started with, when a test asked.
+    rewind_specs: Option<Arc<Mutex<Vec<Option<SessionRewind>>>>>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -618,6 +625,8 @@ impl Default for FakeHarness {
             immediate_stream_end: false,
             generic_death_gate: None,
             event_injector: None,
+            rewind_method: RewindMethod::Handoff,
+            rewind_specs: None,
         }
     }
 }
@@ -1076,10 +1085,38 @@ impl FakeHarness {
     /// A test uses this to report a transport death between turns the way a
     /// real adapter does, while the session (and so its event sender) stays
     /// alive: the stream never ends, so the daemon's row cannot wait for it.
+    /// Advertises a native provider rewind.
+    pub fn with_native_rewind(mut self) -> Self {
+        self.rewind_method = RewindMethod::Native;
+        self
+    }
+
+    /// Records the rewind boundary every session start was given.
+    pub fn with_rewind_specs(mut self) -> (Self, RewindSpecs) {
+        let specs = RewindSpecs::default();
+        self.rewind_specs = Some(Arc::clone(&specs.0));
+        (self, specs)
+    }
+
+    /// Hands the test a handle on a live session's event stream.
     pub fn with_event_injector(mut self) -> (Self, EventInjector) {
         let injector = EventInjector::default();
         self.event_injector = Some(injector.clone());
         (self, injector)
+    }
+}
+
+/// The rewind boundaries a fake session was started with, in start order.
+#[derive(Clone, Debug, Default)]
+pub struct RewindSpecs(Arc<Mutex<Vec<Option<SessionRewind>>>>);
+
+impl RewindSpecs {
+    /// Every boundary, oldest start first.
+    pub fn get(&self) -> Vec<Option<SessionRewind>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -1091,6 +1128,10 @@ impl Harness for FakeHarness {
 
     fn detect(&self) -> Option<HarnessInstall> {
         self.install.clone()
+    }
+
+    fn rewind_method(&self) -> RewindMethod {
+        self.rewind_method
     }
 
     fn has_instance(&self, instance: &str) -> bool {
@@ -1106,6 +1147,12 @@ impl Harness for FakeHarness {
         }
         if let Some(count) = &self.session_count {
             count.note();
+        }
+        if let Some(specs) = &self.rewind_specs {
+            specs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(spec.rewind.clone());
         }
         if let Some(models) = &self.session_models {
             models
@@ -1885,6 +1932,7 @@ pub fn test_spec() -> SessionSpec {
         env_overrides: BTreeMap::new(),
         attachments: Vec::new(),
         agent_id: None,
+        rewind: None,
     }
 }
 

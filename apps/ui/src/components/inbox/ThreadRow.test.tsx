@@ -43,6 +43,8 @@ function summary(branch: string | null): ThreadSummary {
     pending_guest_requests: 0,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
   } as ThreadSummary;
 }
@@ -125,6 +127,8 @@ const thread: ThreadSummary = {
   pending_guest_requests: 1,
   unread: false,
   resume_at: null,
+  rewind: "handoff",
+  file_rewind: false,
   limit: null,
 };
 

@@ -618,6 +618,7 @@ mod tests {
             env_overrides: BTreeMap::new(),
             attachments: Vec::new(),
             agent_id: Some("demo".into()),
+            rewind: None,
         };
         assert!(
             harness
@@ -719,6 +720,7 @@ mod tests {
             env_overrides: BTreeMap::new(),
             attachments: Vec::new(),
             agent_id: Some("demo".into()),
+            rewind: None,
         };
         assert_eq!(
             agent_workspace(&agent, &session).expect("workspace"),
@@ -744,6 +746,7 @@ mod tests {
             env_overrides: BTreeMap::new(),
             attachments: Vec::new(),
             agent_id: Some("demo".into()),
+            rewind: None,
         };
         assert!(agent_workspace(&agent, &session).is_err());
     }

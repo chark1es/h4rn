@@ -54,7 +54,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::stream::{BoxStream, StreamExt};
-use h4rn_protocol::{AgentState, ApprovalDecision, HarnessKind, RuntimeMode, TurnStatus};
+use h4rn_protocol::{
+    AgentState, ApprovalDecision, HarnessKind, RewindMethod, RuntimeMode, SessionRewind, TurnStatus,
+};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -175,10 +177,20 @@ impl Harness for ClaudeCodeHarness {
         self.install.clone().or_else(detect_claude)
     }
 
+    fn rewind_method(&self) -> RewindMethod {
+        RewindMethod::Native
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        if matches!(spec.rewind, Some(SessionRewind::KeepTurns { .. })) {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind(),
+                feature: "that rewind boundary; Claude Code resumes at a message id".into(),
+            });
+        }
         let install = self
             .detect()
             .ok_or(HarnessError::NotDetected { kind: self.kind() })?;
@@ -303,6 +315,7 @@ impl Harness for ClaudeCodeHarness {
             first_send: true,
             closed: false,
             control_seq: 0,
+            prompt_id: None,
             fixed_permission_mode: spec.env_overrides.contains_key(ENV_PERMISSION_MODE),
         }))
     }
@@ -327,6 +340,11 @@ pub struct ClaudeCodeSession {
     first_send: bool,
     closed: bool,
     control_seq: u64,
+    /// The prompt id the next `send` tags its user frame with.
+    ///
+    /// Claude Code records it as the message uuid, which is what a later
+    /// truncating resume names.
+    prompt_id: Option<String>,
     /// The mode is pinned by an explicit environment override, so the thread
     /// control cannot change it.
     fixed_permission_mode: bool,
@@ -517,13 +535,13 @@ impl ClaudeCodeSession {
     }
 }
 
-#[async_trait]
-impl HarnessSession for ClaudeCodeSession {
-    fn kind(&self) -> HarnessKind {
-        self.kind
-    }
-
-    async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
+impl ClaudeCodeSession {
+    /// Writes one prompt, tagging the user frame with the turn's prompt id.
+    async fn send_with_prompt(
+        &mut self,
+        input: UserInput,
+        prompt_id: Option<&str>,
+    ) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {
                 harness: self.kind,
@@ -537,11 +555,31 @@ impl HarnessSession for ClaudeCodeSession {
             attachments.extend(self.first_attachments.iter().cloned());
         }
 
-        let frame = build_user_frame(&input.text, &attachments)?;
+        let frame = build_user_frame(&input.text, &attachments, prompt_id)?;
         self.write_frame(frame).await?;
         self.interrupt_requested.store(false, Ordering::SeqCst);
         self.mark_state(AgentState::Thinking);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl HarnessSession for ClaudeCodeSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        let prompt_id = self.prompt_id.take();
+        self.send_with_prompt(input, prompt_id.as_deref()).await
+    }
+
+    async fn send_tagged(
+        &mut self,
+        input: UserInput,
+        prompt_id: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        self.send_with_prompt(input, prompt_id).await
     }
 
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
@@ -875,6 +913,7 @@ fn spawn_supervisor(
 pub fn build_user_frame(
     text: &str,
     attachments: &[AttachmentRef],
+    prompt_id: Option<&str>,
 ) -> Result<Vec<u8>, HarnessError> {
     let mut blocks = Vec::new();
     let mut path_lines = Vec::new();
@@ -913,10 +952,15 @@ pub fn build_user_frame(
     }
     blocks.extend(native_blocks);
 
-    let frame = json!({
+    let mut frame = json!({
         "type": "user",
         "message": { "role": "user", "content": blocks }
     });
+    // Claude Code records this as the user message's uuid. A later
+    // `--resume-session-at` names it to drop that turn and everything after.
+    if let Some(prompt_id) = prompt_id.filter(|id| !id.trim().is_empty()) {
+        frame["uuid"] = json!(prompt_id);
+    }
     encode_frame(&frame)
 }
 
@@ -952,6 +996,15 @@ fn session_args(spec: &SessionSpec, mcp_config: Option<&Path>) -> Vec<String> {
     if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
         args.push("--resume".into());
         args.push(resume_id.to_string());
+    }
+    // The CLI's truncating resume needs the message id of the turn it drops.
+    // It is only valid with `--resume`, in print mode (which every h4rn
+    // session runs in).
+    if let Some(SessionRewind::ResumeAtMessage { message }) = spec.rewind.as_ref()
+        && spec.resume_id.as_deref().is_some_and(|id| !id.is_empty())
+    {
+        args.push("--resume-session-at".into());
+        args.push(message.clone());
     }
     if let Some(config) = mcp_config {
         args.push("--mcp-config".into());
@@ -1203,7 +1256,7 @@ mod tests {
 
     #[test]
     fn user_frames_use_stream_json_content_blocks() {
-        let frame = build_user_frame("hello", &[]).expect("frame");
+        let frame = build_user_frame("hello", &[], None).expect("frame");
         let value: serde_json::Value = serde_json::from_slice(&frame).expect("json");
         assert_eq!(value["type"], "user");
         assert_eq!(value["message"]["role"], "user");
@@ -1221,7 +1274,7 @@ mod tests {
             path,
             media_type: "image/png".into(),
         };
-        let frame = build_user_frame("look", &[attachment]).expect("frame");
+        let frame = build_user_frame("look", &[attachment], None).expect("frame");
         let value: serde_json::Value = serde_json::from_slice(&frame).expect("json");
         let blocks = value["message"]["content"].as_array().expect("blocks");
         assert_eq!(blocks[0]["type"], "text");
@@ -1242,7 +1295,7 @@ mod tests {
             path: PathBuf::from("/tmp/report.csv"),
             media_type: "text/csv".into(),
         };
-        let frame = build_user_frame("summarise", &[attachment]).expect("frame");
+        let frame = build_user_frame("summarise", &[attachment], None).expect("frame");
         let value: serde_json::Value = serde_json::from_slice(&frame).expect("json");
         let blocks = value["message"]["content"].as_array().expect("blocks");
         assert_eq!(blocks.len(), 1);
@@ -1296,7 +1349,67 @@ mod tests {
             env_overrides: BTreeMap::new(),
             attachments: Vec::new(),
             agent_id: None,
+            rewind: None,
         }
+    }
+
+    #[test]
+    fn a_truncating_resume_names_the_first_removed_message() {
+        let mut spec = spec(Path::new("/tmp"));
+        spec.rewind = Some(SessionRewind::ResumeAtMessage {
+            message: "11111111-1111-4111-8111-111111111111".into(),
+        });
+        let args = session_args(&spec, None);
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--resume" && pair[1] == "sess-1" }),
+            "the session is resumed: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| {
+                pair[0] == "--resume-session-at"
+                    && pair[1] == "11111111-1111-4111-8111-111111111111"
+            }),
+            "the truncating boundary is passed: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_user_frame_carries_the_prompt_id_as_its_uuid() {
+        let frame = build_user_frame(
+            "edit this",
+            &[],
+            Some("11111111-1111-4111-8111-111111111111"),
+        )
+        .expect("frame");
+        let value: serde_json::Value =
+            serde_json::from_slice(&frame[..frame.len() - 1]).expect("json");
+        assert_eq!(value["uuid"], "11111111-1111-4111-8111-111111111111");
+        assert_eq!(value["message"]["content"][0]["text"], "edit this");
+    }
+
+    #[test]
+    fn claude_advertises_a_native_rewind_and_refuses_a_codex_boundary() {
+        let harness = ClaudeCodeHarness::new();
+        assert_eq!(harness.rewind_method(), RewindMethod::Native);
+        let error =
+            match tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(harness.start_session({
+                    let mut spec = spec(Path::new("/tmp"));
+                    spec.rewind = Some(SessionRewind::KeepTurns { keep: 1 });
+                    spec
+                })) {
+                Ok(_) => panic!("a turn boundary is not a message boundary"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            crate::HarnessError::Unsupported {
+                harness: HarnessKind::ClaudeCode,
+                ..
+            }
+        ));
     }
 
     #[test]

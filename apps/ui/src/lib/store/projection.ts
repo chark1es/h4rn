@@ -454,6 +454,17 @@ export function foldEvent(
       return log;
     }
 
+    case "thread_rewound": {
+      // The edited message's cue and every later turn leave the active thread.
+      // The prompt itself comes back only to the device that asked, in the
+      // request's answer, so a replay never reopens a composer.
+      const index = log.turns.findIndex((turn) =>
+        turn.items.some((item) => item.kind === "message" && item.itemId === event.before_item_id),
+      );
+      if (index >= 0) log.turns = log.turns.slice(0, index);
+      return log;
+    }
+
     case "turn_completed": {
       const turn = ensureTurn(log, event.turn_id, at);
       turn.status = event.status;

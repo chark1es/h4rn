@@ -3,6 +3,7 @@ import type { AgentState } from "./AgentState";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { LimitBrief } from "./LimitBrief";
+import type { RewindMethod } from "./RewindMethod";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
@@ -160,6 +161,20 @@ unread: boolean,
  * When auto-resume will try this thread again, when scheduled (ADR-024).
  */
 resume_at: string | null, 
+/**
+ * How this thread's harness drops rewound turns from its own history.
+ *
+ * A client offers **Edit from here** when this is not
+ * [`RewindMethod::Unsupported`], and says which method will run.
+ */
+rewind: RewindMethod, 
+/**
+ * Whether the workspace is the thread's own linked git worktree.
+ *
+ * Only then can a rewind put files back to the pre-message checkpoint;
+ * a thread in the project's main checkout rewinds its conversation only.
+ */
+file_rewind: boolean, 
 /**
  * The limit currently blocking the thread, when one was observed.
  */

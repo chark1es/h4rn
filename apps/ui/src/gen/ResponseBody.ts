@@ -75,6 +75,7 @@ import type { ProxyProfile } from "./ProxyProfile";
 import type { ProxyTestReport } from "./ProxyTestReport";
 import type { Resets } from "./Resets";
 import type { ResumeSchedule } from "./ResumeSchedule";
+import type { RewoundPrompt } from "./RewoundPrompt";
 import type { ScheduleRun } from "./ScheduleRun";
 import type { ScheduleTask } from "./ScheduleTask";
 import type { ScheduleTaskId } from "./ScheduleTaskId";
@@ -201,7 +202,11 @@ turn_id: TurnId,
 /**
  * Durable daemon-global sequence of the last event written for it.
  */
-seq: number, } | { "type": "terminal_opened", 
+seq: number, } | { "type": "rewound", 
+/**
+ * The prompt to put back in the composer.
+ */
+prompt: RewoundPrompt, } | { "type": "terminal_opened", 
 /**
  * The new terminal, including its effective size.
  */
