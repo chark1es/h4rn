@@ -332,6 +332,36 @@ impl McpService {
                 .await
                 .map(|server| ResponseBody::McpServer { server })
                 .map_err(HubError::into_proto),
+            McpRequest::OutsideAgentSettings => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgentSettings {
+                    settings: h4rn_protocol::OutsideAgentSettings {
+                        enabled: outside.enabled(),
+                    },
+                })
+            }
+            McpRequest::SetOutsideAgentSettingsEnabled { enabled } => {
+                let outside = self.outside_agents().ok_or_else(|| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Unsupported,
+                        "this daemon does not offer outside-agent access",
+                    )
+                })?;
+                let enabled = outside.set_enabled(enabled).map_err(|error| {
+                    ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::Internal,
+                        format!("could not save the outside-agent switch: {error}"),
+                    )
+                })?;
+                Ok(ResponseBody::OutsideAgentSettings {
+                    settings: h4rn_protocol::OutsideAgentSettings { enabled },
+                })
+            }
             McpRequest::ListOutsideAgents => {
                 let outside = self.outside_agents().ok_or_else(|| {
                     ProtoError::plain(

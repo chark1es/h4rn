@@ -28,6 +28,8 @@ export type AccessState = {
   signIns: OutsideAgentSignIn[];
   /** Streamable-HTTP endpoint an outside agent connects to. */
   mcpUrl: string;
+  /** Whether Settings → Labs → Outside agents (OAuth) is on; `null` until loaded. */
+  outsideEnabled: boolean | null;
   settings: AgentToolSettings | null;
   loading: boolean;
   refreshing: boolean;
@@ -40,6 +42,7 @@ const initialState: AccessState = {
   agents: [],
   signIns: [],
   mcpUrl: "",
+  outsideEnabled: null,
   settings: null,
   loading: false,
   refreshing: false,
@@ -106,10 +109,21 @@ function applySettings(response: ResponseBody): boolean {
   return true;
 }
 
+function applyOutsideSettings(response: ResponseBody): boolean {
+  if (response.type !== "outside_agent_settings") return false;
+  set({ outsideEnabled: response.settings.enabled });
+  return true;
+}
+
 /** Reads the connected agents, the waiting sign-ins, the MCP URL and the tools. */
 export async function loadAccess(quiet = false): Promise<void> {
   set(quiet ? { refreshing: true } : { loading: true, error: null });
   try {
+    const outside = await request({
+      type: "mcp",
+      request: { type: "outside_agent_settings" },
+    });
+    applyOutsideSettings(outside);
     const agents = await request({ type: "mcp", request: { type: "list_outside_agents" } });
     applyAgents(agents);
     const signIns = await request({
@@ -253,6 +267,61 @@ export async function setAgentToolsEnabled(
   } finally {
     const pending = { ...state.pending };
     delete pending[`harness:${harness}`];
+    set({ pending });
+  }
+}
+
+/** Reads only the outside-agent Labs switch. */
+export async function loadOutsideAgentSettings(): Promise<void> {
+  try {
+    const response = await request({
+      type: "mcp",
+      request: { type: "outside_agent_settings" },
+    });
+    applyOutsideSettings(response);
+  } catch (error) {
+    set({ error: toProtoError(error) });
+  }
+}
+
+/**
+ * Turns outside-agent access on or off for this machine.
+ *
+ * Turning it off revokes every grant and drops every waiting sign-in in one
+ * durable write on the daemon. The local copies are cleared so the page does
+ * not keep showing agents that are already gone.
+ */
+export async function setOutsideAgentEnabled(enabled: boolean): Promise<boolean> {
+  const before = state.outsideEnabled;
+  set({ pending: { ...state.pending, "outside:switch": true }, error: null });
+  try {
+    const response = await request({
+      type: "mcp",
+      request: { type: "set_outside_agent_settings_enabled", enabled },
+    });
+    if (!applyOutsideSettings(response)) {
+      throw new Error(`The daemon answered \`${response.type}\`, not the outside-agent setting.`);
+    }
+    if (!enabled) set({ agents: [], signIns: [], mcpUrl: "" });
+    pushToast({
+      title: enabled ? "Outside agents are on." : "Outside agents are off.",
+      description: enabled
+        ? "An agent you did not start can sign in from Settings → Sharing & access."
+        : "Every grant is revoked and every waiting sign-in is dropped.",
+    });
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    set({ outsideEnabled: before });
+    pushToast({
+      title: `Couldn't ${enabled ? "turn on" : "turn off"} outside agents.`,
+      description: `${proto.message}${proto.hint ? ` ${proto.hint}` : ""}`,
+      variant: "error",
+    });
+    return false;
+  } finally {
+    const pending = { ...state.pending };
+    delete pending["outside:switch"];
     set({ pending });
   }
 }

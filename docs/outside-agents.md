@@ -7,6 +7,22 @@ projects and threads.
 
 The token model behind both is [ADR-045](decisions.md).
 
+## Outside agents are in Labs, off by default
+
+Outside-agent access is not on until you turn it on: **Settings → Labs → Outside agents
+(OAuth)**. While the switch is off:
+
+- the OAuth and discovery routes (`/.well-known/oauth-*` and `/oauth/*`) answer **404**, so a
+  client cannot discover or start a sign-in;
+- an outside-agent bearer token is refused on `/mcp`, while h4rn's own sessions keep their tools;
+- no sign-in request can be created;
+- Settings → Sharing & access hides the outside-agent section and says the feature is in Labs.
+
+Turning the switch off ends every outside-agent grant: every token family is revoked, and every
+waiting sign-in is dropped. The setting and the revocations are one durable write, so a crash
+cannot leave a grant that comes back when the switch is turned on again. Turning it back on does
+not revive anything; each agent signs in again.
+
 ## Tools for agents h4rn runs
 
 Every harness session is already given the hub endpoint and a bearer token minted for that one
@@ -221,6 +237,15 @@ this phase offers the copied URL only on the local machine. A hosted agent needs
 route on the relay; the UI does not pretend one exists: when h4rn is open as a remote client, the
 Copy button is not shown and the page says the URL is the loopback address of the other computer
 and cannot be reached by an agent on the internet yet.
+
+## Known limitations
+
+- Work already running under a grant may still finish its current turn after the grant is
+  revoked. The revocation is checked before work starts -- a queued message, a parked prompt, a
+  watch wake or a delegated child starts nothing once its family is revoked -- but it does not
+  reach into a turn that is already running.
+- The remaining review findings for this feature live on the pull request rather than in this
+  document.
 
 ## Tests
 

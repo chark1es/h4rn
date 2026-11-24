@@ -78,11 +78,26 @@ async fn boot_with(
     rate_limit: Option<usize>,
     extra_bind: Option<std::net::SocketAddr>,
 ) -> TestDaemon {
+    boot_with_outside(fake, rate_limit, extra_bind, true).await
+}
+
+/// Boots with Settings → Labs → Outside agents left at its default, off.
+async fn boot_default_off(rate_limit: Option<usize>) -> TestDaemon {
+    boot_with_outside(FakeHarness::new(), rate_limit, None, false).await
+}
+
+async fn boot_with_outside(
+    fake: FakeHarness,
+    rate_limit: Option<usize>,
+    extra_bind: Option<std::net::SocketAddr>,
+    outside_enabled: bool,
+) -> TestDaemon {
     boot_on(
         "127.0.0.1:0".parse().expect("bind"),
         fake,
         rate_limit,
         extra_bind,
+        outside_enabled,
     )
     .await
 }
@@ -92,6 +107,7 @@ async fn boot_on(
     fake: FakeHarness,
     rate_limit: Option<usize>,
     extra_bind: Option<std::net::SocketAddr>,
+    outside_enabled: bool,
 ) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
@@ -126,6 +142,12 @@ async fn boot_on(
     let addr = bound.local_addr();
     let addrs = bound.addrs().to_vec();
     let outside = bound.outside_agents();
+    if outside_enabled {
+        outside
+            .store()
+            .set_enabled(true)
+            .expect("turn outside agents on for this case");
+    }
     if let Some(limit) = rate_limit {
         outside.set_limits(h4rn_daemon::mcp_server::rate::RateLimiter::new(
             limit,
@@ -890,6 +912,212 @@ async fn the_protocol_lists_and_revokes_outside_agents() {
             .is_enabled(HarnessKind::ClaudeCode, &daemon.host)
     );
     daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Settings → Labs → Outside agents (OAuth)
+// ---------------------------------------------------------------------------
+
+fn outside_settings(response: ResponseBody) -> bool {
+    let ResponseBody::OutsideAgentSettings { settings } = response else {
+        panic!("unexpected response {response:?}");
+    };
+    settings.enabled
+}
+
+#[tokio::test]
+async fn outside_agents_are_off_by_default_and_harness_tools_still_work() {
+    let daemon = boot_default_off(None).await;
+    assert!(
+        !daemon.outside.enabled(),
+        "outside agents must start off until the Labs switch is turned on"
+    );
+    let client = http();
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/oauth/register",
+        "/oauth/authorize",
+        "/oauth/token",
+        "/oauth/revoke",
+    ] {
+        let response = client
+            .get(format!("{}{path}", daemon.base()))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} answered while outside agents were off"
+        );
+    }
+
+    // h4rn's own tools are a different token population and stay on.
+    let repo = git_repo_with_remote();
+    let _thread = daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, repo.path(), "harness tools"))
+        .await
+        .expect("create thread");
+    let injections = wait_for_injection(&daemon.mcp, 1).await;
+    let injection = injections
+        .iter()
+        .find(|injection| injection.endpoint.as_deref() == Some(daemon.mcp_url().as_str()))
+        .expect("the daemon injected its own hub endpoint");
+    let harness_token = injection.token.as_deref().expect("a session token");
+    let tools = list_tools(&client, &daemon.mcp_url(), harness_token).await;
+    assert!(
+        tools.iter().any(|tool| tool == "h4rn__thread_status"),
+        "harness tools disappeared while outside agents were off: {tools:?}"
+    );
+
+    // Mint a grant while the switch is on, then turn it off: the token is
+    // refused on `/mcp` even though harness sessions keep working.
+    let enabled = daemon
+        .outside_agents()
+        .handle(McpRequest::SetOutsideAgentSettingsEnabled { enabled: true })
+        .await
+        .expect("turn on");
+    assert!(outside_settings(enabled));
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let outside_token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "read_only",
+    )
+    .await;
+
+    let disabled = daemon
+        .outside_agents()
+        .handle(McpRequest::SetOutsideAgentSettingsEnabled { enabled: false })
+        .await
+        .expect("turn off");
+    assert!(!outside_settings(disabled));
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.outside_url(),
+        &outside_token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an outside token reached /mcp while the switch was off"
+    );
+    // The harness token from the same daemon still works.
+    let (status, body) = post_rpc(
+        &client,
+        &daemon.mcp_url(),
+        harness_token,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "harness session refused: {body}");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn turning_outside_agents_on_allows_the_oauth_flow() {
+    let daemon = boot_default_off(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (status, _) = register(&client, &daemon.base(), redirect).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let enabled = daemon
+        .outside_agents()
+        .handle(McpRequest::SetOutsideAgentSettingsEnabled { enabled: true })
+        .await
+        .expect("turn on");
+    assert!(outside_settings(enabled));
+    assert!(daemon.outside.enabled());
+
+    let (status, registered) = register(&client, &daemon.base(), redirect).await;
+    assert_eq!(status, StatusCode::CREATED, "{registered}");
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "read_only",
+    )
+    .await;
+    let init = initialize(&client, &daemon.outside_url(), &token).await;
+    assert_eq!(init["serverInfo"]["name"], "h4rn");
+    let tools = list_tools(&client, &daemon.outside_url(), &token).await;
+    assert!(
+        tools.iter().any(|tool| tool == "list_threads"),
+        "the allowed flow did not expose its tools: {tools:?}"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn turning_outside_agents_off_revokes_every_grant_and_stays_off_after_a_restart() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "read_only",
+    )
+    .await;
+    // A second sign-in is waiting, and must be dropped with the grants.
+    let (_, challenge) = pkce();
+    let request = open_authorize(&client, &daemon.base(), client_id, redirect, &challenge).await;
+    assert_eq!(daemon.outside.store().pending_sign_ins().len(), 1);
+
+    let disabled = daemon
+        .outside_agents()
+        .handle(McpRequest::SetOutsideAgentSettingsEnabled { enabled: false })
+        .await
+        .expect("turn off");
+    assert!(!outside_settings(disabled));
+    assert!(daemon.outside.store().connected_agents().is_empty());
+    assert!(daemon.outside.store().pending_sign_ins().is_empty());
+    assert!(daemon.outside.store().pending(&request).is_none());
+    assert!(daemon.outside.store().verify_access(&token, None).is_none());
+
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let response = client
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            daemon.base()
+        ))
+        .send()
+        .await
+        .expect("discovery");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let data_dir = daemon.data_dir().to_path_buf();
+    daemon.stop().await;
+    // A restart reads the committed switch and the revocation it wrote with it.
+    let reopened = h4rn_daemon::mcp_server::OAuthStore::open(&data_dir).expect("reopen store");
+    assert!(!reopened.enabled(), "the switch did not survive a restart");
+    assert!(reopened.connected_agents().is_empty());
+    assert!(reopened.verify_access(&token, None).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -3189,6 +3417,7 @@ async fn a_wildcard_primary_bind_serves_mcp_to_loopback_only() {
         FakeHarness::new(),
         None,
         None,
+        false,
     )
     .await;
     let base = format!("http://127.0.0.1:{}", daemon.addr.port());

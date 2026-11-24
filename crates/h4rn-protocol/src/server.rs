@@ -613,6 +613,11 @@ pub enum ResponseBody {
         /// Streamable-HTTP MCP endpoint an outside agent connects to.
         mcp_url: String,
     },
+    /// The machine-wide outside-agent Labs switch.
+    OutsideAgentSettings {
+        /// Whether outside-agent access is on.
+        settings: crate::mcp::OutsideAgentSettings,
+    },
     /// h4rn's own tools and their per-harness switches.
     AgentTools {
         /// Current settings.

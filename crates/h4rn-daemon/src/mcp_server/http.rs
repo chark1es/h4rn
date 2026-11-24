@@ -49,6 +49,10 @@ pub fn router(service: Arc<OutsideAgents>) -> Router {
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&service),
+            labs_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&service),
             aggregate_guard,
         ))
         // The loopback check is outermost: a request this daemon did not serve
@@ -205,6 +209,32 @@ fn refused(message: &str) -> Response {
         )
             .into_response(),
     )
+}
+
+/// Answers 404 for the OAuth surface while Settings → Labs keeps it off.
+///
+/// The routes must not exist at all while the switch is off: discovery is what
+/// makes an MCP client start a sign-in, and a 403 would still say the feature
+/// is here. `/mcp` itself stays mounted because harness sessions use it; an
+/// outside token there is refused by [`OutsideAgents::handle_mcp`].
+async fn labs_guard(
+    State(service): State<Arc<OutsideAgents>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let oauth_surface = path.starts_with("/oauth/") || path.starts_with("/.well-known/oauth-");
+    if oauth_surface && !service.enabled() {
+        return no_store(
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "Not found.",
+            )
+                .into_response(),
+        );
+    }
+    next.run(request).await
 }
 
 /// Caps the unauthenticated endpoints before their body is parsed.
@@ -646,6 +676,9 @@ async fn mcp_get(State(service): State<Arc<OutsideAgents>>, headers: HeaderMap) 
 
 /// Answers `GET /mcp` for an outside token: no server-initiated stream.
 pub async fn outside_get(service: &OutsideAgents, headers: HeaderMap) -> Response {
+    if !service.enabled() {
+        return super::outside::outside_disabled();
+    }
     let Some(token) = super::outside::bearer_token(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -676,6 +709,9 @@ async fn mcp_delete(State(service): State<Arc<OutsideAgents>>, headers: HeaderMa
 
 /// Revokes the bearer token on `DELETE /mcp` when it is an outside token.
 pub async fn outside_delete(service: &OutsideAgents, headers: HeaderMap) -> Response {
+    if !service.enabled() {
+        return super::outside::outside_disabled();
+    }
     if let Some(token) = super::outside::bearer_token(&headers)
         && let Err(error) = service.store().revoke_token(token)
     {

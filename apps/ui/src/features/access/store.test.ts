@@ -4,11 +4,13 @@ import type { AgentToolSettings, OutsideAgentSignIn, OutsideAgentView, ResponseB
 import {
   getAccessState,
   loadAccess,
+  loadOutsideAgentSettings,
   resetAccessStore,
   respondSignIn,
   revokeAccessAgent,
   setAccessRequesterForTests,
   setAgentToolsEnabled,
+  setOutsideAgentEnabled,
 } from "./store";
 
 function agent(patch: Partial<OutsideAgentView> = {}): OutsideAgentView {
@@ -44,6 +46,9 @@ describe("Sharing & access store", () => {
   it("loads connected agents, the MCP URL and the tool switches", async () => {
     setAccessRequesterForTests((body) => {
       if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type === "outside_agent_settings") {
+        return ok({ type: "outside_agent_settings", settings: { enabled: true } });
+      }
       if (body.request.type === "list_outside_agents") {
         return ok({
           type: "outside_agents",
@@ -55,11 +60,36 @@ describe("Sharing & access store", () => {
     });
     await loadAccess();
     expect(getAccessState().agents).toHaveLength(1);
+    expect(getAccessState().outsideEnabled).toBe(true);
     expect(getAccessState().mcpUrl).toBe("http://127.0.0.1:47800/mcp/outside");
     expect(getAccessState().settings?.enabled.by_harness[0]).toEqual({
       harness: "codex",
       enabled: false,
     });
+  });
+
+  it("reads the outside-agent Labs switch and turns it off with its grants", async () => {
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type === "outside_agent_settings") {
+        return ok({ type: "outside_agent_settings", settings: { enabled: true } });
+      }
+      return ok({ type: "ack" });
+    });
+    await loadOutsideAgentSettings();
+    expect(getAccessState().outsideEnabled).toBe(true);
+
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type !== "set_outside_agent_settings_enabled") {
+        throw new Error(`unexpected MCP request ${body.request.type}`);
+      }
+      return ok({ type: "outside_agent_settings", settings: { enabled: body.request.enabled } });
+    });
+    expect(await setOutsideAgentEnabled(false)).toBe(true);
+    expect(getAccessState().outsideEnabled).toBe(false);
+    expect(getAccessState().agents).toEqual([]);
+    expect(getAccessState().signIns).toEqual([]);
   });
 
   it("removes an agent immediately and puts it back when revocation fails", async () => {
@@ -89,6 +119,9 @@ describe("Sharing & access store", () => {
   it("turns a harness switch off and keeps it when the daemon refuses", async () => {
     setAccessRequesterForTests((body) => {
       if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type === "outside_agent_settings") {
+        return ok({ type: "outside_agent_settings", settings: { enabled: true } });
+      }
       if (body.request.type === "list_outside_agents") {
         return ok({
           type: "outside_agents",
@@ -123,6 +156,9 @@ describe("answering a waiting sign-in", () => {
     const seen: unknown[] = [];
     setAccessRequesterForTests((body) => {
       if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type === "outside_agent_settings") {
+        return ok({ type: "outside_agent_settings", settings: { enabled: true } });
+      }
       if (body.request.type === "list_outside_agents") {
         return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
       }
@@ -157,6 +193,9 @@ describe("answering a waiting sign-in", () => {
   it("puts the prompt back when the daemon refuses", async () => {
     setAccessRequesterForTests((body) => {
       if (body.type !== "mcp") throw new Error("unexpected request");
+      if (body.request.type === "outside_agent_settings") {
+        return ok({ type: "outside_agent_settings", settings: { enabled: true } });
+      }
       if (body.request.type === "list_outside_agent_sign_ins") {
         return ok({ type: "outside_agent_sign_ins", sign_ins: [signIn] });
       }

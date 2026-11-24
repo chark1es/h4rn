@@ -36,6 +36,8 @@ beforeEach(() => {
   setAccessRequesterForTests((body) => {
     if (body.type !== "mcp") throw new Error("unexpected request");
     switch (body.request.type) {
+      case "outside_agent_settings":
+        return ok({ type: "outside_agent_settings", settings: { enabled: true } });
       case "list_outside_agents":
         return ok({
           type: "outside_agents",
@@ -99,6 +101,32 @@ describe("the Sharing & access page", () => {
   });
 });
 
+describe("when outside agents are off in Labs", () => {
+  it("hides the sign-in section and says where the feature lives", async () => {
+    setAccessRequesterForTests((body) => {
+      if (body.type !== "mcp") throw new Error("unexpected request");
+      switch (body.request.type) {
+        case "outside_agent_settings":
+          return ok({ type: "outside_agent_settings", settings: { enabled: false } });
+        case "list_outside_agents":
+          return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
+        case "list_outside_agent_sign_ins":
+          return ok({ type: "outside_agent_sign_ins", sign_ins: [pendingSignIn] });
+        default:
+          return ok({
+            type: "agent_tools",
+            settings: { enabled: { by_harness: [], by_machine: [] } },
+          });
+      }
+    });
+    render(<AccessSettings />);
+    expect(await screen.findByText(/Outside agents are in Labs/)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Outside agents" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy the outside-agent MCP URL" })).toBeNull();
+    expect(screen.queryByText("Codex wants to connect")).toBeNull();
+  });
+});
+
 const pendingSignIn: OutsideAgentSignIn = {
   request_id: "h4rn_auth_1",
   client_name: "Codex",
@@ -113,6 +141,8 @@ describe("a sign-in waiting for the person", () => {
     setAccessRequesterForTests((body) => {
       if (body.type !== "mcp") throw new Error("unexpected request");
       switch (body.request.type) {
+        case "outside_agent_settings":
+          return ok({ type: "outside_agent_settings", settings: { enabled: true } });
         case "list_outside_agents":
           return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
         case "list_outside_agent_sign_ins":
@@ -145,6 +175,8 @@ describe("a sign-in waiting for the person", () => {
     setAccessRequesterForTests((body) => {
       if (body.type !== "mcp") throw new Error("unexpected request");
       switch (body.request.type) {
+        case "outside_agent_settings":
+          return ok({ type: "outside_agent_settings", settings: { enabled: true } });
         case "list_outside_agents":
           return ok({ type: "outside_agents", agents: [], mcp_url: "http://127.0.0.1:1/mcp" });
         case "list_outside_agent_sign_ins":

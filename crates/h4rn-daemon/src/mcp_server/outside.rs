@@ -110,6 +110,18 @@ impl OutsideAgents {
         Arc::clone(&self.store)
     }
 
+    /// Whether Settings → Labs → Outside agents (OAuth) is on for this machine.
+    pub fn enabled(&self) -> bool {
+        self.store.enabled()
+    }
+
+    /// Turns outside-agent access on or off, revoking every grant when off.
+    ///
+    /// The switch and the revocations are one durable write in the store.
+    pub fn set_enabled(&self, enabled: bool) -> Result<bool, super::oauth::OAuthError> {
+        self.store.set_enabled(enabled)
+    }
+
     /// Names the store that holds the owner's access token.
     ///
     /// The local access token is the owner's own credential: a thread may quote
@@ -210,6 +222,9 @@ impl OutsideAgents {
 
     /// Handles `POST /mcp` when the bearer token is an outside-agent token.
     pub async fn handle_mcp(&self, headers: HeaderMap, body: Bytes) -> Response {
+        if !self.enabled() {
+            return outside_disabled();
+        }
         let Some(token) = bearer_token(&headers) else {
             return unauthorized(self);
         };
@@ -912,6 +927,23 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         return None;
     }
     Some(token.trim()).filter(|value| !value.is_empty())
+}
+
+/// A refusal for a token while the Labs switch is off.
+///
+/// It deliberately carries no discovery pointer: the OAuth routes answer 404
+/// in the same state, so sending a client there would only mislead it.
+pub(crate) fn outside_disabled() -> Response {
+    let body = json!({
+        "error": "invalid_token",
+        "error_description": "outside agents are off in Settings → Labs",
+    });
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 fn unauthorized(agents: &OutsideAgents) -> Response {

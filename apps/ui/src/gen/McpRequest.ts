@@ -113,7 +113,11 @@ tool: string,
 /**
  * JSON arguments.
  */
-arguments: unknown, } | { "type": "list_outside_agents" } | { "type": "revoke_outside_agent", 
+arguments: unknown, } | { "type": "list_outside_agents" } | { "type": "outside_agent_settings" } | { "type": "set_outside_agent_settings_enabled", 
+/**
+ * New value.
+ */
+enabled: boolean, } | { "type": "revoke_outside_agent", 
 /**
  * Client id from [`OutsideAgentView::client_id`].
  */

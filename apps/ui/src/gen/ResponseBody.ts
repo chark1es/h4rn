@@ -59,6 +59,7 @@ import type { McpServerView } from "./McpServerView";
 import type { McpShareApproval } from "./McpShareApproval";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
+import type { OutsideAgentSettings } from "./OutsideAgentSettings";
 import type { OutsideAgentSignIn } from "./OutsideAgentSignIn";
 import type { OutsideAgentView } from "./OutsideAgentView";
 import type { PairScope } from "./PairScope";
@@ -584,7 +585,11 @@ agents: Array<OutsideAgentView>,
 /**
  * Streamable-HTTP MCP endpoint an outside agent connects to.
  */
-mcp_url: string, } | { "type": "agent_tools", 
+mcp_url: string, } | { "type": "outside_agent_settings", 
+/**
+ * Whether outside-agent access is on.
+ */
+settings: OutsideAgentSettings, } | { "type": "agent_tools", 
 /**
  * Current settings.
  */

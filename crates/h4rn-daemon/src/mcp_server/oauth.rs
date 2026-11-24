@@ -158,6 +158,13 @@ pub struct PendingRecord {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct StoreFile {
+    /// Whether Settings → Labs → Outside agents (OAuth) is on.
+    ///
+    /// `None` means the file predates the Labs switch. Such a file is treated
+    /// as off and its grants are revoked the first time it is opened, so an
+    /// upgrade can never resurrect a grant when the switch is later turned on.
+    #[serde(default)]
+    enabled: Option<bool>,
     #[serde(default)]
     clients: Vec<ClientRecord>,
     #[serde(default)]
@@ -357,10 +364,12 @@ impl OAuthStore {
     /// person is told where the old file went.
     pub fn open(data_dir: &Path) -> std::io::Result<Self> {
         let path = data_dir.join(FILE);
+        let mut existed = true;
         let file = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<StoreFile>(&bytes) {
                 Ok(file) => file,
                 Err(error) => {
+                    existed = false;
                     let quarantine = quarantine_path(&path);
                     // Never log the serde detail: a data error quotes the
                     // unexpected value, and that value can be a credential.
@@ -384,10 +393,13 @@ impl OAuthStore {
                     StoreFile::default()
                 }
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoreFile::default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existed = false;
+                StoreFile::default()
+            }
             Err(error) => return Err(error),
         };
-        Ok(Self {
+        let store = Self {
             path,
             state: Mutex::new(StoreState {
                 file,
@@ -396,7 +408,36 @@ impl OAuthStore {
             #[cfg(test)]
             hooks: TestHooks::default(),
             resolutions: Mutex::new(HashMap::new()),
-        })
+        };
+        // A file written before the Labs switch existed has no answer for it.
+        // Treat that as off and end every grant in memory, then try to commit
+        // the answer. A failed write still leaves the grants revoked for this
+        // run, so turning the switch on cannot revive them either.
+        if existed && store.lock().file.enabled.is_none() {
+            store.revoke_everything_for_legacy_file();
+        }
+        Ok(store)
+    }
+
+    /// Ends every grant in a store written before the Labs switch existed.
+    fn revoke_everything_for_legacy_file(&self) {
+        let now = Utc::now();
+        let mut guard = self.lock();
+        revoke_all(&mut guard.file, now);
+        guard.file.enabled = Some(false);
+        if let Err(error) = self.persist_locked(&guard.file) {
+            tracing::warn!(
+                %error,
+                "could not save the outside-agent switch; grants stay revoked for this run"
+            );
+        }
+    }
+
+    /// Whether Settings → Labs → Outside agents (OAuth) is on.
+    ///
+    /// A file written before the switch existed counts as off.
+    pub fn enabled(&self) -> bool {
+        self.lock().file.enabled.unwrap_or(false)
     }
 
     /// Fails the next `count` durable writes, for tests that prove a failed
@@ -571,6 +612,11 @@ impl OAuthStore {
     ) -> Result<PendingRecord, OAuthError> {
         let now = Utc::now();
         let mut guard = self.lock();
+        if !guard.file.enabled.unwrap_or(false) {
+            return Err(OAuthError::NotFound(
+                "outside agents are off in Settings → Labs".into(),
+            ));
+        }
         let client = Self::client_locked(&guard.file, client_id)
             .ok_or(OAuthError::InvalidClient)?
             .clone();
@@ -957,6 +1003,11 @@ impl OAuthStore {
         let now = Utc::now();
         let hash = digest(token);
         let mut guard = self.lock();
+        // The Labs switch is a hard gate: a token in the file is not a grant
+        // while outside-agent access is off.
+        if !guard.file.enabled.unwrap_or(false) {
+            return None;
+        }
         let index = guard
             .file
             .tokens
@@ -1026,6 +1077,26 @@ impl OAuthStore {
         self.persist_locked(&next)?;
         guard.file = next;
         Ok(())
+    }
+
+    /// Turns outside-agent access on or off.
+    ///
+    /// Turning the Labs switch off *ends* every grant: every token family is
+    /// revoked, and waiting codes and sign-in requests are dropped. The switch
+    /// and the revocations are one durable write under the state lock, so a
+    /// crash can never leave the switch off with a grant the other half never
+    /// saw -- and turning it back on does not revive anything.
+    pub fn set_enabled(&self, enabled: bool) -> Result<bool, OAuthError> {
+        let now = Utc::now();
+        let mut guard = self.lock();
+        let mut next = guard.file.clone();
+        if !enabled {
+            revoke_all(&mut next, now);
+        }
+        next.enabled = Some(enabled);
+        self.persist_locked(&next)?;
+        guard.file = next;
+        Ok(enabled)
     }
 
     /// Revokes every token for a client, and its codes and approvals.
@@ -1208,6 +1279,22 @@ fn revoke_family(file: &mut StoreFile, family: &str, now: DateTime<Utc>) {
     }
 }
 
+/// Revokes every grant in the store and drops codes and waiting sign-ins.
+///
+/// Used when the Labs switch is turned off and when a file written before the
+/// switch existed is opened. Clients stay registered: the person can turn the
+/// switch back on and the next agent signs in again without re-registering,
+/// but no token from before the switch works.
+fn revoke_all(file: &mut StoreFile, now: DateTime<Utc>) {
+    for entry in &mut file.tokens {
+        if entry.revoked_at.is_none() {
+            entry.revoked_at = Some(now);
+        }
+    }
+    file.codes.clear();
+    file.pending.clear();
+}
+
 /// Drops spent codes once they can no longer identify a live family.
 ///
 /// One rule for every path that prunes the code list (`approve` and issuance):
@@ -1362,6 +1449,9 @@ mod tests {
     fn store() -> (tempfile::TempDir, OAuthStore) {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = OAuthStore::open(dir.path()).expect("store");
+        // These cases exercise the flow behind the Labs switch; the switch
+        // itself, including its default, has its own cases below.
+        store.set_enabled(true).expect("turn outside agents on");
         (dir, store)
     }
 
@@ -1616,9 +1706,174 @@ mod tests {
     }
 
     #[test]
+    fn the_switch_is_off_by_default_and_refuses_a_sign_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = OAuthStore::open(dir.path()).expect("store");
+        assert!(!store.enabled(), "outside agents must start off");
+        let client = store
+            .register_client(Some("Claude Code"), &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (_, challenge) = challenge();
+        let error = store
+            .begin_authorization(
+                &client.client_id,
+                "http://localhost:1455/cb",
+                None,
+                &challenge,
+                None,
+            )
+            .expect_err("a sign-in cannot be created while the switch is off");
+        assert!(
+            matches!(error, OAuthError::NotFound(_)),
+            "unexpected error: {error:?}"
+        );
+        assert!(store.pending_sign_ins().is_empty());
+    }
+
+    #[test]
+    fn a_live_token_is_refused_while_the_switch_is_off() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        assert!(store.verify_access(&pair.access_token, None).is_some());
+        // The state a crash between the switch and a revocation could leave:
+        // the token is still live in the file, but the switch is off. The
+        // bearer gate, not the revocation, must refuse it.
+        store.lock().file.enabled = Some(false);
+        assert!(store.verify_access(&pair.access_token, None).is_none());
+    }
+
+    #[test]
+    fn turning_the_switch_on_allows_a_sign_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = OAuthStore::open(dir.path()).expect("store");
+        store.set_enabled(true).expect("turn on");
+        assert!(store.enabled());
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        assert!(store.verify_access(&pair.access_token, None).is_some());
+    }
+
+    #[test]
+    fn turning_the_switch_off_ends_every_grant_and_survives_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = OAuthStore::open(dir.path()).expect("store");
+        store.set_enabled(true).expect("turn on");
+        let first = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register first");
+        let second = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register second");
+        let first_pair = pair(&store, &first.client_id, OutsideAgentLevel::ReadOnly);
+        let second_pair = pair(&store, &second.client_id, OutsideAgentLevel::FullAccess);
+        let (_, challenge) = challenge();
+        let waiting = store
+            .begin_authorization(
+                &first.client_id,
+                "http://localhost:1455/cb",
+                None,
+                &challenge,
+                None,
+            )
+            .expect("begin");
+        assert_eq!(store.connected_agents().len(), 2);
+        assert_eq!(store.pending_sign_ins().len(), 1);
+
+        store.set_enabled(false).expect("turn off");
+
+        assert!(!store.enabled());
+        assert!(
+            store.connected_agents().is_empty(),
+            "a grant outlived the switch"
+        );
+        assert!(
+            store.pending_sign_ins().is_empty(),
+            "a sign-in outlived the switch"
+        );
+        assert!(store.pending(&waiting.id).is_none());
+        for (client, pair) in [
+            (&first.client_id, &first_pair),
+            (&second.client_id, &second_pair),
+        ] {
+            assert!(store.verify_access(&pair.access_token, None).is_none());
+            assert!(
+                store.refresh(&pair.refresh_token, client, None).is_err(),
+                "a refresh token outlived the switch"
+            );
+        }
+
+        drop(store);
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        assert!(!reopened.enabled(), "the switch did not survive a restart");
+        assert!(reopened.connected_agents().is_empty());
+        assert!(
+            reopened
+                .verify_access(&first_pair.access_token, None)
+                .is_none()
+        );
+        assert!(
+            reopened
+                .verify_access(&second_pair.access_token, None)
+                .is_none()
+        );
+        assert!(reopened.pending_sign_ins().is_empty());
+
+        // Turning it back on must not revive the grants it ended.
+        reopened.set_enabled(true).expect("turn back on");
+        assert!(
+            reopened
+                .verify_access(&first_pair.access_token, None)
+                .is_none()
+        );
+        assert!(
+            reopened
+                .verify_access(&second_pair.access_token, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_file_from_before_the_switch_is_off_and_its_grants_do_not_come_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = OAuthStore::open(dir.path()).expect("store");
+        store.set_enabled(true).expect("turn on");
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        drop(store);
+
+        // An older build wrote this file without the switch at all.
+        let path = dir.path().join(FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("enabled")
+            .expect("the switch field");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("json")).expect("write");
+
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        assert!(!reopened.enabled(), "an old file must default to off");
+        assert!(reopened.verify_access(&pair.access_token, None).is_none());
+        reopened.set_enabled(true).expect("turn on");
+        assert!(
+            reopened.verify_access(&pair.access_token, None).is_none(),
+            "an old grant came back when the switch was turned on"
+        );
+    }
+
+    #[test]
     fn a_revocation_survives_a_restart_even_when_use_raced_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = OAuthStore::open(dir.path()).expect("store");
+        store.set_enabled(true).expect("turn on");
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
             .expect("register");
@@ -1999,6 +2254,7 @@ mod tests {
     fn a_failed_revocation_leaves_the_grant_retryable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = OAuthStore::open(dir.path()).expect("store");
+        store.set_enabled(true).expect("turn on");
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
             .expect("register");
@@ -2226,6 +2482,7 @@ mod tests {
     fn a_revocation_wins_a_race_with_a_last_used_write() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = std::sync::Arc::new(OAuthStore::open(dir.path()).expect("store"));
+        store.set_enabled(true).expect("turn on");
         let mut last = None;
         for round in 0..3 {
             let client = store

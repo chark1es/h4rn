@@ -1669,6 +1669,14 @@ still written lazily, but always from the live state. A revocation answers only 
 committed. A corrupted or older file is quarantined beside it and the daemon starts with no
 grants, which is the safe direction.
 
+**The feature is a Labs switch, and it is off by default.** The answer lives in the same store as
+the grants (`enabled`), not in a second file: turning it off revokes every family and drops every
+waiting code and sign-in in the same durable write, so a crash cannot leave one half behind. While
+it is off the OAuth routes answer 404, no sign-in can be created, and an outside token is refused
+on `/mcp`; harness sessions keep their own token and tools. A file written before the switch
+existed counts as off, and opening it revokes the grants it holds, so an upgrade cannot revive one
+when the switch is later turned on.
+
 **A replay is an attack.** Presenting an authorization code a second time revokes the pair it
 issued, and presenting a rotated refresh token a second time revokes its whole family: either
 means two parties hold the same credential.

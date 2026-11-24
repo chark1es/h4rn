@@ -179,6 +179,7 @@ export function AccessSettings() {
   const signIns = useAccess((state) => state.signIns);
   const mcpUrl = useAccess((state) => state.mcpUrl);
   const settings = useAccess((state) => state.settings);
+  const outsideEnabled = useAccess((state) => state.outsideEnabled);
   const loading = useAccess((state) => state.loading);
   const error = useAccess((state) => state.error);
   const pending = useAccess((state) => state.pending);
@@ -214,72 +215,80 @@ export function AccessSettings() {
         inside the agents h4rn runs.
       </p>
 
-      <div className="q-group">
-        <h2>Outside agents</h2>
-        <p className="q-faint" style={{ marginTop: -4, marginBottom: 12 }}>
-          Add this URL to Claude Code, Codex or another MCP client that supports OAuth. The client
-          signs in once; you choose its level here, in h4rn.
-        </p>
-        <div className="q-field">
-          <div className="lab" style={{ flex: 1, minWidth: 0 }}>
-            <div className="t">MCP URL</div>
-            <div className="s">
-              <span className="q-mono" style={{ wordBreak: "break-all" }}>
-                {mcpUrl || "Waiting for the daemon to bind its listener"}
-              </span>
-            </div>
-          </div>
-          <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
-            {remote ? null : <CopyButton value={mcpUrl} label="Copy the outside-agent MCP URL" />}
-          </div>
-        </div>
-        {remote ? (
-          <p className="q-faint" style={{ marginTop: 8 }}>
-            This h4rn app is connected to {remote.machineName} from another device. That URL is the
-            address on that computer's own loopback, so it works only there: an agent on the
-            internet cannot reach it yet. Copy it from h4rn on {remote.machineName} itself.
+      {outsideEnabled === true ? (
+        <div className="q-group">
+          <h2>Outside agents</h2>
+          <p className="q-faint" style={{ marginTop: -4, marginBottom: 12 }}>
+            Add this URL to Claude Code, Codex or another MCP client that supports OAuth. The client
+            signs in once; you choose its level here, in h4rn.
           </p>
-        ) : null}
-
-        {signIns.length > 0 ? (
-          <div style={{ marginTop: 16 }}>
-            <h3 style={{ margin: "0 0 8px", fontSize: 13, fontWeight: 600 }}>Waiting for you</h3>
-            {signIns.map((signIn) => (
-              <SignInCard key={signIn.request_id} signIn={signIn} />
-            ))}
-          </div>
-        ) : null}
-
-        {loading ? (
-          <p className="q-faint" style={{ marginTop: 12 }}>
-            Reading connected agents…
-          </p>
-        ) : error ? (
-          <p className="q-faint" style={{ marginTop: 12 }}>
-            {error.message}
-            {error.hint ? ` ${error.hint}` : ""}
-          </p>
-        ) : agents.length === 0 ? (
-          <div className="q-empty" style={{ marginTop: 12 }}>
-            <KeyRoundIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-            <div>
-              <div className="t">No outside agent is connected</div>
+          <div className="q-field">
+            <div className="lab" style={{ flex: 1, minWidth: 0 }}>
+              <div className="t">MCP URL</div>
               <div className="s">
-                Nothing can read or start threads from outside h4rn until you approve a sign-in.
+                <span className="q-mono" style={{ wordBreak: "break-all" }}>
+                  {mcpUrl || "Waiting for the daemon to bind its listener"}
+                </span>
               </div>
             </div>
+            <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
+              {remote ? null : <CopyButton value={mcpUrl} label="Copy the outside-agent MCP URL" />}
+            </div>
           </div>
-        ) : (
-          agents.map((agent) => (
-            <AgentRow
-              key={agent.client_id}
-              agent={agent}
-              busy={Boolean(pending[agent.client_id])}
-              onRevoke={() => setRevoking(agent)}
-            />
-          ))
-        )}
-      </div>
+          {remote ? (
+            <p className="q-faint" style={{ marginTop: 8 }}>
+              This h4rn app is connected to {remote.machineName} from another device. That URL is
+              the address on that computer's own loopback, so it works only there: an agent on the
+              internet cannot reach it yet. Copy it from h4rn on {remote.machineName} itself.
+            </p>
+          ) : null}
+
+          {signIns.length > 0 ? (
+            <div style={{ marginTop: 16 }}>
+              <h3 style={{ margin: "0 0 8px", fontSize: 13, fontWeight: 600 }}>Waiting for you</h3>
+              {signIns.map((signIn) => (
+                <SignInCard key={signIn.request_id} signIn={signIn} />
+              ))}
+            </div>
+          ) : null}
+
+          {loading ? (
+            <p className="q-faint" style={{ marginTop: 12 }}>
+              Reading connected agents…
+            </p>
+          ) : error ? (
+            <p className="q-faint" style={{ marginTop: 12 }}>
+              {error.message}
+              {error.hint ? ` ${error.hint}` : ""}
+            </p>
+          ) : agents.length === 0 ? (
+            <div className="q-empty" style={{ marginTop: 12 }}>
+              <KeyRoundIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              <div>
+                <div className="t">No outside agent is connected</div>
+                <div className="s">
+                  Nothing can read or start threads from outside h4rn until you approve a sign-in.
+                </div>
+              </div>
+            </div>
+          ) : (
+            agents.map((agent) => (
+              <AgentRow
+                key={agent.client_id}
+                agent={agent}
+                busy={Boolean(pending[agent.client_id])}
+                onRevoke={() => setRevoking(agent)}
+              />
+            ))
+          )}
+        </div>
+      ) : outsideEnabled === false ? (
+        <p className="q-faint">
+          Outside agents are in Labs. Turn them on in Settings → Labs → Outside agents (OAuth).
+        </p>
+      ) : (
+        <p className="q-faint">Reading the outside-agent setting…</p>
+      )}
 
       <div className="q-group">
         <h2>h4rn tools in your agents</h2>

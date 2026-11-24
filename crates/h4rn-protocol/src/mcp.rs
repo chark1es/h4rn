@@ -533,6 +533,17 @@ pub struct OutsideAgentView {
     pub expires_at: DateTime<Utc>,
 }
 
+/// The machine-wide outside-agent Labs setting.
+///
+/// Outside-agent access is off until the person turns it on in Settings →
+/// Labs. While it is off the OAuth routes do not exist, no sign-in can be
+/// created, and every outside-agent bearer token is refused.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct OutsideAgentSettings {
+    /// Whether Settings → Labs → Outside agents (OAuth) is on for this machine.
+    pub enabled: bool,
+}
+
 /// The h4rn tools every harness session sees, and their per-harness switches.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct AgentToolSettings {
@@ -644,6 +655,16 @@ pub enum McpRequest {
     },
     /// List outside agents connected through OAuth, and the URL they use.
     ListOutsideAgents,
+    /// Read the machine-wide outside-agent Labs switch.
+    OutsideAgentSettings,
+    /// Turn outside-agent access on or off for this machine.
+    ///
+    /// Turning it off revokes every grant and drops waiting sign-ins in the
+    /// same durable write.
+    SetOutsideAgentSettingsEnabled {
+        /// New value.
+        enabled: bool,
+    },
     /// Revoke every token issued to one outside agent.
     RevokeOutsideAgent {
         /// Client id from [`OutsideAgentView::client_id`].

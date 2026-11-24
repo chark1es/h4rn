@@ -1373,6 +1373,8 @@ impl McpHub {
             // to the daemon, which answers them before dispatch.
             McpRequest::ListOutsideAgents
             | McpRequest::RevokeOutsideAgent { .. }
+            | McpRequest::OutsideAgentSettings
+            | McpRequest::SetOutsideAgentSettingsEnabled { .. }
             | McpRequest::AgentTools
             | McpRequest::SetAgentToolsEnabled { .. } => Err(HubError::Invalid(
                 "outside-agent grants are held by the daemon".into(),

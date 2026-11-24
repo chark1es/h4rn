@@ -2683,6 +2683,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let host = HostId::new("host_test");
         let store = Arc::new(OAuthStore::open(dir.path()).expect("store"));
+        store.set_enabled(true).expect("turn on");
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
             .expect("register");

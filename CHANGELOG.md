@@ -14,8 +14,14 @@ All notable changes to h4rn are recorded here. The format follows
   `list_forge_pull_requests`. They act on the calling thread and accept no thread id, so a token
   cannot reach another thread; Settings → Sharing & access turns them off per harness. Agents
   h4rn did not start — Claude Code or Codex in your terminal, and other local MCP clients — can
-  connect to `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). Only you can grant
-  one: the client's browser shows who is asking and where it would return, and the request is
+  connect to `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). Outside
+  agents are in **Labs** and off by default: Settings → Labs → **Outside agents (OAuth)** turns
+  them on. While it is off, the OAuth and discovery routes answer 404, an outside-agent token is
+  refused on `/mcp`, no sign-in can be created, and Settings → Sharing & access hides the
+  outside-agent section behind one plain line saying the feature is in Labs. Turning the switch
+  off revokes every grant and drops every waiting sign-in in one durable write, so turning it
+  back on does not revive them. Only you can grant one: the client's browser shows who is asking
+  and where it would return, and the request is
   approved in h4rn → Settings → Sharing & access, where you pick **Read only**, **Supervised**
   (threads run at approval-required) or **Full access** with no preselected default. Tokens are
   scoped, expiring, revocable and stored only as digests; a revocation is durable and a replayed
@@ -23,7 +29,9 @@ All notable changes to h4rn are recorded here. The format follows
   raising the thread's mode later cannot lift it. The OAuth and MCP routes exist only on the
   loopback listener and refuse another site's page. The same page shows the MCP URL with a Copy
   button and lists connected agents with Revoke. Redirects are admitted only to `https` or
-  localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client. See
+  localhost, and the OAuth endpoints are rate-limited in aggregate and per validated client.
+  Work started under a grant may still finish its current turn after the grant is revoked; the
+  remaining review findings are listed on the pull request. See
   [docs/outside-agents.md](docs/outside-agents.md) and [ADR-045](docs/decisions.md).
 - **Share one thread with a teammate through an expiring guest link.** A link is
   bound to one thread and one browser, lasts 24 hours, and works through the

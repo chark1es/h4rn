@@ -171,6 +171,7 @@ export type * from "./McpTransportInput";
 export type * from "./McpTransportView";
 export type * from "./MessageRole";
 export type * from "./OutsideAgentLevel";
+export type * from "./OutsideAgentSettings";
 export type * from "./OutsideAgentSignIn";
 export type * from "./OutsideAgentView";
 export type * from "./PairScope";
