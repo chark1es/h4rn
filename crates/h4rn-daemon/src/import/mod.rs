@@ -889,10 +889,20 @@ impl ImportRunner {
 
     /// Parses and creates one thread.
     async fn import_one(&self, file: &ConversationFile) -> Result<Imported, ImportFailure> {
-        let parsed = match file.source {
-            ImportSource::ClaudeCode => claude::parse(&file.path),
-            ImportSource::Codex => codex::parse(&file.path),
-        }
+        // Parsing streams a whole transcript from disk. It runs off the async
+        // runtime, the same way a discovery scan does, so a long conversation
+        // cannot hold a worker thread that other requests need.
+        let path = file.path.clone();
+        let source = file.source;
+        let parsed = tokio::task::spawn_blocking(move || match source {
+            ImportSource::ClaudeCode => claude::parse(&path),
+            ImportSource::Codex => codex::parse(&path),
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "a transcript parser did not finish");
+            ImportFailure::Failed
+        })?
         .map_err(ImportFailure::Skipped)?;
         // The head named one folder; the full parser may have found another.
         // Whatever it picked still has to stay out of `~/Downloads`.
