@@ -23,6 +23,16 @@ import {
   useGuest,
 } from "./guestStore";
 
+/** Whether a guest URL names this machine's own loopback. */
+function isLoopbackLink(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function expiryText(expiresAt: string, now: number): string {
   const left = new Date(expiresAt).getTime() - now;
   if (!Number.isFinite(left) || left <= 0) return "Expired";
@@ -164,6 +174,12 @@ export function GuestShareDialog() {
                         {copied ? "Copied" : "Copy"}
                       </button>
                     </div>
+                  ) : link.no_serving_listener ? (
+                    <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12.5 }}>
+                      This machine has no address a guest link can open on. Add a loopback listener,
+                      or link this machine to Connect, then share this thread again. Until then the
+                      link cannot be opened.
+                    </p>
                   ) : (
                     <p className="q-muted" style={{ margin: 0, fontSize: 12.5 }}>
                       The link is still valid for the guest, but this device cannot show its URL.
@@ -175,10 +191,7 @@ export function GuestShareDialog() {
                     {expiryText(link.expires_at, now)} ·{" "}
                     {link.bound ? "Bound to the first browser" : "First browser that opens it"}
                   </div>
-                  {link.url &&
-                  (link.url.startsWith("http://127.0.0.1") ||
-                    link.url.startsWith("http://localhost") ||
-                    link.url.startsWith("http://[::1]")) ? (
+                  {link.url && isLoopbackLink(link.url) ? (
                     <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12 }}>
                       This link only works on this machine. Turn on Connect and share again to send
                       a link to a teammate on another machine. A direct link is never sent over a

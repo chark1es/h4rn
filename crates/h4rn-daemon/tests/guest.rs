@@ -966,6 +966,25 @@ async fn a_page_load_never_claims_the_link() {
         "a cookieless state read"
     );
 
+    // A page load that presents the pending cookie still only offers a new
+    // one: Connect forwards the cookie on a page fetch, so a reload must not
+    // bind the link. A state read with that cookie is what claims it.
+    let (_, pending, _) = Browser::new(url.clone()).get("").await;
+    let pending = pending.expect("pending cookie");
+    let mut reload = Browser::new(url.clone());
+    reload.cookie = Some(pending.clone());
+    let (status, _, _) = reload.get("").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let sharing = daemon
+        .guest
+        .sharing(&thread_id, &format!("{base}/guest"), true)
+        .await
+        .expect("sharing");
+    assert!(
+        !sharing.link.expect("link").bound,
+        "a page GET with a cookie claimed the link"
+    );
+
     // The browser that presents a page-load cookie claims the link on state.
     let (_, cookie, _) = Browser::new(url.clone()).get("").await;
     let mut browser = Browser::new(url);
@@ -1609,8 +1628,12 @@ async fn the_direct_link_names_the_first_loopback_listener() {
 
 #[tokio::test]
 async fn a_dual_stack_bind_treats_an_ipv4_loopback_peer_as_this_machine() {
-    if std::net::TcpListener::bind("[::]:0").is_err() {
-        eprintln!("no dual-stack bind on this machine; the v4-mapped peer cannot be exercised");
+    // Some systems make an IPv6 wildcard socket IPv6-only. Probe the same bind
+    // the daemon uses, rather than assume the default.
+    if !dual_stack_loopback_available().await {
+        eprintln!(
+            "this machine does not map IPv4 loopback onto a [::] listener; the v4-mapped peer cannot be exercised"
+        );
         return;
     }
     let daemon = boot_on("[::]:0".parse().expect("dual-stack"), None).await;
@@ -1894,6 +1917,90 @@ async fn a_relay_prefix_scopes_the_cookie_and_works_twice() {
         let snapshot: GuestSnapshot = serde_json::from_slice(&state.body).expect("snapshot");
         assert_eq!(snapshot.state, GuestLinkState::Active);
     }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_link_with_no_serving_listener_is_marked_unusable() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "no listener").await;
+    let _link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+
+    // No relay and no loopback listener: the row still exists, but the owner
+    // is told why there is no URL instead of being shown a dead link.
+    let sharing = daemon
+        .guest
+        .sharing(&thread_id, "", true)
+        .await
+        .expect("sharing");
+    let link = sharing.link.expect("link");
+    assert_eq!(link.url, None);
+    assert!(
+        link.no_serving_listener,
+        "an unreachable link was not flagged"
+    );
+
+    // With a base the URL is back and the flag is clear.
+    let sharing = daemon
+        .guest
+        .sharing(&thread_id, &format!("{base}/guest"), true)
+        .await
+        .expect("sharing");
+    let link = sharing.link.expect("link");
+    assert!(link.url.is_some());
+    assert!(!link.no_serving_listener);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_link_shared_on_127_0_0_2_works_end_to_end() {
+    // Every address in 127.0.0.0/8 is loopback, but a machine may not have
+    // this one configured. Skip rather than fail when the bind is refused.
+    if std::net::TcpListener::bind("127.0.0.2:0").is_err() {
+        eprintln!("127.0.0.2 is not available on this machine; the extra-loopback half is skipped");
+        return;
+    }
+    let daemon = boot_on("127.0.0.2:0".parse().expect("loopback bind"), None).await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect_at(&daemon, daemon.addr).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "extra loopback").await;
+    wait_until_idle(&daemon.manager, &thread_id).await;
+
+    // Share through the request the UI uses: URL validation used to accept
+    // only 127.0.0.1 and refused this bind even though it serves the routes.
+    owner
+        .request(ClientRequest::SetGuestSettings { enabled: true })
+        .await;
+    let url = match owner
+        .request(ClientRequest::ShareThreadWithGuest {
+            thread_id: thread_id.clone(),
+        })
+        .await
+    {
+        ResponseBody::GuestSharing { sharing } => sharing
+            .link
+            .expect("link")
+            .url
+            .expect("a 127.0.0.2 listener must produce a URL"),
+        other => panic!("unexpected sharing response: {other:?}"),
+    };
+    assert!(
+        url.starts_with(&format!("http://127.0.0.2:{}", daemon.addr.port())),
+        "the link named another address: {url}"
+    );
+
+    // The link really answers on that address and binds its browser.
+    let prefix = url.strip_prefix(&base).expect("local base").to_owned();
+    let browser = Browser::new(format!("{base}{prefix}"));
+    let (status, cookie, body) = browser.get("").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&body).contains(r#"data-state="active""#),
+        "the 127.0.0.2 link did not serve the active page"
+    );
+    assert!(cookie.is_some(), "the link did not bind the browser");
     daemon.stop().await;
 }
 
@@ -3446,6 +3553,106 @@ fn reset_socket(ws: WebSocketStream<MaybeTlsStream<TcpStream>>) {
             .expect("linger option");
     }
     drop(ws);
+}
+
+/// Waits until a thread has no turn in flight, so a test can send the next one
+/// into a quiet record.
+async fn wait_until_idle(manager: &h4rn_daemon::threads::ThreadManager, thread_id: &ThreadId) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while manager.turn_in_flight(thread_id).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the thread never became idle"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Whether an IPv6 wildcard listener accepts an IPv4 loopback connection on
+/// this machine, which is what the daemon's `[::]` bind relies on.
+async fn dual_stack_loopback_available() -> bool {
+    let Ok(listener) = tokio::net::TcpListener::bind("[::]:0").await else {
+        return false;
+    };
+    let Ok(addr) = listener.local_addr() else {
+        return false;
+    };
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        TcpStream::connect(("127.0.0.1", addr.port())),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
+}
+
+#[tokio::test]
+async fn a_send_message_mid_append_still_delivers_after_the_socket_resets() {
+    let daemon = boot().await;
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "append disconnect").await;
+    wait_until_idle(&daemon.manager, &thread_id).await;
+
+    // Hold the next turn's journal write after the record already marks the
+    // turn active, then reset the owner's socket in that window. The handler
+    // must not be dropped: nothing else owns the delivery yet.
+    let gate = daemon.manager.pause_next_append();
+    let mut ws = owner_socket(&daemon).await;
+    let request = ClientFrame {
+        id: 2,
+        body: ClientRequest::SendMessage {
+            thread_id: thread_id.clone(),
+            text: "deliver me anyway".into(),
+            attachments: Vec::new(),
+        },
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&request)
+            .expect("request json")
+            .into(),
+    ))
+    .await
+    .expect("send request");
+    gate.arrived().await;
+    reset_socket(ws);
+    // Let the connection observe the reset before the append is released.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.release();
+
+    // The turn must finish: a turn marked active with no delivery would keep
+    // `turn_in_flight` true forever.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while daemon.manager.turn_in_flight(&thread_id).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a reset socket stranded the turn before its delivery"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // It was a real turn, not just a settled record.
+    let snapshot = daemon
+        .manager
+        .get_thread(&thread_id, 0)
+        .await
+        .expect("thread snapshot");
+    assert!(
+        snapshot.events.iter().any(|event| matches!(
+            &event.event,
+            Event::ItemCompleted {
+                item: h4rn_protocol::Item::Message { role: h4rn_protocol::MessageRole::User, text, .. },
+                ..
+            } if text == "deliver me anyway"
+        )),
+        "the canceled SendMessage never wrote its message"
+    );
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| matches!(event.event, Event::TurnCompleted { .. })),
+        "the turn was left active with no completion"
+    );
+    daemon.stop().await;
 }
 
 #[tokio::test]

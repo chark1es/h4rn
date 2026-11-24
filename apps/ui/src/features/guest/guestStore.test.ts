@@ -29,6 +29,7 @@ const SHARING: GuestSharing = {
     url: "https://connect.example.test/guest/machine/token",
     expires_at: "2026-11-24T12:00:00Z",
     bound: false,
+    no_serving_listener: false,
   },
 };
 

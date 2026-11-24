@@ -14,7 +14,7 @@ const harness = vi.hoisted(() => ({
     creating: {} as Record<string, boolean>,
     stopping: {} as Record<string, boolean>,
     answering: {} as Record<string, boolean>,
-    error: null,
+    error: null as string | null,
   },
   send: vi.fn(),
   dismiss: vi.fn(),
@@ -125,6 +125,31 @@ describe("GuestShareDialog", () => {
     expect(screen.getByText(/bound to the first browser/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /stop sharing/i }));
     expect(harness.stop).toHaveBeenCalledWith("th_1");
+  });
+
+  it("explains when no listener can serve the link", () => {
+    harness.state.sharing = {
+      th_1: {
+        thread_id: "th_1",
+        links_enabled: true,
+        link: {
+          url: null,
+          expires_at: "2099-11-24T10:00:00Z",
+          bound: false,
+          no_serving_listener: true,
+        },
+      },
+    };
+    render(<GuestShareDialog />);
+    expect(screen.getByText(/add a loopback listener/i)).toBeTruthy();
+    expect(screen.getByText(/link this machine to Connect/i)).toBeTruthy();
+  });
+
+  it("shows the daemon's remedy when creating a link fails", () => {
+    harness.state.error =
+      "This machine has no address a guest link can open on. Add a loopback listener, or link this machine to Connect, then share again.";
+    render(<GuestShareDialog />);
+    expect(screen.getByRole("alert").textContent).toContain("Add a loopback listener");
   });
 
   it("says only an admin device may show the URL", () => {

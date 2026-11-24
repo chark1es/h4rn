@@ -176,6 +176,16 @@ fn operator_router(state: AppState, bound: SocketAddr) -> Router {
     app.with_state(state)
 }
 
+/// Whether an address is this machine's own loopback.
+///
+/// Every address in `127.0.0.0/8` and `::1` qualifies, and an IPv4-mapped
+/// address counts as the IPv4 address it names. Listener selection and guest
+/// URL validation both use this one rule, so a daemon bound to `127.0.0.2`
+/// serves its guest page and a link to it is accepted.
+pub(crate) fn is_loopback_ip(ip: IpAddr) -> bool {
+    ip.to_canonical().is_loopback()
+}
+
 /// Whether a listener bound to `bound` may serve the direct guest routes.
 ///
 /// A direct guest link is a bearer token in a URL over plaintext HTTP, so the
@@ -185,7 +195,7 @@ fn operator_router(state: AppState, bound: SocketAddr) -> Router {
 /// refuses a LAN peer. A concrete non-loopback bind has no direct guest path;
 /// Connect is the way to share from there.
 fn serves_direct_guest(bound: SocketAddr) -> bool {
-    bound.ip().is_loopback() || bound.ip().is_unspecified()
+    is_loopback_ip(bound.ip()) || bound.ip().is_unspecified()
 }
 
 /// The loopback URL a listener's direct guest routes answer on, when it has any.
@@ -213,7 +223,7 @@ pub(crate) fn direct_guest_base(bound: SocketAddr) -> Option<String> {
 /// which is not itself a loopback address. Canonicalizing first makes that
 /// connection the loopback peer it really is.
 fn peer_is_loopback(peer: SocketAddr) -> bool {
-    peer.ip().to_canonical().is_loopback()
+    is_loopback_ip(peer.ip())
 }
 
 /// Every route except the webhook endpoint.
@@ -1074,30 +1084,13 @@ where
     S: Sink<Message, Error = E> + Stream<Item = Result<Message, E>> + Unpin + Send + 'static,
     E: std::fmt::Debug + Send + 'static,
 {
-    let (sink, stream) = socket.split();
+    let (sink, mut stream) = socket.split();
     let (tx, rx) = mpsc::channel::<Outbound>(OUTBOUND_CAPACITY);
     let overflowed = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
     let last_seq = Arc::new(AtomicU64::new(0));
     let topics = Arc::new(RwLock::new(vec![Topic::All]));
     let ready = Arc::new(AtomicBool::new(false));
-
-    // Read frames on their own task so a request that runs for seconds never
-    // hides a client that has gone away. When the socket ends, the in-flight
-    // handler is dropped. Work that must outlive the socket (a guest
-    // submission, Send or Dismiss) already runs in its own task.
-    let (frame_tx, mut frame_rx) = mpsc::channel::<Message>(8);
-    let (closed_tx, mut closed_rx) = watch::channel(false);
-    let reader = tokio::spawn(async move {
-        let mut stream = stream;
-        while let Some(message) = stream.next().await {
-            let Ok(message) = message else { break };
-            if frame_tx.send(message).await.is_err() {
-                break;
-            }
-        }
-        let _ = closed_tx.send(true);
-    });
 
     let writer = tokio::spawn(writer_loop(
         sink,
@@ -1138,22 +1131,18 @@ where
     ));
     let service_forwards = handlers::spawn_forwarders(&connection);
 
-    while let Some(message) = frame_rx.recv().await {
+    // Requests run to completion in order: a handler owns steps that must not
+    // be abandoned half-way (a turn marked active before its journal append,
+    // a thread created before its session starts). Work that must outlive the
+    // socket — a guest submission, Send or Dismiss — spawns its own task, so
+    // closing the peer never cancels it.
+    while let Some(message) = stream.next().await {
+        let Ok(message) = message else {
+            break;
+        };
         match message {
             Message::Text(text) => {
-                let reply = {
-                    let handler = connection.handle_text(&text);
-                    tokio::pin!(handler);
-                    tokio::select! {
-                        reply = &mut handler => reply,
-                        // The peer closed the socket while this request was
-                        // running. Drop the handler: a caller that is gone
-                        // cannot receive its answer, and anything that must
-                        // finish has been spawned onto its own task.
-                        _ = closed_rx.changed() => break,
-                    }
-                };
-                let Some(reply) = reply else {
+                let Some(reply) = connection.handle_text(&text).await else {
                     continue;
                 };
                 if connection.send(Outbound::Text(reply)).await.is_err() {
@@ -1172,7 +1161,6 @@ where
         }
     }
 
-    reader.abort();
     journal_forward.abort();
     for handle in service_forwards {
         handle.abort();
@@ -2551,6 +2539,8 @@ mod tests {
         // the handlers' peer check keeps a LAN peer out.
         assert!(serves_direct_guest("0.0.0.0:47800".parse().unwrap()));
         assert!(serves_direct_guest("[::]:47800".parse().unwrap()));
+        // Every address in 127.0.0.0/8 is loopback, not just 127.0.0.1.
+        assert!(serves_direct_guest("127.0.0.2:47800".parse().unwrap()));
         // A concrete network address is not a place a bearer token may live.
         assert!(!serves_direct_guest("192.168.1.9:47800".parse().unwrap()));
         assert!(!serves_direct_guest("100.64.1.5:47800".parse().unwrap()));
@@ -2561,6 +2551,11 @@ mod tests {
         assert_eq!(
             direct_guest_base("127.0.0.1:47800".parse().unwrap()).as_deref(),
             Some("http://127.0.0.1:47800/guest")
+        );
+        // A concrete loopback bind names the address it really bound.
+        assert_eq!(
+            direct_guest_base("127.0.0.2:47800".parse().unwrap()).as_deref(),
+            Some("http://127.0.0.2:47800/guest")
         );
         // The wildcard bind answers this machine on loopback, so the link uses
         // the address that actually reaches it.

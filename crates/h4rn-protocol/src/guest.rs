@@ -128,6 +128,14 @@ pub struct GuestLink {
     pub expires_at: DateTime<Utc>,
     /// Whether the first browser has already claimed it.
     pub bound: bool,
+    /// Whether this machine has no address the link can open on.
+    ///
+    /// A link can exist while the daemon only listens on concrete network
+    /// addresses: its guest routes answer on no address this machine can
+    /// reach. The share dialog then explains the remedy instead of calling
+    /// the link usable.
+    #[serde(default)]
+    pub no_serving_listener: bool,
 }
 
 /// Sharing state for one thread.

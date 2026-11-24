@@ -33,16 +33,20 @@ Connect. Without Connect a direct link names the first listener that can answer
 it on this machine: the loopback address of the primary listener, a wildcard
 bind such as `--bind 0.0.0.0:47800`, or a loopback `--extra-bind`. It uses
 `127.0.0.1` for an IPv4 wildcard bind and `[::1]` for an IPv6 loopback or
-wildcard bind, on the port that listener actually bound. A direct link works
-only in a browser on this machine; the share dialog says so. Any request that
-arrives from a non-loopback address answers 404, including a connection from
-the network to a wildcard socket. A listener bound to one concrete non-loopback
-address serves no guest route at all, and the LAN listener (Settings → Network
-access) does not either, so a direct guest path there answers 404. If every
-listener is a concrete network address, there is no direct link: the share
-dialog says to add a loopback listener or link this machine to Connect instead
-of handing out a link that cannot answer. To share with someone on another
-machine, link this machine to Connect first.
+wildcard bind, and a concrete loopback bind such as `127.0.0.2` names itself,
+on the port that listener actually bound. Any address in `127.0.0.0/8` counts
+as loopback both when the listener is chosen and when the link's URL is
+checked. A direct link works only in a browser on this machine; the share
+dialog says so. Any request that arrives from a non-loopback address answers
+404, including a connection from the network to a wildcard socket. A listener
+bound to one concrete non-loopback address serves no guest route at all, and
+the LAN listener (Settings → Network access) does not either, so a direct guest
+path there answers 404. If every listener is a concrete network address there
+is no direct link: sharing is refused with the remedy, and an existing link
+says it has no address it can open on. The dialog says to add a loopback
+listener or link this machine to Connect instead of handing out a link that
+cannot answer. To share with someone on another machine, link this machine to
+Connect first.
 
 ## What the guest sees
 
@@ -81,6 +85,10 @@ A page for an expired, revoked, switched-off or already-bound link opens on its
 notice with no composer: the daemon renders the link's state into the page, and
 Connect passes that state through to the page it serves from its own origin, so
 the guest never sees a message box that cannot work while the first poll runs.
+Connect also sends the browser's existing binding cookie with that page request,
+so a bound browser reloads to its own state while a fresh browser on the same
+link sees "unbound"; a page load still never claims the link. A token the
+daemon no longer knows answers 410, which Connect opens on the revoked notice.
 A direct guest connection from an IPv4 address on a dual-stack listener counts
 as this machine, so a browser on `127.0.0.1` works against a `[::]` bind.
 
@@ -134,11 +142,12 @@ never pull the files out from under a Send that already claimed them, even when
 it read the row just before that Send claimed it. A submission or a Send runs to
 completion on the daemon even if the guest's browser or your app disconnects
 while it is writing, so a dropped connection cannot strand a half-written
-request and its quota. The daemon notices a closed socket even while another
-request on the same app connection is still running, and the guest submission,
-Send and Dismiss each continue on their own task. Turning the Labs switch off
-saves the setting and ends every link in one transaction, so re-enabling it
-cannot bring a link back.
+request and its quota. The connection runs each request to completion, so a
+closed socket never cancels a step that already changed the record, and the
+guest submission, Send and Dismiss each continue on their own task. A Send or
+Dismiss writes its audit line there too, so the owner's disconnect after the
+claim still leaves a record. Turning the Labs switch off saves the setting and
+ends every link in one transaction, so re-enabling it cannot bring a link back.
 
 A guest request can only read that thread's events, submit a waiting message,
 and fetch an attachment that belongs to a message in that thread. Events are
