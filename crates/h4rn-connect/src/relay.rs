@@ -123,6 +123,21 @@ pub enum GuestAdmission {
     Unknown,
 }
 
+/// One daemon connection a guest exchange is pinned to.
+///
+/// A device may reconnect while a browser request is in flight, and the new
+/// socket starts with its own hello and no admission. An exchange therefore
+/// names the exact connection it began with: capability, admission, its request
+/// frames and every body chunk travel to that socket or the exchange fails as
+/// retryable, never to a socket the daemon has only just opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DaemonLink {
+    /// The daemon device.
+    pub device_id: Uuid,
+    /// The WebSocket this exchange belongs to.
+    pub connection_id: Uuid,
+}
+
 /// A browser request and the chunked answers being assembled for it.
 #[derive(Debug, Default)]
 struct GuestBook {
@@ -135,9 +150,10 @@ struct GuestBook {
 /// One browser request waiting for a specific daemon's answer.
 #[derive(Debug)]
 struct GuestWaiter {
-    /// The daemon the exchange was sent to. An answer from any other device is
-    /// rejected, so a second daemon cannot answer another machine's guest.
-    daemon_device_id: Uuid,
+    /// The daemon connection the exchange was sent to. An answer from another
+    /// device, or from a later socket of the same daemon, is rejected: neither
+    /// can describe an exchange it never received.
+    daemon: DaemonLink,
     tx: oneshot::Sender<h4rn_protocol::GuestHttpResponse>,
     /// Sent once the daemon accepts a chunked body; dropped untouched when the
     /// daemon refuses, so the proxy never uploads a byte it was not asked for.
@@ -157,7 +173,7 @@ pub struct GuestExchange {
 /// A chunked guest answer in progress.
 #[derive(Debug)]
 struct GuestBody {
-    daemon_device_id: Uuid,
+    daemon: DaemonLink,
     response: h4rn_protocol::GuestHttpResponse,
     next_seq: u64,
 }
@@ -199,18 +215,19 @@ impl RelayHub {
     ///
     /// Only the socket that is still the registered one may do this: an old
     /// connection closing after a reconnect must not erase the new
-    /// connection's capability or sessions.
-    pub async fn unregister(&self, device_id: Uuid, connection: Uuid) -> Vec<Session> {
+    /// connection's capability or sessions. `None` says this socket was not the
+    /// live peer, so its closure says nothing about the device's presence.
+    pub async fn unregister(&self, device_id: Uuid, connection: Uuid) -> Option<Vec<Session>> {
         // The check and the removal are one critical section, so a socket that
         // reconnects in this instant cannot be erased by the old one closing.
         {
             let mut peers = self.peers.write().await;
             match peers.get(&device_id) {
-                Some(peer) if peer.connection_id != connection => return Vec::new(),
+                Some(peer) if peer.connection_id != connection => return None,
                 Some(_) => {
                     peers.remove(&device_id);
                 }
-                None => return Vec::new(),
+                None => return None,
             }
         }
         {
@@ -235,9 +252,11 @@ impl RelayHub {
             })
             .map(|(conn_id, _)| conn_id.clone())
             .collect();
-        dead.into_iter()
-            .filter_map(|conn_id| sessions.remove(&conn_id))
-            .collect()
+        Some(
+            dead.into_iter()
+                .filter_map(|conn_id| sessions.remove(&conn_id))
+                .collect(),
+        )
     }
 
     /// Whether a daemon is connected.
@@ -284,7 +303,23 @@ impl RelayHub {
             })
     }
 
-    /// What a daemon's connection can do about a chunked guest upload, waiting
+    /// The daemon's live connection, if it is online.
+    ///
+    /// A guest exchange names this link, so every frame it sends afterwards is
+    /// addressed to the socket that existed when it began instead of whichever
+    /// one happens to be current.
+    pub async fn link(&self, device_id: Uuid) -> Option<DaemonLink> {
+        self.peers
+            .read()
+            .await
+            .get(&device_id)
+            .map(|peer| DaemonLink {
+                device_id,
+                connection_id: peer.connection_id,
+            })
+    }
+
+    /// What one daemon connection can do about a chunked guest upload, waiting
     /// briefly for a hello it promised.
     ///
     /// A daemon that has just opened its socket may not have sent its hello
@@ -294,7 +329,11 @@ impl RelayHub {
     /// the caller must not stream a body, and may ask the browser to retry.
     /// Only a socket that predates hellos, or whose hello omitted the feature,
     /// keeps the bounded legacy path.
-    pub async fn guest_admission(&self, device_id: Uuid, grace: Duration) -> GuestAdmission {
+    ///
+    /// The answer is about `link` alone. A socket that replaced it has said
+    /// nothing, so the exchange is unknown (`retryable`), never legacy: a chunk
+    /// must never reach a connection whose hello and admission it never had.
+    pub async fn guest_admission(&self, link: DaemonLink, grace: Duration) -> GuestAdmission {
         let deadline = tokio::time::Instant::now() + grace;
         loop {
             // Register this waiter before reading the state. `notify_waiters`
@@ -304,30 +343,50 @@ impl RelayHub {
             let notified = self.greeted_now.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            match self.features.read().await.get(&device_id) {
-                Some(peer) => match &peer.state {
-                    HelloState::Greeted(features)
-                        if features
-                            .iter()
-                            .any(|known| known == h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION) =>
-                    {
-                        return GuestAdmission::Announced;
-                    }
-                    HelloState::Greeted(_) => return GuestAdmission::Legacy,
-                    HelloState::PreHello => return GuestAdmission::Legacy,
-                    HelloState::Expected => {}
-                },
-                // The peer went away while this request waited: its offline
-                // answer is retryable, never a body.
-                None => return GuestAdmission::Unknown,
+            if let Some(admission) = self.admission_of(link).await {
+                return admission;
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return GuestAdmission::Unknown;
+                // One last read at the deadline: a hello that arrived in this
+                // final instant is the answer, not a timeout.
+                return self
+                    .admission_of(link)
+                    .await
+                    .unwrap_or(GuestAdmission::Unknown);
             }
             if tokio::time::timeout(remaining, notified).await.is_err() {
-                return GuestAdmission::Unknown;
+                return self
+                    .admission_of(link)
+                    .await
+                    .unwrap_or(GuestAdmission::Unknown);
             }
+        }
+    }
+
+    /// The admission answer for one connection right now, or `None` while its
+    /// promised hello has still not arrived.
+    async fn admission_of(&self, link: DaemonLink) -> Option<GuestAdmission> {
+        let features = self.features.read().await;
+        let Some(peer) = features.get(&link.device_id) else {
+            return Some(GuestAdmission::Unknown);
+        };
+        if peer.connection != link.connection_id {
+            // This socket was replaced (or is gone); silence from the new one
+            // is not this exchange's hello.
+            return Some(GuestAdmission::Unknown);
+        }
+        match &peer.state {
+            HelloState::Greeted(features)
+                if features
+                    .iter()
+                    .any(|known| known == h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION) =>
+            {
+                Some(GuestAdmission::Announced)
+            }
+            HelloState::Greeted(_) => Some(GuestAdmission::Legacy),
+            HelloState::PreHello => Some(GuestAdmission::Legacy),
+            HelloState::Expected => None,
         }
     }
 
@@ -445,15 +504,32 @@ impl RelayHub {
             .ok_or_else(|| {
                 AppError::unavailable("peer_offline", "the other device is not connected")
             })?;
-        match tokio::time::timeout(wait, tx.send(event)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err(AppError::unavailable(
-                "peer_offline",
-                "the other device is not connected",
-            )),
-            Err(_) => Err(AppError::unavailable(
-                "relay_backpressure",
-                "the other device is too slow",
+        wait_for_capacity(tx, event, wait).await
+    }
+
+    /// Sends an event to one pinned daemon connection.
+    ///
+    /// The write fails retryably once that socket is no longer the live peer,
+    /// so an exchange whose connection was replaced never delivers a chunk (or
+    /// a cancel) to the socket that replaced it.
+    pub async fn send_wait_to(
+        &self,
+        link: DaemonLink,
+        event: RelayServerEvent,
+        wait: Duration,
+    ) -> Result<()> {
+        let tx = self.link_sender(link).await?;
+        wait_for_capacity(tx, event, wait).await
+    }
+
+    /// The outbound queue of one exact connection, while it is still live.
+    async fn link_sender(&self, link: DaemonLink) -> Result<mpsc::Sender<RelayServerEvent>> {
+        let peers = self.peers.read().await;
+        match peers.get(&link.device_id) {
+            Some(peer) if peer.connection_id == link.connection_id => Ok(peer.tx.clone()),
+            _ => Err(AppError::unavailable(
+                "guest_connection_replaced",
+                "the machine reconnected; try again",
             )),
         }
     }
@@ -540,34 +616,30 @@ impl RelayHub {
 
     /// Registers one guest HTTP exchange before it is sent to a daemon.
     ///
-    /// The waiter is bound to that daemon's device id; [`Self::complete_guest`]
-    /// ignores an answer from any other device.
+    /// The waiter is bound to that exact connection; [`Self::complete_guest`]
+    /// ignores an answer from any other device or socket.
     pub async fn expect_guest(
         &self,
         request_id: &str,
-        daemon_device_id: Uuid,
+        link: DaemonLink,
     ) -> oneshot::Receiver<h4rn_protocol::GuestHttpResponse> {
-        self.expect_guest_exchange(request_id, daemon_device_id)
-            .await
-            .response
+        self.expect_guest_exchange(request_id, link).await.response
     }
 
     /// Registers one guest exchange that may carry an upload body.
     ///
     /// The returned admission resolves when the daemon accepts the link, the
     /// browser and the budget. A refusal answers the exchange instead, which
-    /// closes the admission without a go-ahead.
-    pub async fn expect_guest_exchange(
-        &self,
-        request_id: &str,
-        daemon_device_id: Uuid,
-    ) -> GuestExchange {
+    /// closes the admission without a go-ahead. Everything this exchange sends
+    /// and receives is addressed to `link`, so a socket the daemon replaced
+    /// mid-upload can neither receive its chunks nor answer it.
+    pub async fn expect_guest_exchange(&self, request_id: &str, link: DaemonLink) -> GuestExchange {
         let (tx, response) = oneshot::channel();
         let (admit_tx, admission) = oneshot::channel();
         self.guests.write().await.waiters.insert(
             request_id.to_owned(),
             GuestWaiter {
-                daemon_device_id,
+                daemon: link,
                 tx,
                 admission: Some(admit_tx),
             },
@@ -581,13 +653,13 @@ impl RelayHub {
     /// Delivers one daemon's go-ahead for a chunked guest body.
     ///
     /// Returns false when there is no waiter, the answer already arrived, or
-    /// the go-ahead came from a device that was not asked.
-    pub async fn admit_guest(&self, from_device: Uuid, request_id: &str) -> bool {
+    /// the go-ahead came from another device or connection than the one asked.
+    pub async fn admit_guest(&self, from: DaemonLink, request_id: &str) -> bool {
         let mut book = self.guests.write().await;
         let Some(waiter) = book.waiters.get_mut(request_id) else {
             return false;
         };
-        if waiter.daemon_device_id != from_device {
+        if waiter.daemon != from {
             return false;
         }
         // One admission per exchange; a second frame cannot restart an upload.
@@ -603,23 +675,23 @@ impl RelayHub {
     /// device other than the one the request was sent to.
     pub async fn complete_guest(
         &self,
-        from_device: Uuid,
+        from: DaemonLink,
         response: h4rn_protocol::GuestHttpResponse,
     ) -> bool {
         let mut book = self.guests.write().await;
         if !book
             .waiters
             .get(&response.request_id)
-            .is_some_and(|waiter| waiter.daemon_device_id == from_device)
+            .is_some_and(|waiter| waiter.daemon == from)
         {
-            tracing::warn!("ignored a guest answer from a device that was not asked");
+            tracing::warn!("ignored a guest answer from a connection that was not asked");
             return false;
         }
         if response.chunked {
             book.bodies.insert(
                 response.request_id.clone(),
                 GuestBody {
-                    daemon_device_id: from_device,
+                    daemon: from,
                     response,
                     next_seq: 0,
                 },
@@ -637,15 +709,15 @@ impl RelayHub {
     /// Adds one slice to a chunked guest answer, completing it on the last.
     pub async fn complete_guest_chunk(
         &self,
-        from_device: Uuid,
+        from: DaemonLink,
         chunk: h4rn_protocol::GuestHttpChunk,
     ) -> bool {
         let mut book = self.guests.write().await;
         let Some(body) = book.bodies.get_mut(&chunk.request_id) else {
             return false;
         };
-        if body.daemon_device_id != from_device {
-            tracing::warn!("ignored a guest chunk from the wrong device");
+        if body.daemon != from {
+            tracing::warn!("ignored a guest chunk from the wrong connection");
             return false;
         }
         if chunk.seq != body.next_seq {
@@ -938,7 +1010,12 @@ async fn handle_socket(state: AppState, socket: WebSocket, authed: Authed, annou
         }
     }
 
-    let closed = state.relay.unregister(device.id, connection).await;
+    // A socket that a reconnect already replaced must not report the device
+    // offline: the new connection is the device's presence now.
+    let Some(closed) = state.relay.unregister(device.id, connection).await else {
+        writer.abort();
+        return;
+    };
     for session in closed {
         let other = if session.client_device_id == device.id {
             session.daemon_device_id
@@ -1141,7 +1218,16 @@ async fn dispatch(
             if let Ok(response) =
                 serde_json::from_slice::<h4rn_protocol::GuestHttpResponse>(&frame.payload)
             {
-                state.relay.complete_guest(authed.device.id, response).await;
+                state
+                    .relay
+                    .complete_guest(
+                        DaemonLink {
+                            device_id: authed.device.id,
+                            connection_id: connection,
+                        },
+                        response,
+                    )
+                    .await;
             }
             Ok(())
         }
@@ -1156,7 +1242,13 @@ async fn dispatch(
             {
                 state
                     .relay
-                    .admit_guest(authed.device.id, &admission.request_id)
+                    .admit_guest(
+                        DaemonLink {
+                            device_id: authed.device.id,
+                            connection_id: connection,
+                        },
+                        &admission.request_id,
+                    )
                     .await;
             }
             Ok(())
@@ -1170,7 +1262,13 @@ async fn dispatch(
             {
                 state
                     .relay
-                    .complete_guest_chunk(authed.device.id, chunk)
+                    .complete_guest_chunk(
+                        DaemonLink {
+                            device_id: authed.device.id,
+                            connection_id: connection,
+                        },
+                        chunk,
+                    )
                     .await;
             }
             Ok(())
@@ -1194,6 +1292,25 @@ async fn dispatch(
             // up on. A device sending one is ignored: it has no slot here.
             Ok(())
         }
+    }
+}
+
+/// Waits for room in one peer's outbound queue, bounded by `wait`.
+async fn wait_for_capacity(
+    tx: mpsc::Sender<RelayServerEvent>,
+    event: RelayServerEvent,
+    wait: Duration,
+) -> Result<()> {
+    match tokio::time::timeout(wait, tx.send(event)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(AppError::unavailable(
+            "peer_offline",
+            "the other device is not connected",
+        )),
+        Err(_) => Err(AppError::unavailable(
+            "relay_backpressure",
+            "the other device is too slow",
+        )),
     }
 }
 
@@ -1340,7 +1457,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let sessions = hub.unregister(daemon, daemon_connection).await;
+        let sessions = hub
+            .unregister(daemon, daemon_connection)
+            .await
+            .expect("the live socket reported its sessions");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].conn_id, "c1");
         assert!(!hub.machine_online(machine).await);
@@ -1384,8 +1504,14 @@ mod tests {
     #[tokio::test]
     async fn a_guest_exchange_is_bound_to_the_daemon_it_was_sent_to() {
         let hub = RelayHub::new();
-        let daemon = Uuid::now_v7();
-        let other = Uuid::now_v7();
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
+        let other = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let waiter = hub.expect_guest("g1", daemon).await;
         // A different daemon claiming the same request id cannot answer it.
         assert!(
@@ -1451,6 +1577,14 @@ mod tests {
         connection
     }
 
+    /// The link one registered daemon socket represents.
+    fn link_for(device: Uuid, connection: Uuid) -> DaemonLink {
+        DaemonLink {
+            device_id: device,
+            connection_id: connection,
+        }
+    }
+
     fn admission_hello() -> h4rn_protocol::RelayHello {
         h4rn_protocol::RelayHello {
             features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
@@ -1473,7 +1607,8 @@ mod tests {
                 .await;
         });
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_secs(2)).await,
+            hub.guest_admission(link_for(daemon, connection), Duration::from_secs(2))
+                .await,
             GuestAdmission::Announced,
             "a hello inside the grace was treated as an older daemon"
         );
@@ -1486,9 +1621,10 @@ mod tests {
         // it says what it supports.
         let hub = RelayHub::new();
         let daemon = Uuid::now_v7();
-        register_daemon(&hub, daemon, true).await;
+        let connection = register_daemon(&hub, daemon, true).await;
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_millis(50)).await,
+            hub.guest_admission(link_for(daemon, connection), Duration::from_millis(50))
+                .await,
             GuestAdmission::Unknown,
             "an unannounced current connection kept a legacy decision"
         );
@@ -1502,8 +1638,9 @@ mod tests {
         let hub = Arc::new(RelayHub::new());
         let daemon = Uuid::now_v7();
         let connection = register_daemon(&hub, daemon, true).await;
+        let link = link_for(daemon, connection);
         let waiter = |hub: Arc<RelayHub>| {
-            tokio::spawn(async move { hub.guest_admission(daemon, Duration::from_secs(5)).await })
+            tokio::spawn(async move { hub.guest_admission(link, Duration::from_secs(5)).await })
         };
         let first = waiter(Arc::clone(&hub));
         let second = waiter(Arc::clone(&hub));
@@ -1534,10 +1671,11 @@ mod tests {
     async fn a_connection_that_predates_hellos_keeps_the_legacy_path() {
         let hub = RelayHub::new();
         let daemon = Uuid::now_v7();
-        register_daemon(&hub, daemon, false).await;
+        let connection = register_daemon(&hub, daemon, false).await;
         let started = std::time::Instant::now();
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_secs(5)).await,
+            hub.guest_admission(link_for(daemon, connection), Duration::from_secs(5))
+                .await,
             GuestAdmission::Legacy
         );
         assert!(
@@ -1559,7 +1697,8 @@ mod tests {
         .await;
         let started = std::time::Instant::now();
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_secs(5)).await,
+            hub.guest_admission(link_for(daemon, connection), Duration::from_secs(5))
+                .await,
             GuestAdmission::Legacy
         );
         assert!(
@@ -1578,17 +1717,25 @@ mod tests {
         hub.announce(daemon, previous, admission_hello()).await;
         let current = register_daemon(&hub, daemon, true).await;
         assert!(
-            hub.unregister(daemon, previous).await.is_empty(),
+            hub.unregister(daemon, previous).await.is_none(),
             "a replaced socket reported sessions it no longer owns"
         );
+        // The old socket closing must not report the device offline: the new
+        // connection is the device's presence now.
+        assert!(
+            hub.online(daemon).await,
+            "a replaced socket's close marked the live connection offline"
+        );
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_millis(50)).await,
+            hub.guest_admission(link_for(daemon, current), Duration::from_millis(50))
+                .await,
             GuestAdmission::Unknown,
             "a replaced socket's close erased the new socket's hello state"
         );
         hub.announce(daemon, current, admission_hello()).await;
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_millis(50)).await,
+            hub.guest_admission(link_for(daemon, current), Duration::from_millis(50))
+                .await,
             GuestAdmission::Announced
         );
     }
@@ -1603,13 +1750,15 @@ mod tests {
         let current = register_daemon(&hub, daemon, true).await;
         hub.announce(daemon, previous, admission_hello()).await;
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_millis(50)).await,
+            hub.guest_admission(link_for(daemon, current), Duration::from_millis(50))
+                .await,
             GuestAdmission::Unknown,
             "a replaced socket's hello spoke for the new one"
         );
         hub.announce(daemon, current, admission_hello()).await;
         assert_eq!(
-            hub.guest_admission(daemon, Duration::from_millis(50)).await,
+            hub.guest_admission(link_for(daemon, current), Duration::from_millis(50))
+                .await,
             GuestAdmission::Announced
         );
     }
@@ -1617,8 +1766,14 @@ mod tests {
     #[tokio::test]
     async fn an_upload_starts_only_after_the_daemon_admits_it() {
         let hub = RelayHub::new();
-        let daemon = Uuid::now_v7();
-        let other = Uuid::now_v7();
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
+        let other = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let exchange = hub.expect_guest_exchange("g1", daemon).await;
         // A different device cannot admit another machine's upload.
         assert!(
@@ -1637,7 +1792,10 @@ mod tests {
     #[tokio::test]
     async fn a_refused_upload_never_gets_an_admission() {
         let hub = RelayHub::new();
-        let daemon = Uuid::now_v7();
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let exchange = hub.expect_guest_exchange("g1", daemon).await;
         assert!(
             hub.complete_guest(
@@ -1663,7 +1821,10 @@ mod tests {
     #[tokio::test]
     async fn a_chunked_guest_answer_is_reassembled_in_order() {
         let hub = RelayHub::new();
-        let daemon = Uuid::now_v7();
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let waiter = hub.expect_guest("g1", daemon).await;
         assert!(
             hub.complete_guest(
@@ -1700,7 +1861,10 @@ mod tests {
     #[tokio::test]
     async fn a_forgotten_guest_waiter_never_receives_an_answer() {
         let hub = RelayHub::new();
-        let daemon = Uuid::now_v7();
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let dropped = hub.expect_guest("g2", daemon).await;
         hub.forget_guest("g2").await;
         assert!(
@@ -1734,7 +1898,10 @@ mod tests {
     #[tokio::test]
     async fn forgetting_a_half_arrived_chunked_answer_leaves_no_body() {
         let hub = RelayHub::new();
-        let daemon = Uuid::now_v7();
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let waiter = hub.expect_guest("g1", daemon).await;
         assert!(
             hub.complete_guest(daemon, chunked_answer("g1")).await,
@@ -1781,7 +1948,10 @@ mod tests {
     #[tokio::test]
     async fn an_answer_arriving_after_the_cleanup_is_dropped_whole() {
         let hub = RelayHub::new();
-        let daemon = Uuid::now_v7();
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let waiter = hub.expect_guest("g3", daemon).await;
         // The cleanup runs first: the error path that failed before the daemon
         // could answer wins the race.
@@ -1795,5 +1965,75 @@ mod tests {
             "the forgotten exchange still holds a body"
         );
         assert!(waiter.await.is_err(), "the forgotten waiter got an answer");
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_cancelled_while_it_runs_still_forgets_the_exchange() {
+        // A browser that disconnects inside the cleanup drops the handler
+        // future at an await. The guard must still be armed there, or the
+        // waiter (and any half-arrived body) stays in the relay forever.
+        let hub = Arc::new(RelayHub::new());
+        let daemon = DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
+        let _waiter = hub.expect_guest("g1", daemon).await;
+        // Hold the book so the cleanup is genuinely mid-await when cancelled.
+        let book = hub.guests.write().await;
+        let task = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                let mut guard =
+                    crate::api::GuestExchangeGuard::new(Arc::clone(&hub), "g1".to_owned());
+                let outcome: crate::error::Result<()> =
+                    Err(crate::error::AppError::internal("the daemon went away"));
+                crate::api::settle_exchange(&mut guard, outcome).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
+        let _ = task.await;
+        drop(book);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while hub.pending_guests().await > 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a cancelled cleanup left its waiter behind");
+    }
+
+    #[tokio::test]
+    async fn a_hello_seen_only_at_the_deadline_is_still_an_answer() {
+        // The wakeup primitive cannot keep a permit for a waiter that has not
+        // registered yet, so a hello can land between the last read and the
+        // wait. The deadline reads once more instead of calling that a timeout.
+        let hub = Arc::new(RelayHub::new());
+        let daemon = Uuid::now_v7();
+        let connection = register_daemon(&hub, daemon, true).await;
+        let link = link_for(daemon, connection);
+        let waiting = Arc::clone(&hub);
+        let waiter = tokio::spawn(async move {
+            waiting
+                .guest_admission(link, Duration::from_millis(120))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        // Published without waking anyone, exactly the missed-notification
+        // window the final read exists for.
+        hub.features.write().await.insert(
+            daemon,
+            PeerHello {
+                connection,
+                state: HelloState::Greeted(vec![
+                    h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned(),
+                ]),
+            },
+        );
+        assert_eq!(
+            waiter.await.expect("waiter"),
+            GuestAdmission::Announced,
+            "a hello visible at the deadline was reported as a timeout"
+        );
     }
 }
