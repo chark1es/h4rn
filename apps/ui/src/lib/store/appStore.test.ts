@@ -338,9 +338,7 @@ describe("forkThread", () => {
   });
 
   it("names the problem when the turn is still running", async () => {
-    fake.request.mockRejectedValueOnce(
-      new Error("This turn is still running or has a message queued behind it."),
-    );
+    fake.request.mockRejectedValueOnce(new Error("This turn is still running."));
 
     expect(await forkThread("thread_source", "turn_1")).toBe(false);
 
@@ -349,6 +347,36 @@ describe("forkThread", () => {
     expect(toast?.title).toBe("Couldn't fork that turn.");
     expect(toast?.description).toContain("still running");
     expect(getState().threads.thread_fork).toBeUndefined();
+  });
+});
+
+describe("createThread worktrees", () => {
+  beforeEach(() => {
+    fake.request.mockClear();
+    fake.response.current = null;
+    seedHosts(["worktree_host"]);
+  });
+
+  it("sends the request and keeps the daemon's refusal in the toast", async () => {
+    fake.request.mockRejectedValueOnce(
+      new Error("the branch `busy` is already checked out at /tmp/busy"),
+    );
+
+    const created = await createThread({
+      host: "worktree_host",
+      harness: "claude_code",
+      workspacePath: "/tmp/project",
+      model: "claude-sonnet-4-5",
+      prompt: "use my branch",
+      worktree: "busy",
+    });
+
+    expect(created).toBe(false);
+    const sent = fake.request.mock.calls[0]?.[0] as { worktree?: unknown } | undefined;
+    expect(sent?.worktree).toBe("busy");
+    const toast = getState().toasts.at(-1);
+    expect(toast?.variant).toBe("error");
+    expect(toast?.description).toContain("already checked out");
   });
 });
 

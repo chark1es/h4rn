@@ -18,8 +18,9 @@ pub enum WorktreeOrigin {
     /// h4rn created it for a worktree-isolated subagent and owns its directory
     /// and its `h4rn/sa-*` branch.
     Subagent,
-    /// A thread's (or subagent child's) workspace is a linked worktree h4rn did
-    /// not create.
+    /// A thread's (or subagent child's) workspace is a linked worktree: one
+    /// h4rn created for a thread that asked for a new checkout, or one it did
+    /// not create (an editor's).
     Thread,
     /// A linked worktree of a thread's repository that the agent or its
     /// harness-native subagents created or touched during a turn.
@@ -87,6 +88,39 @@ pub struct TrackedWorktree {
     /// When the daemon last saw it in use.
     pub last_seen: DateTime<Utc>,
 }
+
+/// This machine's settings for new thread worktrees.
+///
+/// Read and written by the daemon that would create the worktree, so the
+/// location is a path on that machine. Existing worktrees are never moved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct WorktreeSettings {
+    /// Where new worktrees go: an absolute path or a `~` path. Empty uses
+    /// `<data_dir>/worktrees`.
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Prefix for daemon-generated branch names. Empty adds no prefix; the
+    /// trailing slash is optional. Defaults to `h4rn/` when the field is
+    /// absent, while an explicit empty string is kept.
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+}
+
+impl Default for WorktreeSettings {
+    fn default() -> Self {
+        Self {
+            location: None,
+            branch_prefix: default_branch_prefix(),
+        }
+    }
+}
+
+fn default_branch_prefix() -> String {
+    DEFAULT_BRANCH_PREFIX.to_owned()
+}
+
+/// The built-in prefix for daemon-generated thread branches.
+pub const DEFAULT_BRANCH_PREFIX: &str = "h4rn/";
 
 /// A worktree a clear request left in place, and why.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

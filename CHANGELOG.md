@@ -7,6 +7,30 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **A new thread can run in its own git worktree.** Choose **Run in a new
+  worktree** in the New thread dialog, with an optional branch name. The daemon
+  checks out the project's current `HEAD` on a generated `h4rn/<name>` branch
+  (or keeps the branch you name), makes that checkout the thread's workspace,
+  initialises submodules, and leaves the main checkout untouched. Settings →
+  Worktrees has a per-machine **Location** (an absolute or `~/` path) and
+  **Branch prefix** for new checkout names; an existing branch that is checked
+  out elsewhere, a non-git folder and a missing git are refused with the
+  reason. The thread header and sidebar row show the branch, Settings lists the
+  checkout as the thread's own, and clearing still refuses uncommitted work or
+  an active session. Thread deletion leaves the checkout alone. New requests:
+  `GetWorktreeSettings` and `SetWorktreeSettings`. A destination is claimed
+  atomically before git runs, so two threads started at once can never delete
+  each other's checkout or branch: a create that finds the folder taken refuses
+  (or moves to the next suffix), and cleanup after a failure removes only the
+  folder, registration and branch that attempt created. A location that would
+  put new checkouts inside the workspace's checkout or its main checkout — even
+  the project's parent folder, and from a linked worktree or a bare
+  repository's worktree — is refused both when the setting is saved and when a
+  checkout is made. A tag that shares a branch's name never hides the branch,
+  and an ACP agent configured with a fixed directory refuses a worktree request
+  instead of silently ignoring the new checkout. A settings file that fails
+  validation falls back to defaults, so a bad preference never stops the daemon
+  from starting. See [docs/worktrees.md](docs/worktrees.md).
 - **Agents can link pull requests from inside a thread, and outside agents can work with h4rn
   over MCP.** Every harness session now gets h4rn's own tools through its existing per-session
   token: `link_pull_request`, `unlink_pull_request`, `list_thread_pull_requests`,

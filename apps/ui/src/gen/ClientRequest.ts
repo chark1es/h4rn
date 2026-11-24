@@ -48,6 +48,7 @@ import type { UsageGroupBy } from "./UsageGroupBy";
 import type { UsageRange } from "./UsageRange";
 import type { UsageScope } from "./UsageScope";
 import type { WorktreeRequest } from "./WorktreeRequest";
+import type { WorktreeSettings } from "./WorktreeSettings";
 
 /**
  * Everything a client can ask a daemon to do.
@@ -1447,7 +1448,11 @@ force: boolean,
  * Clear all: apply the same exclusions as `paths: None` — never a
  * thread workspace — to the given paths.
  */
-bulk: boolean, } | { "type": "list_text_generators" } | { "type": "add_text_generator", 
+bulk: boolean, } | { "type": "get_worktree_settings" } | { "type": "set_worktree_settings", 
+/**
+ * New settings for this machine.
+ */
+settings: WorktreeSettings, } | { "type": "list_text_generators" } | { "type": "add_text_generator", 
 /**
  * Generator to add.
  */

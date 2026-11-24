@@ -52,6 +52,8 @@ const mock = vi.hoisted(() => {
     clear: () => undefined,
   };
   return {
+    projects: [] as Array<{ host: string; path: string; git: boolean }>,
+    home: null as string | null,
     state,
     harness,
     attachments,
@@ -59,6 +61,11 @@ const mock = vi.hoisted(() => {
     closeNewThread: vi.fn(),
   };
 });
+
+vi.mock("@/features/projects/store", () => ({
+  useProjects: (selector: (value: unknown) => unknown) =>
+    selector({ projects: mock.projects, home: mock.home }),
+}));
 
 vi.mock("@/lib/store/appStore", () => ({
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
@@ -149,6 +156,8 @@ describe("NewThreadDialog drafts", () => {
     mock.harness.probing = {};
     mock.harness.rows = [];
     mock.harness.loaded = false;
+    mock.projects = [];
+    mock.home = null;
     mock.createThread.mockReset();
     mock.closeNewThread.mockReset();
     setDefaultPermissionMode("approval_required");
@@ -798,6 +807,96 @@ describe("NewThreadDialog drafts", () => {
 
     expect(readNewThreadDraft("host_a", "~/code/api")).toBe("");
     expect(readNewThreadDraft("host_a", "~/code/web")).toBe("web work");
+  });
+
+  it("offers a worktree only for a git project on the bound host", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.home = "/home/you";
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().disabled).toBe(false));
+    expect(screen.queryByLabelText("Run in a new worktree")).toBeNull();
+
+    // A folder that is not a repository has no worktree to make.
+    mock.projects = [{ host: "host_a", path: "/home/you/code", git: false }];
+    view.rerender(<NewThreadDialog />);
+    expect(screen.queryByLabelText("Run in a new worktree")).toBeNull();
+
+    mock.projects = [{ host: "host_a", path: "/home/you/code", git: true }];
+    view.rerender(<NewThreadDialog />);
+    expect(screen.getByLabelText("Run in a new worktree")).toBeTruthy();
+
+    // A project on another machine is not this thread's.
+    mock.projects = [{ host: "host_b", path: "/home/you/code", git: true }];
+    view.rerender(<NewThreadDialog />);
+    expect(screen.queryByLabelText("Run in a new worktree")).toBeNull();
+  });
+
+  it("expands the typed home path the way the daemon does", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.home = "/home/you";
+    mock.projects = [{ host: "host_a", path: "/home/you/code/api", git: true }];
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().disabled).toBe(false));
+    // The default folder `~/code` is not the project, so no option yet.
+    expect(screen.queryByLabelText("Run in a new worktree")).toBeNull();
+
+    commitFolder("~/code/api");
+    await waitFor(() => expect(screen.getByLabelText("Run in a new worktree")).toBeTruthy());
+
+    // A subfolder of the registered repository is inside it, so the daemon
+    // resolves it to the same repository and the option stays.
+    commitFolder("~/code/api/packages/web");
+    await waitFor(() => expect(screen.getByLabelText("Run in a new worktree")).toBeTruthy());
+
+    // Without the host's home there is no honest expansion, so no offer.
+    mock.home = null;
+    view.rerender(<NewThreadDialog />);
+    expect(screen.queryByLabelText("Run in a new worktree")).toBeNull();
+  });
+
+  it("starts in a generated worktree when asked", async () => {
+    mock.createThread.mockResolvedValue(true);
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.projects = [{ host: "host_a", path: DEFAULT_NEW_THREAD_WORKSPACE, git: true }];
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().disabled).toBe(false));
+    fireEvent.click(screen.getByLabelText("Run in a new worktree"));
+    expect(screen.getByLabelText("New worktree branch name")).toBeTruthy();
+    fireEvent.change(textarea(), { target: { value: "build it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+    expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
+      workspacePath: DEFAULT_NEW_THREAD_WORKSPACE,
+      worktree: true,
+    });
+  });
+
+  it("sends a named branch when one is typed", async () => {
+    mock.createThread.mockResolvedValue(true);
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.projects = [{ host: "host_a", path: DEFAULT_NEW_THREAD_WORKSPACE, git: true }];
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().disabled).toBe(false));
+    fireEvent.click(screen.getByLabelText("Run in a new worktree"));
+    fireEvent.change(screen.getByLabelText("New worktree branch name"), {
+      target: { value: "feature/login" },
+    });
+    fireEvent.change(textarea(), { target: { value: "build it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+    expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
+      worktree: "feature/login",
+    });
   });
 
   it("starts a new Codex thread on the model the host's live catalogue lists", async () => {

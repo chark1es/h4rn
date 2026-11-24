@@ -189,6 +189,70 @@ pub struct NewThread {
     pub worktree: Option<WorktreeRequest>,
 }
 
+/// Removes a just-created thread worktree unless the thread was created.
+///
+/// Creation can still fail after the checkout exists (a journal write, a
+/// title job); leaving a checkout nobody owns would show up in Settings as an
+/// orphan. A named branch that was already in the repository is kept, because
+/// only the checkout is new.
+struct WorktreeRollback(Option<crate::worktrees::create::CreatedWorktree>);
+
+impl WorktreeRollback {
+    /// The thread now owns the worktree.
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for WorktreeRollback {
+    fn drop(&mut self) {
+        let Some(created) = self.0.take() else {
+            return;
+        };
+        // The rollback removes the checkout and deletes the branch, both by
+        // shelling out to git. A `Drop` cannot await, so it runs on the blocking
+        // pool instead of stalling an async worker; the checkout is gone a
+        // moment later. Outside a runtime (a plain unit test) it runs inline.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || created.rollback());
+            }
+            Err(_) => created.rollback(),
+        }
+    }
+}
+
+/// Test-only: makes the workspace conversion fail for a chosen workspace, so a
+/// test can exercise a checkout whose path cannot be carried as UTF-8 without
+/// needing a real non-UTF-8 folder.
+#[cfg(test)]
+mod workspace_path_fault {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static FORCED: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub(super) fn force(workspace: &std::path::Path) {
+        *FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(workspace.to_path_buf());
+    }
+
+    pub(super) fn clear() {
+        *FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    pub(super) fn forced(workspace: &str) -> bool {
+        FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            .is_some_and(|forced| forced == std::path::Path::new(workspace))
+    }
+}
+
 /// What [`ThreadManager::restart_sessions`] did.
 #[derive(Clone, Debug, Default)]
 pub struct RestartedSessions {
@@ -371,6 +435,8 @@ struct Inner {
     meter: std::sync::OnceLock<Arc<MeterHub>>,
     /// Title generation, installed once by the daemon assembly.
     text_generation: std::sync::OnceLock<Arc<dyn TextGeneration>>,
+    /// Thread worktrees, installed once by the daemon assembly.
+    worktrees: std::sync::OnceLock<Arc<crate::worktrees::create::WorktreeCreator>>,
     /// Told when the lifecycle settles a thread (guest links, ADR-044).
     settle_hook: std::sync::OnceLock<Arc<dyn SettleHook>>,
     /// Checks an outside grant's token family before work it asked for runs.
@@ -2672,6 +2738,7 @@ impl ThreadManager {
                 mcp: std::sync::OnceLock::new(),
                 meter: std::sync::OnceLock::new(),
                 text_generation: std::sync::OnceLock::new(),
+                worktrees: std::sync::OnceLock::new(),
                 settle_hook: std::sync::OnceLock::new(),
                 grant_authority: std::sync::OnceLock::new(),
                 redactor: std::sync::OnceLock::new(),
@@ -2707,6 +2774,11 @@ impl ThreadManager {
     /// Subscribes to the live projected event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// This daemon's host id.
+    pub fn local_host(&self) -> HostId {
+        self.inner.local_host.clone()
     }
 
     /// The manager's clock. Every lifecycle decision reads this so a test can
@@ -2746,6 +2818,13 @@ impl ThreadManager {
     /// harness want.
     pub fn set_text_generation(&self, service: Arc<dyn TextGeneration>) {
         let _ = self.inner.text_generation.set(service);
+    }
+
+    /// Attaches thread worktree creation. Called once by daemon assembly; a
+    /// builder that never attaches it refuses worktree requests instead of
+    /// silently running in the main checkout.
+    pub fn set_worktree_creator(&self, creator: Arc<crate::worktrees::create::WorktreeCreator>) {
+        let _ = self.inner.worktrees.set(creator);
     }
 
     /// Installs the hook that ends guest links when a thread settles by itself.
@@ -3200,8 +3279,23 @@ impl ThreadManager {
                 )));
             }
             // An agent configured with a fixed directory runs there whichever
-            // workspace the client sent. The thread row (and Files/Changes)
-            // must name the directory the agent actually uses.
+            // workspace the client sent. A new worktree would be created and
+            // then ignored, so the request is refused before anything is made.
+            let fixes_workspace = harness
+                .as_ref()
+                .is_some_and(|harness| harness.instance_fixes_workspace(agent_id));
+            if fixes_workspace
+                && request
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.is_requested())
+            {
+                return Err(ManagerError::InvalidRequest(format!(
+                    "the ACP agent `{agent_id}` is configured with a fixed directory, so it cannot run in a new worktree; give the agent the thread workspace or start the thread without a worktree"
+                )));
+            }
+            // The thread row (and Files/Changes) must name the directory the
+            // agent actually uses.
             if let Some(effective) = harness.as_ref().and_then(|harness| {
                 harness.instance_workspace(agent_id, std::path::Path::new(&request.workspace_path))
             }) {
@@ -3223,17 +3317,6 @@ impl ThreadManager {
                 "workspace_path must be an absolute path on the host".into(),
             ));
         }
-        if request
-            .worktree
-            .as_ref()
-            .is_some_and(WorktreeRequest::is_requested)
-        {
-            // The intent is recorded on the CreateThread request so the wire
-            // contract is stable, but this phase does not create worktrees.
-            return Err(ManagerError::NotImplemented(
-                "worktree creation is not implemented in this daemon".into(),
-            ));
-        }
         request.reasoning_effort = normalize_effort(request.reasoning_effort);
         check_thread_controls(
             request.harness,
@@ -3252,6 +3335,46 @@ impl ThreadManager {
             .resolve_attachments(&thread_id, &request.attachments)
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
+        // Worktree creation is the last fallible setup: once the checkout
+        // exists, the thread runs there. A failure after this point rolls the
+        // new branch back, while a named branch that was already there stays.
+        let worktree_guard = if let Some(worktree) = request
+            .worktree
+            .as_ref()
+            .filter(|worktree| worktree.is_requested())
+        {
+            let Some(creator) = self.inner.worktrees.get() else {
+                return Err(ManagerError::Internal(
+                    "this daemon build has no worktree support".into(),
+                ));
+            };
+            let created = creator
+                .create_for_thread(&request.workspace_path, worktree, &request.prompt)
+                .await
+                .map_err(ManagerError::InvalidRequest)?;
+            // The guard exists before the path conversion below, so a checkout
+            // whose path cannot be carried as UTF-8 is rolled back too.
+            let guard = WorktreeRollback(Some(created));
+            let path = guard
+                .0
+                .as_ref()
+                .expect("the guard was just given a checkout")
+                .path
+                .to_str()
+                .map(str::to_owned);
+            #[cfg(test)]
+            let path = if workspace_path_fault::forced(&request.workspace_path) {
+                None
+            } else {
+                path
+            };
+            request.workspace_path = path.ok_or_else(|| {
+                ManagerError::Internal("the new worktree path is not valid UTF-8".into())
+            })?;
+            guard
+        } else {
+            WorktreeRollback(None)
+        };
         let title_eligible = request.parent_thread_id.is_none() && request.subagent_id.is_none();
         let title_prompt = request.prompt.clone();
         // The default title mode uses this thread's own harness, so a prompt is
@@ -3373,6 +3496,7 @@ impl ThreadManager {
                 .await;
         }
 
+        worktree_guard.keep();
         self.inner.spawn_session(handle);
         Ok(CreatedThread {
             thread_id,
@@ -10603,6 +10727,121 @@ mod tests {
         .expect("manager")
     }
 
+    /// A repository the worktree creator can branch from.
+    fn worktree_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("repo");
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "wt@h4rn.invalid"]);
+        run(&["config", "user.name", "h4rn test"]);
+        std::fs::write(dir.path().join("README.md"), "hello\n").expect("readme");
+        run(&["add", "README.md"]);
+        run(&["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    /// A failure after the checkout exists removes the checkout and the branch
+    /// h4rn made, and does the git work off the async runtime.
+    #[tokio::test]
+    async fn a_worktree_for_a_thread_that_fails_to_start_is_rolled_back() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let journal = FlakyJournal::in_memory().await;
+        let manager = open_test_manager_with_journal(
+            FakeHarness::new(),
+            HostId::new("host_test"),
+            journal.clone(),
+        )
+        .await;
+        manager.set_worktree_creator(Arc::new(crate::worktrees::create::WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        )));
+
+        // The checkout is made first; the thread's first durable write then
+        // fails, which is exactly the window the guard covers.
+        journal.fail_next_appends(1);
+        let mut request = new_thread(HostId::new("host_test"), repo.path(), "Fix the rollback");
+        request.worktree = Some(h4rn_protocol::WorktreeRequest::Generated(true));
+        let error = manager
+            .create_thread(request)
+            .await
+            .expect_err("the journal write fails after the checkout exists");
+        assert!(
+            error.to_string().contains("injected journal write failure"),
+            "{error:?}"
+        );
+
+        // The rollback runs on the blocking pool, so wait for it rather than
+        // assuming it finished inside the failed call.
+        let repo_path = repo.path().to_path_buf();
+        let rolled_back = wait_until(|| {
+            crate::worktrees::git::list_worktrees(&repo_path)
+                .map(|listed| listed.is_empty())
+                .unwrap_or(false)
+                && crate::worktrees::git::h4rn_branches(&repo_path)
+                    .map(|branches| branches.is_empty())
+                    .unwrap_or(false)
+        })
+        .await;
+        assert!(
+            rolled_back,
+            "the failed thread's checkout and branch are removed"
+        );
+    }
+
+    /// A checkout whose path cannot be carried as UTF-8 is still rolled back:
+    /// the guard exists before the conversion.
+    #[tokio::test]
+    async fn a_worktree_is_rolled_back_when_its_workspace_cannot_be_carried() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        manager.set_worktree_creator(Arc::new(crate::worktrees::create::WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        )));
+
+        let mut request = new_thread(HostId::new("host_test"), repo.path(), "Fix the encoding");
+        request.worktree = Some(h4rn_protocol::WorktreeRequest::Generated(true));
+        super::workspace_path_fault::force(repo.path());
+        let error = manager
+            .create_thread(request)
+            .await
+            .expect_err("the checkout path cannot be a thread workspace");
+        super::workspace_path_fault::clear();
+        assert!(
+            matches!(error, ManagerError::Internal(ref message) if message.contains("not valid UTF-8")),
+            "the refusal names the path: {error:?}"
+        );
+
+        let repo_path = repo.path().to_path_buf();
+        let rolled_back = wait_until(|| {
+            crate::worktrees::git::list_worktrees(&repo_path)
+                .map(|listed| listed.is_empty())
+                .unwrap_or(false)
+                && crate::worktrees::git::h4rn_branches(&repo_path)
+                    .map(|branches| branches.is_empty())
+                    .unwrap_or(false)
+        })
+        .await;
+        assert!(
+            rolled_back,
+            "the refused thread's checkout and branch are removed"
+        );
+    }
+
     /// A clock that only moves when a test says so.
     ///
     /// Wall time and monotonic time advance together, but a test can move one
@@ -11139,6 +11378,131 @@ mod tests {
             matches!(error, ManagerError::InvalidRequest(ref message) if message.contains("missing")),
             "an unknown instance is refused: {error:?}"
         );
+    }
+
+    /// An ACP agent whose directory is fixed can never run in a checkout h4rn
+    /// would make, so the request is refused before any checkout exists.
+    #[tokio::test]
+    async fn an_acp_agent_with_a_fixed_directory_refuses_a_worktree() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let fixed = tempfile::tempdir().expect("fixed directory");
+        let host = HostId::new("host_test");
+        let spec = h4rn_protocol::AcpAgentSpec {
+            id: "fixed".into(),
+            name: "Fixed".into(),
+            command: "fixed-agent".into(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            working_dir: h4rn_protocol::AcpWorkingDir::FixedPath {
+                path: fixed.path().to_string_lossy().into_owned(),
+            },
+        };
+        let catalog = StaticHarnessCatalog::with(Arc::new(h4rn_harness::GenericAcpHarness::new(
+            Arc::new(h4rn_harness::StaticAcpAgents::new().with(spec)),
+        )));
+        let manager = ThreadManager::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            Arc::new(catalog),
+            host.clone(),
+            ThreadManagerOptions {
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("manager");
+
+        let mut request = new_thread(host, workspace.path(), "in a worktree");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("fixed".into());
+        request.worktree = Some(h4rn_protocol::WorktreeRequest::Generated(true));
+        let error = manager
+            .create_thread(request)
+            .await
+            .expect_err("a fixed-directory agent cannot use a worktree");
+        assert!(
+            matches!(error, ManagerError::InvalidRequest(ref message)
+                if message.contains("fixed directory") && message.contains("worktree")),
+            "the refusal names the fixed directory and the worktree: {error:?}"
+        );
+        // The thread's workspace was not silently rewritten to the fixed
+        // directory, and no thread exists.
+        assert!(
+            manager
+                .list_threads(&ThreadFilter::default())
+                .await
+                .is_empty()
+        );
+    }
+
+    /// A rollback runs off the async runtime: while its git cleanup is held
+    /// open, a current-thread runtime keeps making progress.
+    #[test]
+    fn a_worktree_rollback_does_not_stall_a_current_thread_runtime() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = crate::worktrees::create::create_blocking(
+            repo.path(),
+            &h4rn_protocol::WorktreeRequest::Named("slow/rollback".into()),
+            "rollback",
+            &h4rn_protocol::WorktreeSettings::default(),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        let dest = created.path.clone();
+        // The cleanup is held open long enough that a synchronous rollback
+        // would freeze the runtime's only thread.
+        crate::worktrees::create::test_hooks::hold_rollback(
+            dest.clone(),
+            Duration::from_millis(500),
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ticker = {
+                let ticks = Arc::clone(&ticks);
+                tokio::spawn(async move {
+                    loop {
+                        ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let before = ticks.load(std::sync::atomic::Ordering::Relaxed);
+            // Dropping the guard is what starts the rollback.
+            let guard = WorktreeRollback(Some(created));
+            let rollback = tokio::spawn(async move { drop(guard) });
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let ticks_during = ticks
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(before);
+            ticker.abort();
+            let _ = rollback.await;
+            assert!(
+                ticks_during >= 10,
+                "the runtime kept running while cleanup was held: {ticks_during} ticks"
+            );
+        });
+        crate::worktrees::create::test_hooks::clear_rollback();
+        // The blocking rollback still finishes and removes its checkout.
+        let repo_path = repo.path().to_path_buf();
+        let cleaned = wait_until(|| {
+            crate::worktrees::git::list_worktrees(&repo_path)
+                .map(|listed| listed.is_empty())
+                .unwrap_or(false)
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(cleaned);
     }
 
     #[test]

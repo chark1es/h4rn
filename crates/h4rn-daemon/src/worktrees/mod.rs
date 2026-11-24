@@ -19,7 +19,9 @@
 //! stored. Clearing removes checkouts from disk and, for owned entries, the
 //! `h4rn/` branch h4rn created.
 
+pub mod create;
 pub(crate) mod git;
+pub mod settings;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -428,6 +430,59 @@ impl WorktreeTracker {
         }
     }
 
+    /// Persists a thread's own worktree, so it stays in Settings after the
+    /// thread is deleted.
+    ///
+    /// While the thread exists the listing derives the same row live from its
+    /// workspace; this record is what keeps the checkout clearable once there
+    /// is no thread left to derive it from. Best-effort: a failure is logged
+    /// and the thread is not affected.
+    pub async fn register_thread_worktree(&self, thread_id: &ThreadId, path: &str) {
+        let worktree = std::path::PathBuf::from(path);
+        // Resolve outside the async runtime: both calls shell out to git.
+        let resolved = tokio::task::spawn_blocking({
+            let worktree = worktree.clone();
+            move || {
+                let repo = git::repo_of(&worktree)?;
+                if repo == worktree {
+                    return None;
+                }
+                let branch = git::run_with_timeout(
+                    &worktree,
+                    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                    GIT_BUDGET,
+                )
+                .ok()
+                .filter(|branch| !branch.is_empty());
+                Some((repo, branch))
+            }
+        })
+        .await;
+        let Ok(Some((repo, branch))) = resolved else {
+            tracing::warn!(%path, "could not resolve a thread worktree for tracking");
+            return;
+        };
+        let (Some(repo), Some(path)) = (repo.to_str(), worktree.to_str()) else {
+            return;
+        };
+        if let Err(error) = self
+            .inner
+            .store
+            .record(
+                path,
+                repo,
+                branch.as_deref(),
+                WorktreeOrigin::Thread,
+                thread_id.as_str(),
+                None,
+                Utc::now(),
+            )
+            .await
+        {
+            tracing::warn!(%error, %path, "could not record a thread worktree");
+        }
+    }
+
     /// Lists every tracked worktree, computed fresh.
     ///
     /// Active first, then orphaned, then settled; newest `last_seen` first
@@ -802,6 +857,7 @@ impl Inner {
                 &key.0,
                 repo_text,
                 worktree.branch.as_deref(),
+                WorktreeOrigin::Harness,
                 thread.as_str(),
                 subagent_id.as_ref().map(SubagentId::as_str),
                 Utc::now(),
@@ -1476,7 +1532,7 @@ pub(crate) fn compute_listing(
                     path: path.to_string_lossy().into_owned(),
                     repo: stored.repo.clone(),
                     branch: stored.branch.clone(),
-                    origin: WorktreeOrigin::Harness,
+                    origin: stored.origin,
                     status: if working {
                         WorktreeStatus::Active
                     } else {

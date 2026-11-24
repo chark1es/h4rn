@@ -171,8 +171,10 @@ A tracked worktree has one of three origins:
 
 - `subagent`: h4rn created it for a worktree-isolated child. h4rn owns the
   directory and its `h4rn/sa-*` branch.
-- `thread`: a thread's (or subagent child's) workspace is a linked worktree h4rn
-  did not create, for example one made by an editor.
+- `thread`: a thread's (or subagent child's) workspace is a linked worktree:
+  either one h4rn created because the thread asked to run in a new worktree
+  (see [docs/worktrees.md](worktrees.md)), or one it did not create, for
+  example one made by an editor.
 - `harness`: a linked worktree of a thread's repository that the agent or its
   harness-native subagents created or touched during a turn (Claude Code's
   `.claude/worktrees/agent-*`, or a plain `git worktree add`).
@@ -218,9 +220,11 @@ worktree keeps its own name rather than turning into the other worktree's. And
 anything) is listed with `exists: false`.
 
 **What is stored.** Only observations that cannot be derived live go to
-`<data_dir>/worktrees.db`: `harness` worktrees and which threads used them.
+`<data_dir>/worktrees.db`: `harness` worktrees and which threads used them, plus
+the checkout h4rn created for a thread that asked to run in a new worktree.
 Subagent worktrees come from the supervisor and thread workspaces from the
-thread list, and the list is recomputed on every request. An observed worktree
+thread list, and the list is recomputed on every request. The stored thread
+checkout is why its row survives the thread being deleted. An observed worktree
 whose directory is missing is still listed, with `exists: false`, while its own
 registration remains in the repository's snapshot: its registration is exactly
 what a clear removes. It is forgotten only when neither the directory nor the
