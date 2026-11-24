@@ -2311,7 +2311,7 @@ async fn the_pending_budget_is_held_before_any_file_is_written() {
 }
 
 #[tokio::test]
-async fn a_send_records_that_it_was_accepted_before_the_turn_starts() {
+async fn a_send_journals_its_message_before_the_card_is_answered() {
     let daemon = boot().await;
     let base = format!("http://{}", daemon.addr);
     let mut owner = Client::connect(&daemon).await;
@@ -2324,9 +2324,11 @@ async fn a_send_records_that_it_was_accepted_before_the_turn_starts() {
     assert_eq!(status, 202);
     let request_id = request_id_from_snapshot(&browser).await;
 
-    // The claim is the durable acceptance: a daemon that stops between it and
-    // the turn must be able to tell this message from one never sent.
-    let gate = daemon.guest.pause_next_claim();
+    // The claim only owns the row. The message is accepted when the thread's
+    // journal holds it, and until then the thread has nothing.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::BeforeAppend);
     let sending = {
         let guest = Arc::clone(&daemon.guest);
         let thread_id = thread_id.clone();
@@ -2334,22 +2336,33 @@ async fn a_send_records_that_it_was_accepted_before_the_turn_starts() {
         tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
     };
     gate.arrived().await;
-    let pool = journal_pool(&daemon).await;
-    let (status, accepted): (String, i64) =
-        sqlx::query_as("SELECT status, accepted FROM guest_requests WHERE request_id = ?")
-            .bind(&request_id)
-            .fetch_one(&pool)
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+    assert!(
+        !daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
             .await
-            .expect("read the claimed row");
-    pool.close().await;
-    assert_eq!(status, "sending");
-    assert_eq!(accepted, 1, "the claim did not record the accepted outcome");
+            .expect("read the thread's journal"),
+        "the thread held the message before the append"
+    );
 
     gate.release();
-    sending
-        .await
-        .expect("send task")
-        .expect("the accepted send failed");
+    sending.await.expect("send task").expect("the send failed");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sent")
+    );
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the thread never received the message its card calls sent"
+    );
     daemon.stop().await;
 }
 
@@ -2446,7 +2459,7 @@ async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
 }
 
 #[tokio::test]
-async fn startup_recovers_an_accepted_send_as_sent() {
+async fn startup_recovers_a_send_whose_message_is_journaled_as_sent() {
     let daemon = boot().await;
     let base = format!("http://{}", daemon.addr);
     let mut owner = Client::connect(&daemon).await;
@@ -2459,16 +2472,33 @@ async fn startup_recovers_an_accepted_send_as_sent() {
     assert_eq!(status, 202);
     let request_id = request_id_from_snapshot(&browser).await;
 
-    // The turn started, but the daemon stopped before writing `sent`. The
-    // accepted marker was written with the claim, so recovery can tell this
-    // from a message that never left the queue.
-    let pool = journal_pool(&daemon).await;
-    sqlx::query("UPDATE guest_requests SET status = 'sending', accepted = 1 WHERE request_id = ?")
-        .bind(&request_id)
-        .execute(&pool)
-        .await
-        .expect("claim the accepted row");
-    pool.close().await;
+    // The append happened, but the daemon stopped before the row could say
+    // `sent`. Recovery must ask the journal, not a flag written beside it.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::AfterAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending"),
+        "the simulated crash did not leave a claimed row"
+    );
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the crash point was before the append"
+    );
 
     let resume = browser.state(0).await.next_seq;
     daemon
@@ -2478,12 +2508,13 @@ async fn startup_recovers_an_accepted_send_as_sent() {
         .expect("startup sweep");
     assert_eq!(
         summary_pending_guest_requests(&mut owner, &thread_id).await,
-        0
+        0,
+        "the owner still shows a pending guest request"
     );
     assert_eq!(
         request_status(&daemon, &request_id).await.as_deref(),
         Some("sent"),
-        "an accepted send was recovered as never sent"
+        "a journaled send was recovered as never sent"
     );
     // The same browser's next poll carries the answer that clears its card.
     let later = browser.state(resume).await;
@@ -2493,6 +2524,83 @@ async fn startup_recovers_an_accepted_send_as_sent() {
             Event::GuestRequestResolved { request_id: id, sent: true, .. } if id == &request_id
         )),
         "the guest never learned its accepted message resolved: {:?}",
+        later.events
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_a_send_that_never_reached_the_thread_as_dismissed() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "lost send").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "never arrived".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"hello"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists(), "the request wrote no directory");
+
+    // The claim happened, then the daemon stopped before the message could be
+    // appended. The thread never got it, so the guest must not be told it did.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::BeforeAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+
+    let resume = browser.state(0).await.next_seq;
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "the owner still shows a pending guest request"
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed"),
+        "a send that never reached the thread was recovered as sent"
+    );
+    assert!(
+        !directory.exists(),
+        "a dismissed send kept the files of a message the thread never got"
+    );
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "the guest never learned its lost message was dismissed: {:?}",
         later.events
     );
     daemon.stop().await;
@@ -4361,6 +4469,64 @@ async fn a_resolution_lost_from_the_journal_is_emitted_by_the_sweep() {
     assert_eq!(
         request_status(&daemon, &request_id).await.as_deref(),
         Some("dismissed")
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_finished_request_retries_file_removal_while_its_link_lives() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "sent cleanup").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "with a file".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"hello"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists(), "the request wrote no directory");
+
+    // A refused disk during Dismiss leaves the finished row naming its files.
+    std::fs::remove_dir_all(&directory).expect("clear the request directory");
+    std::fs::write(&directory, b"not a directory").expect("block the cleanup");
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+
+    // The periodic sweep retries while the link still lives, so the orphan is
+    // not kept until Stop sharing.
+    std::fs::remove_file(&directory).expect("unblock the cleanup");
+    std::fs::create_dir_all(&directory).expect("restore the request directory");
+    std::fs::write(directory.join("0-note.txt"), b"hello").expect("restore the file");
+    daemon.guest.sweep_expired().await.expect("sweep");
+    assert!(
+        !directory.exists(),
+        "the sweep never retried a finished request's files"
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed"),
+        "the sweep dropped the row the guest still needs to resolve"
     );
     daemon.stop().await;
 }

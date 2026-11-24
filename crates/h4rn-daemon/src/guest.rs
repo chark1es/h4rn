@@ -195,10 +195,6 @@ struct RequestRow {
     attachments: Vec<StoredAttachment>,
     created_at: DateTime<Utc>,
     status: String,
-    /// Whether the owner's Send reached the turn. It is written with the
-    /// claim, before the turn starts, so a crash between the turn and its
-    /// `sent` row still lets recovery answer the guest honestly.
-    accepted: bool,
     /// `sent` or `dismissed` once the card has an answer; `None` while it is
     /// still waiting.
     resolution: Option<String>,
@@ -248,6 +244,52 @@ pub enum SubmitPhase {
     /// After the last placement check and before the card is appended, so a
     /// test can settle the thread exactly between the two.
     BeforePublish,
+}
+
+/// Where a test pauses a guest Send, relative to its journal append.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendPhase {
+    /// After the row was claimed and before the thread recorded the message.
+    BeforeAppend,
+    /// After the thread recorded the message and before the row says `sent`.
+    AfterAppend,
+}
+
+/// A test's hold on one guest Send.
+///
+/// [`GuestService::pause_next_send`] installs it; the next Send announces that
+/// it reached the phase and waits for [`Self::release`]. It is public so
+/// integration tests can prove a crash on either side of the append.
+#[doc(hidden)]
+pub struct SendGate {
+    phase: SendPhase,
+    used: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl SendGate {
+    /// The phase this gate pauses.
+    pub fn phase(&self) -> SendPhase {
+        self.phase
+    }
+
+    /// Waits until a Send reaches the gate.
+    pub async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    /// Lets the paused Send continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+
+    /// Called by the Send itself.
+    async fn hold(&self) {
+        self.arrived.notify_one();
+        self.release.notified().await;
+    }
 }
 
 /// A test's hold on one submission.
@@ -342,6 +384,8 @@ pub struct GuestService {
     submit_gate: Mutex<Option<Arc<SubmitGate>>>,
     /// A test's pause point for the next Send or Dismiss.
     claim_gate: Mutex<Option<Arc<ClaimGate>>>,
+    /// A test's pause point inside the next Send, before or after its append.
+    send_gate: Mutex<Option<Arc<SendGate>>>,
     /// A test's pause point for the next cleanup claim, between the row it read
     /// and its conditional update.
     cleanup_gate: Mutex<Option<Arc<ClaimGate>>>,
@@ -391,6 +435,7 @@ impl GuestService {
             submit_lock: tokio::sync::Mutex::new(()),
             submit_gate: Mutex::new(None),
             claim_gate: Mutex::new(None),
+            send_gate: Mutex::new(None),
             cleanup_gate: Mutex::new(None),
             snapshot_gate: Mutex::new(None),
         };
@@ -464,6 +509,25 @@ impl GuestService {
         gate
     }
 
+    /// Pauses the next Send at `phase`, until the returned gate is released.
+    ///
+    /// Used by a test that interrupts a real Send on either side of the
+    /// append and then runs startup recovery against the row it left.
+    #[doc(hidden)]
+    pub fn pause_next_send(&self, phase: SendPhase) -> Arc<SendGate> {
+        let gate = Arc::new(SendGate {
+            phase,
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .send_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
     /// Pauses the next cleanup claim between the row it read and its
     /// conditional update, until the returned gate is released.
     ///
@@ -519,6 +583,35 @@ impl GuestService {
         gate.hold().await;
         let mut slot = self
             .claim_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &gate))
+        {
+            *slot = None;
+        }
+    }
+
+    /// Waits at the Send gate a test installed, when it names this phase.
+    async fn hold_send(&self, phase: SendPhase) {
+        let gate = self
+            .send_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        if gate.phase != phase {
+            return;
+        }
+        if gate.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        gate.hold().await;
+        let mut slot = self
+            .send_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if slot
@@ -702,9 +795,6 @@ impl GuestService {
         for statement in [
             "ALTER TABLE guest_requests ADD COLUMN resolution TEXT",
             "ALTER TABLE guest_requests ADD COLUMN resolution_emitted INTEGER NOT NULL DEFAULT 0",
-            // Whether a Send reached the turn. A row from before this column
-            // was never accepted, so recovery treats it as never sent.
-            "ALTER TABLE guest_requests ADD COLUMN accepted INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = sqlx::query(statement).execute(&self.pool).await;
         }
@@ -791,7 +881,7 @@ impl GuestService {
     /// row and its files alone.
     async fn sweep_finished_requests(&self, recover_in_flight: bool) -> Result<(), GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
              FROM guest_requests",
         )
         .fetch_all(&self.pool)
@@ -840,6 +930,19 @@ impl GuestService {
                         request = %request.request_id,
                         %error,
                         "a guest resolution waits for the next sweep"
+                    );
+                }
+                // A finished row can still name files: a removal was refused
+                // earlier, or a crash landed between its append and the
+                // cleanup. Retry now; the row itself stays for the browser's
+                // resolution, so a refused disk costs a retry, not the answer.
+                if matches!(request.status.as_str(), "sent" | "dismissed")
+                    && let Err(error) = self.delete_request_files(&request)
+                {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "a finished guest request keeps its files for the next sweep"
                     );
                 }
                 continue;
@@ -901,15 +1004,17 @@ impl GuestService {
 
     /// Recovers a submission or Send interrupted by the last shutdown.
     ///
-    /// No writer is left, so the row's answer is decided here. A `sending` row
-    /// carries whether its turn was accepted; a `reserving` row never reached
-    /// one. While the link still lives the guest can poll again, and the
-    /// snapshot only mentions a `GuestRequestResolved` whose request id is
-    /// still a row for that link. The row therefore stays as the provenance
-    /// record of that answer: its files go, its resolution is raised, and the
-    /// same browser's next poll clears the card. Ending the link, or the sweep
-    /// after it is gone, drops the row exactly as it does for any other
-    /// finished request.
+    /// No writer is left, so the row's answer is decided here. A `reserving`
+    /// row never reached a turn. A `sending` row was claimed, and whether its
+    /// message reached the thread is not something the row can claim: the
+    /// journal is asked. A message that is journaled is `sent`; one that never
+    /// arrived is `dismissed` and its files are removed. While the link still
+    /// lives the guest can poll again, and the snapshot only mentions a
+    /// `GuestRequestResolved` whose request id is still a row for that link.
+    /// The row therefore stays as the provenance record of that answer: its
+    /// resolution is raised, its files go, and the same browser's next poll
+    /// clears the card. Ending the link, or the sweep after it is gone, drops
+    /// the row exactly as it does for any other finished request.
     async fn recover_interrupted_submission(&self, request: &RequestRow) -> Result<(), GuestError> {
         let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_links WHERE link_id = ?")
             .bind(&request.link_id)
@@ -918,11 +1023,32 @@ impl GuestService {
         if linked == 0 {
             return self.claim_and_discard(request).await;
         }
-        let resolution = if request.accepted {
-            "sent"
+        let accepted = if request.status == "sending" {
+            match self
+                .manager
+                .guest_message_in_thread(&request.thread_id, &request.request_id)
+                .await
+            {
+                Ok(found) => found,
+                // The thread is gone, so no message of this request can be in
+                // it: the row is what still needs an answer.
+                Err(ManagerError::NotFound(_)) => false,
+                Err(error) => {
+                    // Leave the row `sending` so the next startup asks the
+                    // journal again rather than calling a message dismissed
+                    // because a read failed.
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "a recovered guest send waits for the next startup"
+                    );
+                    return Ok(());
+                }
+            }
         } else {
-            "dismissed"
+            false
         };
+        let resolution = if accepted { "sent" } else { "dismissed" };
         let claimed = sqlx::query(
             "UPDATE guest_requests
              SET status = ?, resolution = ?, resolution_emitted = 0
@@ -2100,7 +2226,6 @@ impl GuestService {
             attachments: stored,
             created_at,
             status: "publishing".into(),
-            accepted: false,
             resolution: None,
             resolution_emitted: false,
         };
@@ -2226,7 +2351,7 @@ impl GuestService {
 
     async fn pending_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
              FROM guest_requests WHERE link_id = ? AND status = 'pending'
              ORDER BY created_at ASC",
         )
@@ -2239,7 +2364,7 @@ impl GuestService {
     /// Finished rows whose link has ended, including ones already claimed.
     async fn finished_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
              FROM guest_requests
              WHERE link_id = ? AND status IN ('sent', 'dismissed', 'deleting')",
         )
@@ -2251,7 +2376,7 @@ impl GuestService {
 
     async fn request_by_id(&self, request_id: &str) -> Result<Option<RequestRow>, GuestError> {
         let row = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
              FROM guest_requests WHERE request_id = ?",
         )
         .bind(request_id)
@@ -2283,12 +2408,12 @@ impl GuestService {
                 "That request no longer exists.".into(),
             ));
         };
-        // The accepted outcome is written with the claim, before the turn
-        // starts. A crash after the turn but before `sent` is written therefore
-        // still tells recovery what the guest was owed, and a Send that fails
-        // clears it again below.
+        // The claim only says this Send owns the row. Whether the message was
+        // accepted is decided by the journal the append writes to, never by a
+        // flag updated beside it: a crash between the two is exactly the case
+        // a flag would answer dishonestly.
         let claimed = sqlx::query(
-            "UPDATE guest_requests SET status = 'sending', accepted = 1
+            "UPDATE guest_requests SET status = 'sending'
              WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
         )
         .bind(request_id)
@@ -2311,8 +2436,11 @@ impl GuestService {
                         .await?,
                 );
             }
+            // A test can pause here, before the append, to prove a crash that
+            // never journaled the message recovers it as dismissed.
+            self.hold_send(SendPhase::BeforeAppend).await;
             self.manager
-                .send_message(thread_id, request.text.clone(), ids)
+                .send_guest_message(thread_id, request.text.clone(), ids, &request.request_id)
                 .await
                 .map_err(|error| match error {
                     ManagerError::NotFound(message) => GuestError::NotFound(message),
@@ -2323,6 +2451,10 @@ impl GuestService {
         .await;
         match result {
             Ok(()) => {
+                // The message is in the thread now. A test can pause here, so a
+                // crash after the append but before `sent` is written proves
+                // recovery still answers sent.
+                self.hold_send(SendPhase::AfterAppend).await;
                 self.delete_request_files_best_effort(&request);
                 // The answer is recorded with the status in one write: a crash
                 // before the event leaves `resolution_emitted` false, so the
@@ -2350,7 +2482,7 @@ impl GuestService {
             Err(error) => {
                 // The turn did not start: give the owner the chance to retry.
                 let _ = sqlx::query(
-                    "UPDATE guest_requests SET status = 'pending', accepted = 0
+                    "UPDATE guest_requests SET status = 'pending'
                      WHERE request_id = ?",
                 )
                 .bind(&request.request_id)
@@ -2413,14 +2545,15 @@ impl GuestService {
     }
 
     /// Deletes a request's files, leaving the row for the sweep if the disk
-    /// refuses. Access has already been decided by the caller.
+    /// refuses.
+    ///
+    /// A row that stays `sent` or `dismissed` is retried by every later sweep
+    /// while its link lives, so a transient failure never keeps the files until
+    /// the link ends.
     fn delete_request_files_best_effort(&self, request: &RequestRow) {
         for attempt in 0..CLEANUP_ATTEMPTS {
             match self.delete_request_files(request) {
-                Ok(()) => {
-                    let _ = request;
-                    return;
-                }
+                Ok(()) => return,
                 Err(error) if attempt + 1 == CLEANUP_ATTEMPTS => {
                     tracing::warn!(
                         request = %request.request_id,
@@ -2509,7 +2642,6 @@ fn row_to_request(row: sqlx::sqlite::SqliteRow) -> Result<RequestRow, GuestError
             .map(|value| value.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
         status: row.try_get("status")?,
-        accepted: row.try_get::<i64, _>("accepted").unwrap_or(0) != 0,
         resolution: row.try_get("resolution").unwrap_or(None),
         resolution_emitted: row
             .try_get::<i64, _>("resolution_emitted")

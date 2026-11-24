@@ -643,17 +643,25 @@ All notable changes to h4rn are recorded here. The format follows
   that admission arrives; a current daemon that stays quiet is an error, never mistaken for an
   older build, while a daemon that does not announce it keeps the older bounded wait. Uploads
   hold a separate capped slot from state and attachment reads, and an abandoned upload gives it
-  back at the next ping. A restart no longer loses the guest's answer: a Send records its
-  acceptance with its claim, an interrupted Send or reservation is answered from that record, and
-  its row stays while the link lives, so the same browser's next poll clears its card. A refused
-  submission keeps a cleanup record when its files cannot be removed yet. A completed upload keeps
-  its slot until its answer holds a work slot, so finished bodies cannot pile up past the cap, and
-  a timed-out admission is cancelled so the daemon releases its slot at once. A current daemon's
-  relay socket is marked as one that sends a hello, and while that hello is unknown Connect never
-  streams a body: the guest gets a retryable answer instead. Capability follows the socket, so a
-  reconnect starts unknown and a hello from a replaced socket is ignored; two guest requests
-  waiting for the same hello both see it. A browser that disconnects while its chunked answer is
-  arriving takes its waiter and partial body with it.
+  back at the next ping. A restart no longer loses the guest's answer: a Send is answered by the
+  thread's own journal, so a message that reached the thread recovers as sent and one that never
+  did recovers as dismissed with its files removed, and its row stays while the link lives so the
+  same browser's next poll clears its card. A refused submission keeps a cleanup record when its
+  files cannot be removed yet, and the periodic sweep retries that removal for a finished request
+  while its link still lives. A card whose journal append failed leaves no pending count behind.
+  A completed upload keeps its slot until its answer holds a work slot, so finished bodies cannot
+  pile up past the cap; a cancel releases the daemon's upload slot at once even while its link
+  check or the relay queue is still busy, and the admitted state is committed before the go-ahead
+  is sent. A current daemon's relay socket is marked as one that sends a hello, and while that
+  hello is unknown Connect never streams a body: the guest gets a retryable answer instead.
+  Capability follows the socket, so a reconnect starts unknown and a hello from a replaced socket
+  is ignored; two guest requests waiting for the same hello both see it. A guest exchange over
+  Connect is pinned to the one socket it started on — capability, admission, the request and every
+  chunk — so a reconnect mid-upload fails retryably instead of streaming to a socket that never
+  admitted it, and the capability is read once more as the admission deadline passes. A browser
+  that disconnects while its chunked answer is arriving, during an exchange's cleanup or during
+  the page fetch takes its waiter and partial body with it. A socket a reconnect already replaced
+  no longer reports the machine offline when it closes.
   The attach control's keyboard focus ring uses the design system's focus
   colour in both themes.
 - **An imported conversation is not offered a second time.** When a Claude Code
