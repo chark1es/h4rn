@@ -948,7 +948,7 @@ success keeps the turn's own first words. Only lifecycle reports are uncapped - 
 usage limit, a transport close (the exit and status report), an approval and a session-started
 report - and they are never dropped, or the turn would stay active forever. Everything else counts
 against the hold's bound, including the diagnostic error the bridge makes from an unparseable
-stdout line and, like text, an error past the bound is dropped; an agent that floods garbage during
+stdout line; like text, an error past the bound is dropped, so an agent that floods garbage during
 the write cannot grow the hold without limit. An acceptance that lands between the hold's check and
 the next event releases the held output before that event is applied, so output read first is
 published first. ACP carries no turn id, so text a peer writes after it has read the new prompt is still
