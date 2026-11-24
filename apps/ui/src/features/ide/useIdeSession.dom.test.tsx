@@ -1002,13 +1002,14 @@ describe("a resumed review yields to a newer tab switch", () => {
     await waitFor(() => latest?.state.filesLoading === true);
 
     // A tab switch to b.ts reads its list while the resumed one is still out.
+    const listReads = () =>
+      state.requests.filter((request) => request.type === "fs_diff_files").length;
+    const before = listReads();
     const releaseB = holdNext("fs_diff_files");
     await act(async () => {
       void latest?.followDiffTab("b.ts");
     });
-    await waitFor(
-      () => state.requests.filter((request) => request.type === "fs_diff_files").length === 3,
-    );
+    await waitFor(() => listReads() === before + 1);
 
     // Back to a.ts: the resume's note names a.ts, but it belongs to the older
     // request, so it must not swallow this switch. Without the generation
@@ -1030,6 +1031,39 @@ describe("a resumed review yields to a newer tab switch", () => {
     expect(latest?.state.diffFiles?.against).toEqual({ kind: "base", base: null });
     expect(latest?.state.filesLoading).toBe(false);
     expect(state.requests.filter((request) => request.type === "fs_diff")).toHaveLength(diffs);
+  });
+});
+
+describe("a direct open replaces the finished list's file", () => {
+  it("resumes the file being opened, not the one the list was read for", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+
+    // Branch is read for a.ts and its diff lands.
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts");
+
+    // The list is on screen, so a tab switch opens b.ts directly; that read is
+    // held back.
+    const releaseDiff = holdNext("fs_diff");
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => latest?.state.diffLoading === true);
+    expect(latest?.state.diffPath).toBe("b.ts");
+
+    // The person leaves mid-read and comes back. The open was for b.ts, so the
+    // resume must open b.ts; the finished list's file (a.ts) is history.
+    const home = workspace.path;
+    await switchWorkspace(`${home}-other`);
+    await releaseHold(releaseDiff);
+    await switchWorkspace(home);
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    await flush();
+    expect(latest?.state.diffPath).toBe("b.ts");
+    expect(latest?.state.diff?.path).toBe("b.ts");
   });
 });
 
