@@ -100,13 +100,24 @@ struct Payload {
     turn_id: Option<String>,
     #[serde(default, deserialize_with = "Content::deserialize")]
     content: Option<Content>,
+    /// Codex's per-message metadata, read leniently: a shape other than an
+    /// object (an array, a string) must not make the whole record malformed,
+    /// because the user text beside it would be lost.
     #[serde(rename = "internal_chat_message_metadata_passthrough")]
-    metadata: Option<TurnMetadata>,
+    metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct TurnMetadata {
-    turn_id: Option<String>,
+impl Payload {
+    /// The turn id this message's own metadata names, when it names a valid one.
+    fn metadata_turn_id(&self) -> Option<String> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("turn_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    }
 }
 
 impl TranscriptRecord {
@@ -274,13 +285,7 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
                         // Only the response copy's own metadata may tie it to
                         // a canonical event; guessing the current turn would
                         // drop text an interrupted turn never duplicated.
-                        let turn_id = payload
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.turn_id.as_deref())
-                            .map(str::trim)
-                            .filter(|id| !id.is_empty())
-                            .map(str::to_owned);
+                        let turn_id = payload.metadata_turn_id();
                         turn.push(
                             PendingUser {
                                 text,
@@ -706,6 +711,44 @@ mod tests {
                 .any(|text| text.contains("Private project rules")),
             "the private instructions never reach the import"
         );
+    }
+
+    #[test]
+    fn ambiguous_metadata_keeps_the_response_users_text() {
+        // t3code's fixture, plus the collision it guards: an array must not be
+        // read as a turn id. Read strictly, serde would turn ["turn-1"] into
+        // `turn_id: "turn-1"`, and the later canonical turn would drop this
+        // unrelated prompt along with its own copy.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            json!({
+                "timestamp": "2026-11-20T10:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "internal_chat_message_metadata_passthrough": ["turn-1"],
+                    "content": [{"type": "input_text", "text": "Keep this legacy prompt"}],
+                },
+            }),
+            event_user("Do the thing"),
+            response_user("Do the thing", Some("turn-1")),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(
+            user_texts(&parsed),
+            ["Keep this legacy prompt", "Do the thing"]
+        );
+
+        // A blank turn id names no turn either.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user("Keep this blank-id prompt", Some("   ")),
+            assistant("kept"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["Keep this blank-id prompt"]);
     }
 
     #[test]
