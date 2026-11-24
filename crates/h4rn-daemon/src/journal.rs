@@ -718,10 +718,13 @@ impl SqliteJournal {
 /// race never happens. Production builds have no gate.
 #[cfg(test)]
 mod migration_gate {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     static ARMED: AtomicBool = AtomicBool::new(false);
+    /// How often the duplicate-column fallback ran. A properly locked upgrade
+    /// never needs it, so a test can prove the lock did the work.
+    static FALLBACKS: AtomicUsize = AtomicUsize::new(0);
 
     pub(super) fn arm() {
         ARMED.store(true, Ordering::SeqCst);
@@ -735,6 +738,18 @@ mod migration_gate {
         if ARMED.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+
+    pub(super) fn record_fallback() {
+        FALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn reset_fallbacks() {
+        FALLBACKS.store(0, Ordering::SeqCst);
+    }
+
+    pub(super) fn fallbacks() -> usize {
+        FALLBACKS.load(Ordering::SeqCst)
     }
 }
 
@@ -778,6 +793,8 @@ async fn alter_add_column(
         // tool) may have added the column after the check. That is exactly
         // the state this migration wants, so it is already applied.
         Err(sqlx::Error::Database(error)) if error.message().contains("duplicate column name") => {
+            #[cfg(test)]
+            migration_gate::record_fallback();
             Ok(())
         }
         Err(error) => Err(error.into()),
@@ -2015,12 +2032,38 @@ mod tests {
         assert_eq!(links[0].title, None);
     }
 
+    /// The fallback counter is process-wide, so the tests that read it take
+    /// turns even though cargo runs tests in parallel.
+    fn fallback_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Arms the contention gate and disarms it on drop, so a failing
+    /// assertion cannot leave every later test pausing at its migration.
+    struct ArmedGate;
+
+    impl ArmedGate {
+        fn arm() -> Self {
+            migration_gate::arm();
+            Self
+        }
+    }
+
+    impl Drop for ArmedGate {
+        fn drop(&mut self) {
+            migration_gate::disarm();
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_daemons_open_one_old_journal_without_a_race() {
+        let _counting = fallback_lock().lock().await;
         // Hold every daemon at its column check long enough for the other one
         // to reach the same point, so the two upgrades really contend.
-        migration_gate::arm();
+        let _gate = ArmedGate::arm();
         for attempt in 0..3 {
+            migration_gate::reset_fallbacks();
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("old-links-race.db");
             // The core schema is applied once, so the only upgrade left is
@@ -2057,18 +2100,26 @@ mod tests {
             assert_eq!(links.len(), 1, "the row survives the upgrade");
             assert_eq!(links[0].issue_id, "issue_uuid_1");
             assert_eq!(links[0].identifier, None);
+            // The lock, not the duplicate-column fallback, is what makes the
+            // second opener see the first one's column.
+            assert_eq!(
+                migration_gate::fallbacks(),
+                0,
+                "a locked upgrade never reached the duplicate-column fallback (attempt {attempt})"
+            );
         }
-        migration_gate::disarm();
     }
 
     #[tokio::test]
     async fn a_column_another_writer_already_added_counts_as_applied() {
+        let _counting = fallback_lock().lock().await;
         let journal = SqliteJournal::in_memory().await.unwrap();
         let mut conn = journal.pool.acquire().await.expect("connection");
         sqlx::query("CREATE TABLE probe (id TEXT)")
             .execute(&mut *conn)
             .await
             .expect("probe table");
+        migration_gate::reset_fallbacks();
         add_column(&mut conn, "probe", "note", "TEXT")
             .await
             .expect("add the column");
@@ -2077,6 +2128,7 @@ mod tests {
         alter_add_column(&mut conn, "probe", "note", "TEXT")
             .await
             .expect("a duplicate column is already applied");
+        assert_eq!(migration_gate::fallbacks(), 1, "the fallback ran once");
     }
 
     #[tokio::test]
