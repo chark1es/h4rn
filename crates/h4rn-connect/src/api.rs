@@ -2158,6 +2158,12 @@ fn guest_page_response(cookie: Option<String>, state: &str) -> Response {
     response
 }
 
+/// How long a chunked upload waits for the daemon's go-ahead.
+///
+/// A daemon from before the admission frame never sends one; it bounds the
+/// buffered bytes itself, so a short wait keeps that pairing working.
+const GUEST_ADMISSION_WAIT: Duration = Duration::from_secs(2);
+
 /// Forwards one guest HTTP exchange to the machine's daemon.
 ///
 /// The route is unauthenticated: the guest token in the path is the only
@@ -2375,7 +2381,7 @@ async fn guest_proxy_exchange(
     };
     let payload = serde_json::to_vec(&request)
         .map_err(|_| AppError::internal("serialise the guest request"))?;
-    let waiter = state.relay.expect_guest(request_id, daemon).await;
+    let exchange = state.relay.expect_guest_exchange(request_id, daemon).await;
     let frame = RelayFrame {
         conn_id: format!("guest-{request_id}"),
         kind: RelayFrameKind::GuestHttp,
@@ -2391,10 +2397,19 @@ async fn guest_proxy_exchange(
         .await?;
 
     if chunked {
-        stream_guest_body(state, daemon, request_id, body).await?;
+        // The daemon checks the link, the browser and the pending budget and
+        // says when the body may come. A refusal answers the exchange instead,
+        // which closes the admission without ever reading the upload; only an
+        // older daemon, which holds its own pre-authorization bound, gets the
+        // body after the short wait.
+        match tokio::time::timeout(GUEST_ADMISSION_WAIT, exchange.admission).await {
+            Ok(Ok(())) => stream_guest_body(state, daemon, request_id, body).await?,
+            Ok(Err(_)) => {}
+            Err(_) => stream_guest_body(state, daemon, request_id, body).await?,
+        }
     }
 
-    let answer = match tokio::time::timeout(Duration::from_secs(120), waiter).await {
+    let answer = match tokio::time::timeout(Duration::from_secs(120), exchange.response).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(_)) => {
             return Err(AppError::unavailable(
@@ -3043,6 +3058,62 @@ mod tests {
         let _waiter = hub.expect_guest("g2", daemon).await;
         assert!(discard_failed_exchange(&hub, "g2", Ok(())).await.is_ok());
         assert_eq!(hub.pending_guests().await, 1);
+    }
+
+    #[tokio::test]
+    async fn both_proxy_failures_drop_a_started_chunked_answer() {
+        // The two ways `guest_proxy_exchange` fails, one where the frame could
+        // not be delivered and one where the answer timed out. Either must take
+        // a chunked answer that already started with it, waiter and body.
+        for failure in [
+            AppError::unavailable("relay_backpressure", "the other device is too slow"),
+            AppError::unavailable("guest_timeout", "the machine did not answer in time"),
+        ] {
+            let hub = crate::relay::RelayHub::new();
+            let daemon = Uuid::now_v7();
+            let exchange = hub.expect_guest_exchange("g1", daemon).await;
+            assert!(
+                hub.complete_guest(
+                    daemon,
+                    h4rn_protocol::GuestHttpResponse {
+                        request_id: "g1".into(),
+                        status: 200,
+                        chunked: true,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                        set_cookie: None,
+                    }
+                )
+                .await,
+                "the chunked answer did not start"
+            );
+            assert!(
+                hub.complete_guest_chunk(
+                    daemon,
+                    h4rn_protocol::GuestHttpChunk {
+                        request_id: "g1".into(),
+                        seq: 0,
+                        last: false,
+                        body: b"first half".to_vec(),
+                    }
+                )
+                .await,
+                "the first half did not arrive"
+            );
+
+            let failed = discard_failed_exchange(&hub, "g1", Err::<(), AppError>(failure)).await;
+            assert!(failed.is_err());
+            assert_eq!(hub.pending_guests().await, 0, "a failure kept a waiter");
+            assert_eq!(
+                hub.pending_guest_bodies().await,
+                0,
+                "a failure kept a half-arrived body"
+            );
+            assert!(
+                exchange.response.await.is_err(),
+                "a failed exchange still delivered an answer"
+            );
+        }
     }
 
     #[test]

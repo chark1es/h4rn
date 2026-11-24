@@ -79,6 +79,10 @@ struct PendingGuest {
     checking: bool,
     /// The last chunk arrived while the check was still running.
     complete: bool,
+    /// The admission permit, held from the link check through the body and the
+    /// final answer frame, so an accepted upload never competes with one the
+    /// daemon has not yet authorized.
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 #[derive(Default)]
@@ -173,6 +177,7 @@ impl GuestRelay {
                     started: std::time::Instant::now(),
                     checking,
                     complete: false,
+                    permit: None,
                 },
             );
             drop(state);
@@ -250,10 +255,21 @@ impl GuestRelay {
             return;
         };
         drop(state);
-        self.spawn_exchange(pending.conn_id, pending.request, Some(pending.body), None);
+        self.spawn_exchange(
+            pending.conn_id,
+            pending.request,
+            Some(pending.body),
+            pending.permit,
+        );
     }
 
     /// Checks a chunked submission's link before its body is trusted.
+    ///
+    /// The check holds an admission permit. On success the daemon tells the
+    /// browser it may send the body, and the same permit stays with the pending
+    /// upload (or with the exchange) until the final answer frame is queued.
+    /// Nothing the guest uploads can therefore occupy a buffer slot the cap
+    /// does not account for, and a refusal never reads a byte of it.
     fn spawn_check(&self, request_id: String) {
         let relay = self.clone();
         let surface = Arc::clone(&self.surface);
@@ -264,40 +280,58 @@ impl GuestRelay {
                 .acquire_owned()
                 .await
                 .expect("the guest exchange semaphore is never closed");
-            let input = {
+            let (conn_id, input) = {
                 let state = relay.lock();
                 let Some(pending) = state.pending.get(&request_id) else {
                     return;
                 };
-                crate::server::guest_input(
-                    guest_method(&pending.request.method),
-                    pending.request.path.clone(),
-                    pending.request.public_prefix.clone(),
-                    &guest_headers(&pending.request),
-                    Vec::new(),
+                (
+                    pending.conn_id.clone(),
+                    crate::server::guest_input(
+                        guest_method(&pending.request.method),
+                        pending.request.path.clone(),
+                        pending.request.public_prefix.clone(),
+                        &guest_headers(&pending.request),
+                        Vec::new(),
+                    ),
                 )
             };
             match surface.check_submission(&input).await {
                 Ok(()) => {
+                    // An upload refused for its size, or dropped as abandoned,
+                    // is no longer here; it must not be told to send its body.
+                    if !relay.lock().pending.contains_key(&request_id) {
+                        return;
+                    }
+                    // The go-ahead goes before anything else this exchange
+                    // sends, so a browser that waits for it never races the
+                    // answer.
+                    relay.send_admission(conn_id, request_id.clone()).await;
                     let started = {
                         let mut state = relay.lock();
                         let Some(pending) = state.pending.get_mut(&request_id) else {
                             return;
                         };
                         pending.checking = false;
+                        pending.permit = Some(permit);
                         if !pending.complete {
                             return;
                         }
                         let Some(pending) = state.pending.remove(&request_id) else {
                             return;
                         };
-                        Some((pending.conn_id, pending.request, pending.body))
+                        Some((
+                            pending.conn_id,
+                            pending.request,
+                            pending.body,
+                            pending.permit,
+                        ))
                     };
-                    if let Some((conn_id, request, body)) = started {
+                    if let Some((conn_id, request, body, permit)) = started {
                         // The check's permit goes to the exchange: the slot
                         // never reopens between authorization and the work it
                         // admitted, so another upload cannot take it.
-                        relay.spawn_exchange(conn_id, request, Some(body), Some(permit));
+                        relay.spawn_exchange(conn_id, request, Some(body), permit);
                     }
                 }
                 Err(output) => {
@@ -317,6 +351,23 @@ impl GuestRelay {
                 }
             }
         });
+    }
+
+    /// Tells a browser that its chunked body may now be sent.
+    async fn send_admission(&self, conn_id: String, request_id: String) {
+        let admission = h4rn_protocol::GuestHttpAdmission { request_id };
+        let Ok(payload) = serde_json::to_vec(&admission) else {
+            tracing::warn!("could not serialise a guest admission");
+            return;
+        };
+        let _ = self
+            .out_tx
+            .send(RelayFrame {
+                conn_id,
+                kind: RelayFrameKind::GuestHttpAdmit,
+                payload,
+            })
+            .await;
     }
 
     /// Runs one exchange in its own task, capped by the semaphore.
@@ -866,6 +917,9 @@ async fn handle_event(
             RelayFrameKind::GuestHttp | RelayFrameKind::GuestHttpChunk | RelayFrameKind::Ping => {
                 handle_unblocked_frame(&frame, guests);
             }
+            // A daemon only sends this: a relayed admission addressed back to
+            // the daemon has nothing to admit.
+            RelayFrameKind::GuestHttpAdmit => {}
         },
         RelayServerEvent::Snapshot { devices, .. } => {
             apply_snapshot(service, registry, &devices);
@@ -1240,6 +1294,31 @@ mod tests {
         .expect("a guest answer in time")
     }
 
+    fn get_frame(request_id: &str, path: &str) -> RelayFrame {
+        let request = h4rn_protocol::GuestHttpRequest {
+            request_id: request_id.to_owned(),
+            method: "GET".to_owned(),
+            path: path.to_owned(),
+            public_prefix: None,
+            chunked: false,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        RelayFrame {
+            conn_id: format!("guest-{request_id}"),
+            kind: RelayFrameKind::GuestHttp,
+            payload: serde_json::to_vec(&request).expect("request json"),
+        }
+    }
+
+    /// Waits for one frame of any kind.
+    async fn next_frame(rx: &mut mpsc::Receiver<RelayFrame>) -> RelayFrame {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a guest frame in time")
+            .expect("relay queue open")
+    }
+
     #[tokio::test]
     async fn a_chunked_guest_body_is_answered_in_order_and_off_the_queue() {
         let surface = FakeSurface::new(Vec::new());
@@ -1399,6 +1478,103 @@ mod tests {
         assert_eq!(response.status, 503);
         assert!(!relay.lock().pending.contains_key("over"));
         gate.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn an_authorized_upload_is_admitted_before_the_body_arrives() {
+        let surface = FakeSurface::new(b"ok".to_vec());
+        let (tx, mut rx) = mpsc::channel(8);
+        let relay = GuestRelay::new(surface, tx);
+
+        // No chunk is needed to learn that this upload is allowed.
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        let admission = next_frame(&mut rx).await;
+        assert_eq!(
+            admission.kind,
+            RelayFrameKind::GuestHttpAdmit,
+            "an admitted upload was never told to send its body"
+        );
+        let admission: h4rn_protocol::GuestHttpAdmission =
+            serde_json::from_slice(&admission.payload).expect("admission json");
+        assert_eq!(admission.request_id, "g1");
+        // The permit that admitted the upload is still with it, waiting for the
+        // body and the final answer.
+        assert!(
+            relay
+                .lock()
+                .pending
+                .get("g1")
+                .is_some_and(|pending| pending.permit.is_some()),
+            "the admission permit was released before the body arrived"
+        );
+        // The surface ran only after the body finished.
+        if let Some(pending) = relay.lock().pending.get("g1") {
+            assert!(pending.body.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_upload_is_answered_without_an_admission() {
+        let surface = FakeSurface::refusing();
+        let exchanges = Arc::clone(&surface.exchanges);
+        let (tx, mut rx) = mpsc::channel(8);
+        let relay = GuestRelay::new(surface, tx);
+
+        // The request alone is enough to refuse: no byte of the body is read.
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        let answer = next_frame(&mut rx).await;
+        assert_ne!(
+            answer.kind,
+            RelayFrameKind::GuestHttpAdmit,
+            "a refused upload was admitted"
+        );
+        let response: h4rn_protocol::GuestHttpResponse =
+            serde_json::from_slice(&answer.payload).expect("answer json");
+        assert_eq!(response.status, 410);
+        assert_eq!(exchanges.load(Ordering::SeqCst), 0);
+        assert!(!relay.lock().pending.contains_key("g1"));
+    }
+
+    #[tokio::test]
+    async fn an_exchange_keeps_its_permit_until_its_last_frame_is_queued() {
+        // One permit and room for one queued frame: the first answer blocks
+        // while queueing, and only releasing its permit lets a second exchange
+        // run. A permit dropped before the frames are queued would let the
+        // second one overtake it.
+        let surface = FakeSurface::new(vec![b'a'; h4rn_protocol::GUEST_CHUNK_BYTES * 2]);
+        let exchanges = Arc::clone(&surface.exchanges);
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut relay = GuestRelay::new(surface, tx.clone());
+        relay.permits = Arc::new(tokio::sync::Semaphore::new(1));
+        tx.send(ping_frame()).await.expect("fill the queue");
+
+        handle_unblocked_frame(&get_frame("g1", "/guest/tok/blob/one"), &relay);
+        // The first exchange reached the surface and is now blocked queueing.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while exchanges.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first exchange never ran");
+
+        handle_unblocked_frame(&get_frame("g2", "/guest/tok/blob/two"), &relay);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            exchanges.load(Ordering::SeqCst),
+            1,
+            "a second exchange ran while the first still held buffered frames"
+        );
+
+        // Drain the queue: the first answer finishes and gives up its permit,
+        // then the second exchange runs.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while exchanges.load(Ordering::SeqCst) < 2 {
+                let _ = rx.recv().await.expect("queue open");
+            }
+        })
+        .await
+        .expect("the held permit was never released after the final frame");
     }
 
     #[tokio::test]

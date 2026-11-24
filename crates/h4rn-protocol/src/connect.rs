@@ -65,6 +65,13 @@ pub enum RelayFrameKind {
     /// single WebSocket message approaches the transport's frame limit. The
     /// payload is a JSON [`GuestHttpChunk`].
     GuestHttpChunk,
+    /// The daemon's go-ahead for a chunked guest body (ADR-044).
+    ///
+    /// The daemon checks the link, the browser binding and the pending budget
+    /// before any body bytes arrive. Its payload is a JSON
+    /// [`GuestHttpAdmission`]; a refusal arrives as a [`GuestHttpResponse`]
+    /// instead, so no upload frame is ever sent for a rejected exchange.
+    GuestHttpAdmit,
     /// Tear the session down. The payload is optional and opaque to the relay.
     Close,
     /// Round-trip probe. The relay echoes it back to the sender.
@@ -126,6 +133,16 @@ pub struct GuestHttpResponse {
     /// and only after it has checked every attribute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_cookie: Option<String>,
+}
+
+/// The daemon's go-ahead for one chunked guest body.
+///
+/// A refusal is a [`GuestHttpResponse`] with the reason, so a link, a binding
+/// or a full pending budget never costs the browser an upload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GuestHttpAdmission {
+    /// The exchange whose body may now be sent.
+    pub request_id: String,
 }
 
 /// One slice of a guest HTTP body.

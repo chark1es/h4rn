@@ -77,6 +77,7 @@ async fn boot_with_tick(
         tick_interval,
         "127.0.0.1:0".parse().expect("bind"),
         None,
+        Arc::new(FakeHarness::new()),
     )
     .await
 }
@@ -92,6 +93,7 @@ async fn boot_on(
         Duration::from_millis(20),
         bind,
         extra_bind,
+        Arc::new(FakeHarness::new()),
     )
     .await
 }
@@ -102,6 +104,7 @@ async fn boot_full(
     tick_interval: Duration,
     bind: std::net::SocketAddr,
     extra_bind: Option<std::net::SocketAddr>,
+    harness: Arc<dyn h4rn_harness::Harness>,
 ) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
@@ -124,7 +127,7 @@ async fn boot_full(
         .with_harness_registry(Arc::new(OfflineRegistry))
         .with_lifecycle(options)
         .with_catalog(Arc::new(
-            h4rn_daemon::harnesses::StaticHarnessCatalog::with(Arc::new(FakeHarness::new())),
+            h4rn_daemon::harnesses::StaticHarnessCatalog::with(harness),
         ));
     if let Some(journal) = journal {
         builder = builder.with_journal(journal);
@@ -3554,7 +3557,12 @@ async fn a_dismiss_that_claimed_its_row_is_never_reported_missing() {
         .await
         .expect("dismiss task")
         .expect("a claimed dismissal reported missing");
-    assert_eq!(request_status(&daemon, &request_id).await, None);
+    // The row stays while its link lives: its id is what lets the guest learn
+    // that its card resolved. Ending the link removes it.
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
     assert_eq!(
         summary_pending_guest_requests(&mut owner, &thread_id).await,
         0
@@ -3850,6 +3858,232 @@ async fn a_dismiss_finishes_after_the_owner_disconnects_mid_claim() {
     assert_eq!(
         summary_pending_guest_requests(&mut owner, &thread_id).await,
         0
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_error_with_a_host_path_reaches_the_owner_but_not_the_guest() {
+    let host_path = "/home/owner/.h4rn/missing-workspace";
+    let daemon = boot_full(
+        LifecycleSettings::default(),
+        None,
+        Duration::from_millis(20),
+        "127.0.0.1:0".parse().expect("bind"),
+        None,
+        Arc::new(FakeHarness::new().with_start_failure(format!(
+            "the agent could not start in its fixed working directory {host_path}"
+        ))),
+    )
+    .await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "error path").await;
+
+    // The owner's own view keeps the whole diagnostic.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let owner_message = loop {
+        if let Event::Error { message, .. } = owner.next_event().await {
+            break message;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed startup never reached the owner"
+        );
+    };
+    assert!(
+        owner_message.contains(host_path),
+        "the owner lost the diagnostic: {owner_message}"
+    );
+
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let snapshot = browser.state(0).await;
+    let json = serde_json::to_string(&snapshot).expect("snapshot json");
+    assert!(
+        !json.contains(host_path),
+        "a guest received the host path: {json}"
+    );
+    let errors: Vec<_> = snapshot
+        .events
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            Event::Error { message, hint, .. } => Some((message.clone(), hint.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "the guest lost the error entirely");
+    assert_eq!(errors[0].0, "The agent hit an error.");
+    assert!(
+        errors[0]
+            .1
+            .as_deref()
+            .is_none_or(|hint| !hint.contains('/')),
+        "the guest hint carried a path: {:?}",
+        errors[0].1
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_thread_settled_after_the_placement_check_gets_no_card() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "settle window").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::BeforePublish);
+    let posting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post(
+                    "/messages",
+                    &GuestMessageInput {
+                        text: "too late".into(),
+                        attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                            name: "late.txt".into(),
+                            mime: "text/plain".into(),
+                            data: base64_encode(b"too late"),
+                        }],
+                    },
+                )
+                .await
+        })
+    };
+    gate.arrived().await;
+
+    // The placement commits before the settle hook can run: the hook needs the
+    // submission lock this submit is holding.
+    daemon
+        .manager
+        .set_thread_tab(&thread_id, ThreadTab::Settled, false)
+        .await
+        .expect("settle the thread");
+    gate.release();
+
+    let (status, body) = posting.await.expect("post task");
+    assert_eq!(
+        status,
+        410,
+        "a settled thread took a guest message: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let pool = journal_pool(&daemon).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests WHERE thread_id = ?")
+        .bind(thread_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("count requests");
+    pool.close().await;
+    assert_eq!(rows, 0, "a card was published on a settled thread");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(daemon.dir.path().join("guest"))
+        .expect("guest dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert!(leftovers.is_empty(), "the refused message kept files");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_snapshot_read_under_a_replaced_link_never_answers() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "revoked poll").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    // One message makes the refused snapshot's content recognisable.
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "before revocation".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+
+    let gate = daemon.guest.pause_next_snapshot();
+    let polling = {
+        let browser = browser.clone();
+        tokio::spawn(async move { browser.get("/state/0").await })
+    };
+    gate.arrived().await;
+
+    owner
+        .request(ClientRequest::StopGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    gate.release();
+
+    let (status, _, body) = polling.await.expect("poll task");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::GONE,
+        "a revoked link answered a snapshot: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        !String::from_utf8_lossy(&body).contains("before revocation"),
+        "the refused snapshot still carried thread text"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_guest_polling_after_a_dismiss_and_a_sweep_still_sees_its_card_resolve() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "resolved poll").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "dismiss me".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let resume = browser.state(0).await.next_seq;
+
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    // The sweep runs with the link still alive: it must keep the row that
+    // carries the request id, or the resolution has no way to reach the guest.
+    daemon.guest.sweep_expired().await.expect("sweep");
+
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "a guest polling after the sweep never learned its card resolved: {:?}",
+        later.events
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
     );
     daemon.stop().await;
 }

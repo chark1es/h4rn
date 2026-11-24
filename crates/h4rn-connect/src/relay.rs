@@ -91,6 +91,19 @@ struct GuestWaiter {
     /// rejected, so a second daemon cannot answer another machine's guest.
     daemon_device_id: Uuid,
     tx: oneshot::Sender<h4rn_protocol::GuestHttpResponse>,
+    /// Sent once the daemon accepts a chunked body; dropped untouched when the
+    /// daemon refuses, so the proxy never uploads a byte it was not asked for.
+    admission: Option<oneshot::Sender<()>>,
+}
+
+/// One guest exchange as the proxy sees it: the daemon's go-ahead and its
+/// answer.
+pub struct GuestExchange {
+    /// Resolves when the daemon accepts the upload, or closes when it answers
+    /// first (a refusal) or forgets the exchange.
+    pub admission: oneshot::Receiver<()>,
+    /// The daemon's final answer.
+    pub response: oneshot::Receiver<h4rn_protocol::GuestHttpResponse>,
 }
 
 /// A chunked guest answer in progress.
@@ -350,15 +363,54 @@ impl RelayHub {
         request_id: &str,
         daemon_device_id: Uuid,
     ) -> oneshot::Receiver<h4rn_protocol::GuestHttpResponse> {
-        let (tx, rx) = oneshot::channel();
+        self.expect_guest_exchange(request_id, daemon_device_id)
+            .await
+            .response
+    }
+
+    /// Registers one guest exchange that may carry an upload body.
+    ///
+    /// The returned admission resolves when the daemon accepts the link, the
+    /// browser and the budget. A refusal answers the exchange instead, which
+    /// closes the admission without a go-ahead.
+    pub async fn expect_guest_exchange(
+        &self,
+        request_id: &str,
+        daemon_device_id: Uuid,
+    ) -> GuestExchange {
+        let (tx, response) = oneshot::channel();
+        let (admit_tx, admission) = oneshot::channel();
         self.guests.write().await.waiters.insert(
             request_id.to_owned(),
             GuestWaiter {
                 daemon_device_id,
                 tx,
+                admission: Some(admit_tx),
             },
         );
-        rx
+        GuestExchange {
+            admission,
+            response,
+        }
+    }
+
+    /// Delivers one daemon's go-ahead for a chunked guest body.
+    ///
+    /// Returns false when there is no waiter, the answer already arrived, or
+    /// the go-ahead came from a device that was not asked.
+    pub async fn admit_guest(&self, from_device: Uuid, request_id: &str) -> bool {
+        let mut book = self.guests.write().await;
+        let Some(waiter) = book.waiters.get_mut(request_id) else {
+            return false;
+        };
+        if waiter.daemon_device_id != from_device {
+            return false;
+        }
+        // One admission per exchange; a second frame cannot restart an upload.
+        let Some(admission) = waiter.admission.take() else {
+            return false;
+        };
+        admission.send(()).is_ok()
     }
 
     /// Delivers a daemon's guest answer to the waiting browser request.
@@ -454,6 +506,14 @@ impl RelayHub {
     /// waiter behind.
     pub async fn pending_guests(&self) -> usize {
         self.guests.read().await.waiters.len()
+    }
+
+    /// How many chunked answers are still assembling.
+    ///
+    /// A failed exchange must leave no body behind either, not just no waiter.
+    #[doc(hidden)]
+    pub async fn pending_guest_bodies(&self) -> usize {
+        self.guests.read().await.bodies.len()
     }
 
     /// Whether a daemon for this machine is connected right now.
@@ -884,6 +944,22 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
             }
             Ok(())
         }
+        RelayFrameKind::GuestHttpAdmit => {
+            // Only a daemon admits an upload, and only for the exchange it was
+            // asked to handle.
+            if authed.device.kind != "daemon" {
+                return Ok(());
+            }
+            if let Ok(admission) =
+                serde_json::from_slice::<h4rn_protocol::GuestHttpAdmission>(&frame.payload)
+            {
+                state
+                    .relay
+                    .admit_guest(authed.device.id, &admission.request_id)
+                    .await;
+            }
+            Ok(())
+        }
         RelayFrameKind::GuestHttpChunk => {
             if authed.device.kind != "daemon" {
                 return Ok(());
@@ -1131,6 +1207,52 @@ mod tests {
         let answer = waiter.await.expect("answer");
         assert_eq!(answer.status, 200);
         assert_eq!(answer.body, b"hello");
+    }
+
+    #[tokio::test]
+    async fn an_upload_starts_only_after_the_daemon_admits_it() {
+        let hub = RelayHub::new();
+        let daemon = Uuid::now_v7();
+        let other = Uuid::now_v7();
+        let exchange = hub.expect_guest_exchange("g1", daemon).await;
+        // A different device cannot admit another machine's upload.
+        assert!(
+            !hub.admit_guest(other, "g1").await,
+            "another device admitted the upload"
+        );
+        assert!(hub.admit_guest(daemon, "g1").await);
+        exchange
+            .admission
+            .await
+            .expect("the admission never reached the browser");
+        // One admission per exchange: a repeat cannot restart the upload.
+        assert!(!hub.admit_guest(daemon, "g1").await);
+    }
+
+    #[tokio::test]
+    async fn a_refused_upload_never_gets_an_admission() {
+        let hub = RelayHub::new();
+        let daemon = Uuid::now_v7();
+        let exchange = hub.expect_guest_exchange("g1", daemon).await;
+        assert!(
+            hub.complete_guest(
+                daemon,
+                h4rn_protocol::GuestHttpResponse {
+                    request_id: "g1".into(),
+                    status: 410,
+                    chunked: false,
+                    headers: Vec::new(),
+                    body: b"gone".to_vec(),
+                    set_cookie: None,
+                }
+            )
+            .await
+        );
+        assert!(
+            exchange.admission.await.is_err(),
+            "a refused upload was told to send its body"
+        );
+        assert_eq!(hub.pending_guests().await, 0);
     }
 
     #[tokio::test]

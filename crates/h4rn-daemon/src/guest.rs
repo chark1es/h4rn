@@ -235,6 +235,9 @@ pub enum SubmitPhase {
     /// After the quota is reserved in the database and before files are
     /// written.
     AfterReserve,
+    /// After the first placement check and before the request becomes visible
+    /// to the owner, so a test can settle the thread in that window.
+    BeforePublish,
 }
 
 /// A test's hold on one submission.
@@ -332,6 +335,9 @@ pub struct GuestService {
     /// A test's pause point for the next cleanup claim, between the row it read
     /// and its conditional update.
     cleanup_gate: Mutex<Option<Arc<ClaimGate>>>,
+    /// A test's pause point after the next guest snapshot read its events and
+    /// before it revalidates its link.
+    snapshot_gate: Mutex<Option<Arc<ClaimGate>>>,
 }
 
 impl std::fmt::Debug for GuestService {
@@ -376,6 +382,7 @@ impl GuestService {
             submit_gate: Mutex::new(None),
             claim_gate: Mutex::new(None),
             cleanup_gate: Mutex::new(None),
+            snapshot_gate: Mutex::new(None),
         };
         service.ensure_schema().await?;
         std::fs::create_dir_all(service.guest_root())?;
@@ -467,6 +474,25 @@ impl GuestService {
         gate
     }
 
+    /// Pauses the next guest snapshot after it read the thread and before it
+    /// revalidates its link, until the returned gate is released.
+    ///
+    /// Used by a test that replaces the link in that window. It is not read by
+    /// the production path unless a test installs one.
+    #[doc(hidden)]
+    pub fn pause_next_snapshot(&self) -> Arc<ClaimGate> {
+        let gate = Arc::new(ClaimGate {
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .snapshot_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
     /// Waits at the claim gate a test installed.
     async fn hold_claim(&self) {
         let gate = self
@@ -510,6 +536,33 @@ impl GuestService {
         gate.hold().await;
         let mut slot = self
             .cleanup_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &gate))
+        {
+            *slot = None;
+        }
+    }
+
+    /// Waits at the snapshot gate a test installed, after the events were read
+    /// and before the link is revalidated.
+    async fn hold_snapshot(&self) {
+        let gate = self
+            .snapshot_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        if gate.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        gate.hold().await;
+        let mut slot = self
+            .snapshot_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if slot
@@ -738,7 +791,12 @@ impl GuestService {
                     .bind(&request.link_id)
                     .fetch_one(&self.pool)
                     .await?;
-            if request.status == "pending" && linked > 0 {
+            // A row whose link still lives keeps the request id it names, even
+            // after its answer: the guest snapshot uses those ids to deliver a
+            // `GuestRequestResolved` to a browser that polls later. Ending the
+            // link deletes the finished rows; a row whose link is gone has no
+            // guest left to tell and is removed here.
+            if linked > 0 && matches!(request.status.as_str(), "pending" | "sent" | "dismissed") {
                 continue;
             }
             // A Send, a submission or a publication still running owns its
@@ -1121,6 +1179,17 @@ impl GuestService {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&link.link_id);
         self.discard_pending(link).await;
+        // A finished request keeps its row while its link lives, so the guest
+        // can still learn that its card resolved. With the link gone no guest
+        // can read it, so the row goes with the link. A `sending` row belongs
+        // to a Send that will finish on its own; the sweep takes it later.
+        sqlx::query(
+            "DELETE FROM guest_requests
+             WHERE link_id = ? AND status IN ('sent', 'dismissed')",
+        )
+        .bind(&link.link_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1451,7 +1520,7 @@ impl GuestService {
                 }
             }
             (Method::Get, ["state"]) => match self.resolve(token, cookie, false, true).await {
-                Ok(resolved) => match self.snapshot(&resolved, 0).await {
+                Ok(resolved) => match self.snapshot(token, cookie, &resolved, 0).await {
                     Ok(snapshot) => GuestHttpOutput::json(200, &snapshot),
                     Err(error) => self.error(error),
                 },
@@ -1460,7 +1529,7 @@ impl GuestService {
             (Method::Get, ["state", seq]) => {
                 let since = seq.parse::<u64>().unwrap_or(0);
                 match self.resolve(token, cookie, false, true).await {
-                    Ok(resolved) => match self.snapshot(&resolved, since).await {
+                    Ok(resolved) => match self.snapshot(token, cookie, &resolved, since).await {
                         Ok(snapshot) => GuestHttpOutput::json(200, &snapshot),
                         Err(error) => self.error(error),
                     },
@@ -1552,7 +1621,18 @@ impl GuestService {
     /// Request events are scoped to this link: a replacement guest never sees a
     /// previous link's waiting or dismissed text and file names. A message the
     /// owner sent appears through the normal transcript, so nothing is lost.
-    async fn snapshot(&self, resolved: &Resolved, since: u64) -> Result<GuestSnapshot, GuestError> {
+    ///
+    /// The read happens under the link that `resolved` named, and the link is
+    /// checked again afterwards: an owner who replaces or stops the link while
+    /// the journal is being read must not hand the old browser events recorded
+    /// after that decision.
+    async fn snapshot(
+        &self,
+        token: &str,
+        cookie: Option<&str>,
+        resolved: &Resolved,
+        since: u64,
+    ) -> Result<GuestSnapshot, GuestError> {
         if resolved.state != GuestLinkState::Active {
             return Ok(GuestSnapshot {
                 state: resolved.state,
@@ -1579,6 +1659,28 @@ impl GuestService {
                 .await?
                 .into_iter()
                 .collect();
+        // A test can pause here, after the events were read, to replace the
+        // link before this answer is built.
+        self.hold_snapshot().await;
+        // The exact link that allowed the read must still be the live one. A
+        // stop, a replacement or a binding that moved to another browser
+        // refuses the whole snapshot rather than delivering events the owner
+        // revoked mid-read.
+        let current = match self.resolve(token, cookie, false, false).await {
+            Ok(current) => current,
+            Err(GuestError::Link(_)) => {
+                return Err(GuestError::Link(
+                    "This link was stopped or replaced by the owner.".into(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if current.state != GuestLinkState::Active || current.link.link_id != resolved.link.link_id
+        {
+            return Err(GuestError::Link(
+                "This link was stopped or replaced by the owner.".into(),
+            ));
+        }
         Ok(GuestSnapshot {
             state: GuestLinkState::Active,
             thread: Some(guest_view(&snapshot.summary)),
@@ -1794,6 +1896,9 @@ impl GuestService {
                 "This thread has settled. The owner can share it again after reopening it.".into(),
             ));
         }
+        // A test can pause here, between the placement check and the moment the
+        // card is raised, to settle the thread in that window.
+        self.hold_submit(SubmitPhase::BeforePublish).await;
         // Only now does the request become visible. The status starts as
         // `publishing`: the row and its files are the first half of one
         // decision, and the owner's card is the second. A crash in between
@@ -1820,6 +1925,17 @@ impl GuestService {
             self.remove_request(&request_id, &directory).await;
             return Err(GuestError::Link(
                 "The owner stopped sharing this thread.".into(),
+            ));
+        }
+        // Placement is not a column the guarded update can see (a thread's tab
+        // lives in its journal events), and an archive commits without this
+        // lock. Re-check it now that the row is `publishing`: the settle hook
+        // waits for the submission lock, so a thread that settled in the window
+        // is caught here instead of getting a card it can never answer.
+        if self.is_settled(&resolved.link.thread_id).await {
+            self.remove_request(&request_id, &directory).await;
+            return Err(GuestError::Link(
+                "This thread has settled. The owner can share it again after reopening it.".into(),
             ));
         }
 
@@ -2264,15 +2380,22 @@ fn guest_event(event: Event) -> Option<Event> {
             request_id,
             sent,
         }),
+        // An error's text is a diagnostic for the owner: it can name the
+        // workspace, a fixed working directory or a binary on the host. The
+        // guest gets a plain sentence and whether trying again is safe; the
+        // owner's own projection still carries every detail.
         Event::Error {
             thread_id,
-            message,
-            hint,
             retryable,
+            ..
         } => Some(Event::Error {
             thread_id,
-            message,
-            hint,
+            message: "The agent hit an error.".to_owned(),
+            hint: Some(if retryable {
+                "Try again, or ask the owner to check this thread.".to_owned()
+            } else {
+                "Ask the owner to check this thread.".to_owned()
+            }),
             retryable,
         }),
         _ => None,
