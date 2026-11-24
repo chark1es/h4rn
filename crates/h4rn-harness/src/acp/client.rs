@@ -1878,13 +1878,21 @@ async fn handle_inbound(shared: &Arc<Shared>, id: Value, method: &str, params: V
         }
         "session/request_permission" => {
             let request = AcpPermissionRequest::from_value(&params);
-            publish(
+            let published = publish(
                 shared,
                 AcpEvent::PermissionRequest {
-                    request_id: id,
+                    request_id: id.clone(),
                     request,
                 },
             );
+            if !published {
+                // A permission request the reserved queue could not take has no
+                // consumer, and ACP has no "the client dropped it" outcome: an
+                // unanswered request would leave the agent waiting (and the
+                // turn hanging) forever. Answer it here with the protocol's
+                // cancellation outcome, the same reply Stop sends.
+                send_response(shared, id, json!({"outcome": {"outcome": "cancelled"}})).await;
+            }
         }
         "terminal/create"
         | "terminal/output"
@@ -3552,6 +3560,121 @@ mod tests {
         assert!(
             asked <= RESERVED_QUEUE_CAPACITY + 4,
             "the exit report waited behind {asked} permission requests"
+        );
+    }
+
+    /// A permission request the reserved queue refuses is still answered.
+    ///
+    /// The reserved queue bounds how many handshakes may wait. A request past
+    /// that bound used to be dropped silently, so the agent blocked on an id no
+    /// one would ever answer and the turn hung. Every request must now get
+    /// exactly one reply: the bridge answers the ones it is handed, and the
+    /// reader itself answers the ones the queue refused with the protocol's
+    /// cancellation outcome.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_permission_request_is_answered_even_past_the_reserved_bound() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let replies = workspace.path().join("permission-replies.jsonl");
+        let replies_arg = replies.to_str().expect("utf-8 path").to_string();
+        // The peer answers `initialize`, then drains every frame the client
+        // writes into `replies` while it asks FLOOD times with a unique id. It
+        // stops once every reply is in, or after a quiet second, so a missing
+        // reply ends the wait instead of hanging the test.
+        let script = format!(
+            "read -r line; \
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1,\"agentInfo\":{{\"name\":\"Flood Peer\"}}}}}}'; \
+             : > '{replies_arg}'; \
+             exec 3<&0; \
+             ( while IFS= read -r line <&3; do printf '%s\\n' \"$line\" >> '{replies_arg}'; done ) & \
+             drainer=$!; \
+             i=0; while [ \"$i\" -lt {FLOOD} ]; do \
+               printf '%s\\n' \"{{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":$i,\\\"method\\\":\\\"session/request_permission\\\",\\\"params\\\":{{\\\"sessionId\\\":\\\"s-1\\\"}}}}\"; \
+               i=$((i+1)); \
+             done; \
+             last=-1; quiet=0; \
+             while [ \"$quiet\" -lt 20 ]; do \
+               lines=$(wc -l < '{replies_arg}'); \
+               if [ \"$lines\" -ge {FLOOD} ]; then break; fi; \
+               if [ \"$lines\" -eq \"$last\" ]; then quiet=$((quiet+1)); else quiet=0; last=$lines; fi; \
+               sleep 0.05; \
+             done; \
+             kill \"$drainer\" 2>/dev/null; \
+             exit 0"
+        );
+        let mut config =
+            AcpClientConfig::new("/bin/sh", workspace.path()).args(["-c", script.as_str()]);
+        config.event_capacity = 16;
+        let client = AcpClient::spawn(config).expect("spawn the agent");
+        let mut events = client.take_events().expect("events");
+        let info = client.initialize().await.expect("initialize");
+        assert_eq!(info.agent_name, "Flood Peer");
+
+        // The bridge answers every handshake it is handed, which is what the
+        // real adapter does. The requests the queue dropped never reach it, so
+        // only the reader can answer those.
+        let consumer = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut answered = 0usize;
+                while let Some(event) = events.recv().await {
+                    match event {
+                        AcpEvent::PermissionRequest { request_id, .. } => {
+                            client
+                                .respond_permission(&request_id, None)
+                                .await
+                                .expect("answer a delivered permission request");
+                            answered += 1;
+                        }
+                        // The peer exits once every request is answered, so the
+                        // exit report ends the consumer; the event stream only
+                        // closes when the client itself is dropped.
+                        AcpEvent::Exited { .. } => break,
+                        _ => {}
+                    }
+                }
+                answered
+            })
+        };
+
+        wait_for_exit_published(&client).await;
+        assert!(
+            client.shared.dropped_permissions.load(Ordering::SeqCst) > 0,
+            "a 5,000-request flood dropped nothing, so this proves nothing"
+        );
+        assert!(
+            client.shared.queued_permissions.load(Ordering::SeqCst) <= RESERVED_QUEUE_CAPACITY,
+            "the permission queue grew past its bound: {}",
+            client.shared.queued_permissions.load(Ordering::SeqCst)
+        );
+        client.shutdown().await.expect("shutdown");
+        let answered = consumer.await.expect("consumer");
+
+        let mut replies_by_id: BTreeMap<i64, usize> = BTreeMap::new();
+        let text = std::fs::read_to_string(&replies).expect("the peer's replies");
+        for line in text.lines() {
+            let frame: Value = serde_json::from_str(line).expect("a reply frame");
+            let id = frame.get("id").and_then(Value::as_i64).expect("a reply id");
+            *replies_by_id.entry(id).or_default() += 1;
+        }
+        let unanswered: Vec<i64> = (0..FLOOD as i64)
+            .filter(|id| !replies_by_id.contains_key(id))
+            .collect();
+        assert!(
+            unanswered.is_empty(),
+            "{} permission requests were never answered (delivered: {answered}); first: {:?}",
+            unanswered.len(),
+            &unanswered[..unanswered.len().min(8)]
+        );
+        let duplicated: Vec<(i64, usize)> = replies_by_id
+            .iter()
+            .filter(|(_, count)| **count != 1)
+            .map(|(id, count)| (*id, *count))
+            .collect();
+        assert!(
+            duplicated.is_empty(),
+            "a permission request got more than one reply: {duplicated:?}"
         );
     }
 
