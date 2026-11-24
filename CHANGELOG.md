@@ -516,6 +516,16 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
+  now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
+  `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,
+  and a daemon with only concrete network binds offers no direct link at all instead of a dead one.
+  A connection from `127.0.0.1` to a dual-stack `[::]` bind counts as this machine for the guest
+  routes and `/ws`. Connect now copies the link state the daemon rendered, so an expired,
+  revoked, switched-off or already-bound link opens on its notice with no composer instead of the
+  active page. The daemon notices a closed app socket even while a request is running, and a Send
+  or Dismiss that already claimed its row carries on to `sent`/`dismissed` and deletes its files;
+  the same holds for a dropped guest upload.
 - **A guest exchange never stalls the relay, and a guest request is one decision with its card.**
   Guest work now runs in its own tasks behind a small concurrency cap, so a chunked 10 MB answer, a
   snapshot or a file write can never block the loop that drains the relay socket or starve other

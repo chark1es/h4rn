@@ -1581,7 +1581,9 @@ deleted, and the resolved event names its request. A crash between the claim and
 the event therefore leaves a row the startup sweep can resolve, and a repeated
 event from that sweep cannot clear another guest's hand. The periodic sweep
 leaves a `sending` or `reserving` row alone while a task may still be reading
-it; only the startup pass, where no reader can exist, recovers it.
+it; only the startup pass, where no reader can exist, recovers it. A connection
+reads frames on its own task, so a closed owner socket drops the in-flight
+handler; a submission, Send and Dismiss run separately and finish anyway.
 
 Ending access and deleting files are separate steps. Ending a link deletes its
 row first and removes its page-load cookies, then settles waiting messages; a
@@ -1600,9 +1602,11 @@ The narrow surface is enforced by the token's single thread, not by a scope.
 When the machine is linked to Connect, the link names
 `<connect>/guest/<machine>/<token>`. Connect serves the guest page itself, from a
 fixed document admitted by a hash-based CSP; it never relays daemon HTML onto its
-own origin. Each exchange travels to the daemon over its existing authenticated
-relay socket and is answered by that daemon only: a waiter is bound to the
-selected daemon's device id, and a reply from any other device is ignored.
+own origin. It copies only the link state the daemon rendered into that page, so
+a dead link starts on its notice. Each exchange travels to the daemon over its
+existing authenticated relay socket and is answered by that daemon only: a
+waiter is bound to the selected daemon's device id, and a reply from any other
+device is ignored.
 Bodies are split into bounded frames, so a 10 MB upload never grows a shared
 WebSocket frame; Connect refuses an exchange over the guest limit before it
 reaches the socket, and rebuilds every response header, including the binding
@@ -1613,11 +1617,16 @@ in Connect's tab. Guest routes are traced by template, never by raw URI. The
 payload is plaintext at that hop, as the rest of the relay path is TLS to
 Connect plus Noise only for device sessions; a guest has no Noise key.
 
-Without Connect the daemon names its own loopback listener. A direct link is a
-bearer token and the daemon has no TLS listener, so it is not offered over a LAN
-address; the share dialog says the link works only on this machine and points to
-Connect for a teammate elsewhere. Only the owner or an admin-scoped device may
-copy the URL; a view device gets the link metadata with `url: null`.
+Without Connect the daemon names its own loopback listener. It picks the first
+listener that really serves direct guest routes, including a loopback
+`--extra-bind`, and names `127.0.0.1` for an IPv4 wildcard bind or `[::1]` for
+an IPv6 loopback or wildcard bind. A daemon with only concrete network binds
+offers no direct link and says why. A direct link is a bearer token and the
+daemon has no TLS listener, so it is not offered over a LAN address; the share
+dialog says the link works only on this machine and points to Connect for a
+teammate elsewhere. An IPv4 connection to a dual-stack listener is recognised
+as this machine. Only the owner or an admin-scoped device may copy the URL; a
+view device gets the link metadata with `url: null`.
 
 The guest page polls its snapshot every couple of seconds rather than opening a
 second long-lived socket. That keeps one transport (HTTP) working through both

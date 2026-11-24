@@ -1559,6 +1559,85 @@ async fn direct_guest_routes_follow_the_bound_address() {
 }
 
 #[tokio::test]
+async fn the_direct_link_names_the_first_loopback_listener() {
+    // An IPv6 loopback bind names itself, not an IPv4 address that cannot
+    // answer.
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("no IPv6 loopback on this machine; the [::1] half cannot be exercised");
+    } else {
+        let daemon = boot_on("[::1]:0".parse().expect("ipv6 loopback"), None).await;
+        let port = daemon.addr.port();
+        assert_eq!(
+            daemon.guest.local_base(),
+            Some(format!("http://[::1]:{port}/guest")),
+            "an IPv6 loopback bind named an address the link cannot reach"
+        );
+        daemon.stop().await;
+    }
+
+    let Some(lan) = h4rn_daemon::remote::local_ipv4() else {
+        eprintln!("no non-loopback address on this machine; the LAN halves cannot be exercised");
+        return;
+    };
+
+    // A LAN primary bind has no direct guest path, but a loopback extra bind
+    // does; the link must name that listener's port.
+    let daemon = boot_on(
+        std::net::SocketAddr::new(lan, 0),
+        Some("127.0.0.1:0".parse().expect("loopback extra")),
+    )
+    .await;
+    let extra = daemon.addrs[1];
+    assert!(extra.ip().is_loopback());
+    assert_eq!(
+        daemon.guest.local_base(),
+        Some(format!("http://127.0.0.1:{}/guest", extra.port())),
+        "the link ignored the loopback extra bind"
+    );
+    daemon.stop().await;
+
+    // With no listener that serves direct guest routes there is no link to
+    // hand out.
+    let daemon = boot_on(std::net::SocketAddr::new(lan, 0), None).await;
+    assert_eq!(
+        daemon.guest.local_base(),
+        None,
+        "a LAN-only daemon offered a direct link"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_dual_stack_bind_treats_an_ipv4_loopback_peer_as_this_machine() {
+    if std::net::TcpListener::bind("[::]:0").is_err() {
+        eprintln!("no dual-stack bind on this machine; the v4-mapped peer cannot be exercised");
+        return;
+    }
+    let daemon = boot_on("[::]:0".parse().expect("dual-stack"), None).await;
+    let port = daemon.addr.port();
+    let v4 = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+
+    // The guest page answers a v4 connection, whose peer address on this
+    // socket is `::ffff:127.0.0.1`.
+    let (status, _, body) = Browser::new(format!("http://{v4}"))
+        .get("/guest/not-a-real-token")
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the guest page refused a v4-mapped loopback peer: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(String::from_utf8_lossy(&body).contains(r#"data-state="disabled""#));
+
+    // `/ws` makes the same check, so the owner's socket also opens.
+    let mut owner = Client::connect_at(&daemon, v4).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "mapped loopback").await;
+    assert!(thread_id.as_str().starts_with("th_"));
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_full_pending_budget_refuses_an_upload_before_its_body_is_buffered() {
     let daemon = boot().await;
     let base = format!("http://{}", daemon.addr);
@@ -3311,6 +3390,198 @@ async fn a_dismiss_that_claimed_its_row_is_never_reported_missing() {
         .expect("dismiss task")
         .expect("a claimed dismissal reported missing");
     assert_eq!(request_status(&daemon, &request_id).await, None);
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    daemon.stop().await;
+}
+
+/// Opens an owner socket and completes `Hello`, leaving it ready to send one
+/// request whose reply the test may never read.
+async fn owner_socket(daemon: &TestDaemon) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+    let url = format!("ws://{}/ws?token={}", daemon.addr, daemon.token);
+    let (mut ws, _) = connect_async(url).await.expect("connect");
+    let hello = ClientFrame {
+        id: 1,
+        body: ClientRequest::Hello {
+            protocol_version: h4rn_protocol::PROTOCOL_VERSION,
+            device: DeviceInfo {
+                device_id: DeviceId::new("dev_owner"),
+                name: "owner".into(),
+                platform: "linux".into(),
+                app_version: "1.0.1".into(),
+            },
+        },
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&hello).expect("hello json").into(),
+    ))
+    .await
+    .expect("send hello");
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(20), ws.next())
+            .await
+            .expect("hello in time")
+            .expect("socket open")
+            .expect("frame ok");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let frame: ServerFrame = serde_json::from_str(&text).expect("server frame");
+        if let ServerFrame::Response { id: 1, result } = frame {
+            assert!(result.is_ok(), "hello failed: {result:?}");
+            break;
+        }
+    }
+    ws
+}
+
+/// Closes an owner socket with a reset, as a closing app window does.
+#[allow(deprecated)] // SO_LINGER zero is how a test closes a socket with a reset.
+fn reset_socket(ws: WebSocketStream<MaybeTlsStream<TcpStream>>) {
+    if let MaybeTlsStream::Plain(stream) = ws.get_ref() {
+        stream
+            .set_linger(Some(Duration::ZERO))
+            .expect("linger option");
+    }
+    drop(ws);
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn a_send_finishes_after_the_owner_disconnects_mid_claim() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "send disconnect").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "run even if I leave".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"keep me"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists());
+
+    // Hold the Send after it claimed the row, then drop the owner's socket and
+    // let the claim continue. The work belongs to the daemon, not the socket.
+    let gate = daemon.guest.pause_next_claim();
+    let mut ws = owner_socket(&daemon).await;
+    let request = ClientFrame {
+        id: 2,
+        body: ClientRequest::SendGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&request)
+            .expect("request json")
+            .into(),
+    ))
+    .await
+    .expect("send request");
+    gate.arrived().await;
+    reset_socket(ws);
+    // Let the reader task observe the reset; the paused claim must not be the
+    // only thing this connection is waiting on.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.release();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if request_status(&daemon, &request_id).await.as_deref() == Some("sent") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a dropped owner socket stranded the Send in {request_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!directory.exists(), "the sent request kept its files");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "the sent request still shows as a Request"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn a_dismiss_finishes_after_the_owner_disconnects_mid_claim() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "dismiss disconnect").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "throw me away".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"delete me"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists());
+
+    let gate = daemon.guest.pause_next_claim();
+    let mut ws = owner_socket(&daemon).await;
+    let request = ClientFrame {
+        id: 2,
+        body: ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&request)
+            .expect("request json")
+            .into(),
+    ))
+    .await
+    .expect("send request");
+    gate.arrived().await;
+    reset_socket(ws);
+    // Let the reader task observe the reset; the paused claim must not be the
+    // only thing this connection is waiting on.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.release();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if request_status(&daemon, &request_id).await.as_deref() == Some("dismissed") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a dropped owner socket stranded the Dismiss in {request_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!directory.exists(), "the dismissed request kept its files");
     assert_eq!(
         summary_pending_guest_requests(&mut owner, &thread_id).await,
         0

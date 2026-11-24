@@ -996,7 +996,7 @@ impl GuestService {
             links_enabled: enabled,
             link: Some(GuestLink {
                 url: raw
-                    .filter(|_| include_url)
+                    .filter(|_| include_url && !base.is_empty())
                     .map(|token| self.url_for(base, &token)),
                 expires_at: row.expires_at,
                 bound: row.binding_hash.is_some(),

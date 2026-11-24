@@ -34,7 +34,9 @@ pub(super) async fn handle(
 ) -> Result<ResponseBody, ProtoError> {
     match request {
         ClientRequest::GetGuestSharing { thread_id } => {
-            let base = share_base(conn);
+            // With no relay and no loopback listener there is no base to name:
+            // an existing link still shows its expiry, but its URL is null.
+            let base = share_base(conn).unwrap_or_default();
             let visible = may_read_link_url(conn);
             let sharing = conn
                 .state
@@ -55,7 +57,13 @@ pub(super) async fn handle(
             Ok(ResponseBody::GuestSharing { sharing })
         }
         ClientRequest::ShareThreadWithGuest { thread_id } => {
-            let base = share_base(conn);
+            let Some(base) = share_base(conn) else {
+                return Err(ProtoError::new(
+                    h4rn_protocol::ProtoErrorCode::InvalidRequest,
+                    "A direct guest link needs a loopback listener, and this daemon has none.",
+                    "Start the daemon on a loopback address (or add a loopback --extra-bind), or link this machine to Connect and try again",
+                ));
+            };
             let created = conn
                 .state
                 .guest
@@ -191,22 +199,20 @@ pub(super) fn spawn(_conn: &Connection) -> JoinHandle<()> {
 /// A linked machine advertises the relay address, so the guest reaches it the
 /// same way a paired device does. Without Connect a direct link is loopback
 /// only: the daemon has no TLS listener, and a plaintext LAN URL would put the
-/// bearer token on the network. The share dialog says it works only here.
-fn share_base(conn: &Connection) -> String {
+/// bearer token on the network. The share dialog says it works only here. A
+/// daemon with no listener that serves direct guest routes returns `None`, so
+/// the owner is told to add a loopback listener or use Connect instead of
+/// receiving a link that cannot answer.
+fn share_base(conn: &Connection) -> Option<String> {
     if let Some(remote) = &conn.state.remote
         && let Some(client) = remote.client()
         && client.is_logged_in()
         && let Some(base) = client.public_base_url()
         && let Some(machine) = client.machine_id()
     {
-        return format!("{}/guest/{machine}", base.trim_end_matches('/'));
+        return Some(format!("{}/guest/{machine}", base.trim_end_matches('/')));
     }
-    conn.state.guest.local_base().unwrap_or_else(|| {
-        format!(
-            "http://127.0.0.1:{}/guest",
-            conn.state.network.snapshot().port
-        )
-    })
+    conn.state.guest.local_base()
 }
 
 /// Whether this session may read a guest link's bearer URL.

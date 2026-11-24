@@ -12,7 +12,7 @@
 //! - a slow writer never blocks the thread manager or another client.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -186,6 +186,34 @@ fn operator_router(state: AppState, bound: SocketAddr) -> Router {
 /// Connect is the way to share from there.
 fn serves_direct_guest(bound: SocketAddr) -> bool {
     bound.ip().is_loopback() || bound.ip().is_unspecified()
+}
+
+/// The loopback URL a listener's direct guest routes answer on, when it has any.
+///
+/// A wildcard bind answers a loopback connection on the same port, so the link
+/// names `127.0.0.1` for an unspecified IPv4 bind and `[::1]` for an IPv6
+/// loopback or unspecified bind. A concrete non-loopback bind has no direct
+/// path at all.
+pub(crate) fn direct_guest_base(bound: SocketAddr) -> Option<String> {
+    if !serves_direct_guest(bound) {
+        return None;
+    }
+    let host = match bound.ip() {
+        IpAddr::V4(ip) if ip.is_loopback() => ip.to_string(),
+        IpAddr::V4(_) => "127.0.0.1".to_owned(),
+        IpAddr::V6(ip) if ip.is_loopback() => "[::1]".to_owned(),
+        IpAddr::V6(_) => "[::1]".to_owned(),
+    };
+    Some(format!("http://{host}:{}/guest", bound.port()))
+}
+
+/// Whether a peer is this machine, including an IPv4-mapped address.
+///
+/// A dual-stack `[::]` bind reports an IPv4 connection as `::ffff:127.0.0.1`,
+/// which is not itself a loopback address. Canonicalizing first makes that
+/// connection the loopback peer it really is.
+fn peer_is_loopback(peer: SocketAddr) -> bool {
+    peer.ip().to_canonical().is_loopback()
 }
 
 /// Every route except the webhook endpoint.
@@ -410,7 +438,7 @@ async fn guest_blob_handler(
 /// one `/ws` makes. It answers 404 like an unmounted route: a network peer
 /// must not be able to confirm that a guest path exists.
 fn guest_peer_refused(peer: SocketAddr) -> Option<Response> {
-    (!peer.ip().is_loopback())
+    (!peer_is_loopback(peer))
         .then(|| guest_output(crate::guest::GuestHttpOutput::text(404, "Not found.")))
 }
 
@@ -689,7 +717,7 @@ async fn ws_handler(
 ) -> Response {
     // Plain WebSocket is unencrypted. It is only allowed on loopback; every
     // remote path must use `/secure`, where Noise authenticates and encrypts.
-    if !peer.ip().is_loopback() {
+    if !peer_is_loopback(peer) {
         return (
             StatusCode::FORBIDDEN,
             Json(ProtoError::new(
@@ -1046,13 +1074,30 @@ where
     S: Sink<Message, Error = E> + Stream<Item = Result<Message, E>> + Unpin + Send + 'static,
     E: std::fmt::Debug + Send + 'static,
 {
-    let (sink, mut stream) = socket.split();
+    let (sink, stream) = socket.split();
     let (tx, rx) = mpsc::channel::<Outbound>(OUTBOUND_CAPACITY);
     let overflowed = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
     let last_seq = Arc::new(AtomicU64::new(0));
     let topics = Arc::new(RwLock::new(vec![Topic::All]));
     let ready = Arc::new(AtomicBool::new(false));
+
+    // Read frames on their own task so a request that runs for seconds never
+    // hides a client that has gone away. When the socket ends, the in-flight
+    // handler is dropped. Work that must outlive the socket (a guest
+    // submission, Send or Dismiss) already runs in its own task.
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Message>(8);
+    let (closed_tx, mut closed_rx) = watch::channel(false);
+    let reader = tokio::spawn(async move {
+        let mut stream = stream;
+        while let Some(message) = stream.next().await {
+            let Ok(message) = message else { break };
+            if frame_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        let _ = closed_tx.send(true);
+    });
 
     let writer = tokio::spawn(writer_loop(
         sink,
@@ -1093,13 +1138,22 @@ where
     ));
     let service_forwards = handlers::spawn_forwarders(&connection);
 
-    while let Some(message) = stream.next().await {
-        let Ok(message) = message else {
-            break;
-        };
+    while let Some(message) = frame_rx.recv().await {
         match message {
             Message::Text(text) => {
-                let Some(reply) = connection.handle_text(&text).await else {
+                let reply = {
+                    let handler = connection.handle_text(&text);
+                    tokio::pin!(handler);
+                    tokio::select! {
+                        reply = &mut handler => reply,
+                        // The peer closed the socket while this request was
+                        // running. Drop the handler: a caller that is gone
+                        // cannot receive its answer, and anything that must
+                        // finish has been spawned onto its own task.
+                        _ = closed_rx.changed() => break,
+                    }
+                };
+                let Some(reply) = reply else {
                     continue;
                 };
                 if connection.send(Outbound::Text(reply)).await.is_err() {
@@ -1118,6 +1172,7 @@ where
         }
     }
 
+    reader.abort();
     journal_forward.abort();
     for handle in service_forwards {
         handle.abort();
@@ -2499,6 +2554,47 @@ mod tests {
         // A concrete network address is not a place a bearer token may live.
         assert!(!serves_direct_guest("192.168.1.9:47800".parse().unwrap()));
         assert!(!serves_direct_guest("100.64.1.5:47800".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_direct_link_names_the_loopback_form_of_its_listener() {
+        assert_eq!(
+            direct_guest_base("127.0.0.1:47800".parse().unwrap()).as_deref(),
+            Some("http://127.0.0.1:47800/guest")
+        );
+        // The wildcard bind answers this machine on loopback, so the link uses
+        // the address that actually reaches it.
+        assert_eq!(
+            direct_guest_base("0.0.0.0:47800".parse().unwrap()).as_deref(),
+            Some("http://127.0.0.1:47800/guest")
+        );
+        assert_eq!(
+            direct_guest_base("[::1]:47800".parse().unwrap()).as_deref(),
+            Some("http://[::1]:47800/guest")
+        );
+        assert_eq!(
+            direct_guest_base("[::]:47800".parse().unwrap()).as_deref(),
+            Some("http://[::1]:47800/guest")
+        );
+        // A concrete network listener serves no direct guest route, so it must
+        // not hand out a URL that cannot answer.
+        assert_eq!(
+            direct_guest_base("192.168.1.9:47800".parse().unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn an_ipv4_mapped_peer_is_this_machine() {
+        assert!(peer_is_loopback("127.0.0.1:52000".parse().unwrap()));
+        assert!(peer_is_loopback("[::1]:52000".parse().unwrap()));
+        assert!(peer_is_loopback(
+            "[::ffff:127.0.0.1]:52000".parse().unwrap()
+        ));
+        assert!(!peer_is_loopback("192.168.1.9:52000".parse().unwrap()));
+        assert!(!peer_is_loopback(
+            "[::ffff:192.168.1.9]:52000".parse().unwrap()
+        ));
     }
 
     #[test]

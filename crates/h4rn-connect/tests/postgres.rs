@@ -1085,6 +1085,7 @@ fn fake_guest_answer(
     request: h4rn_protocol::GuestHttpRequest,
     token: &str,
     binding: &str,
+    page_state: &str,
 ) -> h4rn_protocol::GuestHttpResponse {
     let request_id = request.request_id.clone();
     let cookie = request
@@ -1102,15 +1103,16 @@ fn fake_guest_answer(
     let set_cookie =
         format!("h4rn_guest={binding}; Path={prefix}; HttpOnly; Secure; SameSite=Strict");
     let (status, headers, body) = if request.path == format!("/guest/{token}") {
-        // The daemon's page is only asked for its page-load cookie; Connect
-        // must never return this HTML.
+        // The daemon's page is asked for its page-load cookie and rendered
+        // state; Connect must never return this HTML.
         (
             200,
             vec![
                 ("content-type".to_string(), "text/html".to_string()),
                 ("set-cookie".to_string(), set_cookie.clone()),
             ],
-            b"<html>daemon page</html>".to_vec(),
+            format!("<html><body data-state=\"{page_state}\">daemon page</body></html>")
+                .into_bytes(),
         )
     } else if request.path.ends_with("/state") {
         if bound {
@@ -1180,11 +1182,13 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
         .await;
 
     let pages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let page_state = std::sync::Arc::new(std::sync::Mutex::new("active".to_string()));
     let task_state = state.clone();
     let task_device = daemon.device.id;
     let task_pages = pages.clone();
     let task_token = token.to_string();
     let task_binding = binding.to_string();
+    let task_page_state = page_state.clone();
     let fake = tokio::spawn(async move {
         let mut bodies: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
@@ -1206,7 +1210,8 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
                         bodies.insert(request.request_id.clone(), Vec::new());
                         continue;
                     }
-                    let response = fake_guest_answer(request, &task_token, &task_binding);
+                    let state = task_page_state.lock().expect("page state").clone();
+                    let response = fake_guest_answer(request, &task_token, &task_binding, &state);
                     task_state.relay.complete_guest(task_device, response).await;
                 }
                 h4rn_protocol::RelayFrameKind::GuestHttpChunk => {
@@ -1291,6 +1296,28 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
         1,
         "the daemon was asked for its page-load cookie exactly once"
     );
+
+    // A dead link's page opens on its notice, because Connect passes the state
+    // the daemon rendered instead of always serving the active page.
+    *page_state.lock().expect("page state") = "expired".to_string();
+    let dead = client
+        .get(format!("{base}/guest/{machine_id}/{token}"))
+        .send()
+        .await
+        .expect("expired page");
+    assert_eq!(dead.status(), StatusCode::OK);
+    let dead_html = dead.text().await.expect("expired html");
+    assert!(
+        dead_html.contains(r#"data-state="expired""#),
+        "Connect served the active state for an expired link"
+    );
+    assert!(
+        !dead_html.contains("daemon page"),
+        "Connect returned the daemon's HTML"
+    );
+    // The rest of the live flow still works: the page's state only changes
+    // what the browser starts on, not the relayed routes.
+    *page_state.lock().expect("page state") = "active".to_string();
 
     // The page-load cookie must reach the browser on the public path and come
     // back on both state reads. Before the cookie-path fix the jar dropped it,
