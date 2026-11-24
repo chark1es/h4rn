@@ -237,6 +237,12 @@ pub struct Grant {
     pub client_name: String,
     /// Chosen level.
     pub level: OutsideAgentLevel,
+    /// The token family this access token belongs to.
+    ///
+    /// The family, not the client, is the grant's identity: a client can hold
+    /// several sign-ins, and work asked for under one must not survive that
+    /// one's revocation just because another is still live.
+    pub family: String,
     /// RFC 8707 resource the token is bound to, if any.
     pub resource: Option<String>,
 }
@@ -717,8 +723,10 @@ impl OAuthStore {
             expires_at: now + CODE_TTL,
             used_at: None,
         });
-        // Drop anything that expired while the page was open.
-        guard.file.codes.retain(|entry| entry.expires_at > now);
+        // Drop anything that expired while the page was open, under the same
+        // rule issuance uses: a spent code whose family is still live is the
+        // only record a replay can be recognised by, so it stays.
+        prune_spent_codes(&mut guard.file, now);
         let location = redirect_with(
             &pending.redirect_uri,
             &[("code", code.as_str())],
@@ -991,6 +999,7 @@ impl OAuthStore {
             client_id: record.client_id,
             client_name: name,
             level: record.level,
+            family: record.family,
             resource: record.resource,
         })
     }
@@ -1058,17 +1067,54 @@ impl OAuthStore {
         Ok(())
     }
 
-    /// Whether `client_id` names a grant that is still live.
+    /// Whether `family` names a grant that is still live.
     ///
     /// A durable record that may later start work for a grant (a PR watch, an
-    /// armed resume) asks this at the moment that work would start, so a
-    /// revocation made in between is honoured.
-    pub fn grant_is_live(&self, client_id: &str) -> bool {
+    /// armed resume, a parked prompt, a delegated child) asks this at the moment
+    /// that work would start, so a revocation made in between is honoured.
+    ///
+    /// Any live, unrevoked token in the family keeps it live: an access token
+    /// expiring after an hour must not end a watch while the same family's
+    /// refresh token can still sign in. A family with no live token (every
+    /// token revoked or expired) is gone.
+    pub fn grant_is_live(&self, family: &str) -> bool {
         let now = Utc::now();
         let guard = self.lock();
-        guard.file.tokens.iter().any(|entry| {
-            entry.client_id == client_id && entry.kind == TokenKind::Access && entry.live(now)
-        })
+        guard
+            .file
+            .tokens
+            .iter()
+            .any(|entry| entry.family == family && entry.live(now))
+    }
+
+    /// Expires every access token, so a test can prove a family outlives one.
+    ///
+    /// Test-only: the refresh tokens stay live, exactly as after the access
+    /// token's hour has passed while the thirty-day refresh token has not.
+    #[doc(hidden)]
+    pub fn expire_access_tokens_for_test(&self) -> Result<(), OAuthError> {
+        let now = Utc::now();
+        let mut guard = self.lock();
+        for entry in guard
+            .file
+            .tokens
+            .iter_mut()
+            .filter(|entry| entry.kind == TokenKind::Access)
+        {
+            entry.expires_at = now - TimeDelta::seconds(1);
+        }
+        self.persist_locked(&guard.file)
+    }
+
+    /// Expires every authorization code, for the replay-after-expiry test.
+    #[doc(hidden)]
+    pub fn expire_codes_for_test(&self) -> Result<(), OAuthError> {
+        let now = Utc::now();
+        let mut guard = self.lock();
+        for entry in &mut guard.file.codes {
+            entry.expires_at = now - TimeDelta::seconds(1);
+        }
+        self.persist_locked(&guard.file)
     }
 
     /// Every client with a live token, newest first.
@@ -1162,6 +1208,27 @@ fn revoke_family(file: &mut StoreFile, family: &str, now: DateTime<Utc>) {
     }
 }
 
+/// Drops spent codes once they can no longer identify a live family.
+///
+/// One rule for every path that prunes the code list (`approve` and issuance):
+/// an unexpired code stays, and an expired one stays while its family still has
+/// a token that has not expired, so a replay can always be traced to the family
+/// it must revoke.
+fn prune_spent_codes(file: &mut StoreFile, now: DateTime<Utc>) {
+    let tokens = &file.tokens;
+    file.codes.retain(|code| {
+        if code.expires_at > now {
+            return true;
+        }
+        let Some(family) = code.family.as_deref() else {
+            return false;
+        };
+        tokens
+            .iter()
+            .any(|token| token.family == family && token.expires_at > now)
+    });
+}
+
 /// Drops registrations that never connected and are past their window.
 fn prune_clients(file: &mut StoreFile, now: DateTime<Utc>) {
     let cutoff = now - UNUSED_CLIENT_TTL;
@@ -1232,19 +1299,9 @@ fn issue_pair(
     // replay is an attack, and the replay must revoke that family; forgetting
     // the code at code expiry would turn a replay after ten minutes into an
     // "unknown code" with nothing to revoke. Keep it while any token in its
-    // family is still live.
-    let tokens = &file.tokens;
-    file.codes.retain(|code| {
-        if code.expires_at > now {
-            return true;
-        }
-        let Some(family) = code.family.as_deref() else {
-            return false;
-        };
-        tokens
-            .iter()
-            .any(|token| token.family == family && token.expires_at > now)
-    });
+    // family is still live. One rule, shared with `approve`, so both paths that
+    // prune the code list agree.
+    prune_spent_codes(file, now);
     file.pending.retain(|pending| pending.expires_at > now);
     TokenPair {
         access_token,
@@ -1600,6 +1657,42 @@ mod tests {
         store
             .refresh(&pair.refresh_token, &client.client_id, None)
             .expect("refresh still works");
+    }
+
+    /// A grant is live while any token in its family is.
+    ///
+    /// The access token lasts an hour and the refresh token thirty days; a
+    /// watch or a parked prompt must not die at the first hour.
+    #[test]
+    fn a_grant_outlives_its_access_token_while_the_refresh_token_lives() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let pair = pair(&store, &client.client_id, OutsideAgentLevel::Supervised);
+        let family = store
+            .lock()
+            .file
+            .tokens
+            .iter()
+            .find(|token| token.hash == digest(&pair.access_token))
+            .map(|token| token.family.clone())
+            .expect("the access token's family");
+        assert!(store.grant_is_live(&family));
+        assert!(!store.grant_is_live("another-family"));
+
+        store
+            .expire_access_tokens_for_test()
+            .expect("expire the access token");
+        assert!(
+            store.grant_is_live(&family),
+            "the grant died when its access token expired while the refresh token was live"
+        );
+
+        store
+            .revoke_token(&pair.refresh_token)
+            .expect("revoke family");
+        assert!(!store.grant_is_live(&family));
     }
 
     #[test]
@@ -1984,6 +2077,53 @@ mod tests {
             store
                 .refresh(&rotated.refresh_token, &client.client_id, None)
                 .is_err()
+        );
+    }
+
+    /// Approving a second sign-in must not prune a spent code while its family
+    /// is live: the replay of that code is what revokes the family.
+    ///
+    /// `approve` used to drop every expired code, so a second approval in the
+    /// same client forgot the first family's code. A replay after that was an
+    /// unknown code and the family stayed live.
+    #[test]
+    fn approving_again_keeps_a_spent_code_whose_family_is_live() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (verifier, _) = challenge();
+        let code = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        let first = store
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .expect("first use");
+
+        // The first code is past its lifetime, and a second sign-in is approved.
+        {
+            let mut state = store.lock();
+            for entry in &mut state.file.codes {
+                entry.expires_at = Utc::now() - TimeDelta::seconds(1);
+            }
+        }
+        let _second = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        assert!(
+            store
+                .lock()
+                .file
+                .codes
+                .iter()
+                .any(|entry| entry.family.is_some()),
+            "the second approval pruned the spent code of a live family"
+        );
+
+        // Replaying the first code still recognises the family and kills it.
+        let error = store
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .expect_err("a replay is refused");
+        assert!(matches!(error, OAuthError::InvalidGrant(_)), "{error:?}");
+        assert!(
+            store.verify_access(&first.access_token, None).is_none(),
+            "the replay after a second approval left the first family live"
         );
     }
 

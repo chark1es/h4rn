@@ -756,24 +756,37 @@ impl Inner {
         }
         self.persist_id(subagent_id.as_str()).await;
 
+        let grant = self.threads.active_turn_grant(&request.parent_thread).await;
+        // A child inherits the calling turn's authority: the same ceiling and
+        // the same token family. A delegated turn is not a way out from under a
+        // supervised grant, and the child's first dispatch re-checks the family
+        // like any other work that starts later.
+        let ceiling = grant.as_ref().and_then(|grant| grant.ceiling);
+        let runtime_mode = ceiling.map_or(parent.runtime_mode, |ceiling| {
+            parent.runtime_mode.clamped_to(ceiling)
+        });
         let created = self
             .threads
-            .create_thread(NewThread {
-                thread_id: Some(child_thread_id.clone()),
-                parent_thread_id: Some(request.parent_thread.clone()),
-                subagent_id: Some(subagent_id.clone()),
-                host,
-                harness,
-                agent_id: None,
-                workspace_path,
-                model,
-                prompt,
-                attachments: Vec::new(),
-                runtime_mode: parent.runtime_mode,
-                reasoning_effort: parent.reasoning_effort,
-                fast: parent.fast,
-                worktree: None,
-            })
+            .create_thread_for_work(
+                NewThread {
+                    thread_id: Some(child_thread_id.clone()),
+                    parent_thread_id: Some(request.parent_thread.clone()),
+                    subagent_id: Some(subagent_id.clone()),
+                    host,
+                    harness,
+                    agent_id: None,
+                    workspace_path,
+                    model,
+                    prompt,
+                    attachments: Vec::new(),
+                    runtime_mode,
+                    reasoning_effort: parent.reasoning_effort,
+                    fast: parent.fast,
+                    worktree: None,
+                },
+                ceiling,
+                grant,
+            )
             .await;
 
         let created = match created {

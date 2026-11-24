@@ -336,7 +336,11 @@ impl ToolProvider for AgentToolsProvider {
                     .manager
                     .active_turn_grant(&thread_id)
                     .await
-                    .map(|(client_id, ceiling)| WatchGrant { client_id, ceiling });
+                    .map(|work| WatchGrant {
+                        client_id: work.client_id,
+                        family: work.family,
+                        ceiling: work.ceiling,
+                    });
                 self.pr_links
                     .watch_with_grant(&thread_id, &repo, number, grant)
                     .await

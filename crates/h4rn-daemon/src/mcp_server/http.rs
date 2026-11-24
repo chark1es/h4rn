@@ -705,16 +705,16 @@ fn page_shell(title: &str, refresh: Option<&str>, body: &str) -> String {
 :root {{ color-scheme: light dark; --paper:#f7f6f3; --graphite:#1c1c1a; --muted:#6b6a66; --hair:#e1dfda; --blue:#2563eb; --card:#ffffff; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --paper:#171715; --graphite:#f1efe9; --muted:#a3a19a; --hair:#302f2b; --card:#1f1f1c; }} }}
 * {{ box-sizing: border-box; }}
-body {{ margin:0; background:var(--paper); color:var(--graphite); font:15px/1.55 Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }}
+body {{ margin:0; background:var(--paper); color:var(--graphite); font:400 14px/22px Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }}
 main {{ max-width: 34rem; margin: 8vh auto; padding: 0 1.25rem; }}
-h1 {{ font-size: 1.5rem; line-height: 1.25; margin: 0 0 .5rem; font-weight: 600; letter-spacing: -.01em; }}
+h1 {{ font-size: 17px; line-height: 22px; margin: 0 0 .5rem; font-weight: 600; letter-spacing: -.01em; }}
 .lead {{ margin: 0 0 .35rem; }}
-.where {{ color: var(--muted); font-size: 13px; margin: 0 0 1.75rem; overflow-wrap: anywhere; }}
-code {{ font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border:1px solid var(--hair); border-radius: 5px; padding: 1px 5px; }}
+.where {{ color: var(--muted); font-size: 12px; line-height: 16px; margin: 0 0 1.75rem; overflow-wrap: anywhere; }}
+code {{ font: 12.5px/19px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border:1px solid var(--hair); border-radius: 5px; padding: 1px 5px; }}
 .step {{ background: var(--card); border: 1px solid var(--hair); border-radius: 8px; padding: .85rem .95rem; margin: 0 0 1rem; }}
-.step .t {{ font-weight: 550; }}
-.step .d {{ color: var(--muted); font-size: 13px; }}
-.note {{ color: var(--muted); font-size: 12.5px; margin-top: 2rem; border-top: 1px solid var(--hair); padding-top: 1rem; }}
+.step .t {{ font-weight: 600; }}
+.step .d {{ color: var(--muted); font-size: 12px; line-height: 16px; }}
+.note {{ color: var(--muted); font-size: 12px; line-height: 16px; margin-top: 2rem; border-top: 1px solid var(--hair); padding-top: 1rem; }}
 a {{ color: var(--blue); }}
 </style>
 </head>
@@ -857,13 +857,19 @@ mod tests {
     }
 
     #[test]
-    fn the_approval_page_has_no_uppercase_eyebrow() {
+    fn the_approval_pages_follow_the_typography_scale() {
         for page in [
             approval_page("Claude Code", "http://localhost:1455/cb", "req-1", None),
             waiting_page("Claude Code", "http://localhost:1455/cb", "req-1"),
         ] {
             assert!(!page.contains("eyebrow"), "{page}");
             assert!(!page.contains("text-transform: uppercase"), "{page}");
+            // DESIGN.md: prose 14px/22px 400, heading 17px/22px 600.
+            assert!(page.contains("font:400 14px/22px"), "{page}");
+            assert!(
+                page.contains("font-size: 17px; line-height: 22px"),
+                "{page}"
+            );
         }
     }
 

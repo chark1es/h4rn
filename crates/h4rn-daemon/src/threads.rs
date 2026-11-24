@@ -35,7 +35,7 @@ use h4rn_protocol::{
     FsTurnChanges, HarnessKind, HostId, Item, LimitBrief, LimitSource, MessageRole, ProtoError,
     ProtoErrorCode, ResumeFailover, ResumeSchedule, ResumeState, RuntimeMode, SubagentId,
     ThreadFilter, ThreadId, ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage,
-    UsageReport, WorktreeRequest,
+    UsageReport, WorkGrant, WorktreeRequest,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -141,6 +141,17 @@ impl Default for ThreadManagerOptions {
 pub trait SettleHook: Send + Sync {
     /// The thread is Settled now; end anything scoped to it.
     async fn settled(&self, thread_id: &ThreadId);
+}
+
+/// Answers whether an outside grant's token family is still live.
+///
+/// The daemon installs its OAuth store behind this trait, so the thread manager
+/// can re-check a grant at the moment it delivers work without depending on the
+/// MCP module. One implementation, one rule: any live, unrevoked token in the
+/// family keeps it live.
+pub trait GrantAuthority: Send + Sync {
+    /// Whether `family` still has a live, unrevoked token.
+    fn family_is_live(&self, family: &str) -> bool;
 }
 
 /// A request to create a thread (the protocol fields without the wire id).
@@ -310,6 +321,10 @@ struct Inner {
     text_generation: std::sync::OnceLock<Arc<dyn TextGeneration>>,
     /// Told when the lifecycle settles a thread (guest links, ADR-044).
     settle_hook: std::sync::OnceLock<Arc<dyn SettleHook>>,
+    /// Checks an outside grant's token family before work it asked for runs.
+    grant_authority: std::sync::OnceLock<Arc<dyn GrantAuthority>>,
+    /// Removes credentials from a title before the 80-character cut.
+    redactor: std::sync::OnceLock<Arc<crate::mcp_server::Redactor>>,
     /// Threads with a title generation attempt in flight, so a duplicate
     /// never starts a second model call.
     ///
@@ -509,7 +524,7 @@ struct QueuedTurn {
     /// mode change cannot lift it.
     ceiling: Option<RuntimeMode>,
     /// The outside grant whose work this message does, when one sent it.
-    grant: Option<String>,
+    grant: Option<WorkGrant>,
 }
 
 struct ThreadRecord {
@@ -704,6 +719,12 @@ enum SessionSlot {
         /// `record.active` is already gone. The slot remembers which work the
         /// session was last asked to do, so that report still caps the resume.
         ceiling: Option<RuntimeMode>,
+        /// The outside grant of the last turn this session delivered.
+        ///
+        /// Like the ceiling, it outlives the turn: a provider reset reported
+        /// after the capped turn settled still arms a resume that belongs to
+        /// the same grant, and that resume is refused if the grant is revoked.
+        grant: Option<WorkGrant>,
     },
 }
 
@@ -756,7 +777,50 @@ impl SessionSlot {
             *slot = ceiling;
         }
     }
+
+    /// The grant of the last turn `generation` delivered.
+    fn grant_for(&self, generation: u64) -> Option<WorkGrant> {
+        match self {
+            Self::Live {
+                generation: current,
+                grant,
+                ..
+            } if *current == generation => grant.clone(),
+            Self::None | Self::Starting(_) | Self::Live { .. } => None,
+        }
+    }
+
+    /// Records the grant of the turn `generation` is about to deliver.
+    fn note_delivery_grant(&mut self, generation: u64, grant: Option<WorkGrant>) {
+        if let Self::Live {
+            generation: current,
+            grant: slot,
+            ..
+        } = self
+            && *current == generation
+        {
+            *slot = grant;
+        }
+    }
 }
+
+/// What a delivery claim decided.
+enum DeliveryClaim {
+    /// The prompt is this caller's to write on this generation.
+    Claimed(u64),
+    /// Another path owns the turn or the session moved on.
+    Lost,
+    /// The grant that asked for the turn was revoked. The turn was settled
+    /// under the claim's own record lock; the prompt was never written.
+    Revoked,
+}
+
+/// The one row a turn shows when its outside grant was revoked before it ran.
+const REVOKED_GRANT_MESSAGE: &str =
+    "the outside agent's access was revoked before this turn could run";
+/// Where the person re-approves the agent, when they still want the work.
+const REVOKED_GRANT_HINT: &str =
+    "Approve the agent again in h4rn → Settings → Sharing & access, then send the message again";
 
 /// One turn's dispatch state, created with the turn.
 ///
@@ -777,8 +841,8 @@ struct TurnDispatch {
     ///
     /// A durable record that can start work later (a PR watch) copies this so
     /// it can ask, at the moment that work would start, whether the grant is
-    /// still live. The grant id never leaves the daemon.
-    grant: Option<String>,
+    /// still live. The grant id and token family never leave the daemon.
+    grant: Option<WorkGrant>,
     state: std::sync::Mutex<DispatchState>,
     /// The session generation that was started for this turn, once one was.
     ///
@@ -1122,6 +1186,11 @@ struct DyingSession {
     /// limit can land after the capped turn settled, and the resume it arms
     /// must still run at that turn's ceiling.
     ceiling: Option<RuntimeMode>,
+    /// The outside grant of the last turn this session delivered.
+    ///
+    /// The resume a death arms belongs to that grant, so a revocation between
+    /// the turn and the exit report still stops it.
+    grant: Option<WorkGrant>,
     /// The reset this death already armed a schedule for.
     ///
     /// This belongs to the death, not to `scheduled_limit`: the person can
@@ -1133,17 +1202,12 @@ struct DyingSession {
 }
 
 impl TurnDispatch {
-    /// A dispatch whose turn may run with no more autonomy than `ceiling`.
-    fn new_at_most(turn_id: TurnId, input: UserInput, ceiling: Option<RuntimeMode>) -> Self {
-        Self::new_for_work(turn_id, input, ceiling, None)
-    }
-
     /// A dispatch for work an outside grant asked for.
     fn new_for_work(
         turn_id: TurnId,
         input: UserInput,
         ceiling: Option<RuntimeMode>,
-        grant: Option<String>,
+        grant: Option<WorkGrant>,
     ) -> Self {
         Self {
             turn_id,
@@ -1171,8 +1235,8 @@ impl TurnDispatch {
     }
 
     /// The outside grant whose work this turn does, when one asked for it.
-    fn grant(&self) -> Option<&str> {
-        self.grant.as_deref()
+    fn grant(&self) -> Option<&WorkGrant> {
+        self.grant.as_ref()
     }
 
     /// Records that the prompt is being handed to the harness and returns the
@@ -1420,6 +1484,11 @@ struct ScheduledLimit {
     /// back at full autonomy just because the provider paused the run. The same
     /// value is persisted on the thread row, so a restart keeps it too.
     ceiling: Option<RuntimeMode>,
+    /// The outside grant whose turn was paused, when one asked for it.
+    ///
+    /// The schedule row stores it too, so the resume re-checks the exact token
+    /// family and refuses to run once the grant is revoked.
+    grant: Option<WorkGrant>,
 }
 
 /// One armed schedule read back from the ledger at startup.
@@ -1432,11 +1501,13 @@ struct RestoredSchedule {
     schedule_id: String,
     /// The ceiling stored on the ledger row when it was armed.
     ceiling: Option<RuntimeMode>,
+    /// The grant stored on the ledger row when it was armed.
+    grant: Option<WorkGrant>,
 }
 
 /// One limit observation: which session generation reported it and what the
 /// adapter asked for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct LimitObservation {
     generation: Option<u64>,
     /// The ceiling of the turn that reported the limit.
@@ -1445,6 +1516,8 @@ struct LimitObservation {
     /// to be active when it lands: a dead session's exit report can arrive
     /// after its capped turn has settled.
     ceiling: Option<RuntimeMode>,
+    /// The outside grant of the turn that reported the limit, when one ran it.
+    grant: Option<WorkGrant>,
     reset_at: Option<DateTime<Utc>>,
     auto_resume: bool,
 }
@@ -1506,6 +1579,19 @@ impl SummarySignature {
     }
 }
 
+impl Inner {
+    /// The one grant gate; see [`ThreadManager::grant_allows`].
+    fn grant_allows(&self, grant: Option<&WorkGrant>) -> bool {
+        match grant {
+            None => true,
+            Some(grant) => self
+                .grant_authority
+                .get()
+                .is_some_and(|authority| authority.family_is_live(&grant.family)),
+        }
+    }
+}
+
 impl ThreadRecord {
     fn summary(&self, settings: &LifecycleSettings, now: DateTime<Utc>) -> ThreadSummary {
         let tab = tab_for(&self.state, now, settings);
@@ -1562,26 +1648,16 @@ impl ThreadRecord {
     /// a ceiling or a grant.
     #[cfg(test)]
     fn begin_turn(&mut self, at: DateTime<Utc>, input: UserInput) -> Arc<TurnDispatch> {
-        self.begin_turn_at_most(at, input, None)
+        self.begin_turn_for_work(at, input, None, None)
     }
 
-    /// [`Self::begin_turn`] for a message whose sender named a ceiling.
-    fn begin_turn_at_most(
-        &mut self,
-        at: DateTime<Utc>,
-        input: UserInput,
-        ceiling: Option<RuntimeMode>,
-    ) -> Arc<TurnDispatch> {
-        self.begin_turn_for_work(at, input, ceiling, None)
-    }
-
-    /// [`Self::begin_turn_at_most`] for a turn an outside grant asked for.
+    /// [`Self::begin_turn`] for a turn an outside grant asked for.
     fn begin_turn_for_work(
         &mut self,
         at: DateTime<Utc>,
         input: UserInput,
         ceiling: Option<RuntimeMode>,
-        grant: Option<String>,
+        grant: Option<WorkGrant>,
     ) -> Arc<TurnDispatch> {
         // A new turn is a fresh attempt: the previous limit, any resume target
         // and the ceiling the paused turn carried no longer describe the thread.
@@ -1676,6 +1752,7 @@ impl ThreadRecord {
             session,
             applied_limit_reset,
             ceiling,
+            grant,
         } = std::mem::replace(&mut self.session, SessionSlot::None)
         else {
             return;
@@ -1687,6 +1764,7 @@ impl ThreadRecord {
                 session,
                 applied_limit_reset,
                 ceiling,
+                grant,
             };
             return;
         }
@@ -1696,6 +1774,7 @@ impl ThreadRecord {
                 session,
                 report: None,
                 ceiling,
+                grant,
                 applied_reset: applied_limit_reset,
             },
         );
@@ -2146,7 +2225,12 @@ impl ThreadRecord {
             }
             RequeueReason::CompletionFailed => {}
         }
-        let parked = ParkedPrompt::of(turn_id, &dispatch.input(), dispatch.ceiling());
+        let parked = ParkedPrompt::of(
+            turn_id,
+            &dispatch.input(),
+            dispatch.ceiling(),
+            dispatch.grant(),
+        );
         // Save the prompt on the row only when a schedule already owns it.
         // A failed write has not armed its schedule yet: the caller arms it and
         // `apply_limit_hit` saves the prompt in the same step that takes the
@@ -2294,6 +2378,8 @@ impl ThreadManager {
                 meter: std::sync::OnceLock::new(),
                 text_generation: std::sync::OnceLock::new(),
                 settle_hook: std::sync::OnceLock::new(),
+                grant_authority: std::sync::OnceLock::new(),
+                redactor: std::sync::OnceLock::new(),
                 title_jobs: std::sync::Mutex::new(HashSet::new()),
                 title_settled: tokio::sync::Notify::new(),
                 last_schedule_check: std::sync::Mutex::new(None),
@@ -2371,6 +2457,54 @@ impl ThreadManager {
         let _ = self.inner.settle_hook.set(hook);
     }
 
+    /// Names the authority every outside grant is re-checked against.
+    pub fn set_grant_authority(&self, authority: Arc<dyn GrantAuthority>) {
+        let _ = self.inner.grant_authority.set(authority);
+    }
+
+    /// Names the redactor a new thread's title is cleaned with.
+    pub fn set_redactor(&self, redactor: Arc<crate::mcp_server::Redactor>) {
+        let _ = self.inner.redactor.set(redactor);
+    }
+
+    /// The title a new thread stores: the first prompt line, redacted, then cut.
+    ///
+    /// The redactor runs on the whole line before the 80-character cut, so a
+    /// credential is never split by the cut and half-stored.
+    fn redacted_title(&self, prompt: &str, workspace: &str) -> String {
+        let Some(redactor) = self.inner.redactor.get() else {
+            return title_from_prompt(prompt, workspace);
+        };
+        let first = prompt.lines().next().unwrap_or_default().trim();
+        if first.is_empty() {
+            return title_from_prompt(prompt, workspace);
+        }
+        let redacted = redactor.redact(first);
+        let mut cut: String = redacted.chars().take(80).collect();
+        // A cut that lands inside the redaction marker would show `[re`; the
+        // title is shortened instead so the marker is either whole or absent.
+        const MARKER: &str = "[redacted]";
+        for len in (2..MARKER.len()).rev() {
+            if cut.ends_with(&MARKER[..len]) {
+                cut.truncate(cut.len() - len);
+                break;
+            }
+        }
+        redactor.title(&cut)
+    }
+
+    /// Whether work a grant asked for may still run.
+    ///
+    /// The one gate every path that can start a turn later uses at delivery
+    /// time: a queued message, a parked prompt, an auto-resume, a watch wake and
+    /// a delegated child all carry the grant, and this re-checks that its exact
+    /// token family is still live. Work with no grant (a person's own) always
+    /// passes. With no authority installed, grant work is refused: it cannot
+    /// have come from an approved sign-in.
+    pub fn grant_allows(&self, grant: Option<&WorkGrant>) -> bool {
+        self.inner.grant_allows(grant)
+    }
+
     /// The metering hub, when one has been attached.
     pub fn meter(&self) -> Option<Arc<MeterHub>> {
         self.inner.meter.get().cloned()
@@ -2398,14 +2532,11 @@ impl ThreadManager {
     ///
     /// A tool called inside the turn uses this to bind any work that outlives
     /// the turn (a PR watch) to the grant and its limit.
-    pub async fn active_turn_grant(
-        &self,
-        thread_id: &ThreadId,
-    ) -> Option<(String, Option<RuntimeMode>)> {
+    pub async fn active_turn_grant(&self, thread_id: &ThreadId) -> Option<WorkGrant> {
         let handle = self.inner.handle(thread_id).await.ok()?;
         let record = handle.lock().await;
         let dispatch = &record.active.as_ref()?.dispatch;
-        Some((dispatch.grant()?.to_owned(), dispatch.ceiling()))
+        dispatch.grant().cloned()
     }
 
     /// Whether a turn is in flight for this thread.
@@ -2721,7 +2852,7 @@ impl ThreadManager {
         &self,
         mut request: NewThread,
         ceiling: Option<RuntimeMode>,
-        grant: Option<String>,
+        grant: Option<WorkGrant>,
     ) -> Result<CreatedThread, ManagerError> {
         request.workspace_path = expand_home(&request.workspace_path);
         if !self.inner.harnesses.get(request.harness).is_some() {
@@ -2817,7 +2948,7 @@ impl ThreadManager {
             host: request.host,
             harness: request.harness,
             agent_id: request.agent_id,
-            title: title_from_prompt(&request.prompt, &request.workspace_path),
+            title: self.redacted_title(&request.prompt, &request.workspace_path),
             title_source: TitleSource::Prompt,
             workspace_path: request.workspace_path,
             model: request.model,
@@ -2993,16 +3124,16 @@ impl ThreadManager {
 
     /// Appends a message an outside grant asked for.
     ///
-    /// The grant id rides with the turn so a PR watch that turn creates can
-    /// later ask whether the grant is still live. `ceiling` is the grant's own
-    /// limit, never the thread's mode.
+    /// The grant rides with the turn so a PR watch, resume or child that turn
+    /// creates can later ask whether the exact family is still live. `ceiling`
+    /// is the grant's own limit, never the thread's mode.
     pub async fn send_message_for_work(
         &self,
         thread_id: &ThreadId,
         text: String,
         attachments: Vec<AttachmentId>,
         ceiling: Option<RuntimeMode>,
-        grant: Option<String>,
+        grant: Option<WorkGrant>,
     ) -> Result<AcceptedMessage, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let resolved_attachments = self
@@ -4587,6 +4718,7 @@ impl Inner {
                         reset_at,
                         schedule_id: schedule.schedule_id,
                         ceiling: schedule.mode_ceiling,
+                        grant: schedule.grant,
                     });
             }
         }
@@ -4683,6 +4815,7 @@ impl Inner {
                                     // reset still resumes at the capped turn's
                                     // ceiling.
                                     ceiling: restored.ceiling,
+                                    grant: restored.grant,
                                 });
                             }
                             Ok(_) => {
@@ -5079,10 +5212,11 @@ impl Inner {
                     tools: HashMap::new(),
                     saw_work: false,
                     last_tick: None,
-                    dispatch: Arc::new(TurnDispatch::new_at_most(
+                    dispatch: Arc::new(TurnDispatch::new_for_work(
                         parked.turn_id.clone(),
                         parked.input(),
                         parked.mode_ceiling,
+                        parked.grant,
                     )),
                     promoted: false,
                     applied_limit_reset: None,
@@ -5296,6 +5430,22 @@ impl Inner {
             else {
                 return;
             };
+            // Before a harness process is launched for this work: the grant
+            // that asked for it must still be live. Refusing here is what makes
+            // a revoked resume start nothing at all, rather than start an agent
+            // and only then fail the turn.
+            if !self.grant_allows(turn.grant()) {
+                let end = TurnEnd::failed(
+                    REVOKED_GRANT_MESSAGE.into(),
+                    Some(REVOKED_GRANT_HINT.into()),
+                    false,
+                );
+                self.settle_turn_locked(&mut record, &turn.turn_id, end)
+                    .await;
+                drop(record);
+                self.spawn_advance(handle);
+                return;
+            }
             let harness_kind = record.meta.harness;
             let Some(harness) = self.harnesses.get(harness_kind) else {
                 drop(record);
@@ -5442,6 +5592,7 @@ impl Inner {
                 session: Arc::clone(&session),
                 applied_limit_reset: None,
                 ceiling: turn.ceiling(),
+                grant: turn.grant().cloned(),
             };
             // A new session that names a catalogue replaces the last one; a
             // session that names none leaves it alone, because the harness and
@@ -5586,11 +5737,13 @@ impl Inner {
     /// Once the thread has a pause, the reset is only ever applied to the live
     /// session that reported it: an older generation's late report must not
     /// mark the replacement's own reset as applied.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_limit_hit(
         &self,
         record: &mut ThreadRecord,
         generation: Option<u64>,
         ceiling: Option<RuntimeMode>,
+        grant: Option<WorkGrant>,
         reset_at: Option<DateTime<Utc>>,
         auto_resume: bool,
         now: DateTime<Utc>,
@@ -5657,7 +5810,15 @@ impl Inner {
         // session's exit report that arrives after its capped turn settled
         // still caps the resume.
         match meter
-            .arm_schedule(&thread_id, reset_at, prompt, None, now, ceiling)
+            .arm_schedule(
+                &thread_id,
+                reset_at,
+                prompt,
+                None,
+                now,
+                ceiling,
+                grant.clone(),
+            )
             .await
         {
             Ok(schedule) => {
@@ -5678,8 +5839,12 @@ impl Inner {
                         .is_none_or(|parked| &parked.turn_id != turn_id)
                 {
                     let input = active.dispatch.input();
-                    record.meta.parked =
-                        Some(ParkedPrompt::of(turn_id, &input, active.dispatch.ceiling()));
+                    record.meta.parked = Some(ParkedPrompt::of(
+                        turn_id,
+                        &input,
+                        active.dispatch.ceiling(),
+                        active.dispatch.grant(),
+                    ));
                 }
                 record.resume_at = Some(schedule.resume_at);
                 record.scheduled_limit = Some(ScheduledLimit {
@@ -5689,6 +5854,7 @@ impl Inner {
                     schedule_id: Some(schedule.schedule_id),
                     parked_turn,
                     ceiling,
+                    grant,
                 });
                 record.note_applied_reset(generation, reset_at);
                 None
@@ -5839,6 +6005,7 @@ impl Inner {
                             LimitObservation {
                                 generation: Some(claimed_generation),
                                 ceiling: dispatch.ceiling(),
+                                grant: dispatch.grant().cloned(),
                                 reset_at: signal.reset_at,
                                 auto_resume: true,
                             },
@@ -5982,6 +6149,7 @@ impl Inner {
                                 LimitObservation {
                                     generation: Some(claimed_generation),
                                     ceiling: dispatch.ceiling(),
+                                    grant: dispatch.grant().cloned(),
                                     reset_at: signal.reset_at,
                                     auto_resume,
                                 },
@@ -6012,6 +6180,7 @@ impl Inner {
                                     turn_id,
                                     &dispatch.input(),
                                     dispatch.ceiling(),
+                                    dispatch.grant(),
                                 ));
                             }
                             if let Err(error) = self.emit(&mut record, domain, wire).await {
@@ -6074,14 +6243,16 @@ impl Inner {
                 let auto_resume = signal.reset_at.is_some();
                 // This write still owns the turn, so its dispatch is the work
                 // the limit reported on.
-                let ceiling = record
+                let (ceiling, grant) = record
                     .dispatch_for(turn_id)
-                    .and_then(|dispatch| dispatch.ceiling());
+                    .map(|dispatch| (dispatch.ceiling(), dispatch.grant().cloned()))
+                    .unwrap_or((None, None));
                 if let Some(event) = self
                     .apply_limit_hit(
                         &mut record,
                         Some(claimed_generation),
                         ceiling,
+                        grant,
                         signal.reset_at,
                         auto_resume,
                         now,
@@ -6168,12 +6339,23 @@ impl Inner {
             return;
         }
         let mut guard = session.lock().await;
-        let Some(generation) = self.claim_delivery(&handle, &dispatch, &session).await else {
-            // The turn ended, or its session was replaced, while this waited
-            // for the session lock or the record lock.
-            drop(guard);
-            self.recover_delivery(&handle, &dispatch).await;
-            return;
+        let generation = match self.claim_delivery(&handle, &dispatch, &session).await {
+            DeliveryClaim::Claimed(generation) => generation,
+            DeliveryClaim::Lost => {
+                // The turn ended, or its session was replaced, while this
+                // waited for the session lock or the record lock.
+                drop(guard);
+                self.recover_delivery(&handle, &dispatch).await;
+                return;
+            }
+            DeliveryClaim::Revoked => {
+                // The grant was revoked before the prompt could be written.
+                // The claim settled the turn; nothing reaches the harness, and
+                // whatever the settlement promoted still needs a session.
+                drop(guard);
+                self.spawn_advance(handle);
+                return;
+            }
         };
         // Test-only interleaving point: the dispatch is claimed and its prompt
         // is not on the wire yet.
@@ -6235,26 +6417,27 @@ impl Inner {
     }
 
     /// Claims `dispatch` for delivery, proving in the same record lock read
-    /// that `session` is still the live slot for it.
+    /// that `session` is still the live slot for it and that the grant which
+    /// asked for the turn is still live.
     ///
     /// Splitting the check from the claim would let a settings change record a
     /// value the session cannot take and an `advance_queue` detach that session
     /// in between; the claim would then write the prompt to a session whose pump
-    /// was already stopped. `None` means another path owns the turn or the
-    /// session it was going to write to.
+    /// was already stopped. [`DeliveryClaim::Lost`] means another path owns the
+    /// turn or the session it was going to write to.
     async fn claim_delivery(
         &self,
         handle: &ThreadHandle,
         dispatch: &Arc<TurnDispatch>,
         session: &SharedSession,
-    ) -> Option<u64> {
+    ) -> DeliveryClaim {
         // Test-only interleaving point: the session is still attached and the
         // prompt is not claimed yet.
         #[cfg(test)]
         self.pause_delivery().await;
         let mut record = handle.lock().await;
         if record.dispatch_for(&dispatch.turn_id).is_none() || !record.session.is_live(session) {
-            return None;
+            return DeliveryClaim::Lost;
         }
         if record.pause_parks_turn(&dispatch.turn_id) {
             // A limit armed a pause for this very prompt between its promotion
@@ -6263,19 +6446,38 @@ impl Inner {
             // pause is waiting on.
             #[cfg(test)]
             self.claim_refused.notify_waiters();
-            return None;
+            return DeliveryClaim::Lost;
         }
-        let generation = record.session.generation()?;
+        // The one gate: a queued message, a parked prompt, a resume, a watch
+        // wake and a delegated child all arrive here, and work whose exact
+        // token family was revoked never reaches the harness. Settling under
+        // this same lock is what keeps another path from promoting it.
+        if !self.grant_allows(dispatch.grant()) {
+            let end = TurnEnd::failed(
+                REVOKED_GRANT_MESSAGE.into(),
+                Some(REVOKED_GRANT_HINT.into()),
+                false,
+            );
+            self.settle_turn_locked(&mut record, &dispatch.turn_id, end)
+                .await;
+            return DeliveryClaim::Revoked;
+        }
+        let Some(generation) = record.session.generation() else {
+            return DeliveryClaim::Lost;
+        };
         if !dispatch.claim() {
-            return None;
+            return DeliveryClaim::Lost;
         }
-        // The session now owns this turn's ceiling. A limit report that names
-        // this session belongs to this work, even if the turn has settled by
-        // the time the report lands.
+        // The session now owns this turn's ceiling and grant. A limit report
+        // that names this session belongs to this work, even if the turn has
+        // settled by the time the report lands.
         record
             .session
             .note_delivery_ceiling(generation, dispatch.ceiling());
-        Some(generation)
+        record
+            .session
+            .note_delivery_grant(generation, dispatch.grant().cloned());
+        DeliveryClaim::Claimed(generation)
     }
 
     /// Gives a claimed prompt back when its session disappeared before the
@@ -6914,13 +7116,16 @@ impl Inner {
                     auto_resume,
                 } => {
                     // The session that reported it was delivering this thread's
-                    // last turn; that turn's ceiling is what the resume keeps.
+                    // last turn; that turn's ceiling and grant are what the
+                    // resume keeps.
                     let ceiling = record.session.ceiling_for(generation);
+                    let grant = record.session.grant_for(generation);
                     self.note_limit_hit(
                         &mut record,
                         LimitObservation {
                             generation: Some(generation),
                             ceiling,
+                            grant,
                             reset_at,
                             auto_resume,
                         },
@@ -7463,11 +7668,20 @@ impl Inner {
         let LimitObservation {
             generation,
             ceiling,
+            grant,
             reset_at,
             auto_resume,
         } = limit;
         if let Some(event) = self
-            .apply_limit_hit(record, generation, ceiling, reset_at, auto_resume, now)
+            .apply_limit_hit(
+                record,
+                generation,
+                ceiling,
+                grant,
+                reset_at,
+                auto_resume,
+                now,
+            )
             .await
         {
             let _ = self.emit(record, Vec::new(), vec![event]).await;
@@ -7672,11 +7886,13 @@ impl Inner {
         let mut domain = Vec::new();
         let mut wire = Vec::new();
         let ceiling = record.session.ceiling_for(generation);
+        let grant = record.session.grant_for(generation);
         self.note_limit_hit(
             &mut record,
             LimitObservation {
                 generation: Some(generation),
                 ceiling,
+                grant,
                 reset_at,
                 auto_resume,
             },
@@ -7759,15 +7975,17 @@ impl Inner {
                 let now = self.now();
                 let mut domain = Vec::new();
                 let mut wire = Vec::new();
-                let ceiling = record
+                let (ceiling, grant) = record
                     .dying_sessions
                     .get(&generation)
-                    .and_then(|dying| dying.ceiling);
+                    .map(|dying| (dying.ceiling, dying.grant.clone()))
+                    .unwrap_or((None, None));
                 self.note_limit_hit(
                     &mut record,
                     LimitObservation {
                         generation: Some(generation),
                         ceiling,
+                        grant,
                         reset_at,
                         auto_resume,
                     },
@@ -7895,15 +8113,17 @@ impl Inner {
         let now = self.now();
         let mut domain = Vec::new();
         let mut wire = Vec::new();
-        let ceiling = record
+        let (ceiling, grant) = record
             .dying_sessions
             .get(&generation)
-            .and_then(|dying| dying.ceiling);
+            .map(|dying| (dying.ceiling, dying.grant.clone()))
+            .unwrap_or((None, None));
         self.note_limit_hit(
             record,
             LimitObservation {
                 generation: Some(generation),
                 ceiling,
+                grant,
                 reset_at: Some(reset_at),
                 auto_resume: true,
             },
@@ -8226,6 +8446,12 @@ impl Inner {
         // replaced this schedule meanwhile: `send` may have started a turn
         // (which cancels the schedule), a newer limit may have replaced it, or
         // the daemon may have closed the thread.
+        //
+        // The same gate a live mode switch holds: this resume chooses a
+        // session, and a switch that already made that session permissive but
+        // has not recorded it must finish first.
+        let switch_lock = handle.lock().await.switch_lock.clone();
+        let _switch = switch_lock.lock().await;
         let mut record = handle.lock().await;
         if record.closed {
             drop(record);
@@ -8269,6 +8495,49 @@ impl Inner {
             return Ok(None);
         }
         let pending_turn = parks_active;
+        // The grant that asked for this work must still be live. The record's
+        // own pause is the authority (it was armed from the turn that hit the
+        // limit); the ledger row is the fallback for a pause this daemon has
+        // not bound yet. A revoked family ends the schedule here, before any
+        // session is selected or started.
+        let grant = record
+            .scheduled_limit
+            .as_ref()
+            .and_then(|scheduled| scheduled.grant.clone())
+            .or_else(|| schedule.grant.clone());
+        if let Some(grant) = grant.as_ref()
+            && !self.grant_allows(Some(grant))
+        {
+            let settled = if let Some(turn_id) =
+                record.active.as_ref().map(|active| active.turn_id.clone())
+            {
+                let end = TurnEnd::failed(
+                    REVOKED_GRANT_MESSAGE.into(),
+                    Some(REVOKED_GRANT_HINT.into()),
+                    false,
+                );
+                self.settle_turn_locked(&mut record, &turn_id, end).await
+            } else {
+                false
+            };
+            record.clear_pause();
+            record.limit = None;
+            record.resume_at = None;
+            record.meta.parked = None;
+            drop(record);
+            drop(_switch);
+            let _ = meter
+                .finish_schedule(
+                    schedule,
+                    ResumeState::Cancelled,
+                    Some(REVOKED_GRANT_MESSAGE.into()),
+                )
+                .await;
+            if settled {
+                self.spawn_advance(handle);
+            }
+            return Ok(None);
+        }
         // Whoever chose it (the policy at reset time, or a person through
         // `FailOver`), a changed model needs a fresh session: the live one was
         // started on the limited model. This happens only after the schedule
@@ -8317,6 +8586,7 @@ impl Inner {
             }
             let needs_session = matches!(record.session, SessionSlot::None);
             drop(record);
+            drop(_switch);
             // The attempt is already claimed, so the ledger cannot fire it
             // again: whether or not the outcome write lands, the prompt has one
             // delivery owner now.
@@ -8356,13 +8626,14 @@ impl Inner {
         let now = self.now();
         record.clear_pause();
         record.limit = None;
-        let dispatch = record.begin_turn_at_most(
+        let dispatch = record.begin_turn_for_work(
             now,
             UserInput {
                 text: prompt.clone(),
                 attachments: Vec::new(),
             },
             ceiling,
+            grant,
         );
         let turn_id = dispatch.turn_id.clone();
         let domain = vec![
@@ -8399,6 +8670,7 @@ impl Inner {
         let stale = record.detach_stale_session();
         let needs_session = matches!(record.session, SessionSlot::None);
         drop(record);
+        drop(_switch);
 
         let fired = match meter
             .finish_schedule(schedule, ResumeState::Fired, None)
@@ -8616,11 +8888,17 @@ fn harness_refs(attachments: &[Attachment]) -> Vec<AttachmentRef> {
 
 impl ParkedPrompt {
     /// The durable form of a prompt a pause is holding.
-    fn of(turn_id: &TurnId, input: &UserInput, mode_ceiling: Option<RuntimeMode>) -> Self {
+    fn of(
+        turn_id: &TurnId,
+        input: &UserInput,
+        mode_ceiling: Option<RuntimeMode>,
+        grant: Option<&WorkGrant>,
+    ) -> Self {
         Self {
             turn_id: turn_id.clone(),
             text: input.text.clone(),
             mode_ceiling,
+            grant: grant.cloned(),
             attachments: input
                 .attachments
                 .iter()
@@ -8799,6 +9077,46 @@ mod tests {
     {
         let (parked, arrived) = tokio::sync::oneshot::channel();
         (tokio::spawn(work(parked)), arrived)
+    }
+
+    /// A grant authority a test can revoke: only named families are live.
+    #[derive(Default)]
+    struct TestGrantAuthority {
+        live: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl TestGrantAuthority {
+        fn allow(&self, family: &str) {
+            self.live
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(family.to_owned());
+        }
+
+        fn revoke(&self, family: &str) {
+            self.live
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(family);
+        }
+    }
+
+    impl GrantAuthority for TestGrantAuthority {
+        fn family_is_live(&self, family: &str) -> bool {
+            self.live
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(family)
+        }
+    }
+
+    /// The triple a supervised outside turn carries.
+    fn work_grant(family: &str) -> WorkGrant {
+        WorkGrant {
+            client_id: "client_test".into(),
+            family: family.into(),
+            ceiling: Some(RuntimeMode::ApprovalRequired),
+        }
     }
 
     /// Polls `ready` until it is true, for up to five seconds of wall clock.
@@ -10881,6 +11199,7 @@ mod tests {
                     reason: "the old model hit its limit".into(),
                 }),
                 manager.now(),
+                None,
                 None,
             )
             .await
@@ -15081,6 +15400,7 @@ mod tests {
                     &mut record,
                     Some(2),
                     None,
+                    None,
                     Some(newer_reset),
                     true,
                     manager.now(),
@@ -16366,6 +16686,7 @@ mod tests {
                     LimitObservation {
                         generation: Some(99),
                         ceiling: None,
+                        grant: None,
                         reset_at: Some(newer_reset),
                         auto_resume: true,
                     },
@@ -17592,6 +17913,7 @@ mod tests {
                     &mut record,
                     Some(1),
                     None,
+                    None,
                     Some(reset_at),
                     true,
                     manager.now(),
@@ -17680,6 +18002,7 @@ mod tests {
                     &mut record,
                     Some(9),
                     None,
+                    None,
                     Some(reset_at),
                     true,
                     manager.now(),
@@ -17762,6 +18085,7 @@ mod tests {
                 .apply_limit_hit(
                     &mut record,
                     Some(9),
+                    None,
                     None,
                     Some(newer_reset),
                     true,
@@ -17849,6 +18173,7 @@ mod tests {
                 .apply_limit_hit(
                     &mut record,
                     Some(2),
+                    None,
                     None,
                     Some(newer_reset),
                     true,
@@ -21715,6 +22040,7 @@ mod tests {
                 None,
                 chrono::Utc::now(),
                 Some(RuntimeMode::ApprovalRequired),
+                None,
             )
             .await
             .expect("arm the schedule");
@@ -21758,6 +22084,263 @@ mod tests {
             .await
             .expect("the resumed turn completed");
         assert_eq!(status, TurnStatus::Completed);
+        manager.shutdown().await;
+    }
+
+    /// A new thread's stored title is redacted before the 80-character cut.
+    ///
+    /// The journal keeps the title, and every listing reads it back; redacting
+    /// only at output would still store a credential, and a cut before the
+    /// redactor could store half of one.
+    #[tokio::test]
+    async fn a_new_thread_title_is_redacted_before_it_is_cut() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(FakeHarness::new(), host.clone()).await;
+        manager.set_redactor(Arc::new(crate::mcp_server::Redactor::new()));
+        // Built at runtime so the repository holds no credential-shaped literal.
+        let token = format!("{}{}", "ghp", "_") + &"x".repeat(36);
+        let created = manager
+            .create_thread(new_thread(
+                host,
+                workspace.path(),
+                &format!("deploy with {token} today"),
+            ))
+            .await
+            .expect("create");
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert!(
+            !summary.title.contains(&token),
+            "the stored title kept the credential: {}",
+            summary.title
+        );
+        assert!(summary.title.contains("[redacted]"), "{}", summary.title);
+        manager.shutdown().await;
+    }
+
+    /// A queued message whose grant was revoked never reaches the harness.
+    ///
+    /// The message was accepted while the grant was live, so it sits in the
+    /// queue. The revocation happens before the turn is promoted; delivery is
+    /// claimed later, and that claim must refuse it.
+    #[tokio::test]
+    async fn a_queued_message_never_runs_after_its_grant_is_revoked() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, completion) = FakeHarness::new().with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let authority = Arc::new(TestGrantAuthority::default());
+        authority.allow("family-a");
+        manager.set_grant_authority(authority.clone());
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        sends.wait_for(1).await;
+
+        manager
+            .send_message_for_work(
+                &created.thread_id,
+                "queued".into(),
+                Vec::new(),
+                Some(RuntimeMode::ApprovalRequired),
+                Some(work_grant("family-a")),
+            )
+            .await
+            .expect("queue the message");
+        authority.revoke("family-a");
+        completion.release();
+
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the queued turn was settled");
+        assert_eq!(status, TurnStatus::Failed);
+        assert_eq!(
+            sends.get(),
+            1,
+            "the revoked grant's queued message reached the harness"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A resume whose grant was revoked starts nothing, even after a restart.
+    ///
+    /// The schedule carries the exact token family on its ledger row, so the
+    /// restart does not need any other record to know whose work this is.
+    #[tokio::test]
+    async fn a_resume_after_revocation_starts_nothing_across_a_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let (harness, _settings) = FakeHarness::new().with_session_settings();
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host.clone(), workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        manager.shutdown().await;
+        drop(manager);
+
+        // Only the ledger row exists, and it names the family that asked.
+        meter
+            .arm_schedule(
+                &created.thread_id,
+                Some(reset_at),
+                "continue".into(),
+                None,
+                chrono::Utc::now(),
+                Some(RuntimeMode::ApprovalRequired),
+                Some(work_grant("family-a")),
+            )
+            .await
+            .expect("arm the schedule");
+
+        let (harness, restarted_settings) = FakeHarness::new().with_session_settings();
+        let (harness, sends) = harness.with_send_count();
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        // The family was revoked while the daemon was down.
+        manager.set_grant_authority(Arc::new(TestGrantAuthority::default()));
+        manager.set_meter(Arc::clone(&meter));
+        manager.resync_meter_state().await;
+
+        manager
+            .resume_now(&created.thread_id)
+            .await
+            .expect("the restored pause is handled");
+        assert!(
+            started_modes(&restarted_settings).is_empty(),
+            "the resume started a session for a revoked grant"
+        );
+        assert_eq!(
+            sends.get(),
+            0,
+            "the resume wrote a prompt for an revoked grant"
+        );
+        assert!(
+            !manager.turn_in_flight(&created.thread_id).await,
+            "the revoked resume left a turn running"
+        );
+        let schedules = meter.schedules().await.expect("schedules");
+        assert!(
+            schedules
+                .iter()
+                .all(|schedule| schedule.state != ResumeState::Scheduled
+                    && schedule.state != ResumeState::Waiting),
+            "the revoked resume left its schedule armed: {schedules:?}"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A resume selects its session through the live mode-switch gate.
+    ///
+    /// The person's switch has already made the live session permissive and has
+    /// not recorded it yet. Without the gate the resume trusts that session; with
+    /// it the resume waits, then starts a session at its own ceiling.
+    #[tokio::test]
+    async fn a_resume_takes_the_mode_switch_gate() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let (harness, settings) = FakeHarness::new().with_session_settings();
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        assert_eq!(
+            started_modes(&settings),
+            vec![RuntimeMode::ApprovalRequired]
+        );
+
+        meter
+            .arm_schedule(
+                &created.thread_id,
+                Some(reset_at),
+                "continue".into(),
+                None,
+                chrono::Utc::now(),
+                Some(RuntimeMode::ApprovalRequired),
+                None,
+            )
+            .await
+            .expect("arm");
+        manager.resync_meter_state().await;
+
+        let commit = Arc::new(SettingsCommitPause::default());
+        *manager
+            .inner
+            .settings_commit_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(commit.clone());
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let switching = tokio::spawn(async move {
+            this.set_thread_runtime_mode(&thread_id, RuntimeMode::FullAccess)
+                .await
+        });
+        commit.switched.notified().await;
+        let starts_before = started_modes(&settings).len();
+
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let mut resuming = tokio::spawn(async move { this.resume_now(&thread_id).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut resuming)
+                .await
+                .is_err(),
+            "the resume selected a session before the switch recorded what it applied"
+        );
+        assert_eq!(
+            started_modes(&settings).len(),
+            starts_before,
+            "the resume started a session while the switch was unrecorded"
+        );
+
+        commit.commit.notify_one();
+        switching
+            .await
+            .expect("the switch task")
+            .expect("record the mode");
+        resuming
+            .await
+            .expect("the resume task")
+            .expect("the schedule fires");
+        assert!(
+            wait_until(|| started_modes(&settings).len() > starts_before).await,
+            "the resume did not start a session: {:?}",
+            settings.get()
+        );
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired),
+            "the resume reused the session the switch made permissive: {:?}",
+            settings.get()
+        );
+        *manager
+            .inner
+            .settings_commit_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let _ = next_turn_status(&mut events).await;
         manager.shutdown().await;
     }
 }

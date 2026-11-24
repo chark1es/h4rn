@@ -208,6 +208,13 @@ impl MeterHub {
     }
 
     /// Arms or replaces the schedule for one thread.
+    ///
+    /// `grant` is the outside grant that asked for the paused turn. It is
+    /// stored on the schedule itself, in the same write that arms it, so the
+    /// resume that fires can re-check that its token family is still live.
+    // Named arguments rather than a builder: every caller is one place and the
+    // list is the whole durable row this write produces.
+    #[allow(clippy::too_many_arguments)]
     pub async fn arm_schedule(
         &self,
         thread_id: &ThreadId,
@@ -216,6 +223,7 @@ impl MeterHub {
         failover: Option<ResumeFailover>,
         now: DateTime<Utc>,
         mode_ceiling: Option<RuntimeMode>,
+        grant: Option<h4rn_protocol::WorkGrant>,
     ) -> Result<ResumeSchedule, StoreError> {
         let policy = self.policy();
         let attempt = self
@@ -238,6 +246,7 @@ impl MeterHub {
             reason: plan.reason,
             prompt,
             mode_ceiling,
+            grant,
             failover,
             last_error: None,
         };
@@ -447,6 +456,7 @@ mod tests {
                     None,
                     at(0),
                     None,
+                    None,
                 )
                 .await
                 .expect("arm");
@@ -489,6 +499,7 @@ mod tests {
             Some(failover.clone()),
             at(0),
             None,
+            None,
         )
         .await
         .expect("arm");
@@ -499,6 +510,7 @@ mod tests {
                 "continue".into(),
                 Some(failover.clone()),
                 at(1),
+                None,
                 None,
             )
             .await
@@ -517,7 +529,7 @@ mod tests {
         });
         let thread_id = ThreadId::new("th_cancel");
         let first = hub
-            .arm_schedule(&thread_id, None, "continue".into(), None, at(0), None)
+            .arm_schedule(&thread_id, None, "continue".into(), None, at(0), None, None)
             .await
             .expect("arm");
 
@@ -544,7 +556,7 @@ mod tests {
         // A newer attempt replaces the row; the old fire is stale for both
         // operations and the new attempt is claimable.
         let second = hub
-            .arm_schedule(&thread_id, None, "continue".into(), None, at(1), None)
+            .arm_schedule(&thread_id, None, "continue".into(), None, at(1), None, None)
             .await
             .expect("rearm");
         assert_ne!(second.schedule_id, first.schedule_id);

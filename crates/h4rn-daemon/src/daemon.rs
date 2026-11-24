@@ -1,6 +1,6 @@
 //! Daemon assembly: builder, bound listeners and graceful shutdown.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -555,6 +555,8 @@ impl DaemonBuilder {
         // One redactor for both seats: h4rn's own tools and the outside tools
         // answer with the same redacted title, and one token store feeds it.
         let redactor = Arc::new(crate::mcp_server::Redactor::new());
+        // Titles are cleaned at the source, before the 80-character cut.
+        manager.set_redactor(Arc::clone(&redactor));
         mcp.hub()
             .register_provider(Arc::new(crate::mcp_server::AgentToolsProvider::new(
                 Arc::clone(&manager),
@@ -689,12 +691,46 @@ pub struct Daemon {
     network_access_enabled: bool,
 }
 
+/// The OAuth store as the thread manager's grant authority.
+struct OAuthGrantAuthority(Arc<crate::mcp_server::OutsideAgents>);
+
+impl crate::threads::GrantAuthority for OAuthGrantAuthority {
+    fn family_is_live(&self, family: &str) -> bool {
+        self.0.store().grant_is_live(family)
+    }
+}
+
+/// The loopback socket that really serves MCP, from the sockets that bound.
+///
+/// A listener whose bound address is loopback is used as it is, so `[::1]` stays
+/// `[::1]`. A wildcard bind answers this machine on its own port, so its
+/// loopback name is advertised. Any other bind has no eligible socket and the
+/// caller reports the feature unavailable.
+fn mcp_serving_socket(listeners: &[(SocketAddr, server::ListenerKind)]) -> Option<SocketAddr> {
+    let mut wildcard = None;
+    for (addr, _kind) in listeners {
+        if addr.ip().is_loopback() {
+            return Some(*addr);
+        }
+        if addr.ip().is_unspecified() && wildcard.is_none() {
+            wildcard = Some(*addr);
+        }
+    }
+    wildcard.map(|addr| {
+        let ip = if addr.is_ipv6() {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        } else {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        };
+        SocketAddr::new(ip, addr.port())
+    })
+}
+
 impl Daemon {
     /// Bound configuration.
     pub fn config(&self) -> &Config {
         &self.config
     }
-
     /// The secure transport service, when enabled.
     pub fn secure(&self) -> Option<Arc<SecureService>> {
         self.secure.clone()
@@ -752,6 +788,10 @@ impl Daemon {
 
     /// Binds the primary and optional extra listener.
     pub async fn bind(self) -> anyhow::Result<BoundDaemon> {
+        // Every durable piece of outside-grant work is re-checked against the
+        // OAuth store's live token families when it is delivered.
+        self.manager
+            .set_grant_authority(Arc::new(OAuthGrantAuthority(Arc::clone(&self.outside))));
         let mut listeners = Vec::new();
         let mut addrs = Vec::new();
 
@@ -798,14 +838,34 @@ impl Daemon {
             }
         }
 
-        // The hub endpoint is always loopback: harness children run on this
-        // machine and must not expose the token over a LAN interface.
-        let loopback = SocketAddr::from(([127, 0, 0, 1], addrs[0].port()));
-        let mcp_url = format!("http://{loopback}/mcp");
-        self.mcp.set_endpoint(mcp_url).await;
-        // Outside agents use the same loopback address: OAuth only finishes
-        // over https or localhost, and this listener is loopback-only.
-        self.outside.set_base_url(format!("http://{loopback}"));
+        // The hub endpoint is served by a socket this machine can reach as
+        // loopback. Derive it from the sockets that really bound rather than
+        // assuming the primary is `127.0.0.1`: an IPv6 loopback bind answers on
+        // `[::1]`, and a wildcard bind answers loopback on its own port while
+        // the advertised name stays `127.0.0.1`/`[::1]`. A concrete LAN bind
+        // with no loopback socket has no eligible listener, and the features
+        // that need one are reported unavailable instead of advertising an
+        // address that does not answer.
+        match mcp_serving_socket(
+            &listeners
+                .iter()
+                .filter_map(|(listener, kind)| listener.local_addr().ok().map(|addr| (addr, *kind)))
+                .collect::<Vec<_>>(),
+        ) {
+            Some(socket) => {
+                self.mcp.set_endpoint(format!("http://{socket}/mcp")).await;
+                // Outside agents use the same loopback address: OAuth only
+                // finishes over https or localhost, and this listener is
+                // loopback-only.
+                self.outside.set_base_url(format!("http://{socket}"));
+            }
+            None => {
+                tracing::warn!(
+                    bind = %self.config.bind,
+                    "no loopback socket serves MCP; harness tools and outside agents are unavailable"
+                );
+            }
+        }
         // A thread may quote the person's own access token; an outside agent
         // must never read it back out of `get_thread`.
         self.outside.set_owner_token(&self.tokens);
@@ -1471,4 +1531,41 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let bound = daemon.bind().await?;
     tracing::info!(addr = %bound.local_addr(), "h4rnd ready");
     bound.serve(crate::supervisor::shutdown_signal()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bound(addr: &str) -> (SocketAddr, server::ListenerKind) {
+        let addr: SocketAddr = addr.parse().expect("address");
+        (addr, server::ListenerKind::for_bind(addr))
+    }
+
+    #[test]
+    fn the_mcp_socket_follows_the_loopback_socket_it_serves() {
+        let ipv6 = bound("[::1]:47800");
+        assert_eq!(mcp_serving_socket(&[ipv6]), Some(ipv6.0));
+
+        // A wildcard bind answers this machine on its own port, under the
+        // matching loopback name.
+        assert_eq!(
+            mcp_serving_socket(&[bound("0.0.0.0:47800")]),
+            Some("127.0.0.1:47800".parse().expect("addr"))
+        );
+        assert_eq!(
+            mcp_serving_socket(&[bound("[::]:47800")]),
+            Some("[::1]:47800".parse().expect("addr"))
+        );
+
+        // A loopback extra bind is the eligible socket when the primary is not.
+        let extra = bound("127.0.0.1:5000");
+        assert_eq!(
+            mcp_serving_socket(&[bound("192.168.1.5:47800"), extra]),
+            Some(extra.0)
+        );
+
+        // A concrete LAN bind with no loopback socket has nowhere to serve.
+        assert_eq!(mcp_serving_socket(&[bound("192.168.1.5:47800")]), None);
+    }
 }

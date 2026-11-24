@@ -322,6 +322,26 @@ pub struct FailoverOptions {
     pub unavailable: Option<String>,
 }
 
+/// The authority an outside grant carries into work that can start a turn later.
+///
+/// A grant is a `(client, token family, ceiling)` triple: which client asked,
+/// which of its token families is the credential, and the most autonomy the
+/// work it asked for may run with. Work that outlives the request that created
+/// it (a parked prompt, a resume schedule, a PR watch, a delegated child) keeps
+/// this, and the family is re-checked when the turn is actually delivered.
+///
+/// The family never reaches a client: a [`ResumeSchedule`] omits it on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkGrant {
+    /// Public client id of the grant that asked for the work.
+    pub client_id: String,
+    /// The token family the work was asked under. Daemon-internal.
+    pub family: String,
+    /// The most autonomy the work may run with.
+    #[serde(default)]
+    pub ceiling: Option<RuntimeMode>,
+}
+
 /// One persisted auto-resume schedule.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ResumeSchedule {
@@ -349,6 +369,14 @@ pub struct ResumeSchedule {
     /// when the daemon stops before any other record is updated.
     #[serde(default)]
     pub mode_ceiling: Option<RuntimeMode>,
+    /// The exact grant that asked for the turn this schedule continues.
+    ///
+    /// Daemon state, never part of a schedule a client reads: the resuming turn
+    /// must re-check that this token family is still live, and the policy prompt
+    /// that fires is the same work the grant asked for.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub grant: Option<WorkGrant>,
     /// Failover choice, when one was made.
     pub failover: Option<ResumeFailover>,
     /// Last resume error, when a previous attempt failed.

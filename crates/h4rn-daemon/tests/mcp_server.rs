@@ -29,6 +29,7 @@ struct TestDaemon {
     addrs: Vec<std::net::SocketAddr>,
     dir: tempfile::TempDir,
     manager: Arc<ThreadManager>,
+    subagents: Arc<h4rn_daemon::subagents::SubagentManager>,
     outside: Arc<OutsideAgents>,
     mcp_service: Arc<h4rn_daemon::mcp::McpService>,
     host: HostId,
@@ -119,6 +120,7 @@ async fn boot_on(
         .await
         .expect("build daemon");
     let manager = daemon.manager();
+    let subagents = daemon.subagents();
     let mcp_service = daemon.mcp();
     let bound: BoundDaemon = daemon.bind().await.expect("bind daemon");
     let addr = bound.local_addr();
@@ -145,6 +147,7 @@ async fn boot_on(
         addrs,
         dir,
         manager,
+        subagents,
         outside,
         mcp_service,
         host,
@@ -1305,6 +1308,169 @@ async fn a_cross_site_origin_cannot_register_or_spend_a_code() {
     daemon.stop().await;
 }
 
+/// Drives one request through the real outside-agent router with a chosen peer.
+///
+/// A live daemon's socket always reports a loopback peer, so the peer-address
+/// check can only be exercised in process, where `MockConnectInfo` names the
+/// connection. The routes, their layers and their handlers are the real ones.
+async fn guarded_status(
+    outside: Arc<OutsideAgents>,
+    peer: std::net::SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &'static str,
+) -> StatusCode {
+    use tower::ServiceExt;
+
+    let app = h4rn_daemon::mcp_server::router(outside)
+        .layer(axum::extract::connect_info::MockConnectInfo(peer));
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(axum::http::header::HOST, "127.0.0.1")
+        .header(axum::http::header::CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = app
+        .oneshot(
+            request
+                .body(axum::body::Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("the router answers");
+    response.status()
+}
+
+const REGISTER_BODY: &str =
+    r#"{"client_name":"Another local app","redirect_uris":["http://localhost:1455/cb"]}"#;
+
+#[tokio::test]
+async fn middleware_refuses_a_duplicate_origin_on_the_real_router() {
+    let daemon = boot(None).await;
+    let own = daemon.base();
+    let loopback = daemon.addr;
+    let status = guarded_status(
+        Arc::clone(&daemon.outside),
+        loopback,
+        "/oauth/register",
+        &[
+            (reqwest::header::ORIGIN.as_str(), own.as_str()),
+            (reqwest::header::ORIGIN.as_str(), own.as_str()),
+        ],
+        REGISTER_BODY,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a duplicated Origin was treated as one"
+    );
+    // The same route with one well-formed Origin is served.
+    let status = guarded_status(
+        Arc::clone(&daemon.outside),
+        loopback,
+        "/oauth/register",
+        &[(reqwest::header::ORIGIN.as_str(), own.as_str())],
+        REGISTER_BODY,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn middleware_refuses_a_malformed_origin_on_the_real_router() {
+    let daemon = boot(None).await;
+    let loopback = daemon.addr;
+    // The listener's own origin with a trailing slash or a path is malformed,
+    // not merely a different site: a lenient parse would accept it as itself.
+    let own = daemon.base();
+    for origin in [
+        format!("{own}/"),
+        format!("{own}/path"),
+        "null".to_owned(),
+        "http://a.example http://b.example".to_owned(),
+    ] {
+        let status = guarded_status(
+            Arc::clone(&daemon.outside),
+            loopback,
+            "/oauth/register",
+            &[(reqwest::header::ORIGIN.as_str(), origin.as_str())],
+            REGISTER_BODY,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{origin} was accepted");
+    }
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn middleware_refuses_a_duplicate_sec_fetch_site_on_the_real_router() {
+    let daemon = boot(None).await;
+    let loopback = "127.0.0.1:5555".parse().expect("peer");
+    let status = guarded_status(
+        Arc::clone(&daemon.outside),
+        loopback,
+        "/oauth/register",
+        &[
+            ("sec-fetch-site", "same-origin"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        REGISTER_BODY,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a duplicated Sec-Fetch-Site was treated as one"
+    );
+    let status = guarded_status(
+        Arc::clone(&daemon.outside),
+        loopback,
+        "/oauth/register",
+        &[("sec-fetch-site", "same-origin, https://evil.example")],
+        REGISTER_BODY,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a list was accepted");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn middleware_refuses_a_non_loopback_peer_on_the_real_router() {
+    let daemon = boot(None).await;
+    let remote: std::net::SocketAddr = "192.0.2.10:5555".parse().expect("peer");
+    for path in ["/oauth/register", "/mcp/outside"] {
+        let status = guarded_status(
+            Arc::clone(&daemon.outside),
+            remote,
+            path,
+            &[],
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{path} accepted a request from another machine"
+        );
+    }
+    // The same requests over a loopback peer are not refused by this rule.
+    let loopback = "127.0.0.1:5555".parse().expect("peer");
+    let status = guarded_status(
+        Arc::clone(&daemon.outside),
+        loopback,
+        "/oauth/register",
+        &[],
+        REGISTER_BODY,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn a_rebinding_host_is_refused() {
     let daemon = boot(None).await;
@@ -1332,7 +1498,7 @@ async fn a_rebinding_host_is_refused() {
 }
 
 #[tokio::test]
-async fn oauth_and_mcp_answer_only_on_the_loopback_listener() {
+async fn oauth_stays_on_the_loopback_listener_and_mcp_serves_loopback_peers() {
     // A second listener bound to every interface is classified as non-loopback
     // even though this test reaches it through 127.0.0.1.
     let daemon = boot_with(FakeHarness::new(), None, Some("0.0.0.0:0".parse().unwrap())).await;
@@ -1358,13 +1524,15 @@ async fn oauth_and_mcp_answer_only_on_the_loopback_listener() {
             .expect("request");
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} leaked");
     }
+    // `/mcp` is mounted behind the loopback guard so a harness on this machine
+    // keeps its tools; an unknown token still answers 401, not 404.
     let response = client
         .post(format!("{lan_base}/mcp"))
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
         .send()
         .await
         .expect("mcp");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     // The loopback listener still serves them.
     let (status, _) = register(&client, &daemon.base(), "http://localhost:1455/cb").await;
@@ -2738,11 +2906,284 @@ mod watch_grant {
         );
         daemon.stop().await;
     }
+
+    /// A watch lives on any live token in its family, and dies with that family.
+    ///
+    /// The access token expires after an hour; the refresh token does not, so
+    /// the watch must still deliver. Revoking the family that created the watch
+    /// stops it even though the same client holds a second, live sign-in: the
+    /// watch belongs to a family, not to the client.
+    #[tokio::test]
+    async fn a_watch_outlives_its_access_token_and_ends_with_its_family() {
+        let (fake, start) = FakeHarness::new().with_start_gate();
+        let (fake, sends) = fake.with_send_count();
+        let daemon = boot_with(fake, None, None).await;
+        let settings = daemon.settings.clone();
+        let client = http();
+        let redirect = "http://localhost:1455/callback";
+        let (_, registered) = register(&client, &daemon.base(), redirect).await;
+        let client_id = registered["client_id"]
+            .as_str()
+            .expect("client id")
+            .to_owned();
+        let first_token = begin_and_approve(
+            &daemon,
+            &client,
+            &daemon.base(),
+            &client_id,
+            redirect,
+            "supervised",
+        )
+        .await;
+        // The same client signs in a second time: a second, independent family.
+        let second_token = begin_and_approve(
+            &daemon,
+            &client,
+            &daemon.base(),
+            &client_id,
+            redirect,
+            "supervised",
+        )
+        .await;
+        assert_ne!(first_token, second_token);
+        let repo = git_repo_with_remote();
+
+        let started = call_tool(
+            &client,
+            &daemon.outside_url(),
+            &first_token,
+            "start_thread",
+            json!({
+                "harness": "claude_code",
+                "model": "default",
+                "prompt": "open a pull request",
+                "workspace_path": repo.path().display().to_string(),
+                "runtime_mode": "full_access"
+            }),
+        )
+        .await;
+        assert!(started.get("error").is_none(), "{started}");
+        let thread_id = h4rn_protocol::ThreadId::new(
+            started["result"]["structuredContent"]["thread_id"]
+                .as_str()
+                .expect("thread id"),
+        );
+
+        let source = Arc::new(WatchSource::default());
+        let links = h4rn_daemon::pr_links::PrLinkService::new(
+            Arc::new(
+                h4rn_daemon::journal::SqliteJournal::in_memory()
+                    .await
+                    .expect("journal"),
+            ),
+            source.clone(),
+            Arc::new(ThreadWakeSink::new(
+                Arc::clone(&daemon.manager),
+                daemon.outside.store(),
+            )),
+        );
+        let provider = h4rn_daemon::mcp_server::AgentToolsProvider::new(
+            Arc::clone(&daemon.manager),
+            Arc::clone(&links),
+            h4rn_daemon::forge::ForgeService::open(daemon.data_dir()).expect("forge"),
+            Arc::new(h4rn_daemon::mcp_server::AgentToolSettingsStore::open(
+                daemon.data_dir(),
+                daemon.host.clone(),
+            )),
+            Arc::new(h4rn_daemon::mcp_server::Redactor::new()),
+            daemon.host.clone(),
+        );
+        let scope = h4rn_mcp::session::McpScope::harness(
+            HarnessKind::ClaudeCode,
+            daemon.host.clone(),
+            Some(thread_id.clone()),
+        );
+        let context =
+            h4rn_mcp::provider::ToolCallContext::new(scope, "h4rn", Duration::from_secs(5));
+        provider
+            .call_tool("link_pull_request", json!({"number": 7}), &context)
+            .await
+            .expect("link");
+        provider
+            .call_tool("watch_pull_request", json!({"number": 7}), &context)
+            .await
+            .expect("watch");
+
+        // The access token's hour has passed; the family's refresh token has not.
+        daemon
+            .outside
+            .store()
+            .expire_access_tokens_for_test()
+            .expect("expire access tokens");
+        start.release();
+        wait_for_started(&settings, 1).await;
+        wait_for_turn_end(&daemon, &thread_id).await;
+
+        // The person raises the thread; the wake still runs at the grant's cap,
+        // and it is delivered although the access token is expired.
+        daemon
+            .manager
+            .set_thread_runtime_mode(&thread_id, RuntimeMode::FullAccess)
+            .await
+            .expect("raise the mode");
+        source.bump();
+        links.poll_once().await;
+        wait_for_started(&settings, 2).await;
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired),
+            "the wake of a family with a live refresh token ran uncapped: {:?}",
+            settings.get()
+        );
+        let sends_after_wake = sends.get();
+        wait_for_turn_end(&daemon, &thread_id).await;
+
+        // Revoke the family that created the watch. The client's second family
+        // is still live, and must not keep this watch alive.
+        daemon
+            .outside
+            .store()
+            .revoke_token(&first_token)
+            .expect("revoke the first family");
+        source.bump();
+        links.poll_once().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            sends.get(),
+            sends_after_wake,
+            "a revoked family's watch woke the thread while another family was live"
+        );
+        assert_eq!(
+            started_modes(&settings).len(),
+            2,
+            "a revoked family's watch started a session"
+        );
+        daemon.stop().await;
+    }
 }
 
-/// A wildcard primary bind is not a loopback listener.
+/// A delegated child inherits the calling turn's ceiling and grant.
+///
+/// The parent thread is raised to full access while a supervised turn runs.
+/// That turn delegates; the child must start at the turn's approval-required
+/// ceiling, not the thread's newer mode, and once the family is revoked a later
+/// delegation starts nothing.
 #[tokio::test]
-async fn a_wildcard_primary_bind_serves_no_oauth_or_mcp() {
+async fn a_delegated_child_inherits_the_turns_ceiling_and_grant() {
+    use h4rn_protocol::{SpawnSubagentRequest, SubagentBudget, SubagentContext, SubagentIsolation};
+
+    let (fake, start) = FakeHarness::new().with_start_gate();
+    let (fake, sessions) = fake.with_session_count();
+    let daemon = boot_with(fake, None, None).await;
+    let settings = daemon.settings.clone();
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_owned();
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        &client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
+    let repo = git_repo_with_remote();
+    let started = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "start_thread",
+        json!({
+            "harness": "claude_code",
+            "model": "default",
+            "prompt": "plan the work",
+            "workspace_path": repo.path().display().to_string(),
+            "runtime_mode": "full_access"
+        }),
+    )
+    .await;
+    assert!(started.get("error").is_none(), "{started}");
+    let thread_id = h4rn_protocol::ThreadId::new(
+        started["result"]["structuredContent"]["thread_id"]
+            .as_str()
+            .expect("thread id"),
+    );
+
+    // The person raises the thread while the supervised turn is still starting.
+    daemon
+        .manager
+        .set_thread_runtime_mode(&thread_id, RuntimeMode::FullAccess)
+        .await
+        .expect("raise the mode");
+    let request = || SpawnSubagentRequest {
+        parent_thread: thread_id.clone(),
+        task: "read the tests".into(),
+        harness: Some(HarnessKind::ClaudeCode),
+        host: None,
+        model: None,
+        isolation: SubagentIsolation::Shared,
+        context: SubagentContext::None,
+        budget: SubagentBudget::default(),
+    };
+    let child = daemon.subagents.spawn(request()).await.expect("delegate");
+    let child_id = child.child_thread_id.clone().expect("child thread");
+    let summary = daemon
+        .manager
+        .thread_summary(&child_id)
+        .await
+        .expect("child summary");
+    assert_eq!(
+        summary.runtime_mode,
+        RuntimeMode::ApprovalRequired,
+        "the child was created at the thread's full-access mode"
+    );
+
+    // Revoking the family ends the authority the turn can pass on. The child
+    // is created while the turn is still active, so it carries the grant; its
+    // startup must refuse before launching a harness.
+    daemon
+        .outside
+        .store()
+        .revoke_client(&client_id)
+        .expect("revoke");
+    let refused = daemon
+        .subagents
+        .spawn(request())
+        .await
+        .expect("the delegation is accepted");
+    let refused_id = refused.child_thread_id.clone().expect("child thread");
+
+    start.release();
+    wait_for_started(&settings, 2).await;
+    assert!(
+        !started_modes(&settings).contains(&RuntimeMode::FullAccess),
+        "the delegated child started at full access: {:?}",
+        settings.get()
+    );
+    assert_eq!(
+        sessions.get(),
+        2,
+        "a revoked grant's delegated child started a session"
+    );
+    assert!(
+        !daemon.manager.turn_in_flight(&refused_id).await,
+        "a revoked grant's delegated child left a turn running"
+    );
+    daemon.stop().await;
+}
+
+/// A wildcard primary bind serves MCP to loopback peers, never OAuth.///
+/// The advertised hub URL names `127.0.0.1` on the wildcard socket's port, so a
+/// harness on this machine keeps its tools; a request from another machine is
+/// refused by the guard. The OAuth routes stay absent: their redirect only
+/// finishes on a loopback listener.
+#[tokio::test]
+async fn a_wildcard_primary_bind_serves_mcp_to_loopback_only() {
     let daemon = boot_on(
         "0.0.0.0:0".parse().expect("bind"),
         FakeHarness::new(),
@@ -2796,7 +3237,13 @@ async fn a_wildcard_primary_bind_serves_no_oauth_or_mcp() {
             "{path} was served on a wildcard bind"
         );
     }
-    for path in ["/mcp", "/mcp/outside"] {
+    // `/mcp` serves harness sessions on this machine. Its outside-token alias
+    // stays on the loopback router, because OAuth that finishes on localhost
+    // is absent here.
+    for (path, expected) in [
+        ("/mcp", StatusCode::UNAUTHORIZED),
+        ("/mcp/outside", StatusCode::NOT_FOUND),
+    ] {
         let response = client
             .post(format!("{base}{path}"))
             .bearer_auth("h4rn_at_unknown")
@@ -2806,8 +3253,8 @@ async fn a_wildcard_primary_bind_serves_no_oauth_or_mcp() {
             .expect("post");
         assert_eq!(
             response.status(),
-            StatusCode::NOT_FOUND,
-            "{path} was served on a wildcard bind"
+            expected,
+            "{path} answered the wrong way on a wildcard bind"
         );
     }
     daemon.stop().await;
@@ -2882,9 +3329,15 @@ async fn a_title_cut_inside_a_token_returns_no_fragment() {
         !started.to_string().contains("ghp"),
         "start_thread returned the title's fragment: {started}"
     );
+    // The title was redacted before the cut, so the stored title never ended in
+    // half a token. A cut inside the redaction marker itself is not shown either.
+    let title = started["result"]["structuredContent"]["thread"]["title"]
+        .as_str()
+        .expect("title");
+    assert!(!title.contains("[r"), "a half marker was stored: {title}");
     assert!(
-        started.to_string().contains("[redacted]"),
-        "start_thread did not redact the title: {started}"
+        !title.contains("ghp"),
+        "a token fragment was stored: {title}"
     );
 
     let listed = call_tool(

@@ -396,7 +396,8 @@ impl MeterStore {
                 prompt        TEXT NOT NULL,
                 failover_json TEXT,
                 last_error    TEXT,
-                mode_ceiling  TEXT
+                mode_ceiling  TEXT,
+                grant_json    TEXT
             )",
         )
         .execute(&self.pool)
@@ -405,6 +406,10 @@ impl MeterStore {
         // resume armed by the old build has no ceiling, which is exactly the
         // state that build left behind.
         self.ensure_column("meter_schedules", "mode_ceiling", "TEXT")
+            .await?;
+        // The grant that asked for the paused turn. A row armed before this
+        // column existed names no grant, so its resume runs as that build's did.
+        self.ensure_column("meter_schedules", "grant_json", "TEXT")
             .await?;
 
         Ok(())
@@ -613,8 +618,8 @@ impl MeterStore {
         sqlx::query(
             "INSERT INTO meter_schedules
              (schedule_id, thread_id, scheduled_at, resume_at, attempt, state, reason, prompt,
-              failover_json, last_error, mode_ceiling)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)
+              failover_json, last_error, mode_ceiling, grant_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(thread_id) DO UPDATE SET
                 schedule_id = excluded.schedule_id,
                 scheduled_at = excluded.scheduled_at,
@@ -625,7 +630,8 @@ impl MeterStore {
                 prompt = excluded.prompt,
                 failover_json = excluded.failover_json,
                 last_error = excluded.last_error,
-                mode_ceiling = excluded.mode_ceiling",
+                mode_ceiling = excluded.mode_ceiling,
+                grant_json = excluded.grant_json",
         )
         .bind(&schedule.schedule_id)
         .bind(schedule.thread_id.as_str())
@@ -638,6 +644,13 @@ impl MeterStore {
         .bind(failover)
         .bind(&schedule.last_error)
         .bind(ceiling_json(schedule.mode_ceiling.as_ref())?)
+        .bind(
+            schedule
+                .grant
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        )
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -889,6 +902,10 @@ fn schedule_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<ResumeSchedule, St
         prompt: row.try_get("prompt")?,
         mode_ceiling: row
             .try_get::<Option<String>, _>("mode_ceiling")?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?,
+        grant: row
+            .try_get::<Option<String>, _>("grant_json")?
             .map(|json| serde_json::from_str(&json))
             .transpose()?,
         failover,
@@ -1161,6 +1178,11 @@ mod tests {
             reason: "reset".into(),
             prompt: "continue".into(),
             mode_ceiling: Some(RuntimeMode::ApprovalRequired),
+            grant: Some(h4rn_protocol::WorkGrant {
+                client_id: "client-1".into(),
+                family: "family-1".into(),
+                ceiling: Some(RuntimeMode::ApprovalRequired),
+            }),
             failover: None,
             last_error: None,
         };

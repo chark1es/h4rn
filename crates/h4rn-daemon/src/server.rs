@@ -170,9 +170,11 @@ impl ListenerKind {
     /// Every decision comes from the address the listener actually bound, not
     /// from the flag that created it: `--bind 0.0.0.0` is still the primary
     /// listener, but it is not a loopback address, so [`for_bind`] makes it an
-    /// `ExtraBind` and it serves neither OAuth nor `/mcp`. [`operator_router`]
-    /// still mounts the direct guest routes for a wildcard bind, because its
-    /// loopback connection is the same socket.
+    /// `ExtraBind` and it serves no OAuth. `/mcp` is mounted there behind the
+    /// loopback guard, so a harness on this machine keeps its tools while a
+    /// network peer is refused. [`operator_router`] still mounts the direct
+    /// guest routes for a wildcard bind, because its loopback connection is the
+    /// same socket.
     ///
     /// [`for_bind`]: ListenerKind::for_bind
     pub fn router(self, state: AppState, bound: SocketAddr) -> Router {
@@ -200,21 +202,7 @@ impl ListenerKind {
 /// (ADR-009).
 pub fn router(state: AppState) -> Router {
     let outside = Arc::clone(&state.outside);
-    // The MCP endpoint carries bearer tokens for harness sessions and for
-    // outside agents, so it is guarded like the OAuth routes: only this
-    // daemon's own page and a loopback `Host` may reach it.
-    let mcp = Router::new()
-        .route(
-            "/mcp",
-            get(mcp_http_get)
-                .post(mcp_http_post)
-                .delete(mcp_http_delete),
-        )
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&outside),
-            crate::mcp_server::http::loopback_guard,
-        ))
-        .with_state(state.clone());
+    let mcp = mcp_router(state.clone());
     core_routes()
         .route("/webhooks/{secret}", post(webhook_post))
         .merge(guest_router())
@@ -223,16 +211,42 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::mcp_server::router(outside))
 }
 
+/// The `/mcp` route every loopback-serving listener mounts.
+///
+/// It carries bearer tokens for harness sessions and for outside agents, so it
+/// is guarded like the OAuth routes: only this daemon's own page and a loopback
+/// peer may reach it. The operator router mounts this too, so a wildcard or LAN
+/// bind still lets harness sessions on this machine reach their tools while a
+/// peer from the network is refused.
+fn mcp_router(state: AppState) -> Router {
+    let outside = Arc::clone(&state.outside);
+    Router::new()
+        .route(
+            "/mcp",
+            get(mcp_http_get)
+                .post(mcp_http_post)
+                .delete(mcp_http_delete),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&outside),
+            crate::mcp_server::http::loopback_guard,
+        ))
+        .with_state(state)
+}
+
 /// The router an operator-named bind that is not loopback serves.
 ///
 /// It carries the webhook endpoint because the operator chose where it
-/// listens, but never OAuth or `/mcp`: the redirect and the bearer tokens stay
-/// on the loopback listener. `/secure` is always registered so a remote client
-/// gets a clear "not enabled" response instead of a 404, while plain WebSocket
-/// access stays loopback-only (ADR-009). Direct guest routes are mounted only
-/// where the bound address can answer this machine: the wildcard address,
-/// whose loopback connection is the same socket. The guest handlers repeat the
-/// check on the peer address, so a wildcard bind still refuses a LAN peer.
+/// listens, and `/mcp` behind the loopback guard so a harness session on this
+/// machine keeps its tools when the daemon is bound to the wildcard or a LAN
+/// address. It never carries OAuth: the redirect and the authorization store
+/// stay on the loopback listener. `/secure` is always registered so a remote
+/// client gets a clear "not enabled" response instead of a 404, while plain
+/// WebSocket access stays loopback-only (ADR-009). Direct guest routes are
+/// mounted only where the bound address can answer this machine: the wildcard
+/// address, whose loopback connection is the same socket. The guest handlers
+/// repeat the check on the peer address, so a wildcard bind still refuses a LAN
+/// peer.
 fn operator_router(state: AppState, bound: SocketAddr) -> Router {
     let app = core_routes().route("/webhooks/{secret}", post(webhook_post));
     let app = if serves_direct_guest(bound) {
@@ -240,7 +254,7 @@ fn operator_router(state: AppState, bound: SocketAddr) -> Router {
     } else {
         app
     };
-    app.with_state(state)
+    app.with_state(state.clone()).merge(mcp_router(state))
 }
 
 /// Whether a listener bound to `bound` may serve the direct guest routes.

@@ -13,8 +13,8 @@ All notable changes to h4rn are recorded here. The format follows
   `watch_pull_request`, `unwatch_pull_request`, `thread_status` and
   `list_forge_pull_requests`. They act on the calling thread and accept no thread id, so a token
   cannot reach another thread; Settings → Sharing & access turns them off per harness. Agents
-  h4rn did not start — Claude Code or Codex in your terminal, ChatGPT, a bot — can connect to
-  `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). Only you can grant
+  h4rn did not start — Claude Code or Codex in your terminal, and other local MCP clients — can
+  connect to `/mcp` with OAuth (authorization code + PKCE, dynamic client registration). Only you can grant
   one: the client's browser shows who is asking and where it would return, and the request is
   approved in h4rn → Settings → Sharing & access, where you pick **Read only**, **Supervised**
   (threads run at approval-required) or **Full access** with no preselected default. Tokens are
@@ -573,6 +573,29 @@ All notable changes to h4rn are recorded here. The format follows
   reported, a malformed or duplicated `Origin`/`Sec-Fetch-Site` is refused
   instead of treated as absent, `set_harness` commits a switch only after its
   write succeeds, and both browser sign-in screens lost their uppercase eyebrow.
+- **A grant is now the exact sign-in that asked for the work, and every later
+  turn is checked against it.** The daemon carries a `(client, token family,
+  ceiling)` triple through everything that can start a turn later: a queued
+  message, a prompt parked by a usage limit, the resume schedule, a PR watch, the
+  wake that watch causes, and a delegated child. Delivery re-checks that exact
+  family and refuses — settling the turn with a plain explanation and starting no
+  session — once it is revoked, including across a restart. Any live token in the
+  family keeps it alive, so a watch no longer dies when the one-hour access token
+  expires while the refresh token is live, and revoking one family stops its work
+  even when the same client holds another live sign-in. A wake turn carries the
+  triple, so a watch it re-creates keeps the grant instead of clearing it, and a
+  delegated child starts at the calling turn's ceiling rather than the thread's
+  newer mode. An auto-resume selects its session through the same per-thread gate
+  as a live mode switch, so it cannot reuse a session the switch already made
+  permissive. A second approval no longer prunes the spent code of a live family,
+  so a late replay still revokes it. Thread titles are redacted before the
+  80-character cut, the redactor removes a partial owner-token prefix and
+  daemon-issued guest links (`/guest/<token>`), and the MCP URL follows the socket
+  that really serves it (`[::1]` for an IPv6 loopback bind, the loopback extra
+  bind when the primary is a wildcard or LAN address, `127.0.0.1` for a wildcard
+  bind, and unavailable when no loopback socket exists); `/mcp` is mounted on a
+  non-loopback bind behind the loopback guard so harness tools keep working,
+  while OAuth stays loopback-only.
 - **A guest exchange never stalls the relay, and a guest request is one decision with its card.**
   Guest work now runs in its own tasks behind a small concurrency cap, so a chunked 10 MB answer, a
   snapshot or a file write can never block the loop that drains the relay socket or starve other

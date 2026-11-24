@@ -129,6 +129,13 @@ pub struct ParkedPrompt {
     /// not come back at a more permissive mode just because the daemon paused.
     #[serde(default)]
     pub mode_ceiling: Option<h4rn_protocol::RuntimeMode>,
+    /// The outside grant that asked for this prompt, when one did.
+    ///
+    /// It survives a restart with the prompt: the resumed turn must re-check
+    /// that the exact token family is still live, and refuse to run if the grant
+    /// was revoked while the daemon was down.
+    #[serde(default)]
+    pub grant: Option<h4rn_protocol::WorkGrant>,
 }
 
 /// One attachment of a [`ParkedPrompt`].
@@ -1501,6 +1508,11 @@ mod tests {
             text: "carry on".into(),
             attachments: Vec::new(),
             mode_ceiling: Some(RuntimeMode::ApprovalRequired),
+            grant: Some(h4rn_protocol::WorkGrant {
+                client_id: "client-1".into(),
+                family: "family-1".into(),
+                ceiling: Some(RuntimeMode::ApprovalRequired),
+            }),
         });
         journal.upsert_thread(&one).await.unwrap();
         drop(journal);

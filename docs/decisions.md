@@ -1673,11 +1673,19 @@ grants, which is the safe direction.
 issued, and presenting a rotated refresh token a second time revokes its whole family: either
 means two parties hold the same credential.
 
-**A grant's ceiling travels with each message.** A supervised grant is not allowed to change the
-person's thread mode. Every message it sends carries `approval_required` as an immutable ceiling;
-the turn runs on a session started (or replaced) at the stricter of the thread's mode and that
-ceiling, and the ceiling survives a rate-limit pause and a restart. Raising the thread's mode
-afterwards cannot lift a ceiling that is already queued.
+**A grant is `(client, token family, ceiling)`.** A supervised grant is not allowed to change the
+person's thread mode. Every piece of work that can start a turn later — a queued message, a prompt
+parked by a provider limit, the resume schedule, a PR watch, the wake that watch causes and a
+delegated child — carries the triple and stores it durably. Every message it sends carries
+`approval_required` as an immutable ceiling; the turn runs on a session started (or replaced) at the
+stricter of the thread's mode and that ceiling, and the ceiling survives a rate-limit pause and a
+restart. Raising the thread's mode afterwards cannot lift a ceiling that is already queued.
+
+The family is the grant's identity, not the client: a client can hold several sign-ins, and work
+asked for under one must not survive that one's revocation because another is still live. At the
+moment work is delivered the exact family is re-checked, and a family with no live, unrevoked token
+— access or refresh — refuses delivery rather than starting a session. A delegated child inherits
+the calling turn's triple, so a supervised turn cannot delegate its way past its ceiling.
 
 Tokens also carry the RFC 8707 `resource` they were issued for, when the client names one, and
 `/mcp` refuses a token bound to another resource. Tool results for `get_thread` redact the daemon's

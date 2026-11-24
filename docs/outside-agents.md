@@ -1,9 +1,9 @@
 # Agents and MCP
 
 h4rn is an MCP server in two directions. Agents h4rn runs get tools for the thread they are working
-in. Agents h4rn did **not** start — Claude Code or Codex in your own terminal, ChatGPT, a bot — can
-connect to the daemon over OAuth, once you approve a level, and work with your projects and
-threads.
+in. Agents h4rn did **not** start — Claude Code or Codex in your own terminal, and other local MCP
+clients — can connect to the daemon over OAuth, once you approve a level, and work with your
+projects and threads.
 
 The token model behind both is [ADR-045](decisions.md).
 
@@ -40,13 +40,21 @@ An outside agent connects to:
 http://127.0.0.1:<port>/mcp
 ```
 
-The URL is on Settings → Sharing & access with a **Copy MCP URL** button. It is the daemon's
-loopback listener: the OAuth redirect must finish on `https` or a localhost address, and the MCP
-endpoint carries a bearer token, so it is deliberately not exposed on the LAN or tailnet. The
-decision comes from the address a socket is really bound to, not from which flag named it: a
-primary bind of `0.0.0.0` or a LAN address serves 404 for `/mcp` and every OAuth route. A request
-through a loopback socket is also refused unless its peer address is this machine and its `Host` is
-a loopback name; the header is the client's claim, the socket is not.
+The URL is on Settings → Sharing & access with a **Copy MCP URL** button. It names the socket that
+really serves MCP: the loopback listener the daemon bound, `[::1]` when that socket is IPv6, or the
+loopback extra bind when the primary is a wildcard or LAN address. A wildcard primary answers this
+machine on its own port, so its URL is `127.0.0.1`/`[::1]` on that port. When no loopback socket
+exists (a primary bound only to one LAN address, with no loopback extra bind), there is nowhere to
+serve it and the feature reports itself unavailable instead of printing an address that does not
+answer.
+
+The OAuth routes stay on the loopback listener: their redirect must finish on `https` or a
+localhost address. The MCP endpoint carries a bearer token, so it is never served to a network
+peer. A non-loopback bind mounts `/mcp` behind the same guard, which lets a harness session on this
+machine keep its tools while a request from another machine is refused; a concrete LAN bind without
+a loopback socket has no such path. A request through a loopback socket is also refused unless its
+peer address is this machine and its `Host` is a loopback name; the header is the client's claim,
+the socket is not.
 
 ### Sign in
 
@@ -119,7 +127,9 @@ never spends a rate-limit hit.
 
 ### Tokens
 
-- Access tokens last **one hour**; refresh tokens last **thirty days** and rotate on every use.
+- Access tokens last **one hour**; refresh tokens last **thirty days** and rotate on every use. A
+  grant is live while **any** token in its family is: a watch or a parked prompt does not die when
+  the one-hour access token expires if the refresh token is still live.
 - Both are random 256-bit values with a recognisable prefix (`h4rn_at_`, `h4rn_rt_`).
 - Only a BLAKE3 digest is written to `outside_agents.json`; a copy of the file is not a copy of the
   credentials. No token is ever logged or returned in a tool result. An approval's redirect carries
@@ -159,22 +169,34 @@ never spends a rate-limit hit.
 `list_providers`. It never creates a worktree. A thread it starts cannot run with more permission
 than its grant allows: a supervised grant always starts at `approval_required`, and a message it
 sends to an existing thread is clamped to that mode for the turn without changing the person's own
-thread setting. The ceiling belongs to the work, not to whichever dispatch is active: a supervised
-`start_thread` attaches it to the first prompt as well as to the thread's mode, so raising the mode
-while that first prompt runs changes the live session only as far as the ceiling allows and the
-person's next turn gets the new mode.
+thread setting.
 
-A turn stopped by a provider limit stores the ceiling on the resume schedule itself, in the same
-write that arms it, so the resume runs under it even if the daemon stopped before anything else was
-recorded. A PR watch created inside a supervised turn keeps the grant id and the ceiling: every wake
-asks whether the grant is still live (a revoked grant starts nothing and ends the watch) and starts
-at most at the ceiling. A live mode switch and the selection of a session for a prompt share one
-per-thread gate, so a switch that has already applied full access to the session cannot be read as
-the old setting by an incoming supervised message.
+The grant is a `(client, token family, ceiling)` triple, and every piece of work that can start a
+turn later carries it: a queued message, a prompt parked by a provider limit, the resume schedule, a
+PR watch, the wake that watch causes, and a delegated child. The triple is stored durably where the
+work waits, and delivery re-checks the exact token family before anything reaches the harness: a
+revoked family means the turn fails with a plain explanation and no session is started, including
+after a restart. A child inherits the calling turn's triple and can never run wider than it, so a
+supervised turn cannot delegate its way to full access. The ceiling belongs to the work, not to
+whichever dispatch is active: a supervised `start_thread` attaches it to the first prompt as well as
+to the thread's mode, so raising the mode while that first prompt runs changes the live session only
+as far as the ceiling allows and the person's next turn gets the new mode.
 
-`thread_status`, `start_thread`, `list_threads` and `get_thread` share one redactor, applied before
-truncation and to both text and structured output. A title is the first 80 characters of the first
-prompt, so a token can be cut inside its own prefix; the redactor also removes that fragment.
+A turn stopped by a provider limit stores the ceiling and the grant on the resume schedule itself, in
+the same write that arms it, so the resume runs under them even if the daemon stopped before
+anything else was recorded. A PR watch created inside a supervised turn keeps the exact token family
+and the ceiling: every wake asks whether that family is still live (a revoked family starts nothing
+and ends the watch) and starts at most at the ceiling. The wake turn itself carries the same triple,
+so a watch it re-creates keeps the grant rather than clearing it. A live mode switch, a prompt
+dispatch and a resume's session selection share one per-thread gate, so a switch that has already
+applied full access to the session cannot be read as the old setting by an incoming supervised
+message or an auto-resume.
+
+`thread_status`, `start_thread`, `list_threads` and `get_thread` share one redactor. A thread's
+title is redacted before the 80-character cut, so the journal never stores a credential or a
+fragment of one, and the same redactor also removes a partial owner-token prefix left by an older
+stored title. Guest links (`/guest/<token>`) are redacted too: a guest link is a bearer credential
+in a URL.
 
 An outside agent never sees the person's own upstream MCP servers; it sees only this tool set.
 

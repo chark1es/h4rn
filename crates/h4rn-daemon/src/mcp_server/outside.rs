@@ -17,7 +17,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use h4rn_mcp::jsonrpc::{self, Incoming, RpcErrorObject};
 use h4rn_mcp::types::{CallToolResult, Content, ToolAnnotations, ToolDefinition};
-use h4rn_protocol::{HarnessKind, HostId, OutsideAgentLevel, RuntimeMode, ThreadId, ThreadSummary};
+use h4rn_protocol::{
+    HarnessKind, HostId, OutsideAgentLevel, RuntimeMode, ThreadId, ThreadSummary, WorkGrant,
+};
 use serde_json::{Value, json};
 
 use super::oauth::{Grant, OAuthStore};
@@ -671,6 +673,11 @@ impl OutsideAgents {
                 // prompt runs must not lift it, and a resume after a usage
                 // limit keeps it.
                 let ceiling = ceiling_for(grant.level);
+                let work_grant = WorkGrant {
+                    client_id: grant.client_id.clone(),
+                    family: grant.family.clone(),
+                    ceiling,
+                };
                 let created = self
                     .manager
                     .create_thread_for_work(
@@ -700,7 +707,7 @@ impl OutsideAgents {
                             worktree: None,
                         },
                         ceiling,
-                        Some(grant.client_id.clone()),
+                        Some(work_grant),
                     )
                     .await
                     .map_err(|error| error.to_string())?;
@@ -734,15 +741,14 @@ impl OutsideAgents {
                 // turn this message starts is clamped while it runs, and raising
                 // the mode afterwards cannot lift a ceiling already queued.
                 let ceiling = ceiling_for(grant.level);
+                let work_grant = WorkGrant {
+                    client_id: grant.client_id.clone(),
+                    family: grant.family.clone(),
+                    ceiling,
+                };
                 let accepted = self
                     .manager
-                    .send_message_for_work(
-                        &thread_id,
-                        text,
-                        Vec::new(),
-                        ceiling,
-                        Some(grant.client_id.clone()),
-                    )
+                    .send_message_for_work(&thread_id, text, Vec::new(), ceiling, Some(work_grant))
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(structured(
