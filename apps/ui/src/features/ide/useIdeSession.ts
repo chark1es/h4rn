@@ -220,6 +220,19 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
    * throw it away, and only a newer branch read (or another workspace) may.
    */
   const branchesRequestRef = useRef(0);
+  /**
+   * The file the pending Branch or Commits list load will open after a
+   * workspace round-trip, and the request generation it belongs to.
+   *
+   * Restoring a workspace resumes the list load the person left, and that load
+   * already opens the tab's file. The pane's tab-follow effect runs on the same
+   * render and would ask for the same list again; this names the file the
+   * resumed load has taken, so the follow leaves it alone. A newer request
+   * moves the generation, which retires the note.
+   */
+  const resumedListRef = useRef<{ token: number; path: string | null; source: DiffSource } | null>(
+    null,
+  );
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
 
@@ -891,6 +904,19 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     async (path: string) => {
       const current = stateRef.current;
       const listing = current.filesLoading || current.commitsLoading;
+      // A review resumed after a workspace round-trip is already loading this
+      // tab's file: asking for the list again would read it twice. Only the
+      // resumed request itself is skipped, so a later follow to another tab
+      // still takes over.
+      const resumed = resumedListRef.current;
+      if (
+        listing &&
+        resumed?.token === diffRequestRef.current &&
+        resumed.path === path &&
+        resumed.source === current.diffSource
+      ) {
+        return;
+      }
       // With no list read out, `diffPath` is the newest request's file (a
       // direct open names it at once), so a tab that matches it is already
       // shown or loading. While a list is out, `diffPath` still names the file
@@ -1117,6 +1143,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     // bump both generations so every request still in flight is dropped.
     diffRequestRef.current += 1;
     branchesRequestRef.current += 1;
+    resumedListRef.current = null;
     // Nothing is in flight for the state being restored, so a cached spinner
     // is the leftover of a read that has already been dropped.
     const idle: Partial<IdeState> = {
@@ -1162,11 +1189,23 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         // explicitly instead of letting the loaders read `stateRef`.
         if (cached.diffSource === "branch") {
           void resume.loadBranch(cached.diffPath, { base: cached.diffBase });
+          // The resumed load opens this file; the pane's follow effect must not
+          // read the same list again for the tab it is going to show.
+          resumedListRef.current = {
+            token: diffRequestRef.current,
+            path: cached.diffPath,
+            source: "branch",
+          };
         } else if (cached.diffSource === "commit") {
           void resume.loadCommit(cached.diffPath, {
             base: cached.diffBase,
             commit: cached.diffCommit,
           });
+          resumedListRef.current = {
+            token: diffRequestRef.current,
+            path: cached.diffPath,
+            source: "commit",
+          };
         } else if (cached.diffPath) {
           void resume.openDiff(cached.diffPath, cached.diffSource, {
             base: cached.diffBase,

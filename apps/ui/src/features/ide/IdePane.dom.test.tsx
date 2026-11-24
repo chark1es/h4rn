@@ -749,6 +749,37 @@ describe("the diff pane stays on the file the person picked", () => {
     expect(screen.getByText("3 files")).toBeTruthy();
   });
 
+  it("asks once when the source picker starts a review on a moved tab", async () => {
+    await mount();
+    await openDiff();
+
+    // Close the pane, then move the editor to another tab.
+    fireEvent.click(screen.getByRole("tab", { name: "Edit" }));
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+
+    // Picking Branch from the path bar starts the review for the tab in front
+    // of the editor; the pane's follow effect must not read it a second time.
+    const before = diffRequests().length;
+    const filesBefore = mock.requests.filter((request) => request.type === "fs_diff_files").length;
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew branch/ })).toBeTruthy(),
+    );
+    await settle();
+
+    expect(diffRequests()).toHaveLength(before + 1);
+    expect(mock.requests.filter((request) => request.type === "fs_diff_files")).toHaveLength(
+      filesBefore + 1,
+    );
+  });
+
   it("names the base Commit mode reuses", async () => {
     await mount();
     await openDiff();
@@ -1022,6 +1053,13 @@ describe("a branch review resumed after a workspace round-trip", () => {
     });
     await waitFor(() => expect(filesRequests().length).toBeGreaterThan(before));
     expect(filesRequests().at(-1)?.against).toEqual({ kind: "base", base: "release" });
+    // One read, not two: the resumed load already opens the tab's file, so the
+    // pane's follow must not ask for the same list again.
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+    await settle();
+    expect(filesRequests()).toHaveLength(before + 1);
   });
 });
 

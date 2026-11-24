@@ -866,6 +866,120 @@ describe("a stale branch reply leaves its newer load alone", () => {
   });
 });
 
+describe("a tab switch keeps an empty commit range empty", () => {
+  it("re-lists the range instead of asking for a commit it no longer has", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+
+    // The range emptied out since the list was read, so the refresh clears the
+    // commit that was selected from the older list.
+    state.commits = { ...state.commits, commits: [] };
+    await act(async () => {
+      await latest?.refreshDiffLists();
+    });
+    expect(latest?.state.diffCommit).toBeNull();
+    expect(latest?.state.diffError).toBeNull();
+
+    // Switching tabs on the empty range must re-read the list: opening a
+    // commit scope with no commit would answer with an error about a missing
+    // sha instead of the range's own empty state.
+    const diffs = state.requests.filter((request) => request.type === "fs_diff").length;
+    await act(async () => {
+      await latest?.followDiffTab("b.ts");
+    });
+    await flush();
+    expect(latest?.state.diffError).toBeNull();
+    expect(state.requests.filter((request) => request.type === "fs_diff")).toHaveLength(diffs);
+    expect(latest?.state.diffCommit).toBeNull();
+    expect(latest?.state.diffPath).toBeNull();
+  });
+});
+
+describe("a follow re-reads a branch list that never arrived", () => {
+  it("asks for the failed list once when the tab switches", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+
+    // The picker's list fails and the first file list is still out, so the
+    // follow has to take over the load.
+    const releaseFiles = holdNext("fs_diff_files");
+    failNext("fs_branches");
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.branchesError !== null);
+    expect(latest?.state.diffBranches).toBeNull();
+    expect(latest?.state.branchesLoading).toBe(false);
+    expect(latest?.state.filesLoading).toBe(true);
+
+    // The picker has no list to offer; the follow reads it again, exactly once,
+    // so the base picker recovers without a manual refresh.
+    state.requests = [];
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    await releaseHold(releaseFiles);
+    expect(state.requests.filter((request) => request.type === "fs_branches")).toHaveLength(1);
+    expect(latest?.state.diffBranches?.branches).toEqual(["main", "feature"]);
+    expect(latest?.state.branchesError).toBeNull();
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "main" });
+  });
+});
+
+describe("a tab switch during a held commit file list", () => {
+  it("opens the new tab's files and drops the older list", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+    await act(async () => {
+      await latest?.selectDiffSource("commit");
+    });
+    await waitFor(() => latest?.state.diff?.against?.kind === "commit");
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-1" });
+
+    // The picker moves to commit-2, and its file list is held back.
+    state.commits = {
+      ...state.commits,
+      commits: [
+        {
+          sha: "commit-2",
+          short_sha: "c2",
+          subject: "second",
+          author: "you",
+          authored_at: "2026-03-04T12:03:00Z",
+        },
+        ...state.commits.commits,
+      ],
+    };
+    const releaseFiles = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.setDiffCommit("commit-2");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // The person moves to another tab before it lands.
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(() => latest?.state.diff?.path === "b.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "commit", sha: "commit-2" });
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "commit", sha: "commit-2" });
+
+    // The held list for a.ts belongs to the request the follow replaced; it
+    // must not paint its own file list or open a.ts over the tab on screen.
+    await releaseHold(releaseFiles);
+    await flush();
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "commit", sha: "commit-2" });
+    expect(latest?.state.diff?.path).toBe("b.ts");
+    expect(latest?.state.diffPath).toBe("b.ts");
+    expect(latest?.state.filesLoading).toBe(false);
+  });
+});
+
 describe("a workspace change advances the branch generation", () => {
   it("ignores the previous workspace's branch list and file list", async () => {
     await mount();
