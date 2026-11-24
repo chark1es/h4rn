@@ -2395,6 +2395,7 @@ class MockDaemon {
             turn_id: turnId,
             seq: this.seq + 1,
             queued_message_id: message.message_id,
+            unrecorded: false,
           });
           this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
           return;
@@ -2404,6 +2405,7 @@ class MockDaemon {
           thread_id: body.thread_id,
           turn_id: turnId,
           seq: this.seq + 1,
+          unrecorded: false,
         });
         entry.summary = {
           ...entry.summary,

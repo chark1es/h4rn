@@ -47,9 +47,24 @@ pub enum QueueAction {
     },
     /// Deliver it now: steer into the running turn when the harness can, else
     /// move it to the front of the queue.
-    SendNow,
+    SendNow {
+        /// The turn the client saw running when it asked, when one was.
+        ///
+        /// The daemon steers only into that turn: one that already ended, or
+        /// whose first prompt it has not accepted yet, moves the message to the
+        /// front instead of catching a turn the person did not mean.
+        #[serde(default)]
+        turn_id: Option<TurnId>,
+    },
     /// Steer it into the running turn, refusing rather than queuing it.
-    Steer,
+    Steer {
+        /// The turn the client saw running when it asked.
+        ///
+        /// A stale turn is refused rather than steered into whatever turn runs
+        /// now.
+        #[serde(default)]
+        turn_id: Option<TurnId>,
+    },
 }
 
 /// Which way a queued message moves.

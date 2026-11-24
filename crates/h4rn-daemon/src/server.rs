@@ -1649,6 +1649,7 @@ impl Connection {
                         turn_id: accepted.turn_id,
                         seq: accepted.seq,
                         queued_message_id: accepted.queued_message_id,
+                        unrecorded: accepted.unrecorded,
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
                 ClientRequest::GetThreadQueue { thread_id, offset } => self
@@ -1673,8 +1674,8 @@ impl Connection {
                         h4rn_protocol::QueueAction::Edit { .. } => "thread.queue.edited",
                         h4rn_protocol::QueueAction::Remove => "thread.queue.removed",
                         h4rn_protocol::QueueAction::Move { .. } => "thread.queue.moved",
-                        h4rn_protocol::QueueAction::SendNow => "thread.queue.sent_now",
-                        h4rn_protocol::QueueAction::Steer => "thread.queue.steered",
+                        h4rn_protocol::QueueAction::SendNow { .. } => "thread.queue.sent_now",
+                        h4rn_protocol::QueueAction::Steer { .. } => "thread.queue.steered",
                     };
                     let result = self
                         .state

@@ -1484,6 +1484,7 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
             turn_id: accepted_turn,
             seq,
             queued_message_id: _,
+            unrecorded: _,
         } => {
             assert_eq!(accepted_thread, thread_id);
             assert_ne!(accepted_turn, first_turn_id, "the next turn gets a new id");

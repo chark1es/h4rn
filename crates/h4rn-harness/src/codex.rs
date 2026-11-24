@@ -1404,10 +1404,6 @@ fn provider_arguments(env: &BTreeMap<String, String>) -> Vec<String> {
     arguments
 }
 
-/// Builds the `turn/start` input array from text and attachments.
-///
-/// Images become `localImage` items (Codex reads the path itself); every other
-/// attachment becomes a `mention` item, and the prompt also states the absolute
 /// The `turn/steer` parameters for one message.
 ///
 /// Kept separate so the wire shape (thread, expected turn and normalized input)
@@ -1443,6 +1439,10 @@ pub fn steer_request(
     )
 }
 
+/// Builds the `turn/start` input array from text and attachments.
+///
+/// Images become `localImage` items (Codex reads the path itself); every other
+/// attachment becomes a `mention` item, and the prompt also states the absolute
 /// path so the model can refer to the file even if the mention is ignored.
 pub fn build_turn_input(text: &str, attachments: &[AttachmentRef]) -> Vec<Value> {
     let mut input = Vec::new();

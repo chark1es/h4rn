@@ -1828,15 +1828,25 @@ Claude advertises no steer; the daemon refuses it with a typed `Unsupported` err
 guessing. OpenCode's HTTP prompt starts a queued message and ACP has one prompt at a time, so they
 do not advertise it either. Claude's steering was withdrawn in the council's first review round.
 
-A steer is delivered **at most once**. It names the turn the client observed (`SendMessage.turn_id`)
-and the daemon refuses a stale id and a turn whose first prompt the harness has not accepted yet.
+A steer is delivered **at most once**. It names the turn the client observed (`SendMessage.turn_id`),
+and so does a queue action: `QueueMessage`'s `SendNow` and `Steer` carry the turn the client saw, and
+the daemon refuses a stale id and a turn whose first prompt the harness has not accepted yet. The
+check runs again under the lock that claims the message, so a turn that ends between the client's
+look and the claim cannot receive it; `Send now` then moves the message to the front instead, while
+`Steer` refuses, because moving it is not what it promised.
 Sending now from the queue claims the message durably before the adapter sees it: the queue row is
 journaled without the message first. If the journal write fails the claim is undone and nothing was
 delivered; if the adapter definitely refuses (unsupported, missing binary, a protocol error answer)
-the message goes back where it was; if the outcome is unclear (a timeout, a dead transport) the
+the message goes back where it was and the restore append is retried, because a row that only exists
+in memory is lost on the next restart; if the outcome is unclear (a timeout, a dead transport) the
 claim stands and the error is reported, because a second automatic delivery is worse than a row the
 person has to retype. The claim also reads the message under the same lock that removes it, so an
 edit committed in between cannot send text the person already replaced.
+
+A steer the harness already took is **reported as delivered even when its transcript row could not
+be written**: `MessageAccepted.unrecorded` says the words are in the turn and only the row is
+missing. Reporting that as a failure would invite a resend, and the running turn would hold the same
+words twice.
 
 Queue edits, removals, moves and Send now are one daemon request (`QueueMessage`). Every mutation
 and the promotion of the next turn take the same thread-record lock, so a message that has just
@@ -1855,13 +1865,26 @@ The queue's **contents are not in `ThreadSummary`**. A full queue is unbounded w
 transport refuses a frame over 512 KiB, so carrying it in every summary made a large queue break the
 connection. The summary carries `queued_count` and a `queue_revision`; the rows come from
 `GetThreadQueue` in bounded pages (whole messages only, at most 100 and about 256 KiB per page) and a
-client pages with `offset`. A `QueueUpdated` reply names the revision it came from, so a reply that
-arrives after a newer summary is ignored instead of putting back a message that already started.
+client pages with `offset`. A page whose revision differs from the first one's is not joined: the
+client starts over, because a message that started or was edited in between would otherwise appear
+next to rows it never stood beside. A `QueueUpdated` reply names the revision it came from, so a
+reply that arrives after a newer summary is ignored instead of putting back a message that already
+started, and a reply that carries fewer rows than its total is a first page, not the queue, so the
+client fetches every page instead of replacing what it has.
+
+A client's queue is **the daemon's queue after a reload**. Every reconnect drops the cached rows
+(the revision counter starts over with the daemon), so the thread list and each opened thread
+refetch the queue of every thread whose summary counts messages; waiting for an unrelated event
+would hide the rows for as long as a rate-limit pause lasts. A summary that counts zero keeps an
+empty entry at its own revision rather than deleting the cached one, so a fetch still in flight is
+recognised as older and dropped.
 
 The composer keeps three texts apart while editing a queued message: the edit buffer in the box, the
-message's saved text, and the thread's own draft (which stays in storage). A second Edit keeps the
-draft the first one displaced, another tab's draft write never replaces an active edit, and when the
-message starts under the edit the composer refills only with text that actually changed.
+message's saved text, and the thread's own draft (which stays in storage, untouched by the edit). A
+second Edit leaves that draft alone too, another tab's draft write never replaces an active edit, and
+when the message starts under the edit the composer refills only with text that actually changed. Cancel
+reads the stored draft back rather than the copy taken when the edit began, so a draft another tab
+saved during the edit is what the person gets.
 
 Clients choose a per-device default for follow-ups (Queue or Steer) in Settings → Chat. Enter (or
 Cmd/Ctrl+Enter when `Enter inserts a new line` is on) uses that default; Cmd/Ctrl+Enter (or adding

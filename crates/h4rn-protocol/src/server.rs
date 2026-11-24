@@ -206,6 +206,16 @@ pub enum ResponseBody {
         #[serde(default)]
         #[ts(optional)]
         queued_message_id: Option<crate::ids::QueuedMessageId>,
+        /// Whether the text reached the turn without its transcript row being
+        /// recorded.
+        ///
+        /// A steer is delivered into the running turn before the daemon can
+        /// record its user row. If that write fails the harness already has the
+        /// text, so the send is reported as delivered: a client shows it and
+        /// does not resend it, because a resend would put the same words into
+        /// the turn twice.
+        #[serde(default)]
+        unrecorded: bool,
     },
     /// A thread's queue changed.
     ///

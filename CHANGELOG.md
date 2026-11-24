@@ -625,6 +625,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The queue you see is the daemon's queue, even after a reload.** A reload or reconnect now
+  refetches waiting rows for every thread that has them, instead of leaving them invisible until
+  something unrelated happens, and a late reply can no longer put a message back that has already
+  started: a summary saying nothing waits is remembered at its own revision, so older answers are
+  ignored. A queue longer than one page is read page by page and started over if it changes halfway,
+  and a reply carrying only its first page no longer replaces the rows a client already has (editing
+  one of 150 waiting messages keeps all 150). Send now and Steer from the queue name the turn the
+  person saw and wait until the agent has accepted that turn's own prompt: a stale turn is refused,
+  and an unaccepted one moves the message to the front instead of racing it. A steer the agent
+  already took is reported as delivered even when its transcript row could not be written, so it is
+  never sent a second time, and a refused steer's row is written again instead of being kept only in
+  memory. Move down is disabled on the last queued row, and Cancel on an edit restores the draft
+  another tab saved while the edit was open.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,

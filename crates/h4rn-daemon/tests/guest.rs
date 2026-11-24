@@ -3661,6 +3661,8 @@ async fn a_send_message_mid_append_still_delivers_after_the_socket_resets() {
             thread_id: thread_id.clone(),
             text: "deliver me anyway".into(),
             attachments: Vec::new(),
+            steer: false,
+            turn_id: None,
         },
     };
     ws.send(Message::Text(

@@ -42,7 +42,8 @@ use tokio::task::JoinHandle;
 
 use crate::blobs::{AttachmentResolver, BlobError};
 use crate::journal::{
-    Journal, ParkedAttachment, ParkedPrompt, StoredQueuedMessage, ThreadMeta, TitleSource, WireEvent,
+    Journal, ParkedAttachment, ParkedPrompt, StoredQueuedMessage, ThreadMeta, TitleSource,
+    WireEvent,
 };
 use crate::text_generation::{TextGeneration, TextGenerationError};
 
@@ -267,15 +268,35 @@ pub struct AcceptedMessage {
     pub seq: u64,
     /// The queued message this send created, when it waits for a turn.
     pub queued_message_id: Option<QueuedMessageId>,
+    /// Whether the text reached the turn without its transcript row being
+    /// recorded.
+    ///
+    /// Only a steer can end this way: the harness already has the text, so the
+    /// caller must not resend it.
+    pub unrecorded: bool,
 }
 
 /// How one send delivers its text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SendMode {
     /// Wait for the thread's next turn.
+    #[default]
     Queue,
     /// Deliver into the running turn when the harness can.
     Steer,
+}
+
+/// How one send delivers, and the identity of the work it does.
+#[derive(Clone, Debug, Default)]
+struct SendWork {
+    /// Wait behind the running turn, or steer into it.
+    mode: SendMode,
+    /// The turn the client observed, for a steer.
+    turn_id: Option<TurnId>,
+    /// The sender's permission ceiling, when an outside grant set one.
+    ceiling: Option<RuntimeMode>,
+    /// The outside grant whose work this message does, when one sent it.
+    grant: Option<WorkGrant>,
 }
 
 /// Result of one queue change or read.
@@ -3562,10 +3583,10 @@ impl ThreadManager {
             thread_id,
             text,
             attachments,
-            SendMode::Queue,
-            None,
-            None,
-            None,
+            SendWork {
+                mode: SendMode::Queue,
+                ..SendWork::default()
+            },
         )
         .await
     }
@@ -3588,8 +3609,17 @@ impl ThreadManager {
         mode: SendMode,
         turn_id: Option<TurnId>,
     ) -> Result<AcceptedMessage, ManagerError> {
-        self.send_message_with_work(thread_id, text, attachments, mode, turn_id, None, None)
-            .await
+        self.send_message_with_work(
+            thread_id,
+            text,
+            attachments,
+            SendWork {
+                mode,
+                turn_id,
+                ..SendWork::default()
+            },
+        )
+        .await
     }
 
     /// Appends a user message whose turn may run with no more autonomy than
@@ -3628,10 +3658,12 @@ impl ThreadManager {
             thread_id,
             text,
             attachments,
-            SendMode::Queue,
-            None,
-            ceiling,
-            grant,
+            SendWork {
+                mode: SendMode::Queue,
+                ceiling,
+                grant,
+                ..SendWork::default()
+            },
         )
         .await
     }
@@ -3642,11 +3674,14 @@ impl ThreadManager {
         thread_id: &ThreadId,
         text: String,
         attachments: Vec<AttachmentId>,
-        mode: SendMode,
-        turn_id: Option<TurnId>,
-        ceiling: Option<RuntimeMode>,
-        grant: Option<WorkGrant>,
+        work: SendWork,
     ) -> Result<AcceptedMessage, ManagerError> {
+        let SendWork {
+            mode,
+            turn_id,
+            ceiling,
+            grant,
+        } = work;
         let handle = self.inner.handle(thread_id).await?;
         let resolved_attachments = self
             .inner
@@ -3748,12 +3783,33 @@ impl ThreadManager {
                     },
                     at: None,
                 }];
-                let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+                let (_, seq) = match self.inner.emit(&mut record, domain, wire).await {
+                    Ok(emitted) => emitted,
+                    // The harness already has the text, so this is a delivery
+                    // that only missed its transcript row. Reporting it as a
+                    // failure would invite a resend and put the words into the
+                    // turn twice.
+                    Err(error) => {
+                        tracing::error!(
+                            %thread_id,
+                            %error,
+                            "a steer reached the turn but its transcript row was not saved"
+                        );
+                        return Ok(AcceptedMessage {
+                            thread_id: thread_id.clone(),
+                            turn_id: active_turn_id,
+                            seq: self.inner.journal.head().await.unwrap_or(0),
+                            queued_message_id: None,
+                            unrecorded: true,
+                        });
+                    }
+                };
                 return Ok(AcceptedMessage {
                     thread_id: thread_id.clone(),
                     turn_id: active_turn_id,
                     seq,
                     queued_message_id: None,
+                    unrecorded: false,
                 });
             }
             // No turn running: this starts the next turn like any other send.
@@ -3819,6 +3875,7 @@ impl ThreadManager {
                 turn_id: active_turn_id,
                 seq,
                 queued_message_id: Some(queued.message_id),
+                unrecorded: false,
             });
         }
 
@@ -3883,6 +3940,7 @@ impl ThreadManager {
                 turn_id,
                 seq,
                 queued_message_id: Some(queued.message_id),
+                unrecorded: false,
             });
         }
 
@@ -3984,6 +4042,7 @@ impl ThreadManager {
             turn_id,
             seq,
             queued_message_id: None,
+            unrecorded: false,
         })
     }
 
@@ -4083,9 +4142,12 @@ impl ThreadManager {
                 };
                 Ok(queue_update(thread_id, &record, seq))
             }
-            QueueAction::SendNow | QueueAction::Steer => {
-                let steer_only = matches!(action, QueueAction::Steer);
-                self.send_queued(handle, thread_id, message_id, steer_only)
+            QueueAction::SendNow { turn_id } => {
+                self.send_queued(handle, thread_id, message_id, turn_id, false)
+                    .await
+            }
+            QueueAction::Steer { turn_id } => {
+                self.send_queued(handle, thread_id, message_id, turn_id, true)
                     .await
             }
         }
@@ -4118,16 +4180,21 @@ impl ThreadManager {
     /// that turn. Otherwise `SendNow` moves it to the front (starting a turn if
     /// none runs); `Steer` refuses, because it promises a mid-turn delivery.
     ///
+    /// `turn_id` is the turn the client observed. A steer names its turn, so a
+    /// message can never land in a newer turn the person did not mean.
+    ///
     /// A steer claims the message durably *before* the harness sees it. A
-    /// definite refusal puts it back; an unclear outcome (a timeout, a dead
-    /// transport) leaves the claim, because the message may already be in the
-    /// turn. Either way it is delivered at most once, and a restart can never
-    /// find it waiting again after the harness took it.
+    /// definite refusal puts it back and retries the restore write, so a refused
+    /// message is never lost; an unclear outcome (a timeout, a dead transport)
+    /// leaves the claim, because the message may already be in the turn. Either
+    /// way it is delivered at most once, and a restart can never find it waiting
+    /// again after the harness took it.
     async fn send_queued(
         &self,
         handle: ThreadHandle,
         thread_id: &ThreadId,
         message_id: &QueuedMessageId,
+        turn_id: Option<TurnId>,
         steer_only: bool,
     ) -> Result<QueueUpdate, ManagerError> {
         let (index, active, harness, live) = {
@@ -4139,42 +4206,65 @@ impl ThreadManager {
             }
             (
                 queue_position(&record, message_id)?,
-                record.active.as_ref().map(|active| active.turn_id.clone()),
+                record
+                    .active
+                    .as_ref()
+                    .map(|active| (active.turn_id.clone(), active.dispatch.write_accepted())),
                 record.meta.harness,
                 record.live_session().cloned(),
             )
         };
 
-        if let (Some(active_turn_id), true, Some(session)) = (
-            active.clone(),
-            h4rn_harness::capabilities(harness).steer,
-            live,
-        ) {
+        // The client named the turn it saw. A different turn running means the
+        // one it meant already ended: a steer is refused rather than landing in
+        // a turn the person did not choose, and Send now falls back to moving
+        // the message to the front.
+        if let (Some(observed), Some((current, _))) = (&turn_id, &active)
+            && observed != current
+        {
+            if steer_only {
+                return Err(ManagerError::Conflict(
+                    "that turn already ended; try again for the turn running now".into(),
+                ));
+            }
+            return self
+                .move_queued_to_front(handle, thread_id, message_id, index)
+                .await;
+        }
+
+        let steer_ready = h4rn_harness::capabilities(harness).steer
+            && active.as_ref().is_some_and(|(_, accepted)| *accepted)
+            && live.is_some();
+        let active_turn_id = active.as_ref().map(|(turn, _)| turn.clone());
+
+        if steer_ready
+            && let (Some(active_turn_id), Some(session)) = (active_turn_id.clone(), live.clone())
+        {
             let now = self.now();
             #[cfg(test)]
             self.inner.pause_queue_read().await;
-            // Read the message and claim it under one lock: an edit that lands
-            // between two locks keeps its index, so a stale copy would send text
-            // the person already replaced. The claim's own append must succeed
-            // before the harness sees anything, or a restart could deliver it a
-            // second time.
-            let message = {
-                let mut record = handle.lock().await;
-                let current = queue_position(&record, message_id)?;
-                if current != index {
+            // The claim checks the named turn and removes the row under one
+            // lock: an edit that lands in between keeps its index, so a stale
+            // copy could send text the person already replaced, and the append
+            // must succeed before the harness sees anything, or a restart could
+            // deliver the message a second time.
+            let claimed = self
+                .claim_queued_for_steer(&handle, message_id, index, &active_turn_id)
+                .await?;
+            let Some(message) = claimed else {
+                // The turn ended, or its first prompt is not accepted yet,
+                // between the client's look and this claim. Send now moves the
+                // message to the front instead; Steer refuses, because moving
+                // it is not what it promised.
+                if steer_only {
                     return Err(ManagerError::Conflict(
-                        "the queue changed while that message was being sent".into(),
+                        "that turn is no longer taking messages; try steering again in a moment"
+                            .into(),
                     ));
                 }
-                let message = record.meta.queued.remove(current);
-                record.note_queue_change();
-                if let Err(error) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await {
-                    // Nothing reached the harness, and storage still holds the
-                    // old queue, so the in-memory claim is undone to match it.
-                    restore_queue_item(&mut record, current, message);
-                    return Err(error);
-                }
-                message
+                return self
+                    .move_queued_to_front(handle, thread_id, message_id, index)
+                    .await;
             };
             let steered = {
                 let mut guard = session.lock().await;
@@ -4201,11 +4291,13 @@ impl ThreadManager {
                 Ok(()) => {}
                 Err(SteerFailure::Rejected(error)) => {
                     // A definite refusal never reached the turn, so the message
-                    // goes back where it was and stays deliverable.
+                    // goes back where it was and stays deliverable. The restore
+                    // write is retried: a queue that is only remembered in
+                    // memory would lose the message on the next restart.
                     let mut record = handle.lock().await;
                     restore_queue_item(&mut record, index, message);
                     record.note_queue_change();
-                    let _ = self.inner.emit(&mut record, Vec::new(), Vec::new()).await;
+                    self.inner.save_restored_queue(&mut record).await;
                     return Err(error);
                 }
                 Err(SteerFailure::Unclear(error)) => {
@@ -4235,7 +4327,20 @@ impl ThreadManager {
                 },
                 at: None,
             }];
-            let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+            let seq = match self.inner.emit(&mut record, domain, wire).await {
+                Ok((_, seq)) => seq,
+                Err(error) => {
+                    // The message is in the turn and was claimed durably, so it
+                    // is delivered; only its transcript row is missing. The
+                    // queue change itself is what this answers with.
+                    tracing::error!(
+                        %thread_id,
+                        %error,
+                        "a queued steer reached the turn but its transcript row was not saved"
+                    );
+                    0
+                }
+            };
             return Ok(queue_update(thread_id, &record, seq));
         }
 
@@ -4251,8 +4356,57 @@ impl ThreadManager {
             });
         }
 
-        // Send now without a steer: first in the queue, and the turn starts at
-        // once when nothing is running.
+        self.move_queued_to_front(handle, thread_id, message_id, index)
+            .await
+    }
+
+    /// Claims one queued message for a steer into `turn_id`.
+    ///
+    /// Returns `None`, with nothing claimed and nothing written, when that turn
+    /// is no longer active or its first prompt has not been accepted yet: the
+    /// caller then refuses or moves the message to the front. The turn check and
+    /// the removal happen under one lock, and the resulting queue row must be
+    /// durable before the harness sees the text.
+    async fn claim_queued_for_steer(
+        &self,
+        handle: &ThreadHandle,
+        message_id: &QueuedMessageId,
+        expected_index: usize,
+        turn_id: &TurnId,
+    ) -> Result<Option<StoredQueuedMessage>, ManagerError> {
+        let mut record = handle.lock().await;
+        let current = queue_position(&record, message_id)?;
+        if current != expected_index {
+            return Err(ManagerError::Conflict(
+                "the queue changed while that message was being sent".into(),
+            ));
+        }
+        let accepted = record
+            .active
+            .as_ref()
+            .is_some_and(|active| active.turn_id == *turn_id && active.dispatch.write_accepted());
+        if !accepted {
+            return Ok(None);
+        }
+        let message = record.meta.queued.remove(current);
+        record.note_queue_change();
+        if let Err(error) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await {
+            // Nothing reached the harness, and storage still holds the old
+            // queue, so the in-memory claim is undone to match it.
+            restore_queue_item(&mut record, current, message);
+            return Err(error);
+        }
+        Ok(Some(message))
+    }
+
+    /// Moves one queued message to the front, starting its turn when none runs.
+    async fn move_queued_to_front(
+        &self,
+        handle: ThreadHandle,
+        thread_id: &ThreadId,
+        message_id: &QueuedMessageId,
+        index: usize,
+    ) -> Result<QueueUpdate, ManagerError> {
         let mut record = handle.lock().await;
         let current = queue_position(&record, message_id)?;
         if current != index {
@@ -6079,6 +6233,36 @@ impl Inner {
         record.last_signature = Some(SummarySignature::of(&summary));
         let seq = seqs.last().copied().unwrap_or(0);
         Ok((summary, seq))
+    }
+
+    /// Writes a queue that a failed steer put back, retrying the append.
+    ///
+    /// A refused message must never be lost, and after a failed restore the row
+    /// exists only in memory: a restart reads the queue from storage, where it
+    /// is still missing. The append is retried a few times before giving up;
+    /// the row stays in memory, so a later mutation of the same thread persists
+    /// it, and the failure is logged rather than silently dropped.
+    async fn save_restored_queue(&self, record: &mut ThreadRecord) {
+        const ATTEMPTS: usize = 3;
+        for attempt in 1..=ATTEMPTS {
+            match self.emit(record, Vec::new(), Vec::new()).await {
+                Ok(_) => return,
+                Err(error) if attempt < ATTEMPTS => {
+                    tracing::warn!(
+                        %error,
+                        attempt,
+                        "the queue restored after a refused steer was not saved; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "the queue restored after a refused steer could not be saved"
+                    );
+                }
+            }
+        }
     }
 
     /// Waits between a delivery's liveness check and its claim, when a test
@@ -10286,10 +10470,8 @@ fn stored_queue_page(
     queued: &[StoredQueuedMessage],
     offset: usize,
 ) -> Vec<h4rn_protocol::QueuedMessage> {
-    let messages: Vec<h4rn_protocol::QueuedMessage> = queued
-        .iter()
-        .map(|entry| entry.message.clone())
-        .collect();
+    let messages: Vec<h4rn_protocol::QueuedMessage> =
+        queued.iter().map(|entry| entry.message.clone()).collect();
     h4rn_protocol::queue_page(&messages, offset)
 }
 
@@ -23385,13 +23567,22 @@ mod tests {
         let message_id = queued.queued_message_id.expect("queued id");
 
         // The claim's append succeeds; the one that records the message in the
-        // turn fails. The harness already has the text by then, so a restart
-        // must not find it waiting again.
+        // turn fails. The harness already has the text by then, so the send is
+        // reported as done rather than as a failure that invites a resend, and a
+        // restart must not find it waiting again.
         journal.fail_appends_after(1);
-        let refused = manager
-            .queue_message(&created.thread_id, &message_id, QueueAction::SendNow)
-            .await;
-        assert!(refused.is_err(), "the failed journal write is reported");
+        let accepted = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::SendNow { turn_id: None },
+            )
+            .await
+            .expect("the steer is delivered even though the row is not recorded");
+        assert!(
+            accepted.queued.is_empty(),
+            "the claimed message is not queued any more"
+        );
         assert_eq!(steers.get(), 1, "the harness took the message once");
         let queue = manager
             .thread_queue(&created.thread_id, 0)
@@ -23441,7 +23632,11 @@ mod tests {
         let message_id = queued.queued_message_id.expect("queued id");
 
         let failed = manager
-            .queue_message(&created.thread_id, &message_id, QueueAction::Steer)
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Steer { turn_id: None },
+            )
             .await;
         assert!(failed.is_err(), "the timeout is reported");
         let queue = manager
@@ -23476,7 +23671,11 @@ mod tests {
         let message_id = queued.queued_message_id.expect("queued id");
 
         let failed = manager
-            .queue_message(&created.thread_id, &message_id, QueueAction::Steer)
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Steer { turn_id: None },
+            )
             .await;
         assert!(failed.is_err(), "the refusal is reported");
         let queue = manager
@@ -23528,7 +23727,11 @@ mod tests {
             let message_id = message_id.clone();
             async move {
                 manager
-                    .queue_message(&thread_id, &message_id, QueueAction::SendNow)
+                    .queue_message(
+                        &thread_id,
+                        &message_id,
+                        QueueAction::SendNow { turn_id: None },
+                    )
                     .await
             }
         });
@@ -23564,6 +23767,327 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A queue steer names the turn the person saw. A turn that already ended
+    /// is refused: steering into whatever runs now would put the message in a
+    /// turn the person did not mean.
+    #[tokio::test]
+    async fn a_queued_steer_for_an_ended_turn_is_refused() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+        let queued = manager
+            .send_message(&created.thread_id, "for the wrong turn".into(), Vec::new())
+            .await
+            .expect("queue");
+        let message_id = queued.queued_message_id.expect("queued id");
+
+        let refused = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Steer {
+                    turn_id: Some(TurnId::new_uuid_v7()),
+                },
+            )
+            .await;
+        match refused {
+            Err(ManagerError::Conflict(message)) => {
+                assert!(message.contains("already ended"), "{message}");
+            }
+            other => panic!("expected a conflict for a stale turn, got {other:?}"),
+        }
+        assert_eq!(steers.get(), 0, "a stale steer never reaches the harness");
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["for the wrong turn"],
+            "the message stays queued for the turn the person meant"
+        );
+        manager.shutdown().await;
+    }
+
+    /// Send now for a turn that already ended moves the message to the front.
+    ///
+    /// A steer cannot go where the person looked, but "send now" still means
+    /// "now": the message waits first in line for whatever turn runs next.
+    #[tokio::test]
+    async fn send_now_for_an_ended_turn_moves_the_message_to_the_front() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+        let first = manager
+            .send_message(&created.thread_id, "first queued".into(), Vec::new())
+            .await
+            .expect("queue")
+            .queued_message_id
+            .expect("queued id");
+        let second = manager
+            .send_message(&created.thread_id, "second queued".into(), Vec::new())
+            .await
+            .expect("queue")
+            .queued_message_id
+            .expect("queued id");
+
+        let sent = manager
+            .queue_message(
+                &created.thread_id,
+                &second,
+                QueueAction::SendNow {
+                    turn_id: Some(TurnId::new_uuid_v7()),
+                },
+            )
+            .await
+            .expect("send now");
+        assert_eq!(
+            sent.queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["second queued", "first queued"],
+            "a stale turn moves the message to the front instead of steering it"
+        );
+        assert!(
+            sent.queued
+                .iter()
+                .any(|message| message.message_id == first),
+            "the older message keeps its place behind it"
+        );
+        assert_eq!(steers.get(), 0, "nothing was steered into the new turn");
+        manager.shutdown().await;
+    }
+
+    /// Send now only steers once the turn's own prompt has been accepted.
+    ///
+    /// Written earlier, the steer could be read before that prompt and start a
+    /// turn of its own, so the message moves to the front of the queue instead.
+    #[tokio::test]
+    async fn send_now_moves_the_message_to_the_front_before_the_prompt_is_accepted() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // The first turn completes; the gate holds the second prompt in its
+        // write, so its turn runs with a live session and nothing accepted yet.
+        let (harness, gate) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_gate_after(2);
+        let (harness, steers) = harness.with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let first_queued = manager
+            .send_message(&created.thread_id, "first queued".into(), Vec::new())
+            .await
+            .expect("queue")
+            .queued_message_id
+            .expect("queued id");
+        let second_queued = manager
+            .send_message(&created.thread_id, "second queued".into(), Vec::new())
+            .await
+            .expect("queue")
+            .queued_message_id
+            .expect("queued id");
+
+        let sent = manager
+            .queue_message(
+                &created.thread_id,
+                &second_queued,
+                QueueAction::SendNow {
+                    turn_id: Some(second.turn_id.clone()),
+                },
+            )
+            .await
+            .expect("send now");
+        assert_eq!(
+            sent.queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["second queued", "first queued"],
+            "the message moved to the front instead of steering"
+        );
+        assert!(
+            sent.queued
+                .iter()
+                .any(|message| message.message_id == first_queued),
+            "the older message keeps its place behind it"
+        );
+        assert_eq!(
+            steers.get(),
+            0,
+            "a turn that has not accepted its prompt is never steered"
+        );
+        gate.release();
+        manager.shutdown().await;
+    }
+
+    /// A direct steer that the harness took is reported as delivered even when
+    /// the transcript row cannot be written.
+    ///
+    /// The alternative is an error, which the client answers by sending the
+    /// same words again: the running turn would then hold them twice.
+    #[tokio::test]
+    async fn a_steer_that_cannot_be_recorded_is_reported_as_delivered() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        journal.fail_next_appends(1);
+        let accepted = manager
+            .send_message_with(
+                &created.thread_id,
+                "go left".into(),
+                Vec::new(),
+                SendMode::Steer,
+                Some(created.turn_id.clone()),
+            )
+            .await
+            .expect("the steer is delivered even though its row is not recorded");
+        assert!(
+            accepted.unrecorded,
+            "the result says the transcript row is missing"
+        );
+        assert_eq!(
+            accepted.queued_message_id, None,
+            "a delivered steer is never queued for a resend"
+        );
+        steers.wait_for(1).await;
+        assert_eq!(steers.texts(), vec!["go left".to_owned()]);
+        manager.shutdown().await;
+    }
+
+    /// A refused steer's restore write is retried, so the message survives a
+    /// restart even when the first attempt fails.
+    #[tokio::test]
+    async fn a_failed_restore_write_is_retried_and_the_message_survives_a_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, _steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let harness = harness.with_steer_rejection("turn_nope does not exist");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+        let message_id = manager
+            .send_message(&created.thread_id, "never lost".into(), Vec::new())
+            .await
+            .expect("queue")
+            .queued_message_id
+            .expect("queued id");
+
+        // The claim lands; the first restore write fails and the retry lands.
+        journal.fail_appends_after(1);
+        let failed = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Steer { turn_id: None },
+            )
+            .await;
+        assert!(failed.is_err(), "the refusal is reported");
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["never lost"]
+        );
+        let stored = journal
+            .list_threads()
+            .await
+            .expect("stored threads")
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("stored thread");
+        assert_eq!(
+            stored
+                .queued
+                .iter()
+                .map(|entry| entry.message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["never lost"],
+            "the restored message reached storage, not only memory"
+        );
+
+        manager.shutdown().await;
+        let restarted = open_test_manager_with_journal(
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+            host,
+            journal,
+        )
+        .await;
+        let queue = restarted
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue after restart");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["never lost"],
+            "a refused steer is still queued after a restart"
+        );
+        restarted.shutdown().await;
+    }
     #[tokio::test]
     async fn queue_edits_removals_and_order_survive_a_restart() {
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -23815,7 +24339,11 @@ mod tests {
 
         // Send now starts the oldest one by hand; the pause goes with it.
         manager
-            .queue_message(&created.thread_id, &alpha, QueueAction::SendNow)
+            .queue_message(
+                &created.thread_id,
+                &alpha,
+                QueueAction::SendNow { turn_id: None },
+            )
             .await
             .expect("send now");
         let released = manager

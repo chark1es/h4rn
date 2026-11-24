@@ -210,7 +210,18 @@ seq: number,
  * instead; a steered or immediately started message is in the
  * transcript and has no queued id.
  */
-queued_message_id?: QueuedMessageId, } | { "type": "queue_updated", 
+queued_message_id?: QueuedMessageId, 
+/**
+ * Whether the text reached the turn without its transcript row being
+ * recorded.
+ *
+ * A steer is delivered into the running turn before the daemon can
+ * record its user row. If that write fails the harness already has the
+ * text, so the send is reported as delivered: a client shows it and
+ * does not resend it, because a resend would put the same words into
+ * the turn twice.
+ */
+unrecorded: boolean, } | { "type": "queue_updated", 
 /**
  * Thread whose queue changed.
  */
