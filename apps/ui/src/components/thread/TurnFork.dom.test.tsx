@@ -71,8 +71,16 @@ function finishedTurn(overrides: Partial<StreamTurn> = {}): StreamTurn {
   };
 }
 
-function renderTurn(turn: StreamTurn) {
-  return render(<TurnBlock turn={turn} threadId="thread_1" summary={summary} onReply={() => {}} />);
+function renderTurn(turn: StreamTurn, turns: StreamTurn[] = [turn]) {
+  return render(
+    <TurnBlock
+      turn={turn}
+      turns={turns}
+      threadId="thread_1"
+      summary={summary}
+      onReply={() => {}}
+    />,
+  );
 }
 
 beforeAll(() => {
@@ -123,7 +131,7 @@ describe("fork from a turn", () => {
     expect(screen.queryByRole("button", { name: "Turn actions" })).toBeNull();
   });
 
-  it("uses the real turn behind an imported user cue", async () => {
+  it("uses the real turn behind a copied user cue", async () => {
     renderTurn(
       finishedTurn({
         id: "cue:user:item_8",
@@ -145,5 +153,50 @@ describe("fork from a turn", () => {
     const item = await screen.findByRole("menuitem", { name: "Fork from here" });
     fireEvent.click(item);
     await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_8"));
+  });
+
+  it("offers a prompt-only turn once its daemon turn settled", async () => {
+    // The person's message has its own cue row; the daemon turn behind it has
+    // no items because the agent answered nothing. The settled daemon turn is
+    // what makes the fork possible.
+    const cue = finishedTurn({
+      id: "cue:user:item_9",
+      forkTurnId: "turn_9",
+      items: [
+        {
+          kind: "message",
+          itemId: "item_9",
+          role: "user",
+          text: "just this",
+          attachments: [],
+          streaming: false,
+        },
+      ],
+    });
+    const daemonTurn = finishedTurn({ id: "turn_9", items: [] });
+    renderTurn(cue, [cue, daemonTurn]);
+    openMenu(screen.getByRole("button", { name: "Fork from this turn" }));
+    const item = await screen.findByRole("menuitem", { name: "Fork from here" });
+    fireEvent.click(item);
+    await waitFor(() => expect(forkThread).toHaveBeenCalledWith("thread_1", "turn_9"));
+  });
+
+  it("does not offer a cue whose daemon turn is still running", () => {
+    const cue = finishedTurn({
+      id: "cue:user:item_10",
+      forkTurnId: "turn_10",
+      items: [
+        {
+          kind: "message",
+          itemId: "item_10",
+          role: "user",
+          text: "still going",
+          attachments: [],
+          streaming: false,
+        },
+      ],
+    });
+    renderTurn(cue, [cue, finishedTurn({ id: "turn_10", status: "running" })]);
+    expect(screen.queryByRole("button", { name: "Fork from this turn" })).toBeNull();
   });
 });

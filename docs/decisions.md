@@ -1809,20 +1809,29 @@ address and a hosted agent has no path in this phase.
 
 A fork is a new thread, not a view over the source. It copies the source's
 project, workspace, harness, agent instance and settings, and its transcript is
-the source turns through the chosen turn, inclusive, journaled as ordinary
-message items with each message's own time. Only a turn the journal knows to be
-finished can be forked; the source's active turn and any message queued behind
-it are refused. The source is only read.
+everything the source showed through the chosen turn, inclusive, journaled as
+the events that showed it with each record's own time: messages with their
+attachments, tool calls, delegated rows, plans, error and usage-limit rows, and
+a reply that only ever streamed. Only a turn the journal knows to be finished
+can be forked; the source's active turn and any message still waiting in its
+queue are refused. A message queued behind a running turn is its own turn, with
+its own id from the moment it arrives, so forking the running turn cannot copy
+it. The source is only read.
 
-The first message continues the conversation one of two ways. When the chosen
-turn is the source's latest and the adapter advertises `supports_native_fork`,
-the fork stores the source's session id and asks the harness to copy it: Claude
-Code's `--resume <id> --fork-session` and Codex app-server's `thread/fork`.
-Otherwise — an earlier turn, a harness without native forks, or a failed start
-— the fork starts a fresh session and sends a bounded handoff of its copied
-history. This reuses the import's one-attempt machinery (ADR-045): the native
-intent is cleared when a session reports `SessionStarted`, or when a start dies
-before that report, and the same turn is retried with the handoff.
+The first message continues the conversation one of two ways. A native fork is
+a copy of the provider's own conversation, so it must be bounded to the chosen
+turn. Adapters say how far their own fork reaches (`native_fork_scope`): Codex
+app-server's `thread/fork` names the provider turn to copy through
+(`lastTurnId`), which the daemon recorded when that turn ran, so any finished
+turn is exact even after the source carries on; Claude Code's
+`--resume <id> --fork-session` copies the whole session, so it is only used while
+the chosen turn is still the source session's tip, re-checked under the
+source's record lock when the fork starts. Otherwise — a harness without native
+forks, a source that moved on, or a failed start — the fork starts a fresh
+session and sends a bounded handoff of its copied history. This reuses the
+import's one-attempt machinery (ADR-045): the native intent is cleared when a
+session reports `SessionStarted`, or when it cannot be bounded or dies before
+that report, and the same turn is retried with the handoff.
 
 Lineage is a `forked_from { thread_id, turn_id }` in the thread row, projected on
 the summary; the origin title is read from the thread list so a rename needs no

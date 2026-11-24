@@ -175,8 +175,12 @@ impl Harness for ClaudeCodeHarness {
         self.install.clone().or_else(detect_claude)
     }
 
-    fn supports_native_fork(&self) -> bool {
-        true
+    fn native_fork_scope(&self) -> Option<crate::NativeFork> {
+        // Claude Code copies the session it resumes in full. A turn that is no
+        // longer the session's tip cannot be forked natively: the copy would
+        // carry the later turns, so the daemon re-checks the tip at the fork's
+        // first start.
+        Some(crate::NativeFork::LatestOnly)
     }
 
     async fn start_session(
@@ -1302,6 +1306,7 @@ mod tests {
             fast: false,
             resume_id: Some("sess-1".into()),
             native_fork: false,
+            native_fork_turn: None,
             mcp_endpoint: None,
             env_overrides: BTreeMap::new(),
             attachments: Vec::new(),

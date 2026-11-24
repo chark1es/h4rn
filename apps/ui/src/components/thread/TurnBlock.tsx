@@ -210,12 +210,15 @@ function Item({ item, threadId }: { item: TurnItem; threadId: string }) {
 
 export function TurnBlock({
   turn,
+  turns,
   threadId,
   summary,
   onReply,
   staleAt = null,
 }: {
   turn: StreamTurn;
+  /** Every row in the stream, so a cue can look up the turn it belongs to. */
+  turns: StreamTurn[];
   threadId: string;
   summary: ThreadSummary;
   /** Focus the composer so the person can reply to a stopped or failed turn. */
@@ -235,7 +238,7 @@ export function TurnBlock({
     turn.status === "running" && !turn.imported && agentStateIsActive(summary.agent_state);
   const stopped = stoppedNotice(turn.status);
   const failed = turn.status === "failed" || turn.status === "interrupted";
-  const forkTurnId = forkableTurn(turn);
+  const forkTurnId = forkableTurn(turn, turns);
 
   if (isUserTurn) {
     return (

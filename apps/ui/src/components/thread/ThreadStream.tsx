@@ -35,10 +35,12 @@ function PendingTurn({ message }: { message: PendingMessage }) {
  */
 export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turns: StreamTurn[] }) {
   if (summary.tab !== "done" || summary.agent_state !== "done") return null;
-  // A fork's history is a copy of an h4rn thread, not something imported from
-  // another harness; the header's lineage line says where it came from.
-  if (summary.forked_from) return null;
-  const imported = turns.length > 0 && turns.every((turn) => turn.imported);
+  // Copied history is not a finished turn of this thread. An imported
+  // conversation says where it came from; a fork says nothing here until it has
+  // run a turn of its own, and then its own receipt is the honest one.
+  const copiedOnly = turns.length > 0 && turns.every((turn) => turn.imported);
+  if (copiedOnly && summary.forked_from) return null;
+  const imported = copiedOnly;
   return (
     <div className="q-col q-receipt">
       <div className="q-live-line">
@@ -171,6 +173,7 @@ export function ThreadStream({
               {row.kind === "turn" ? (
                 <TurnBlock
                   turn={row.turn}
+                  turns={turns}
                   threadId={threadId}
                   summary={summary}
                   onReply={onReply}

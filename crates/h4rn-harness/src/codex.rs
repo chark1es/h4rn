@@ -133,8 +133,10 @@ impl Harness for CodexHarness {
         self.install.clone().or_else(detect_codex)
     }
 
-    fn supports_native_fork(&self) -> bool {
-        true
+    fn native_fork_scope(&self) -> Option<crate::NativeFork> {
+        // `thread/fork` takes `lastTurnId`, so Codex copies the conversation
+        // through the named turn and leaves later turns out.
+        Some(crate::NativeFork::ThroughTurn)
     }
 
     async fn start_session(
@@ -450,6 +452,7 @@ impl CodexSession {
         {
             params["threadId"] = Value::String(resume_id.to_string());
         }
+        bound_thread_open(spec, method, &mut params);
         let result = self.request(method, params).await?;
 
         let thread_id = result["thread"]["id"]
@@ -1149,6 +1152,25 @@ fn thread_open_method(spec: &SessionSpec) -> (&'static str, bool) {
     }
 }
 
+/// Applies the thread-open method's own bound to its params.
+///
+/// `thread/fork` takes `lastTurnId`: Codex copies the conversation through that
+/// turn and omits everything after it, even when the source thread has moved on
+/// since the fork was made. A resume continues the one thread and has nothing
+/// to bound.
+fn bound_thread_open(spec: &SessionSpec, method: &str, params: &mut Value) {
+    if method != "thread/fork" {
+        return;
+    }
+    if let Some(turn_id) = spec
+        .native_fork_turn
+        .as_deref()
+        .filter(|turn| !turn.is_empty())
+    {
+        params["lastTurnId"] = Value::String(turn_id.to_string());
+    }
+}
+
 fn model_argument(model: &str) -> Option<&str> {
     let model = model.trim();
     if model.is_empty() || model == "default" {
@@ -1716,6 +1738,89 @@ mod tests {
             ("thread/start", false),
             "a fresh thread has nothing to fork"
         );
+    }
+
+    #[test]
+    fn a_fork_request_stops_at_the_chosen_provider_turn() {
+        let mut spec = crate::test_spec();
+        spec.resume_id = Some("thread-source".into());
+        spec.native_fork = true;
+        spec.native_fork_turn = Some("turn-provider-2".into());
+        let (method, _) = thread_open_method(&spec);
+        let mut params = json!({});
+        bound_thread_open(&spec, method, &mut params);
+        assert_eq!(
+            params["lastTurnId"], "turn-provider-2",
+            "the fork names the provider turn it copies through: {params}"
+        );
+
+        // A resume has no bound, and a fork without a named turn sends none.
+        let mut resume = json!({});
+        bound_thread_open(&spec, "thread/resume", &mut resume);
+        assert!(resume.get("lastTurnId").is_none());
+
+        spec.native_fork_turn = None;
+        let mut unbounded = json!({});
+        bound_thread_open(&spec, "thread/fork", &mut unbounded);
+        assert!(unbounded.get("lastTurnId").is_none());
+    }
+
+    /// The real startup sends `thread/fork` with the chosen provider turn, not
+    /// only the helper that builds it: a fake app-server logs every frame.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fork_start_names_the_turn_to_copy_through() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let log = workspace.path().join("frames.log");
+        let path = workspace.path().join("codex");
+        let script = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s
+' "$line" >> "{log}"
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id" ;;
+    *'"method":"thread/fork"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"thread-forked","model":"gpt-6.1"}}}}}}\n' "$id" ;;
+    *'"method":"model/list"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"data":[]}}}}\n' "$id" ;;
+  esac
+done
+"#,
+            log = log.display()
+        );
+        crate::test_scripts::write_script(&path, &script);
+        let harness = CodexHarness::with_install(HarnessInstall {
+            path,
+            version: "0.0.0-fake".into(),
+        });
+        let mut spec = crate::test_spec();
+        spec.workspace = workspace.path().to_path_buf();
+        spec.model = "gpt-6.1".into();
+        spec.resume_id = Some("thread-source".into());
+        spec.native_fork = true;
+        spec.native_fork_turn = Some("turn-provider-2".into());
+        spec.mcp_endpoint = None;
+        let session = harness.start_session(spec).await.expect("start the fork");
+
+        let frames: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let fork = frames
+            .iter()
+            .find(|frame| frame["method"] == "thread/fork")
+            .expect("the fork request reached the app-server");
+        assert_eq!(fork["params"]["threadId"], "thread-source");
+        assert_eq!(
+            fork["params"]["lastTurnId"], "turn-provider-2",
+            "the request names the provider turn to copy through: {fork}"
+        );
+        let mut session = session;
+        let _ = session.shutdown().await;
     }
 
     #[test]

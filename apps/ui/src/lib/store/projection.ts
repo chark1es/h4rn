@@ -315,10 +315,12 @@ export function foldEvent(
             usage: null,
             changes: null,
           };
-          if (imported) {
-            cue.imported = true;
-            cue.forkTurnId = turn_id;
-          }
+          // The cue always names the daemon turn it belongs to. A fork from
+          // this row is only offered once that turn has settled, which the
+          // live daemon row says; copied history has no live row and is
+          // settled by definition.
+          cue.forkTurnId = turn_id;
+          if (imported) cue.imported = true;
           log.turns.push(cue);
           return log;
         }
@@ -477,7 +479,10 @@ export function foldEvent(
     }
 
     case "usage_limit_hit": {
-      const turn = latestRunningTurn(log);
+      // A replayed transcript settles each turn before its rows arrive, so a
+      // copied limit row has no running turn to join; it belongs to the turn
+      // it followed, exactly as the live stream attaches it to the newest one.
+      const turn = latestRunningTurn(log) ?? log.turns[log.turns.length - 1];
       if (!turn) return log;
       if (!turn.items.some((item) => item.kind === "limit")) {
         turn.items.push({
@@ -491,7 +496,9 @@ export function foldEvent(
     }
 
     case "error": {
-      const turn = latestRunningTurn(log);
+      // Same as a limit row: a copied error belongs to the turn it followed,
+      // which the replay has already settled.
+      const turn = latestRunningTurn(log) ?? log.turns[log.turns.length - 1];
       if (!turn) return log;
       turn.items.push({
         kind: "error",

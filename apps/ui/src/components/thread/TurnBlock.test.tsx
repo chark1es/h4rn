@@ -68,7 +68,13 @@ function userOnlyTurn(status: StreamTurn["status"]): StreamTurn {
 
 function render(turn: StreamTurn): string {
   return renderToStaticMarkup(
-    <TurnBlock turn={turn} threadId="thread_1" summary={summary} onReply={() => {}} />,
+    <TurnBlock
+      turn={turn}
+      turns={[turn]}
+      threadId="thread_1"
+      summary={summary}
+      onReply={() => {}}
+    />,
   );
 }
 
@@ -132,6 +138,16 @@ describe("TurnBlock", () => {
     expect(rule).toMatch(/--fg/);
   });
 
+  it("gives the per-turn fork control a 44 px target on phones", () => {
+    const css = readFileSync(new URL("../../styles/quiet.css", import.meta.url), "utf8");
+    const start = css.indexOf("@media (max-width: 720px) {\n  .q-turn-menu {");
+    expect(start).toBeGreaterThan(-1);
+    const rule = css.slice(start, css.indexOf("}", start) + 1);
+    // A thumb needs the whole square; the glyph inside stays 14 px.
+    expect(rule).toMatch(/width:\s*44px/);
+    expect(rule).toMatch(/height:\s*44px/);
+  });
+
   it("offers Reply, not a resend, after a failed or interrupted turn", () => {
     for (const status of ["failed", "interrupted"] as const) {
       const markup = render({
@@ -171,6 +187,7 @@ describe("TurnBlock", () => {
     const markup = renderToStaticMarkup(
       <TurnBlock
         turn={turn}
+        turns={[turn]}
         threadId="thread_1"
         summary={{ ...summary, tab: "working", agent_state: "thinking" }}
         onReply={() => {}}
@@ -198,6 +215,7 @@ describe("TurnBlock", () => {
             },
           ],
         }}
+        turns={[]}
         threadId="thread_1"
         summary={{ ...summary, tab: "working", agent_state: "idle" }}
         onReply={() => {}}
@@ -223,6 +241,7 @@ describe("TurnBlock", () => {
             },
           ],
         }}
+        turns={[]}
         threadId="thread_1"
         summary={{ ...summary, tab: "working", agent_state: "thinking" }}
         onReply={() => {}}

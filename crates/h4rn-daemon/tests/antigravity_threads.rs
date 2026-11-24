@@ -287,7 +287,7 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
     // fixture holds its death until the gate file appears, so the follow-up
     // below can be queued while the transport is still alive.
     let thread_id: ThreadId = created.thread_id.clone();
-    manager
+    let dying = manager
         .send_message(&thread_id, "please H4RN_FIXTURE_EXIT".into(), Vec::new())
         .await
         .expect("send");
@@ -300,16 +300,21 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
     .await
     .expect("the fixture reached its exit gate before the turn ended");
 
-    // The follow-up queues behind the dying turn, not behind a fresh one.
+    // The follow-up queues behind the dying turn as a turn of its own, not
+    // behind a fresh one.
     let queued = manager
         .send_message(&thread_id, "second".into(), Vec::new())
         .await
         .expect("send");
+    assert_ne!(
+        queued.turn_id, dying.turn_id,
+        "a queued message is its own turn"
+    );
     std::fs::write(workspace.path().join(".agy-fixture-exit-gate"), b"")
         .expect("release the fixture's exit gate");
 
     let failed = next_turn(&mut events).await;
-    assert_eq!(failed.turn_id, queued.turn_id, "the dying turn is A");
+    assert_eq!(failed.turn_id, dying.turn_id, "the dying turn is A");
     assert_eq!(failed.status, TurnStatus::Failed);
     assert_eq!(
         failed.errors.len(),

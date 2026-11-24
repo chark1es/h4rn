@@ -109,6 +109,23 @@ pub struct AttachmentRef {
     pub media_type: String,
 }
 
+/// How far an adapter's own fork of a session reaches.
+///
+/// A fork must hold exactly the source conversation through the chosen turn.
+/// Adapters differ in what they can ask their provider for, so the daemon asks
+/// this before it spends a fork.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeFork {
+    /// The provider copies its whole saved conversation.
+    ///
+    /// Only the newest turn of the session can be forked: an earlier turn
+    /// would carry every turn after it.
+    LatestOnly,
+    /// The provider copies its conversation through a named provider turn,
+    /// inclusive, so any settled turn can be forked without later work.
+    ThroughTurn,
+}
+
 /// Everything needed to start one harness session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSpec {
@@ -130,9 +147,16 @@ pub struct SessionSpec {
     /// it in place.
     ///
     /// Only set for a forked thread's first startup, and only where the
-    /// adapter advertises [`Harness::supports_native_fork`]. The source
-    /// session is read from disk by the harness and is never attached to.
+    /// adapter advertises [`Harness::native_fork_scope`]. The source session is
+    /// read from disk by the harness and is never attached to.
     pub native_fork: bool,
+    /// The provider turn the fork copies through, inclusive.
+    ///
+    /// Set beside `native_fork` for an adapter whose native fork is
+    /// [`NativeFork::ThroughTurn`]. It is that provider's own turn id, which
+    /// the daemon recorded when the source turn ran, so a fork made after the
+    /// source moved on still stops at the chosen turn.
+    pub native_fork_turn: Option<String>,
     /// The single h4rn MCP hub endpoint injected into the session.
     pub mcp_endpoint: Option<String>,
     /// Extra environment variables (never secrets in argv).
@@ -169,6 +193,15 @@ pub enum HarnessEvent {
     TextDelta {
         /// Text to append to the current item.
         text: String,
+    },
+    /// The provider's own id for the turn it just started.
+    ///
+    /// Only an adapter whose fork names a provider turn reports this. The
+    /// daemon records which provider turn an h4rn turn became, so a fork made
+    /// later can ask the provider to copy only up to that turn.
+    NativeTurnId {
+        /// The provider's turn id, in its own vocabulary.
+        turn_id: String,
     },
     /// A tool call started or changed state.
     ToolCall {
@@ -732,13 +765,13 @@ pub trait Harness: Send + Sync {
             .map(|snapshot| snapshot.fingerprint().to_owned())
     }
 
-    /// Whether this adapter can fork a named native session into a new one.
+    /// How this adapter can fork a named native session into a new one.
     ///
     /// A native fork keeps the provider's own conversation, including tool
-    /// work h4rn never journaled. Adapters without it answer `false`, and a
+    /// work h4rn never journaled. Adapters without it answer `None`, and a
     /// forked thread then starts from a bounded handoff instead.
-    fn supports_native_fork(&self) -> bool {
-        false
+    fn native_fork_scope(&self) -> Option<NativeFork> {
+        None
     }
 
     /// Starts (or resumes) a session.

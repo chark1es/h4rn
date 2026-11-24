@@ -1587,6 +1587,15 @@ fieldset.q-seg-fs {
     opacity: 1;
   }
 }
+/* A thumb needs the whole 44 px, but the glyph stays small: the negative
+   margins keep the row's own rhythm and only the hit area grows. */
+@media (max-width: 720px) {
+  .q-turn-menu {
+    width: 44px;
+    height: 44px;
+    margin: -11px -11px -11px auto;
+  }
+}
 .q-ag-head b {
   color: var(--fg-2);
   font-weight: 500;

@@ -23,6 +23,7 @@ fn spec(workspace: &std::path::Path, resume_id: Option<String>) -> SessionSpec {
         fast: false,
         resume_id,
         native_fork: false,
+        native_fork_turn: None,
         mcp_endpoint: None,
         env_overrides: Default::default(),
         attachments: Vec::new(),

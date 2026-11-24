@@ -394,6 +394,7 @@ mod tests {
             fast: false,
             resume_id: None,
             native_fork: false,
+            native_fork_turn: None,
             mcp_endpoint: None,
             env_overrides: std::collections::BTreeMap::new(),
             attachments: Vec::new(),

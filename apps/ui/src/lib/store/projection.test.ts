@@ -256,7 +256,69 @@ describe("foldEvent", () => {
     expect(next.pending).toHaveLength(0);
     expect(next.turns.at(-1)).toMatchObject({
       id: "cue:user:server_1",
+      // The cue names the daemon turn it belongs to, so a fork can wait for
+      // that turn to settle.
+      forkTurnId: "turn_1",
       items: [{ kind: "message", role: "user", text: "ship it" }],
+    });
+  });
+
+  it("attaches a replayed error row to the turn it followed", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "server_1",
+        role: "assistant",
+        text: "done",
+        attachments: [],
+      },
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    log = foldEvent(log, {
+      type: "error",
+      thread_id: "t1",
+      message: "the transport closed",
+      hint: null,
+      retryable: true,
+    });
+
+    const turn = log.turns.find((candidate) => candidate.id === "turn_1");
+    expect(turn?.items.at(-1)).toMatchObject({
+      kind: "error",
+      message: "the transport closed",
+    });
+  });
+
+  it("attaches a replayed limit row to the turn it followed", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "server_1",
+        role: "assistant",
+        text: "done",
+        attachments: [],
+      },
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    log = foldEvent(log, {
+      type: "usage_limit_hit",
+      thread_id: "t1",
+      reset_at: "2026-01-01T01:00:00.000Z",
+      auto_resume: false,
+    });
+
+    const turn = log.turns.find((candidate) => candidate.id === "turn_1");
+    expect(turn?.items.at(-1)).toMatchObject({
+      kind: "limit",
+      resetAt: "2026-01-01T01:00:00.000Z",
     });
   });
 

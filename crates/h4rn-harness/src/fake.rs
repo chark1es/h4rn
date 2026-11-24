@@ -5,7 +5,7 @@
 //! projection or lifecycle test needs, and lets a test assert the daemon's
 //! response to any event sequence without a child process.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -158,6 +158,133 @@ impl EventInjector {
     }
 }
 
+/// One provider turn a fake session ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTurn {
+    /// The provider's own turn id.
+    pub turn_id: String,
+    /// The prompt that turn carried.
+    pub prompt: String,
+}
+
+/// The source conversation one native fork copied, as the fake saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeForkCopy {
+    /// Session the fork was told to copy, when it named one.
+    pub source_session: Option<String>,
+    /// Provider turn it was told to stop at, inclusive.
+    pub bound_turn: Option<String>,
+    /// The prompts its context held after the copy.
+    pub context: Vec<String>,
+}
+
+/// The provider conversations a fake harness kept, so tests can read back what
+/// a native fork really carried.
+///
+/// A real provider copies its own conversation; the fake records each prompt
+/// under the session it ran in, hands a fork the turns through `lastTurnId`
+/// when one was named, and reports its own turn ids. That is enough for a
+/// daemon test to prove a fork's agent context stops at the chosen turn.
+#[derive(Clone, Debug, Default)]
+pub struct NativeSessions(Arc<Mutex<NativeSessionState>>);
+
+#[derive(Debug, Default)]
+struct NativeSessionState {
+    /// Provider session id -> the turns it ran, oldest first.
+    conversations: HashMap<String, Vec<NativeTurn>>,
+    /// Every native fork this fake was asked to start, in order.
+    forks: Vec<NativeForkCopy>,
+    /// Turns handed out so far, so ids never repeat.
+    turns: usize,
+}
+
+impl NativeSessions {
+    /// The next provider turn id this fake would report.
+    fn next_turn_id(&self) -> String {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.turns += 1;
+        format!("provider-turn-{}", state.turns)
+    }
+
+    /// Records one prompt under the session that ran it.
+    fn record_prompt(&self, session: &str, turn_id: &str, prompt: &str) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .conversations
+            .entry(session.to_string())
+            .or_default()
+            .push(NativeTurn {
+                turn_id: turn_id.to_string(),
+                prompt: prompt.to_string(),
+            });
+    }
+
+    /// The turns a fork of `spec` would copy, when it is a native fork.
+    fn copy_for_fork(&self, spec: &SessionSpec) -> Option<Vec<NativeTurn>> {
+        if !spec.native_fork {
+            return None;
+        }
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut turns = spec
+            .resume_id
+            .as_ref()
+            .and_then(|session| state.conversations.get(session))
+            .cloned()
+            .unwrap_or_default();
+        if let Some(bound) = spec.native_fork_turn.as_deref() {
+            match turns.iter().position(|turn| turn.turn_id == bound) {
+                Some(index) => turns.truncate(index + 1),
+                // A provider that cannot find the named turn copies nothing.
+                None => turns.clear(),
+            }
+        }
+        Some(turns)
+    }
+
+    /// Records the copy and seeds the new session's conversation with it.
+    fn note_fork(&self, spec: &SessionSpec, session: &str, context: Vec<NativeTurn>) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.forks.push(NativeForkCopy {
+            source_session: spec.resume_id.clone(),
+            bound_turn: spec.native_fork_turn.clone(),
+            context: context.iter().map(|turn| turn.prompt.clone()).collect(),
+        });
+        state.conversations.insert(session.to_string(), context);
+    }
+
+    /// Every native fork this fake started, in order.
+    pub fn forks(&self) -> Vec<NativeForkCopy> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .forks
+            .clone()
+    }
+
+    /// The prompts one provider session holds, oldest first.
+    pub fn context(&self, session: &str) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .conversations
+            .get(session)
+            .map(|turns| turns.iter().map(|turn| turn.prompt.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
 /// A fake harness adapter.
 #[derive(Clone, Debug)]
 pub struct FakeHarness {
@@ -201,6 +328,17 @@ pub struct FakeHarness {
     /// and then dies before it reports a new session, the way a provider that
     /// cannot find the source conversation fails after the spawn.
     native_fork_death: Option<String>,
+    /// What this fake advertises for [`Harness::native_fork_scope`].
+    ///
+    /// A test picks `None` to model a harness with no native fork at all, or
+    /// one of the two scopes to exercise how far its fork reaches.
+    native_fork_scope: Option<crate::NativeFork>,
+    /// The provider conversations this fake kept, when a test asked for them.
+    ///
+    /// It is what makes a native fork observable: the fake reports its own turn
+    /// ids, records each prompt under the session it ran in, and a fork copies
+    /// only the turns through the bound id, exactly as a real provider would.
+    native_sessions: Option<NativeSessions>,
     /// How many startups fail before one succeeds; `None` fails every one.
     start_failure_budget: Option<usize>,
     /// Startups attempted so far, so a budget can count down.
@@ -423,6 +561,8 @@ pub struct StartSpec {
     pub resume_id: Option<String>,
     /// Whether the startup asked to fork that session.
     pub native_fork: bool,
+    /// The provider turn it asked the fork to stop at, when it named one.
+    pub native_fork_turn: Option<String>,
 }
 
 /// The session startups one fake harness saw, in order.
@@ -637,6 +777,8 @@ impl Default for FakeHarness {
             resume_failure: None,
             resume_death: None,
             native_fork_death: None,
+            native_fork_scope: Some(crate::NativeFork::LatestOnly),
+            native_sessions: None,
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
@@ -874,6 +1016,26 @@ impl FakeHarness {
     pub fn with_native_fork_death(mut self, message: impl Into<String>) -> Self {
         self.native_fork_death = Some(message.into());
         self
+    }
+
+    /// A fake whose adapter can fork natively, in the given scope.
+    pub fn with_native_fork(mut self, scope: crate::NativeFork) -> Self {
+        self.native_fork_scope = Some(scope);
+        self
+    }
+
+    /// A fake whose adapter cannot fork natively at all.
+    pub fn without_native_fork(mut self) -> Self {
+        self.native_fork_scope = None;
+        self
+    }
+
+    /// A fake that reports its provider turn ids and keeps each session's
+    /// conversation, so a native fork's context can be read back.
+    pub fn with_native_sessions(mut self) -> (Self, NativeSessions) {
+        let sessions = NativeSessions::default();
+        self.native_sessions = Some(sessions.clone());
+        (self, sessions)
     }
 
     /// Records each session's starting settings and every live switch it
@@ -1165,10 +1327,11 @@ impl Harness for FakeHarness {
         self.install.clone()
     }
 
-    fn supports_native_fork(&self) -> bool {
+    fn native_fork_scope(&self) -> Option<crate::NativeFork> {
         // A test chooses a harness whose native fork it wants to exercise; the
-        // fake can always model one, including its death before SessionStarted.
-        true
+        // fake can model both scopes, including a fork that dies before
+        // `SessionStarted`.
+        self.native_fork_scope
     }
 
     fn has_instance(&self, instance: &str) -> bool {
@@ -1206,6 +1369,7 @@ impl Harness for FakeHarness {
                 .push(StartSpec {
                     resume_id: spec.resume_id.clone(),
                     native_fork: spec.native_fork,
+                    native_fork_turn: spec.native_fork_turn.clone(),
                 });
         }
         if let Some(settings) = &self.session_settings {
@@ -1264,6 +1428,12 @@ impl Harness for FakeHarness {
                 .clone()
                 .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)))
         };
+        // A native fork copies the source conversation through the turn it
+        // was bound to, exactly as a provider would.
+        let native_fork_context = self
+            .native_sessions
+            .as_ref()
+            .and_then(|sessions| sessions.copy_for_fork(&spec));
         let dies_on_start = self
             .native_fork_death
             .as_ref()
@@ -1288,8 +1458,13 @@ impl Harness for FakeHarness {
                 .await;
         } else {
             sender
-                .send(HarnessEvent::SessionStarted { session_id })
+                .send(HarnessEvent::SessionStarted {
+                    session_id: session_id.clone(),
+                })
                 .await;
+            if let (Some(sessions), Some(context)) = (&self.native_sessions, native_fork_context) {
+                sessions.note_fork(&spec, &session_id, context);
+            }
         }
         let health = TransportHealth::new();
         if let Some(injector) = &self.event_injector {
@@ -1372,6 +1547,8 @@ impl Harness for FakeHarness {
             diagnostic_before_death: self.diagnostic_before_death.clone(),
             immediate_stream_end: self.immediate_stream_end,
             generic_death_gate: self.generic_death_gate.clone(),
+            session_id,
+            native_sessions: self.native_sessions.clone(),
         }))
     }
 }
@@ -1455,6 +1632,10 @@ pub struct FakeSession {
     immediate_stream_end: bool,
     /// Holds a dead send's failure until this gate opens.
     generic_death_gate: Option<Gate>,
+    /// This session's id, as the provider sees it.
+    session_id: String,
+    /// The provider conversations this fake kept, when a test asked for them.
+    native_sessions: Option<NativeSessions>,
 }
 
 #[async_trait]
@@ -1502,6 +1683,13 @@ impl HarnessSession for FakeSession {
             });
         }
         self.sends += 1;
+        if let Some(sessions) = &self.native_sessions {
+            // The provider names its turn before it does anything with the
+            // prompt, so the daemon records the id with this turn.
+            let turn_id = sessions.next_turn_id();
+            sessions.record_prompt(&self.session_id, &turn_id, &input.text);
+            self.emit(HarnessEvent::NativeTurnId { turn_id });
+        }
         if let Some(count) = &self.send_count {
             count.note();
         }
@@ -1990,6 +2178,7 @@ pub fn test_spec() -> SessionSpec {
         fast: false,
         resume_id: None,
         native_fork: false,
+        native_fork_turn: None,
         mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
         env_overrides: BTreeMap::new(),
         attachments: Vec::new(),
