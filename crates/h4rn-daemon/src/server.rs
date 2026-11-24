@@ -108,6 +108,8 @@ pub struct AppState {
     pub acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     /// Registered sidebar projects.
     pub projects: Arc<crate::projects::ProjectService>,
+    /// Discovery and import of other harnesses' saved conversations.
+    pub import: Arc<crate::import::ImportService>,
     /// Title generation: coding-agent CLI or a configured text generator.
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// Guest links and messages waiting for the owner (ADR-044).
@@ -931,6 +933,8 @@ struct Connection {
     origin: SessionOrigin,
     /// One filesystem watcher subscription per requested workspace.
     watches: HashMap<String, JoinHandle<()>>,
+    /// Client frames being reassembled from chunks, by request id.
+    chunks: HashMap<u64, ChunkAssembly>,
     /// Set when this connection must be dropped with a resume hint.
     overflowed: Arc<AtomicBool>,
     /// Wakes the writer loop when a forwarder overflows this connection.
@@ -1060,6 +1064,7 @@ where
         Arc::clone(&overflowed),
         Arc::clone(&notify),
         Arc::clone(&last_seq),
+        origin.is_remote(),
     ));
 
     let viewer_id = state.terminals.next_viewer_id();
@@ -1074,6 +1079,7 @@ where
         tx: tx.clone(),
         origin,
         watches: HashMap::new(),
+        chunks: HashMap::new(),
         overflowed: Arc::clone(&overflowed),
         notify: Arc::clone(&notify),
     };
@@ -1158,6 +1164,63 @@ impl Connection {
         }
     }
     async fn handle_text(&mut self, text: &str) -> Option<String> {
+        if let Some(chunk) = parse_chunk_frame(text) {
+            let id = chunk.id;
+            return match self.accept_chunk(chunk) {
+                Ok(Some(assembled)) => self.handle_frame(&assembled).await,
+                Ok(None) => None,
+                Err(error) => Some(error_frame(id, error)),
+            };
+        }
+        self.handle_frame(text).await
+    }
+
+    /// Adds one piece of a chunked client frame, and returns the joined frame
+    /// text once its last piece arrives.
+    fn accept_chunk(&mut self, frame: ChunkFrame) -> Result<Option<String>, ProtoError> {
+        let part = frame.chunk;
+        if part.index as usize >= MAX_CHUNKS {
+            self.chunks.remove(&frame.id);
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "a chunked frame had too many pieces",
+                "Send fewer, larger chunks",
+            ));
+        }
+        if !self.chunks.contains_key(&frame.id) && self.chunks.len() >= MAX_PENDING_CHUNKS {
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "too many chunked frames are waiting on this connection",
+                "Finish one request before starting another",
+            ));
+        }
+        let entry = self.chunks.entry(frame.id).or_default();
+        if part.index != entry.next {
+            self.chunks.remove(&frame.id);
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "chunked frame pieces arrived out of order",
+                "Send the pieces in order on one connection",
+            ));
+        }
+        if entry.text.len().saturating_add(part.data.len()) > MAX_CHUNKED_FRAME_BYTES {
+            self.chunks.remove(&frame.id);
+            return Err(ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                "a chunked frame was larger than this daemon accepts",
+                "Send a smaller request",
+            ));
+        }
+        entry.text.push_str(&part.data);
+        entry.next += 1;
+        if !part.last {
+            return Ok(None);
+        }
+        let assembled = self.chunks.remove(&frame.id).map(|entry| entry.text);
+        Ok(assembled)
+    }
+
+    async fn handle_frame(&mut self, text: &str) -> Option<String> {
         let frame: ClientFrame = match serde_json::from_str(text) {
             Ok(frame) => frame,
             Err(error) => {
@@ -1346,17 +1409,27 @@ impl Connection {
                     .manager
                     .get_thread(&thread_id, since_seq)
                     .await
-                    .map(|snapshot| ResponseBody::Thread {
-                        summary: snapshot.summary,
-                        events: snapshot
-                            .events
-                            .into_iter()
-                            .map(|event| SeqEvent {
-                                seq: event.seq,
-                                event: event.event,
-                            })
-                            .collect(),
-                        next_seq: snapshot.next_seq,
+                    .map(|snapshot| {
+                        // A paired transport refuses a frame over 512 KiB and
+                        // closes the session. A long replay therefore comes in
+                        // pages the client asks for again; a single event that
+                        // is itself larger is carried whole in its own page and
+                        // split into wire chunks on the way out.
+                        let (events, more) =
+                            page_thread_events(snapshot.events, self.frame_limit().is_some());
+                        let next_seq = events.last().map(|event| event.seq).unwrap_or(since_seq);
+                        ResponseBody::Thread {
+                            summary: snapshot.summary,
+                            events: events
+                                .into_iter()
+                                .map(|event| SeqEvent {
+                                    seq: event.seq,
+                                    event: event.event,
+                                })
+                                .collect(),
+                            next_seq,
+                            more,
+                        }
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
                 ClientRequest::CreateThread {
@@ -2252,29 +2325,42 @@ async fn writer_loop<S>(
     overflowed: Arc<AtomicBool>,
     notify: Arc<Notify>,
     last_seq: Arc<AtomicU64>,
+    chunked: bool,
 ) where
     S: Sink<Message> + Unpin + Send + 'static,
 {
-    loop {
+    'writer: loop {
         tokio::select! {
             biased;
             _ = notify.notified(), if overflowed.load(Ordering::Relaxed) => {
                 let hint = resume_hint(last_seq.load(Ordering::Relaxed));
-                let _ = tokio::time::timeout(WRITE_TIMEOUT, sink.send(Message::Text(hint.into()))).await;
+                for frame in chunked_frames(&hint, WIRE_CHUNK_BYTES) {
+                    let _ = tokio::time::timeout(WRITE_TIMEOUT, sink.send(Message::Text(frame.into()))).await;
+                }
                 break;
             }
             message = rx.recv() => {
                 let Some(message) = message else { break; };
                 match message {
                     Outbound::Text(text) => {
-                        let sent = tokio::time::timeout(
-                            WRITE_TIMEOUT,
-                            sink.send(Message::Text(text.into())),
-                        )
-                        .await;
-                        if sent.is_err() {
-                            tracing::warn!("client write timed out; closing the connection");
-                            break;
+                        // A paired transport closes on a frame over its limit.
+                        // Split only there; the plain loopback path keeps
+                        // delivering its listings and reads whole.
+                        let frames = if chunked {
+                            chunked_frames(&text, WIRE_CHUNK_BYTES)
+                        } else {
+                            vec![text]
+                        };
+                        for frame in frames {
+                            let sent = tokio::time::timeout(
+                                WRITE_TIMEOUT,
+                                sink.send(Message::Text(frame.into())),
+                            )
+                            .await;
+                            if sent.is_err() {
+                                tracing::warn!("client write timed out; closing the connection");
+                                break 'writer;
+                            }
                         }
                     }
                     Outbound::Binary(bytes) => {
@@ -2328,6 +2414,135 @@ where
             )
         })?
         .map_err(FsError::into_proto)
+}
+
+/// Bytes of thread events sent in one page on a framed session.
+///
+/// The transport's frame is 512 KiB; the summary, the response envelope and
+/// the deliberate headroom stay well inside the rest.
+const THREAD_PAGE_BYTES: usize = 256 * 1024;
+
+/// Bytes of one serialized frame sent as a chunk on a framed session.
+///
+/// A chunk's `data` is JSON-escaped into the chunk frame, which can double its
+/// size at worst, so 192 KiB stays under half of the transport's 512 KiB limit.
+const WIRE_CHUNK_BYTES: usize = 192 * 1024;
+
+/// Pieces in one chunked client frame.
+const MAX_CHUNKS: usize = 128;
+
+/// Largest client frame accepted when joined from chunks.
+const MAX_CHUNKED_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// Client requests that may be mid-chunk on one connection.
+const MAX_PENDING_CHUNKS: usize = 4;
+
+/// A piece of a client frame too large for one transport frame.
+///
+/// This is a wire envelope around the exact bytes of the original
+/// [`h4rn_protocol::ClientFrame`], not a protocol request, so an older daemon
+/// and every typed client stay unchanged.
+#[derive(Debug, serde::Deserialize)]
+struct ChunkFrame {
+    id: u64,
+    chunk: ChunkPart,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ChunkPart {
+    index: u32,
+    last: bool,
+    data: String,
+}
+
+/// A frame being joined from chunks on one connection.
+#[derive(Default)]
+struct ChunkAssembly {
+    /// Next expected piece.
+    next: u32,
+    /// Pieces joined so far.
+    text: String,
+}
+
+/// Reads one chunk envelope, or `None` for an ordinary client frame.
+fn parse_chunk_frame(text: &str) -> Option<ChunkFrame> {
+    // The `chunk` key is what makes this an envelope; a normal ClientFrame
+    // always carries a tagged `body` instead.
+    if !text.contains("\"chunk\"") {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+/// One page of a thread replay, and whether another page follows.
+///
+/// A single oversized event is never dropped or cut: it is included whole even
+/// when it alone passes the budget, and the writer splits its wire frame.
+fn page_thread_events(
+    events: Vec<crate::journal::WireEvent>,
+    framed: bool,
+) -> (Vec<crate::journal::WireEvent>, bool) {
+    if !framed {
+        return (events, false);
+    }
+    let mut used: usize = 0;
+    let mut cut = events.len();
+    for (index, event) in events.iter().enumerate() {
+        let size = serde_json::to_string(&event.event)
+            .map(|text| text.len())
+            .unwrap_or_default();
+        if index > 0 && used.saturating_add(size) > THREAD_PAGE_BYTES {
+            cut = index;
+            break;
+        }
+        used = used.saturating_add(size);
+    }
+    let more = cut < events.len();
+    let mut events = events;
+    events.truncate(cut);
+    (events, more)
+}
+
+/// Splits one serialized frame into the pieces a framed transport may carry.
+///
+/// The receiver joins the pieces and parses the original frame, so no text is
+/// lost or altered. A frame that already fits is returned unchanged, and every
+/// piece is a complete JSON frame of its own.
+fn chunked_frames(text: &str, limit: usize) -> Vec<String> {
+    let size = text.len();
+    if size <= limit {
+        return vec![text.to_owned()];
+    }
+    let chunks = size.div_ceil(limit);
+    let mut frames = Vec::with_capacity(chunks);
+    let mut start = 0;
+    let mut index = 0;
+    while start < size {
+        let mut end = (start + limit).min(size);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        // A one-character chunk is still bounded by the chunk budget; keeping
+        // it separate stops a loop that never advances on a tiny limit.
+        if end == start {
+            end = text[start..]
+                .char_indices()
+                .nth(1)
+                .map(|(offset, _)| start + offset)
+                .unwrap_or(size);
+        }
+        let frame = serde_json::json!({
+            "kind": "chunk",
+            "index": index,
+            "last": end == size,
+            "data": &text[start..end],
+        })
+        .to_string();
+        frames.push(frame);
+        start = end;
+        index += 1;
+    }
+    frames
 }
 
 fn response_frame(id: u64, body: ResponseBody, frame_limit: Option<usize>) -> String {
@@ -2530,6 +2745,7 @@ mod tests {
             agent_id: None,
             title,
             workspace_path: "/tmp/work".into(),
+            project_path: None,
             branch: None,
             model: "test-model".into(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
@@ -2553,6 +2769,74 @@ mod tests {
             resume_at: None,
             limit: None,
         }
+    }
+
+    #[test]
+    fn a_thread_replay_is_paged_on_a_framed_session() {
+        use h4rn_protocol::{MessageRole, ThreadId, TurnId};
+
+        let thread_id = ThreadId::new("th_page");
+        let event = |seq: u64| crate::journal::WireEvent {
+            seq,
+            thread_id: thread_id.clone(),
+            event: Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: TurnId::new("turn_page"),
+                item: h4rn_protocol::Item::Message {
+                    item_id: format!("item-{seq}"),
+                    role: MessageRole::User,
+                    text: "p".repeat(200 * 1024),
+                    attachments: Vec::new(),
+                },
+                at: None,
+            },
+        };
+
+        let (first, more) = page_thread_events(vec![event(1), event(2), event(3)], true);
+        assert_eq!(first.len(), 1, "one 200 KiB event fits a 256 KiB page");
+        assert_eq!(first[0].seq, 1);
+        assert!(more, "the rest follows in another page");
+
+        let (rest, more) = page_thread_events(vec![event(2), event(3)], true);
+        assert_eq!(rest.len(), 1);
+        assert!(more);
+
+        // A single event over the budget is sent whole, never cut.
+        let (one, more) = page_thread_events(vec![event(4)], true);
+        assert_eq!(one.len(), 1);
+        assert!(!more);
+
+        // The plain loopback path keeps delivering the whole replay at once.
+        let (all, more) = page_thread_events(vec![event(5), event(6)], false);
+        assert_eq!(all.len(), 2);
+        assert!(!more);
+    }
+
+    #[test]
+    fn an_oversized_frame_is_split_into_reassemblable_chunks() {
+        // Quotes escape to two bytes each, and the emoji straddles the byte
+        // budget, so the split must respect character boundaries.
+        let text = format!("{}{}", "\"".repeat(300 * 1024), "🙂".repeat(1000));
+        let frames = chunked_frames(&text, WIRE_CHUNK_BYTES);
+        assert!(frames.len() > 1);
+        let mut joined = String::new();
+        for (index, frame) in frames.iter().enumerate() {
+            assert!(
+                frame.len() <= WIRE_CHUNK_BYTES * 2 + 256,
+                "chunk {} is {} bytes",
+                index,
+                frame.len()
+            );
+            let value: serde_json::Value = serde_json::from_str(frame).expect("chunk JSON");
+            assert_eq!(value["kind"], "chunk");
+            assert_eq!(value["index"], index);
+            assert_eq!(value["last"], index + 1 == frames.len());
+            joined.push_str(value["data"].as_str().expect("chunk data"));
+        }
+        assert_eq!(joined, text, "joining the chunks restores the frame");
+
+        // A frame that already fits is not wrapped.
+        assert_eq!(chunked_frames("small", WIRE_CHUNK_BYTES), vec!["small"]);
     }
 
     #[test]

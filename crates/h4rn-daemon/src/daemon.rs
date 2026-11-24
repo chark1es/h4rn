@@ -388,6 +388,15 @@ impl DaemonBuilder {
 
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
+        // Imports read the harnesses' own transcripts and turn selected
+        // conversations into ordinary threads on this daemon.
+        let import = Arc::new(crate::import::ImportService::open(
+            Arc::clone(&journal),
+            Arc::clone(&projects),
+            Arc::clone(&manager),
+            hosts.local_id().clone(),
+            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")),
+        ));
         let pr_links = crate::pr_links::PrLinkService::new(
             Arc::clone(&journal),
             Arc::new(crate::pr_links::ForgePrSource::new(Arc::clone(&forge))),
@@ -579,6 +588,7 @@ impl DaemonBuilder {
             acp_agents,
             harness_versions,
             projects,
+            import,
             manager,
             subagents,
             worktrees,
@@ -636,6 +646,7 @@ pub struct Daemon {
     harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
     acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     projects: Arc<crate::projects::ProjectService>,
+    import: Arc<crate::import::ImportService>,
     text_generation: Arc<crate::text_generation::TextGenerationService>,
     guest: Arc<crate::guest::GuestService>,
     schedules: Arc<ScheduleService>,
@@ -802,6 +813,7 @@ impl Daemon {
             harness_versions: Arc::clone(&self.harness_versions),
             acp_agents: Arc::clone(&self.acp_agents),
             projects: Arc::clone(&self.projects),
+            import: Arc::clone(&self.import),
             text_generation: Arc::clone(&self.text_generation),
             guest: Arc::clone(&self.guest),
             schedules: Arc::clone(&self.schedules),

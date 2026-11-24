@@ -34,6 +34,7 @@ mod claude_code;
 mod codex;
 mod controls;
 mod fake;
+mod homes;
 mod opencode;
 pub mod registry;
 pub mod stats;
@@ -70,6 +71,7 @@ pub use fake::{
     EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionCount,
     SessionModels, SessionSettings, SettingChange, test_spec,
 };
+pub use homes::{HomeError, harness_home, home_variable, resolve_home};
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
     ENV_OPENCODE_MODELS, ENV_OPENCODE_PACKAGE, ENV_OPENCODE_PROVIDER, MINIMUM_OPENCODE_VERSION,

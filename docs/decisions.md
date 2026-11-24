@@ -1623,3 +1623,67 @@ The guest page polls its snapshot every couple of seconds rather than opening a
 second long-lived socket. That keeps one transport (HTTP) working through both
 the direct address and the relay proxy, and the thread still follows live work
 within that interval.
+## ADR-045: Imported conversations resume natively, with a bounded handoff as the fallback
+
+**Status:** Accepted
+
+Claude Code and Codex already keep their conversations on disk, so h4rn reads
+those transcripts instead of asking the person to copy them. Discovery and
+parsing live in `crates/h4rn-daemon/src/import/` and are read-only; a scan reads
+the head of each transcript with the same streaming record reader the import
+uses to group it and to skip a session that never wrote a visible message, and a
+full parse streams one JSONL record at a time and names only the fields it keeps,
+so a megabyte-sized attachment or tool result is read past instead of being
+loaded or deciding that the line is malformed. A Codex rollout that was rewound
+declares a byte prefix of the rollout it replaced; the prefix streams before the
+rollout's own records, under the same limits.
+
+An imported thread is an ordinary thread whose transcript is journaled as message
+items and whose `ThreadMeta` carries the imported origin. That origin holds only
+source facts: the source harness, transcript path, native session id, the project
+it belongs to when that differs from the folder it ran in, and whether a native
+resume is still worth trying. The kept messages live in the journal, the one copy
+h4rn keeps, so an upsert never rewrites a transcript. The thread has no live
+session, so it costs nothing until the person writes again. It lands in Done with
+its hand down; that placement replays from the origin and each message's time
+from the wire events, so a restart shows the same thread, not a Settled or
+freshly-timed one.
+
+The first new message prefers the harness's own resume (`--resume` for Claude
+Code, `thread/resume` for Codex) because that restores the provider's real
+context, including tool work the import intentionally leaves out. When the
+harness refuses the resume — either by failing the start, or, as the real Claude
+Code adapter does, by exiting after it returned a session that never reported
+`SessionStarted` — the daemon clears the dead id, records `native_resume: false`
+in the same turn, and retries once with a bounded handoff: the original request
+plus the newest messages, in order, under a byte budget (16,000 by default,
+`H4RN_HANDOFF_BYTES` clamped to 1,024–64,000). The budget covers the serialised
+envelope and the person's request, which is appended verbatim and never
+shortened. The journal keeps the transcript as it was imported (only the hard
+32 MiB kept-text limit applies); the handoff applies its own ceiling when the
+person writes again.
+
+The handoff builder is separate (`crates/h4rn-daemon/src/handoff.rs`) and takes
+only roles and text, so provider switching and forking can reuse the same
+selection later. Import identity is the source session id, or the transcript path
+with its size and a content fingerprint when none exists, recorded in
+`daemon_imported_sources`. The claim uses the identity the full parse found, not
+the scan's head, so a session id in a later record still identifies both copies.
+The source is claimed and its thread written in one
+transaction, so overlapping runs, two copies of one session in a run, or a crash
+between the claim and the write all import the conversation exactly once. A long
+imported transcript crosses a paired connection in bounded pages, and a frame
+over the secure transport's limit is split into chunks the client joins, so a
+large message is never shortened to fit.
+
+Discovery caps each attempt at 100 not-yet-imported conversations and 4 GiB per
+project, newest first, and skips a transcript over 4 GiB, a conversation over
+32 MiB of kept text or 100,000 records. Once a project's quota is full its
+remaining transcripts are not read, which only a Claude Code folder can be known
+to hold without reading: Codex stores every project's rollouts in shared date
+folders, so each one is still peeked to learn which project it belongs to.
+Paths are compared after canonicalising them and stripping a Windows
+extended-length prefix, so a symlinked `~/Downloads` stays excluded. Warnings say
+a limit was reached without naming message text. Kept text and titles pass
+through the existing token redactor before they reach the journal, and nothing is
+logged from a transcript.

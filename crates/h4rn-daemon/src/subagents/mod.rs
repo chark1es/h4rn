@@ -833,6 +833,7 @@ impl Inner {
                 thread_id: request.parent_thread.clone(),
                 turn_id: parent_turn,
                 item,
+                at: None,
             },
             Event::SubagentSpawned {
                 parent_thread_id: request.parent_thread.clone(),

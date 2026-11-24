@@ -74,7 +74,15 @@ turn_id: TurnId,
 /**
  * The completed item.
  */
-item: Item, } | { "type": "tool_call", 
+item: Item, 
+/**
+ * When the item was authored in the conversation it came from.
+ *
+ * Imported transcripts carry their own timestamps, so a restored
+ * thread shows when each message was really written. Absent means the
+ * item has no source time and the journal's own time applies.
+ */
+at?: string, } | { "type": "tool_call", 
 /**
  * Thread.
  */
