@@ -63,16 +63,22 @@ arrived yet.
 Malformed records are ignored, and unreadable or empty conversations are skipped.
 Records are streamed one at a time: a record larger than the text worth keeping
 is read past its attachment or tool output, so a short prompt is never lost to a
-screenshot beside it. A conversation is skipped when its transcript is over
-4 GiB, when the kept text and metadata need more than 32 MiB, when one record is
-longer than 48 MiB, or when it has more than 100,000 records. Retention stops the
-moment that limit is crossed: the kept window and a turn's pending text are
-released at once, so one oversized conversation cannot grow memory toward the
-size of its file. Each import attempt reads at most 100 conversations and 4 GiB
-per project, newest first, and only counts conversations that are not already
-imported and whose head showed a visible message. Once a project's quota is
-full, the rest of its transcripts under that folder are not read at all; one
-already imported is still recognised. The list says when a limit was reached.
+screenshot beside it. A conversation is skipped with a warning when its
+transcript is over 4 GiB, when the kept text and metadata need more than 32 MiB,
+when any single record is longer than 48 MiB — the person's text, a tool result
+or an attachment alike, not only user text — or when it has more than 100,000
+records. Retention stops the moment that limit is crossed: the kept window and a
+turn's pending text are released at once, so one oversized conversation cannot
+grow memory toward the size of its file. Each import attempt reads at most 100
+conversations and 4 GiB per project, newest first, and only counts conversations
+that are not already imported and whose head showed a visible message. Once a
+project's quota is full, the rest of that project's Claude Code transcripts are
+not read at all; one already imported is still recognised. That shortcut is per
+Claude Code folder, because its folder names the working directory. Codex
+rollouts live in date folders shared by every project, so each rollout is still
+peeked at its head to learn which project it belongs to, and its full transcript
+is read only while that project's quota allows. The list says when a limit was
+reached.
 
 ## Importing
 
@@ -113,8 +119,11 @@ conversation's original working folder:
    starting anything.
 
 The handoff keeps the original request and the newest messages, in order, with
-their roles. It is bounded in UTF-8 bytes: 16,000 by default, clamped to
-1,024–64,000. Set `H4RN_HANDOFF_BYTES` on the daemon to choose a different size.
+their roles. The turn's own request is never part of that history block, even
+though it is already in the journal by then: it reaches the agent once, as the
+request that follows the history. The handoff is bounded in UTF-8 bytes: 16,000
+by default, clamped to 1,024–64,000. Set `H4RN_HANDOFF_BYTES` on the daemon to
+choose a different size.
 The budget covers the whole handoff — the header, every message as it is
 serialised, the lead-in and your new request — so the saved history never pushes
 your request past it. The newest messages fill the budget from the end, and once

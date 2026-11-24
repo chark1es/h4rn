@@ -1636,13 +1636,15 @@ only the fields it keeps, so a megabyte-sized attachment or tool result is read
 past instead of being loaded or deciding that the line is malformed.
 
 An imported thread is an ordinary thread whose transcript is journaled as message
-items and whose `ThreadMeta` carries the imported origin: source, transcript
-path, native session id, the project it belongs to when that differs from the
-folder it ran in, the kept messages with their timestamps, and whether a native
-resume is still worth trying. It has no live session, so it costs nothing until
-the person writes again. It lands in Done with its hand down; that placement and
-each message's time replay from the origin and the wire events, so a restart
-shows the same thread, not a Settled or freshly-timed one.
+items and whose `ThreadMeta` carries the imported origin. That origin holds only
+source facts: the source harness, transcript path, native session id, the project
+it belongs to when that differs from the folder it ran in, and whether a native
+resume is still worth trying. The kept messages live in the journal, the one copy
+h4rn keeps, so an upsert never rewrites a transcript. The thread has no live
+session, so it costs nothing until the person writes again. It lands in Done with
+its hand down; that placement replays from the origin and each message's time
+from the wire events, so a restart shows the same thread, not a Settled or
+freshly-timed one.
 
 The first new message prefers the harness's own resume (`--resume` for Claude
 Code, `thread/resume` for Codex) because that restores the provider's real
@@ -1668,8 +1670,12 @@ between the claim and the write all import the conversation exactly once.
 
 Discovery caps each attempt at 100 not-yet-imported conversations and 4 GiB per
 project, newest first, and skips a transcript over 4 GiB, a conversation over
-32 MiB of kept text or 100,000 records. Paths are compared after canonicalising
-them and stripping a Windows extended-length prefix, so a symlinked
-`~/Downloads` stays excluded. Warnings say a limit was reached without naming
-message text. Kept text and titles pass through the existing token redactor
-before they reach the journal, and nothing is logged from a transcript.
+32 MiB of kept text or 100,000 records. Once a project's quota is full its
+remaining transcripts are not read, which only a Claude Code folder can be known
+to hold without reading: Codex stores every project's rollouts in shared date
+folders, so each one is still peeked to learn which project it belongs to.
+Paths are compared after canonicalising them and stripping a Windows
+extended-length prefix, so a symlinked `~/Downloads` stays excluded. Warnings say
+a limit was reached without naming message text. Kept text and titles pass
+through the existing token redactor before they reach the journal, and nothing is
+logged from a transcript.

@@ -68,10 +68,10 @@ All notable changes to h4rn are recorded here. The format follows
   with no canonical event keeps its context). The transcript is kept as it was
   written — a long first prompt is stored whole and the handoff applies its own
   ceiling later — and a record is streamed past attachments and tool output
-  instead of being dropped for its size; a record longer than 48 MiB skips the
-  conversation with a warning, and retention stops as soon as a limit is
-  crossed, so one oversized conversation cannot grow memory toward its file
-  size. Each source session id is
+  instead of being dropped for its size; a single record over 48 MiB — text, a
+  tool result or an attachment — skips the conversation with a warning, and
+  retention stops as soon as a limit is crossed, so one oversized conversation
+  cannot grow memory toward its file size. Each source session id is
   recorded, so running the import again only adds what is new; a transcript
   without one is identified by its path, size and content. The claim and the
   new thread are written in one transaction, so overlapping runs and a crash
@@ -81,20 +81,25 @@ All notable changes to h4rn are recorded here. The format follows
   Discovery is read-only, skips
   `~/Downloads` (including through a symlink), offers at most 100
   not-yet-imported conversations and 4 GiB per project per attempt (once a
-  project's quota is full its other transcripts are not read at all, while one
-  already imported is still recognised), and skips
+  project's quota is full its other Claude Code transcripts are not read at all,
+  while one already imported is still recognised; Codex rollouts are still
+  peeked to learn their project), and skips
   transcripts over 4 GiB, conversations over 32 MiB of kept text or 100,000
   records; the list shows what a scan could not read. Imported threads land in
-  Done with their own message times and stay there after a restart. An imported
-  thread starts a session when you send its first message: it prefers the
-  harness's own resume — spent once that session starts — and falls back to a
-  bounded handoff of the saved history (16,000 bytes by default,
-  `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000) before your exact, unshortened
-  request, including when the harness exits after starting a resume it cannot
-  honour, and a Stop during that retry ends the turn interrupted. The handoff
-  reads the history from the thread's journaled messages, so no second copy of
-  the transcript is stored. Message text is never logged and token
-  shapes are redacted before storage. See [docs/import.md](docs/import.md).
+  Done with their own message times and stay there after a restart; their replies
+  render as finished history — never as a live or paused stream — and the thread
+  says **Imported from** with the conversation's own time instead of a duration
+  and token count it never had. An imported thread starts a session when you send
+  its first message: it prefers the harness's own resume — spent once that session
+  starts — and falls back to a bounded handoff of the saved history (16,000 bytes
+  by default, `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000) before your exact,
+  unshortened request, including when the harness exits after starting a resume it
+  cannot honour, and a Stop during that retry ends the turn interrupted. The
+  request is sent once: the fallback never includes the current turn's own prompt
+  in the history block, so a large request cannot push the recent messages out of
+  the handoff. The handoff reads the history from the thread's journaled messages,
+  so no second copy of the transcript is stored. Message text is never logged and
+  token shapes are redacted before storage. See [docs/import.md](docs/import.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a
