@@ -2191,10 +2191,12 @@ fn guest_event(event: Event) -> Option<Event> {
             thread_id,
             turn_id,
             started_at,
+            harness,
         } => Some(Event::TurnStarted {
             thread_id,
             turn_id,
             started_at,
+            harness,
         }),
         Event::MessageDelta {
             thread_id,

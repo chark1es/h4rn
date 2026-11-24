@@ -28,7 +28,7 @@ function task(patch: Partial<ScheduleTask> = {}): ScheduleTask {
     thread_id: null,
     webhook_path_set: false,
     once_consumed: false,
-    next_run_at: "2026-11-24T08:00:00.000Z",
+    next_run_at: "2030-01-01T08:00:00.000Z",
     last_run: null,
     created_at: "2026-11-20T10:00:00.000Z",
     updated_at: "2026-11-20T10:00:00.000Z",

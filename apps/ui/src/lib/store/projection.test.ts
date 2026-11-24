@@ -101,6 +101,37 @@ describe("foldEvent", () => {
     });
   });
 
+  it("puts a harness switch between the turns as a quiet divider row", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: "2026-01-01T00:00:00.000Z",
+      harness: "claude_code",
+    });
+    log = foldEvent(log, {
+      type: "harness_switched",
+      thread_id: "t1",
+      from: "claude_code",
+      to: "codex",
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_2",
+      started_at: "2026-01-01T00:01:00.000Z",
+      harness: "codex",
+    });
+    expect(log.turns[0]?.id).toBe("turn_1");
+    const divider = log.turns.find((turn) => turn.divider);
+    expect(divider?.items).toMatchObject([
+      { kind: "harness_switch", from: "claude_code", to: "codex" },
+    ]);
+    expect(log.turns.find((turn) => turn.id === "turn_1")?.harness).toBe("claude_code");
+    expect(log.turns.find((turn) => turn.id === "turn_2")?.harness).toBe("codex");
+  });
+
   it("keeps one plan item per turn, updated in place", () => {
     let log = createThreadLog();
     log = foldEvent(log, {

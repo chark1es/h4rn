@@ -80,6 +80,14 @@ export type PlanItem = {
   entries: PlanStep[];
 };
 
+/** A quiet line where one provider stopped and the next began. */
+export type HarnessSwitchItem = {
+  kind: "harness_switch";
+  itemId: string;
+  from: HarnessKind;
+  to: HarnessKind;
+};
+
 export type TurnItem =
   | MessageItem
   | ToolItem
@@ -87,7 +95,8 @@ export type TurnItem =
   | LimitItem
   | ErrorItem
   | DelegatedItem
-  | PlanItem;
+  | PlanItem
+  | HarnessSwitchItem;
 
 export type StreamTurn = {
   id: TurnId;
@@ -104,6 +113,20 @@ export type StreamTurn = {
    * live: an imported thread has no session until the person writes again.
    */
   imported?: boolean;
+  /**
+   * Harness that ran this turn, when the daemon reported one.
+   *
+   * A thread can switch harness between turns, so a turn keeps its own
+   * provider instead of borrowing the summary's current one.
+   */
+  harness?: HarnessKind;
+  /**
+   * True for a synthetic row that only carries a quiet divider.
+   *
+   * It has no agent header, live line or turn actions: a harness switch landed
+   * between turns, so it belongs between their rows, not inside either.
+   */
+  divider?: boolean;
 };
 
 export type PendingMessage = {
@@ -239,6 +262,7 @@ export function foldEvent(
       if (existing) {
         existing.status = "running";
         if (!existing.startedAt) existing.startedAt = event.started_at;
+        if (event.harness) existing.harness = event.harness;
       } else {
         log.turns.push({
           id: event.turn_id,
@@ -247,8 +271,36 @@ export function foldEvent(
           items: [],
           usage: null,
           changes: null,
+          ...(event.harness ? { harness: event.harness } : {}),
         });
       }
+      return log;
+    }
+
+    case "harness_switched": {
+      const id = `switch:${event.from}:${event.to}:${at}`;
+      const item: HarnessSwitchItem = {
+        kind: "harness_switch",
+        itemId: id,
+        from: event.from,
+        to: event.to,
+      };
+      // A switch always happens between turns. A new row keeps it in
+      // chronological place and keeps both neighbouring turns intact; the
+      // same event folded twice is not shown twice.
+      if (log.turns.some((turn) => turn.id === id)) return log;
+      log.turns.push({
+        id,
+        startedAt: at,
+        status: "completed",
+        items: [item],
+        usage: null,
+        changes: null,
+        // A thread switched before its first live turn still shows where it
+        // came from, so the receipt keeps naming the imported conversation.
+        imported: true,
+        divider: true,
+      });
       return log;
     }
 

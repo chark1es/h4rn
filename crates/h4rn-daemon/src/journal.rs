@@ -118,6 +118,15 @@ pub struct ThreadMeta {
     /// their timestamps, are what its first new turn hands to a fresh session
     /// (or a native resume, when the harness can take one).
     pub imported: Option<ImportedOrigin>,
+    /// Whether the next turn must open with a bounded handoff of the journaled
+    /// history.
+    ///
+    /// A harness switch clears the old resume id, so the first turn on the new
+    /// harness has no native context to resume. It sends the history instead,
+    /// using the same builder and budget as an import fallback. Cleared when a
+    /// session actually starts, so a failed start does not lose the history a
+    /// later message needs.
+    pub handoff_pending: bool,
 }
 
 /// The saved conversation a thread was imported from.
@@ -458,7 +467,8 @@ impl SqliteJournal {
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
                 parked_json    TEXT,
-                imported_json  TEXT
+                imported_json  TEXT,
+                handoff_pending INTEGER NOT NULL DEFAULT 0
             )",
         )
         .execute(&self.pool)
@@ -486,6 +496,12 @@ impl SqliteJournal {
             .await?;
         self.ensure_column("daemon_threads", "imported_json", "TEXT")
             .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "handoff_pending",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
         self.ensure_column("daemon_threads", "reasoning_effort", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "fast", "INTEGER NOT NULL DEFAULT 0")
@@ -683,8 +699,8 @@ async fn upsert_thread_on(
     let imported_json = serde_json::to_string(&meta.imported)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, handoff_pending)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -703,7 +719,8 @@ async fn upsert_thread_on(
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json,
-            imported_json = excluded.imported_json",
+            imported_json = excluded.imported_json,
+            handoff_pending = excluded.handoff_pending",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -725,6 +742,7 @@ async fn upsert_thread_on(
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
     .bind(imported_json)
+    .bind(meta.handoff_pending as i64)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -766,7 +784,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, handoff_pending
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -820,6 +838,7 @@ impl Journal for SqliteJournal {
                 imported: row
                     .try_get::<Option<String>, _>("imported_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
+                handoff_pending: row.try_get::<i64, _>("handoff_pending")? != 0,
             });
         }
         Ok(metas)
@@ -1651,6 +1670,7 @@ mod tests {
             agent_fingerprint: None,
             parked: None,
             imported: None,
+            handoff_pending: false,
         }
     }
 

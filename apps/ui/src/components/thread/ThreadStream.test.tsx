@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ThreadSummary, Usage } from "@/gen";
 import type { StreamTurn } from "@/lib/store/projection";
 import { ThreadReceipt } from "./ThreadStream";
+import { TurnBlock } from "./TurnBlock";
 
 const usage: Usage = {
   input_tokens: 0,
@@ -99,5 +100,31 @@ describe("ThreadReceipt", () => {
         />,
       ),
     ).toBe("");
+  });
+});
+
+describe("Harness switch divider", () => {
+  it("names both harnesses in the transcript", () => {
+    const divider: StreamTurn = {
+      id: "switch:claude_code:codex",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      status: "completed",
+      items: [
+        {
+          kind: "harness_switch",
+          itemId: "switch:claude_code:codex",
+          from: "claude_code",
+          to: "codex",
+        },
+      ],
+      usage: null,
+      changes: null,
+      divider: true,
+    };
+    const markup = renderToStaticMarkup(
+      <TurnBlock turn={divider} threadId="thread_1" summary={summary} onReply={() => undefined} />,
+    );
+    expect(markup).toContain("Switched from Claude Code to Codex");
+    expect(markup).not.toContain("q-ag-head");
   });
 });

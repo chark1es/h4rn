@@ -489,6 +489,32 @@ pub struct ThreadSummary {
     pub limit: Option<crate::usage::LimitBrief>,
 }
 
+/// One thread setting a harness switch had to drop.
+///
+/// The new harness does not offer the setting the old one was using, so the
+/// daemon records the value it dropped and the client can say which ones it
+/// was. The value is display-ready: a mode is its protocol slug and an effort
+/// is the harness's own word.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DroppedSetting {
+    /// Which setting was dropped.
+    pub setting: DroppedSettingKind,
+    /// The value the thread had before the switch.
+    pub value: String,
+}
+
+/// A thread setting a switch can drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DroppedSettingKind {
+    /// The permission mode the old harness could run in.
+    RuntimeMode,
+    /// The reasoning effort the old harness accepted.
+    ReasoningEffort,
+    /// The old harness's fast tier.
+    Fast,
+}
+
 /// One completed stream item.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]

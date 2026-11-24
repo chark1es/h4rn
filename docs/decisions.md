@@ -1802,3 +1802,44 @@ MCP paths accept one JSON-RPC message per request and refuse a batch, which is w
 transport specifies and what keeps one scope check and one rate-limit hit attached to one call. It
 is loopback-only, and the Connect relay does not yet carry HTTP, so the copied URL is the local
 address and a hosted agent has no path in this phase.
+
+
+## ADR-047: A harness switch happens between turns, over a bounded handoff
+
+**Status:** Accepted
+
+A thread can move to another provider only when nothing is in flight: no running
+turn, no queued or parked prompt, no armed rate-limit resume and no waiting
+approval. That single rule is what keeps the switch honest. The old session can
+be shut down without a prompt still belonging to it, a queued message can never
+be delivered to the provider the person just left, and an approval can only be
+answered by the session that asked for it. A switch therefore belongs between
+turns, next to the turn boundary the composer already respects, not inside the
+stream as a mid-turn migration.
+
+The old session is detached under the thread's record lock and shut down while
+the switch gate is held, so a Send cannot select a new session beside it. The
+record then names the new harness and model, clears the old harness-native
+resume id and its agent fingerprint, and persists a `handoff_pending` flag with
+the `HarnessSwitched` domain event and wire event in one journal append. Clearing
+the resume id is part of the same write, so a crash or restart cannot resurrect a
+conversation the new provider never had. `handoff_pending` survives a restart and
+is cleared only when a session actually reports that it started; a failed start
+must not lose the history a later message still needs.
+
+The first turn on the new harness reuses the import fallback instead of growing a
+second implementation: the same `handoff::build`, the same `H4RN_HANDOFF_BYTES`
+budget, the same "original request plus newest messages" selection, and the same
+rule that the person's request is appended verbatim. The history is read from the
+journaled wire items, which is the one copy h4rn keeps, so a switch after a
+restart behaves like one made a moment earlier. A thread that was imported and
+then switched keeps the same path: the imported origin is no longer special once
+the thread has live turns.
+
+Settings follow the thread where the target harness can honour them. A plan mode
+on a harness without one falls back to approval required; an effort or fast tier
+the target does not expose returns to its default. The response names every value
+that was dropped, and the transcript's divider names the two harnesses. Each
+`TurnStarted` event carries the harness that ran the turn, so a transcript that
+spans a switch does not relabel old turns with the new provider, and the metering
+ledger attributes each turn to the harness and model that really served it.

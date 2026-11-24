@@ -151,7 +151,8 @@ after a restart without a second transcript being stored. Once the retry opens a
 session, later messages resume that session normally.
 
 The handoff builder lives in `crates/h4rn-daemon/src/handoff.rs` so provider
-switching and forking can reuse it.
+switching and forking can reuse it. A harness switch uses the same builder and
+budget today; see [docs/provider-switch.md](provider-switch.md).
 
 ## Privacy
 

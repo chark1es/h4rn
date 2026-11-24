@@ -10,6 +10,7 @@ import type { FsChangeKind } from "./FsChangeKind";
 import type { FsSearchMatch } from "./FsSearchMatch";
 import type { FsTurnChanges } from "./FsTurnChanges";
 import type { GuestRequest } from "./GuestRequest";
+import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { Item } from "./Item";
 import type { McpCaller } from "./McpCaller";
@@ -34,7 +35,19 @@ import type { Usage } from "./Usage";
  * unknown variants must be ignored so a newer daemon can talk to an older
  * client without a protocol break (ADR-003).
  */
-export type Event = { "type": "thread_upserted" } & ThreadSummary | { "type": "turn_started", 
+export type Event = { "type": "thread_upserted" } & ThreadSummary | { "type": "harness_switched", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * Harness the thread ran on until now.
+ */
+from: HarnessKind, 
+/**
+ * Harness the next turn runs on.
+ */
+to: HarnessKind, } | { "type": "turn_started", 
 /**
  * Thread.
  */
@@ -46,7 +59,16 @@ turn_id: TurnId,
 /**
  * Start time.
  */
-started_at: string, } | { "type": "message_delta", 
+started_at: string, 
+/**
+ * Harness this turn ran on, when the daemon knows it.
+ *
+ * A thread can change harness between turns, so a turn names the
+ * provider that produced it instead of borrowing the thread's current
+ * one. Older journals omit it; the client then falls back to the
+ * summary's harness.
+ */
+harness?: HarnessKind, } | { "type": "message_delta", 
 /**
  * Thread.
  */

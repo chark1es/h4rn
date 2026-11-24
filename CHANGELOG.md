@@ -7,6 +7,16 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Switch a thread to another harness between turns.** The harness name in the thread header, and
+  **Switch harness…** in the command palette, move the thread to another installed harness (and
+  model) without losing its history or workspace. The old session is shut down cleanly and its
+  resume id cleared; the first message on the new harness continues from a bounded handoff of the
+  journaled conversation, using the same byte budget and never shortening your request. Settings the
+  new harness does not offer are dropped to its safe default and reported, the transcript shows a
+  quiet "Switched from Claude Code to Codex" divider, and usage stays attributed to the harness that
+  ran each turn. A switch is refused with a plain reason while a turn is running, a message is queued
+  or parked, a rate-limit resume is armed, or an approval is waiting. See
+  [docs/provider-switch.md](docs/provider-switch.md) and [ADR-047](docs/decisions.md).
 - **Agents can link pull requests from inside a thread, and outside agents can work with h4rn
   over MCP.** Every harness session now gets h4rn's own tools through its existing per-session
   token: `link_pull_request`, `unlink_pull_request`, `list_thread_pull_requests`,

@@ -158,6 +158,25 @@ pub enum ClientRequest {
         /// Whether to use the fast tier.
         fast: bool,
     },
+    /// Move a thread to another harness between turns.
+    ///
+    /// The thread keeps its history, workspace and every setting the new
+    /// harness offers. The old session is ended, and the first message on the
+    /// new harness continues from a bounded handoff of the journaled history.
+    /// Any other turn, queued or parked prompt, armed rate-limit resume or
+    /// pending approval refuses the switch with [`crate::ProtoErrorCode::Conflict`].
+    SwitchThreadHarness {
+        /// Thread to switch.
+        thread_id: ThreadId,
+        /// Harness to run the next turns on.
+        harness: HarnessKind,
+        /// Configured ACP agent instance when `harness` is
+        /// [`HarnessKind::Acp`]; ignored by built-in harnesses.
+        #[serde(default)]
+        agent_id: Option<String>,
+        /// Model slug to start the new harness with.
+        model: String,
+    },
     /// Move a thread by hand. The override sticks until the next turn starts.
     SetThreadTab {
         /// Thread to move.
@@ -1644,6 +1663,7 @@ impl ClientRequest {
             | Self::SetThreadModel { .. }
             | Self::SetThreadReasoningEffort { .. }
             | Self::SetThreadFast { .. }
+            | Self::SwitchThreadHarness { .. }
             | Self::Snooze { .. }
             | Self::CancelResume { .. }
             | Self::ResumeNow { .. }
@@ -2075,6 +2095,15 @@ mod tests {
                 ClientRequest::SetThreadFast {
                     thread_id: thread(),
                     fast: true,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::SwitchThreadHarness {
+                    thread_id: thread(),
+                    harness: HarnessKind::Codex,
+                    agent_id: None,
+                    model: "gpt-5".into(),
                 },
                 Approve,
             ),
