@@ -16,8 +16,10 @@ import {
   forceCanFix,
   forceRemoveDescription,
   inUseWorktrees,
+  loadWorktreeSettings,
   loadWorktrees,
   removeDescription,
+  saveWorktreeSettings,
   settledWorktrees,
   splitMiddlePath,
   useWorktreeList,
@@ -103,6 +105,31 @@ export function WorktreeSettings() {
   const error = useWorktrees((state) => state.error);
   const outcome = useWorktrees(worktreeOutcomeForClient);
   const clearError = useWorktrees((state) => state.clearError);
+  const settings = useWorktrees((state) => state.settings);
+  const settingsSource = useWorktrees((state) => state.settingsSource);
+  const settingsLoading = useWorktrees((state) => state.settingsLoading);
+  const settingsSaving = useWorktrees((state) => state.settingsSaving);
+  const settingsError = useWorktrees((state) => state.settingsError);
+  const settingsCurrent = worktreeClientCurrent(settingsSource);
+
+  const [location, setLocation] = useState(settings?.location ?? "");
+  const [prefix, setPrefix] = useState(settings?.branch_prefix ?? "h4rn/");
+
+  useEffect(() => {
+    if (online) void loadWorktreeSettings();
+  }, [online]);
+
+  // The daemon is the source of truth: adopt what it returned, including the
+  // default prefix it substitutes for an empty one.
+  useEffect(() => {
+    if (!settings) return;
+    setLocation(settings.location ?? "");
+    setPrefix(settings.branch_prefix);
+  }, [settings]);
+
+  const settingsDirty =
+    settings !== null &&
+    (location.trim() !== (settings.location ?? "") || prefix !== settings.branch_prefix);
 
   // Each confirmation keeps the machine and paths it was opened for, so a
   // refresh behind the dialog cannot change its targets.
@@ -152,9 +179,99 @@ export function WorktreeSettings() {
     <div className="q-form">
       <h1>Worktrees</h1>
       <p className="lead">
-        Git worktrees h4rn created for subagents, and the ones your threads and their subagents
-        worked in. Clearing removes the checkout from disk.
+        Git worktrees h4rn created for threads and subagents, and the ones your threads and their
+        subagents worked in. Clearing removes the checkout from disk.
       </p>
+
+      <div className="q-group">
+        <div className="q-group-head">
+          <h2>New worktrees</h2>
+        </div>
+        <p className="desc">
+          Where this machine puts new worktree checkouts, and how it names their branches. Existing
+          worktrees stay where they are.
+        </p>
+        <div className="q-field">
+          <div className="lab">
+            <label className="t" htmlFor="worktree-location">
+              Location
+            </label>
+            <div className="s">
+              An absolute path or one starting with <span className="q-mono">~/</span>. Empty uses
+              the h4rn data folder.
+            </div>
+          </div>
+          <div className="ctl">
+            <input
+              id="worktree-location"
+              className="q-input q-mono"
+              value={location}
+              disabled={!online || !settingsCurrent || settingsLoading || settingsSaving}
+              placeholder="~/worktrees"
+              spellCheck={false}
+              onChange={(event) => setLocation(event.target.value)}
+              style={{ maxWidth: 320, fontSize: 12 }}
+            />
+          </div>
+        </div>
+        <div className="q-field">
+          <div className="lab">
+            <label className="t" htmlFor="worktree-branch-prefix">
+              Branch prefix
+            </label>
+            <div className="s">
+              Starts daemon-generated branch names. Invalid characters become hyphens; the trailing
+              slash is optional.
+            </div>
+          </div>
+          <div className="ctl">
+            <input
+              id="worktree-branch-prefix"
+              className="q-input q-mono"
+              value={prefix}
+              disabled={!online || !settingsCurrent || settingsLoading || settingsSaving}
+              placeholder="h4rn/"
+              spellCheck={false}
+              onChange={(event) => setPrefix(event.target.value)}
+              style={{ maxWidth: 220, fontSize: 12 }}
+            />
+          </div>
+        </div>
+        <div className="q-field">
+          <div className="lab" />
+          <div className="ctl" style={{ justifyContent: "flex-start", gap: 8 }}>
+            <button
+              type="button"
+              className="q-btn secondary"
+              disabled={
+                !online || !settingsCurrent || settingsLoading || settingsSaving || !settingsDirty
+              }
+              onClick={() =>
+                void saveWorktreeSettings(
+                  {
+                    location: location.trim() === "" ? null : location.trim(),
+                    branch_prefix: prefix,
+                  },
+                  settingsSource ?? undefined,
+                )
+              }
+            >
+              {settingsSaving ? "Saving…" : "Save"}
+            </button>
+            {settingsError ? (
+              <span className="q-field-error" role="alert">
+                {settingsError.message}
+                {settingsError.hint ? ` ${settingsError.hint}` : ""}
+              </span>
+            ) : null}
+            {!settingsError && settings !== null && !settingsDirty ? (
+              <span className="q-muted" style={{ fontSize: 12 }}>
+                Saved on this machine.
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </div>
 
       {page.kind === "groups" && inUse.length > 0 ? (
         <div className="q-group">
