@@ -181,11 +181,14 @@ impl RelayHub {
         } else {
             HelloState::PreHello
         };
-        self.peers.write().await.insert(device_id, peer);
+        // Publish the new capability before the peer becomes routable. A
+        // guest request in this gap must see "unknown", never the previous
+        // socket's hello.
         self.features
             .write()
             .await
             .insert(device_id, PeerHello { connection, state });
+        self.peers.write().await.insert(device_id, peer);
         // A waiter for the previous connection re-reads the new one, which
         // starts from what its own handshake promised.
         self.greeted_now.notify_waiters();
@@ -198,17 +201,29 @@ impl RelayHub {
     /// connection closing after a reconnect must not erase the new
     /// connection's capability or sessions.
     pub async fn unregister(&self, device_id: Uuid, connection: Uuid) -> Vec<Session> {
-        if self
-            .peers
-            .read()
-            .await
-            .get(&device_id)
-            .is_some_and(|peer| peer.connection_id != connection)
+        // The check and the removal are one critical section, so a socket that
+        // reconnects in this instant cannot be erased by the old one closing.
         {
-            return Vec::new();
+            let mut peers = self.peers.write().await;
+            match peers.get(&device_id) {
+                Some(peer) if peer.connection_id != connection => return Vec::new(),
+                Some(_) => {
+                    peers.remove(&device_id);
+                }
+                None => return Vec::new(),
+            }
         }
-        self.peers.write().await.remove(&device_id);
-        self.features.write().await.remove(&device_id);
+        {
+            let mut features = self.features.write().await;
+            // A newer connection may have registered since the peers lock was
+            // released; only its own hello state may be removed.
+            if features
+                .get(&device_id)
+                .is_some_and(|hello| hello.connection == connection)
+            {
+                features.remove(&device_id);
+            }
+        }
         // A waiter that was still hoping for this peer's hello re-checks and
         // keeps waiting for the grace it was given; no one is left asleep.
         self.greeted_now.notify_waiters();
@@ -1550,6 +1565,31 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "a hello without the feature waited for the grace to expire"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_close_from_a_replaced_socket_leaves_the_new_ones_hello() {
+        // The old socket closing after a reconnect must not erase the new
+        // socket's state; the new one is still waiting for its own hello.
+        let hub = RelayHub::new();
+        let daemon = Uuid::now_v7();
+        let previous = register_daemon(&hub, daemon, true).await;
+        hub.announce(daemon, previous, admission_hello()).await;
+        let current = register_daemon(&hub, daemon, true).await;
+        assert!(
+            hub.unregister(daemon, previous).await.is_empty(),
+            "a replaced socket reported sessions it no longer owns"
+        );
+        assert_eq!(
+            hub.guest_admission(daemon, Duration::from_millis(50)).await,
+            GuestAdmission::Unknown,
+            "a replaced socket's close erased the new socket's hello state"
+        );
+        hub.announce(daemon, current, admission_hello()).await;
+        assert_eq!(
+            hub.guest_admission(daemon, Duration::from_millis(50)).await,
+            GuestAdmission::Announced
         );
     }
 
