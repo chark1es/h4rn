@@ -641,6 +641,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A harness switch hands the conversation over once.** The first turn on the
+  new harness carries the journaled history exactly once, including after a dead
+  native resume retries the same prompt; a message still waiting in the queue is
+  never folded into that history, and a request that repeats queued text is told
+  apart by its recorded id rather than by matching words. An imported conversation
+  with no native resume gets its history even when the new session reports its id
+  before the first prompt is delivered. Answering an approval while a turn is
+  being stopped no longer deadlocks the daemon, an approval dropped with its
+  replaced session is resolved on every client, the Changes panel no longer counts
+  the switch divider as a turn, and a switch to a configured ACP agent lists that
+  agent's own models. See [docs/provider-switch.md](docs/provider-switch.md).
+
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,

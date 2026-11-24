@@ -44,7 +44,7 @@ export function usePanelChanges(thread: ThreadSummary | null): PanelChanges {
   const turns = useMemo(
     () =>
       (log?.turns ?? [])
-        .filter((turn) => !turn.id.startsWith("cue:user:"))
+        .filter((turn) => !turn.divider && !turn.id.startsWith("cue:user:"))
         .map((turn, index) => ({
           id: turn.id,
           label: `Turn ${index + 1}`,

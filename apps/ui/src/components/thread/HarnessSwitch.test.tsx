@@ -178,6 +178,37 @@ describe("HarnessSwitch", () => {
     expect(input.value).toBe("gpt-5.4");
   });
 
+  it("lists an ACP target's own models, never a sibling agent's", () => {
+    mock.agents = [
+      { id: "agent-a", name: "Agent A", installed: true, models: [{ id: "model-a" }] },
+      { id: "agent-b", name: "Agent B", installed: true, models: [{ id: "model-b" }] },
+    ];
+    // A thread on agent A reported these to the host. Agent B must not offer
+    // them just because it is also an ACP agent on the same host.
+    mock.state.threads = {
+      th_a: summary({
+        thread_id: "th_a",
+        harness: "acp",
+        agent_id: "agent-a",
+        host: "host_1",
+        model: "model-a",
+        models: ["model-a", "model-a-old"],
+      }),
+    };
+    render(<HarnessSwitch summary={summary()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Switch harness/i }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "ACP · Agent B" }));
+
+    const input = screen.getByLabelText("Model for the new harness") as HTMLInputElement;
+    expect(input.value).toBe("model-b");
+    const options = Array.from(
+      document.querySelectorAll('datalist[id="h4rn-switch-models-th_1"] option'),
+    ).map((option) => option.getAttribute("value"));
+    expect(options).toContain("model-b");
+    expect(options).not.toContain("model-a");
+    expect(options).not.toContain("model-a-old");
+  });
+
   it("shows a refusal in the panel instead of pretending the switch happened", async () => {
     mock.switchThreadHarness.mockResolvedValueOnce({
       ok: false,

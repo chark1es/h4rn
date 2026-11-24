@@ -566,6 +566,14 @@ struct Inner {
     /// belongs to the session the switch would end.
     #[cfg(test)]
     approval_pause: std::sync::Mutex<Option<Arc<ApprovalPause>>>,
+    /// Pauses a Stop after it took the session lock and before it checks the
+    /// record.
+    ///
+    /// Test-only: this is the window where the session lock is held and the
+    /// record lock is still to come, the half of the order an approval answer
+    /// must never mirror.
+    #[cfg(test)]
+    stop_pause: std::sync::Mutex<Option<Arc<StopPause>>>,
 }
 
 /// A test's hold on one journal append.
@@ -620,6 +628,16 @@ struct ApprovalPause {
     /// Signalled once the approval left the cue map and the gates are held.
     removed: tokio::sync::Notify,
     /// The test's permission to finish the answer.
+    resume: tokio::sync::Notify,
+}
+
+/// A test's hold on Stop's session-then-record window.
+#[cfg(test)]
+#[derive(Default)]
+struct StopPause {
+    /// Signalled once the Stop holds the session lock.
+    held: tokio::sync::Notify,
+    /// The test's permission to continue to the record lock.
     resume: tokio::sync::Notify,
 }
 
@@ -742,6 +760,22 @@ struct QueuedTurn {
     ceiling: Option<RuntimeMode>,
     /// The outside grant whose work this message does, when one sent it.
     grant: Option<WorkGrant>,
+    /// The journaled id of the user message that announced it.
+    ///
+    /// A queued message is recorded under the turn that was running when it
+    /// arrived, so a later handoff cannot find it by this turn's id. It is left
+    /// out of the history by this id, never by matching its text.
+    item_id: String,
+}
+
+/// One journaled message with the ids a handoff needs to leave prompts out.
+struct HistoryMessage {
+    /// The turn it was journaled under.
+    turn_id: TurnId,
+    /// The item id the person's message was recorded as.
+    item_id: String,
+    /// The text and author a handoff builder reads.
+    message: crate::journal::ImportedMessage,
 }
 
 /// Everything a harness switch replaces, kept until its journal write lands.
@@ -1139,6 +1173,12 @@ struct TurnDispatch {
     /// appends the block twice. Its accepted prompt is what clears the thread's
     /// durable `handoff_pending` flag.
     handoff_applied: AtomicBool,
+    /// The journaled id of the user message this turn's prompt was recorded as.
+    ///
+    /// A message promoted from the queue was journaled under the turn that was
+    /// running when it arrived, so this is not derivable from `turn_id`. The
+    /// handoff leaves the turn's own prompt out by this id.
+    prompt_item_id: std::sync::Mutex<Option<String>>,
     /// Pauses a failing write just before it decides what to do with the
     /// dispatch, so a test can land a Stop in that window.
     ///
@@ -1486,6 +1526,7 @@ impl TurnDispatch {
         ceiling: Option<RuntimeMode>,
         grant: Option<WorkGrant>,
     ) -> Self {
+        let prompt_item_id = Some(user_item_id(&turn_id));
         Self {
             turn_id,
             input: std::sync::Mutex::new(input),
@@ -1498,9 +1539,26 @@ impl TurnDispatch {
             accepted_attempt: AtomicU64::new(0),
             write_settled: tokio::sync::Notify::new(),
             handoff_applied: AtomicBool::new(false),
+            prompt_item_id: std::sync::Mutex::new(prompt_item_id),
             #[cfg(test)]
             recover_pause: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The journaled id of the user message this turn's prompt was recorded as.
+    fn prompt_item_id(&self) -> Option<String> {
+        self.prompt_item_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Names the user message this turn was promoted from.
+    fn set_prompt_item_id(&self, item_id: String) {
+        *self
+            .prompt_item_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(item_id);
     }
 
     /// Whether this turn already went through the history handoff step.
@@ -1967,7 +2025,7 @@ impl ThreadRecord {
     fn handoff_block(
         &self,
         request: &str,
-        history: &[crate::journal::ImportedMessage],
+        history: &[&crate::journal::ImportedMessage],
     ) -> Option<String> {
         if !self.needs_history_handoff() {
             return None;
@@ -1984,13 +2042,14 @@ impl ThreadRecord {
 
     /// Whether this thread's next turn must open with its journaled history.
     ///
-    /// An imported thread that cannot resume natively needs it, and so does the
-    /// first turn after a harness switch (`handoff_pending`), until a prompt
-    /// that carried it was accepted by the new session. The switch case does
-    /// not read `resume_id`: a fresh session may report its id before the first
-    /// prompt is delivered, and that turn still has to carry the history.
+    /// Set durably by a harness switch and by an import that has no native
+    /// resume to spend, and by the fallback when that resume turns out to be
+    /// dead. The switch case does not read `resume_id`: a fresh session may
+    /// report its id before the first prompt is delivered, and that turn still
+    /// has to carry the history. The flag is cleared only once a session accepts
+    /// the prompt that carried it.
     fn needs_history_handoff(&self) -> bool {
-        self.meta.handoff_pending || (self.meta.imported.is_some() && self.meta.resume_id.is_none())
+        self.meta.handoff_pending
     }
 
     /// Drops approvals no session on this thread can answer any more.
@@ -1998,13 +2057,23 @@ impl ThreadRecord {
     /// A mirrored approval belongs to the child's session and stays; the
     /// others are answerable only by the session generation that raised them.
     /// An approval left over from a session that has since been replaced would
-    /// otherwise block every switch forever.
-    fn drop_stale_approvals(&mut self) {
+    /// otherwise block every switch forever. The removed ids are returned so
+    /// the caller can resolve them on every client instead of leaving a cue up.
+    fn drop_stale_approvals(&mut self) -> Vec<(String, ApprovalKind)> {
         let current = self.session.generation();
-        self.pending_approvals.retain(|_, pending| {
-            pending.forward.is_some()
-                || current.is_some_and(|generation| pending.generation == generation)
-        });
+        let dropped: Vec<(String, ApprovalKind)> = self
+            .pending_approvals
+            .iter()
+            .filter(|(_, pending)| {
+                pending.forward.is_none()
+                    && !current.is_some_and(|generation| pending.generation == generation)
+            })
+            .map(|(approval_id, pending)| (approval_id.clone(), pending.kind))
+            .collect();
+        for (approval_id, _) in &dropped {
+            self.pending_approvals.remove(approval_id);
+        }
+        dropped
     }
 
     /// Everything a harness switch is about to replace.
@@ -2835,6 +2904,8 @@ impl ThreadManager {
                 claim_refused: tokio::sync::Notify::new(),
                 #[cfg(test)]
                 approval_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                stop_pause: std::sync::Mutex::new(None),
             }),
         };
         manager.inner.restore().await?;
@@ -3649,7 +3720,10 @@ impl ThreadManager {
                 project_path: request.project_path,
                 native_resume,
             }),
-            handoff_pending: false,
+            // An import with no native resume to spend owes its history to the
+            // first session, even if that session reports its own id before the
+            // prompt is delivered.
+            handoff_pending: !native_resume,
         };
         let mut state = ThreadState::new(created_at);
         state.last_activity = last_active;
@@ -3865,6 +3939,7 @@ impl ThreadManager {
             // holds no prompt to deliver at all.
             let release_pending =
                 stale_schedule && record.pending_turn() && record.parks_persisted_prompt();
+            let item_id = fresh_item_id("user");
             record.queued.push_back(QueuedTurn {
                 input: UserInput {
                     text: text.clone(),
@@ -3872,6 +3947,7 @@ impl ThreadManager {
                 },
                 ceiling,
                 grant,
+                item_id: item_id.clone(),
             });
             let mut domain = vec![ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -3893,7 +3969,7 @@ impl ThreadManager {
                 thread_id: thread_id.clone(),
                 turn_id: active_turn_id.clone(),
                 item: Item::Message {
-                    item_id: fresh_item_id("user"),
+                    item_id,
                     role: MessageRole::User,
                     text,
                     attachments: resolved_attachments,
@@ -4279,6 +4355,10 @@ impl ThreadManager {
             return Ok(());
         };
         let mut session = shared.lock().await;
+        // Test-only interleaving point: the Stop holds the session lock and has
+        // not checked the record yet.
+        #[cfg(test)]
+        self.inner.pause_stop().await;
         {
             let record = handle.lock().await;
             if record.dispatch_for(&turn_id).is_none() || !record.session.is_live(&shared) {
@@ -4409,23 +4489,29 @@ impl ThreadManager {
         // The answer can only reach the session generation that asked. A stale
         // cue left by a replaced session is refused here instead of being routed
         // into the session that took its place.
-        let response = {
+        //
+        // The record lock is released before the session lock is taken. A Stop
+        // takes the session lock first and then the record lock (see
+        // `cancel_claimed_turn`), so holding the record while waiting for the
+        // session here would deadlock the two. The switch gates taken above
+        // still keep a switch from detaching this session in between.
+        let session = {
             let target_record = target.lock().await;
-            let live = target_record.session.generation() == Some(pending.generation);
-            if !live {
-                None
+            if target_record.session.generation() == Some(pending.generation) {
+                target_record.live_session().cloned()
             } else {
-                match target_record.live_session().cloned() {
-                    Some(session) => Some(
-                        session
-                            .lock()
-                            .await
-                            .respond_approval(&target_approval, decision, option_id.as_deref())
-                            .await,
-                    ),
-                    None => None,
-                }
+                None
             }
+        };
+        let response = match session {
+            Some(session) => Some(
+                session
+                    .lock()
+                    .await
+                    .respond_approval(&target_approval, decision, option_id.as_deref())
+                    .await,
+            ),
+            None => None,
         };
 
         match response {
@@ -4619,8 +4705,32 @@ impl ThreadManager {
             }
             // An approval whose session is gone can never be answered. Drop
             // those first, so a leftover from a dead session cannot refuse the
-            // switch forever.
-            record.drop_stale_approvals();
+            // switch forever, and resolve each on the clients so no cue or
+            // phone sheet is left up waiting for an answer that cannot come.
+            let dropped_approvals = record.drop_stale_approvals();
+            if !dropped_approvals.is_empty() {
+                let mut domain = Vec::new();
+                let mut wire = Vec::new();
+                for (approval_id, kind) in dropped_approvals {
+                    domain.push(if kind == ApprovalKind::Question {
+                        ThreadEvent::QuestionAnswered { at: now }
+                    } else {
+                        ThreadEvent::ApprovalResolved { at: now }
+                    });
+                    wire.push(Event::ApprovalResolved {
+                        thread_id: thread_id.clone(),
+                        approval_id,
+                        option_id: None,
+                        by_device: None,
+                    });
+                }
+                if let Err(error) = self.inner.emit(&mut record, domain, wire).await {
+                    tracing::warn!(
+                        %error,
+                        "could not resolve approvals left by a replaced session"
+                    );
+                }
+            }
             if let Some((message, hint)) = record.switch_refusal() {
                 return Err(ManagerError::Refused {
                     message: message.to_owned(),
@@ -6061,6 +6171,20 @@ impl Inner {
         }
     }
 
+    /// Test-only: waits just after a Stop took the session lock.
+    #[cfg(test)]
+    async fn pause_stop(&self) {
+        let pause = self
+            .stop_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.held.notify_one();
+            pause.resume.notified().await;
+        }
+    }
+
     /// Waits between a delivery's liveness check and its claim, when a test
     /// installed one.
     #[cfg(test)]
@@ -6123,22 +6247,12 @@ impl Inner {
     /// needs, so an upsert never rewrites a transcript, and a harness switch
     /// reads the same history.
     ///
-    /// `exclude` names the turn the handoff is being built for. Its prompt is
-    /// already journaled by the time a handoff is built, so leaving it in the
-    /// history block would send the same request twice: once as history and
-    /// once as the request that follows it.
-    ///
-    /// `exclude_request` names the request too, for a turn whose prompt was
-    /// journaled under a different id: a queued message is recorded under the
-    /// turn that was running when it arrived, and only the promoted turn's own
-    /// id exists later. The newest user message with exactly that text is left
-    /// out, which is the prompt the handoff will append verbatim.
-    async fn journaled_history(
-        &self,
-        thread_id: &ThreadId,
-        exclude: Option<&TurnId>,
-        exclude_request: Option<&str>,
-    ) -> Vec<crate::journal::ImportedMessage> {
+    /// Each entry keeps the ids the caller needs to leave out prompts that do
+    /// not belong in the history: the turn it was journaled under and the item
+    /// id the person's message was recorded as. Filtering happens against the
+    /// record at the claim, so a message still in the queue can never be read
+    /// back as something that already happened.
+    async fn journaled_history(&self, thread_id: &ThreadId) -> Vec<HistoryMessage> {
         let events = match self.journal.read_wire_since(thread_id, 0).await {
             Ok(events) => events,
             Err(error) => {
@@ -6147,35 +6261,32 @@ impl Inner {
             }
         };
         let fallback = self.now();
-        let mut messages: Vec<crate::journal::ImportedMessage> = events
+        events
             .into_iter()
             .filter_map(|wire| match wire.event {
                 Event::ItemCompleted {
-                    item: Item::Message { role, text, .. },
+                    item:
+                        Item::Message {
+                            item_id,
+                            role,
+                            text,
+                            ..
+                        },
                     turn_id,
                     at,
                     ..
-                } => {
-                    if exclude == Some(&turn_id) {
-                        return None;
-                    }
-                    Some(crate::journal::ImportedMessage {
+                } => Some(HistoryMessage {
+                    turn_id,
+                    item_id,
+                    message: crate::journal::ImportedMessage {
                         role,
                         text,
                         at: at.unwrap_or(fallback),
-                    })
-                }
+                    },
+                }),
                 _ => None,
             })
-            .collect();
-        if let Some(request) = exclude_request
-            && let Some(index) = messages
-                .iter()
-                .rposition(|message| message.role == MessageRole::User && message.text == request)
-        {
-            messages.remove(index);
-        }
-        messages
+            .collect()
     }
 
     async fn restore(self: &Arc<Self>) -> Result<(), ManagerError> {
@@ -6454,7 +6565,16 @@ impl Inner {
             && record.scheduled_limit.is_none()
             && let Some(queued) = record.queued.pop_front()
         {
-            let next = record.begin_turn_for_work(now, queued.input, queued.ceiling, queued.grant);
+            let QueuedTurn {
+                input,
+                ceiling,
+                grant,
+                item_id,
+            } = queued;
+            let next = record.begin_turn_for_work(now, input, ceiling, grant);
+            // The prompt was journaled under the turn that ran when it was
+            // queued; the handoff leaves it out by that id.
+            next.set_prompt_item_id(item_id);
             // This turn is the daemon's next step, not a person's Send: if the
             // transport it inherits dies before it runs, it goes back to the
             // queue instead of failing (see `requeue_promoted_turn`).
@@ -7468,16 +7588,31 @@ impl Inner {
         dispatch: Arc<TurnDispatch>,
         session: SharedSession,
     ) {
-        if self
-            .attached_generation(&handle, &dispatch, &session)
-            .await
-            .is_none()
-        {
-            self.recover_delivery(&handle, &dispatch).await;
-            return;
-        }
+        // One record read decides both whether this session still owns the turn
+        // and whether its prompt owes the thread's history. The journal is read
+        // only when it does, before the session lock and before the claim's
+        // record lock: a long thread must not stall either.
+        let handoff = {
+            let record = handle.lock().await;
+            if record.dispatch_for(&dispatch.turn_id).is_none() || !record.session.is_live(&session)
+            {
+                drop(record);
+                self.recover_delivery(&handle, &dispatch).await;
+                return;
+            }
+            if dispatch.handoff_applied() || !record.needs_history_handoff() {
+                None
+            } else {
+                let thread_id = record.meta.thread_id.clone();
+                drop(record);
+                Some(self.journaled_history(&thread_id).await)
+            }
+        };
         let mut guard = session.lock().await;
-        let generation = match self.claim_delivery(&handle, &dispatch, &session).await {
+        let generation = match self
+            .claim_delivery(&handle, &dispatch, &session, handoff)
+            .await
+        {
             DeliveryClaim::Claimed(generation) => generation,
             DeliveryClaim::Lost => {
                 // The turn ended, or its session was replaced, while this
@@ -7575,6 +7710,7 @@ impl Inner {
         handle: &ThreadHandle,
         dispatch: &Arc<TurnDispatch>,
         session: &SharedSession,
+        handoff: Option<Vec<HistoryMessage>>,
     ) -> DeliveryClaim {
         // Test-only interleaving point: the session is still attached and the
         // prompt is not claimed yet.
@@ -7612,8 +7748,9 @@ impl Inner {
         };
         // The thread's history must reach the first turn on a new harness,
         // whichever path produced it. This runs under the record lock, so two
-        // delivery paths can never prepare the same prompt twice.
-        self.apply_history_handoff(&mut record, dispatch).await;
+        // delivery paths can never prepare the same prompt twice, and its reads
+        // were done before both locks were taken.
+        self.apply_history_handoff(&mut record, dispatch, handoff);
         if !dispatch.claim() {
             return DeliveryClaim::Lost;
         }
@@ -7638,25 +7775,39 @@ impl Inner {
     /// and the turn a startup was launched for. Applying it at the claim keeps
     /// the message it replaces off the transcript; the journaled user message
     /// stays exactly what the person wrote.
-    async fn apply_history_handoff(&self, record: &mut ThreadRecord, dispatch: &Arc<TurnDispatch>) {
-        if dispatch.handoff_applied() || !record.needs_history_handoff() {
+    ///
+    /// The history was read before the claim. It is filtered here, under the
+    /// record lock, so a prompt still waiting in the queue is left out even when
+    /// it was journaled after the read: only the items the record still owns
+    /// that way are dropped, by id, never by matching text.
+    fn apply_history_handoff(
+        &self,
+        record: &mut ThreadRecord,
+        dispatch: &Arc<TurnDispatch>,
+        history: Option<Vec<HistoryMessage>>,
+    ) {
+        let Some(history) = history else {
+            return;
+        };
+        if dispatch.handoff_applied() {
             return;
         }
         dispatch.note_handoff_applied();
-        let thread_id = record.meta.thread_id.clone();
         let request = dispatch.input().text;
-        let promoted = record
-            .active
-            .as_ref()
-            .is_some_and(|active| active.promoted && Arc::ptr_eq(&active.dispatch, dispatch));
-        let history = self
-            .journaled_history(
-                &thread_id,
-                Some(&dispatch.turn_id),
-                promoted.then_some(request.as_str()),
-            )
-            .await;
-        if let Some(block) = record.handoff_block(&request, &history) {
+        let mut excluded: std::collections::HashSet<String> = record
+            .queued
+            .iter()
+            .map(|queued| queued.item_id.clone())
+            .collect();
+        if let Some(item_id) = dispatch.prompt_item_id() {
+            excluded.insert(item_id);
+        }
+        let messages: Vec<&crate::journal::ImportedMessage> = history
+            .iter()
+            .filter(|entry| entry.turn_id != dispatch.turn_id && !excluded.contains(&entry.item_id))
+            .map(|entry| &entry.message)
+            .collect();
+        if let Some(block) = record.handoff_block(&request, &messages) {
             dispatch.replace_text(crate::handoff::with_request(&block, &request));
         }
     }
@@ -8971,6 +9122,7 @@ impl Inner {
                 RecoveryOutcome::Settled => return HandoffRetry::Declined,
             }
             record.meta.resume_id = None;
+            record.meta.handoff_pending = true;
             if let Some(imported) = record.meta.imported.as_mut() {
                 imported.native_resume = false;
             }
@@ -8980,24 +9132,10 @@ impl Inner {
         if let Err(error) = self.journal.upsert_thread(&meta).await {
             tracing::warn!(%error, "could not clear a failed imported resume id");
         }
-        let history = self
-            .journaled_history(&meta.thread_id, Some(&turn.turn_id), None)
-            .await;
-        let block = {
-            let messages: Vec<crate::handoff::HandoffMessage<'_>> = history
-                .iter()
-                .map(|message| crate::handoff::HandoffMessage {
-                    role: message.role,
-                    text: &message.text,
-                })
-                .collect();
-            let request = turn.input().text;
-            crate::handoff::build(&messages, crate::handoff::budget_from_env(), &request)
-        };
-        if let Some(block) = block {
-            let request = turn.input().text;
-            turn.replace_text(crate::handoff::with_request(&block, &request));
-        }
+        // The next claim builds the one handoff for this prompt. Doing it here
+        // too would wrap a prompt the claim is already wrapping: the delivery
+        // that loses this startup can claim the turn before this retry's own
+        // session starts.
         self.spawn_session(handle.clone());
         HandoffRetry::Started
     }
@@ -13454,6 +13592,266 @@ mod tests {
         assert!(
             handle.lock().await.active.is_none(),
             "the stopped turn ended instead of staying Working"
+        );
+        manager.shutdown().await;
+    }
+
+    /// An imported thread with no native resume still sends its history when
+    /// the fresh session reports its id before the prompt is claimed.
+    ///
+    /// The durable flag, not a `resume_id` the pump may already have set, is
+    /// what says the first turn owes its history.
+    #[tokio::test]
+    async fn an_imported_thread_without_a_resume_still_hands_off_after_session_started() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let manager = Arc::new(open_test_manager(FakeHarness::new(), host.clone()).await);
+        let mut events = manager.subscribe();
+        let now = Utc::now();
+        assert!(
+            manager
+                .import_thread(NewImportedThread {
+                    host: host.clone(),
+                    harness: HarnessKind::ClaudeCode,
+                    workspace_path: workspace.path().display().to_string(),
+                    project_path: None,
+                    model: "fake-model".into(),
+                    title: "Imported".into(),
+                    created_at: now,
+                    last_active: now,
+                    resume_id: None,
+                    source: h4rn_protocol::ImportSource::ClaudeCode,
+                    source_path: workspace.path().join("saved.jsonl").display().to_string(),
+                    source_key: "claude_code:no-resume".into(),
+                    messages: vec![
+                        ImportedThreadMessage {
+                            role: MessageRole::User,
+                            text: "an earlier request".into(),
+                            at: now,
+                        },
+                        ImportedThreadMessage {
+                            role: MessageRole::Assistant,
+                            text: "an earlier reply".into(),
+                            at: now,
+                        },
+                    ],
+                })
+                .await
+                .expect("import")
+        );
+        let thread_id = manager
+            .list_threads(&ThreadFilter::default())
+            .await
+            .first()
+            .expect("imported thread")
+            .thread_id
+            .clone();
+        let handle = manager.inner.handle(&thread_id).await.expect("handle");
+
+        // Hold the claim so the session's own id is recorded first, exactly as
+        // it is when the pump handles `SessionStarted` before the delivery.
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        let sent = manager
+            .send_message(&thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("send");
+        pause.checked.notified().await;
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .map(|record| record.meta.resume_id.is_some())
+                .unwrap_or(false))
+            .await,
+            "the session reported its id before the claim"
+        );
+        // The claim is what matters here; leave the later write unpaused.
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        pause.resume.notify_one();
+
+        let mut echoed = String::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted { turn_id, .. } if turn_id == sent.turn_id => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the imported thread's first turn completed");
+        assert_eq!(
+            echoed.matches("Earlier conversation history").count(),
+            1,
+            "the history is sent once: {echoed}"
+        );
+        assert!(echoed.contains("an earlier request"), "{echoed}");
+        assert!(echoed.contains("an earlier reply"), "{echoed}");
+        assert!(echoed.ends_with("carry on"), "{echoed}");
+
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        manager.shutdown().await;
+    }
+
+    /// A handoff leaves out every prompt still waiting in the queue, even when
+    /// one repeats the request's own text.
+    ///
+    /// The request is a message promoted from the queue, whose journaled item
+    /// belongs to the turn that was running when it arrived. Matching text
+    /// cannot tell it from a later queued message with the same words; the ids
+    /// can.
+    #[tokio::test]
+    async fn a_handoff_for_a_promoted_turn_leaves_every_queued_prompt_out() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, start_gate) = FakeHarness::new()
+            .with_resume_death("No conversation found with session ID")
+            .with_start_gate();
+        let host = HostId::new("host_test");
+        let manager = Arc::new(open_test_manager(harness, host.clone()).await);
+        let mut events = manager.subscribe();
+        let now = Utc::now();
+        assert!(
+            manager
+                .import_thread(NewImportedThread {
+                    host: host.clone(),
+                    harness: HarnessKind::ClaudeCode,
+                    workspace_path: workspace.path().display().to_string(),
+                    project_path: None,
+                    model: "fake-model".into(),
+                    title: "Imported".into(),
+                    created_at: now,
+                    last_active: now,
+                    resume_id: Some("saved-session".into()),
+                    source: h4rn_protocol::ImportSource::ClaudeCode,
+                    source_path: workspace.path().join("saved.jsonl").display().to_string(),
+                    source_key: "claude_code:saved-session".into(),
+                    messages: vec![
+                        ImportedThreadMessage {
+                            role: MessageRole::User,
+                            text: "an earlier request".into(),
+                            at: now,
+                        },
+                        ImportedThreadMessage {
+                            role: MessageRole::Assistant,
+                            text: "an earlier reply".into(),
+                            at: now,
+                        },
+                    ],
+                })
+                .await
+                .expect("import")
+        );
+        let thread_id = manager
+            .list_threads(&ThreadFilter::default())
+            .await
+            .first()
+            .expect("imported thread")
+            .thread_id
+            .clone();
+        let handle = manager.inner.handle(&thread_id).await.expect("handle");
+
+        // The first prompt waits on the startup gate, so two more messages can
+        // queue behind it before either reaches a harness.
+        let first = manager
+            .send_message(&thread_id, "first request".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .map(|record| matches!(record.session, SessionSlot::Starting(_)))
+                .unwrap_or(false))
+            .await,
+            "the first startup is in flight"
+        );
+        manager
+            .send_message(&thread_id, "continue".into(), Vec::new())
+            .await
+            .expect("queue the duplicate");
+        manager
+            .send_message(&thread_id, "and check the logs".into(), Vec::new())
+            .await
+            .expect("queue the other prompt");
+        assert_eq!(handle.lock().await.queued.len(), 2, "two prompts wait");
+
+        // A Stop ends the turn that never reached the harness and promotes the
+        // queued "continue". The startup then fails its dead resume, so the
+        // promoted turn is the one that falls back to the handoff.
+        manager
+            .interrupt(&thread_id)
+            .await
+            .expect("the starting turn is stopped");
+        let promoted = handle
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|active| active.turn_id.clone())
+            .expect("the queued prompt was promoted");
+        start_gate.release();
+
+        let mut echoed: std::collections::HashMap<TurnId, String> =
+            std::collections::HashMap::new();
+        let mut completed = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while completed.len() < 3 {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { turn_id, text, .. } => {
+                        echoed.entry(turn_id).or_default().push_str(&text);
+                    }
+                    Event::TurnCompleted { turn_id, .. } => completed.push(turn_id),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the stopped turn and both queued turns completed");
+        assert_eq!(completed[0], first.turn_id);
+        assert_eq!(completed[1], promoted);
+
+        let handoff = echoed.get(&promoted).expect("the promoted turn's echo");
+        assert_eq!(
+            handoff.matches("Earlier conversation history").count(),
+            1,
+            "the history is built once: {handoff}"
+        );
+        assert_eq!(
+            handoff.matches("continue").count(),
+            1,
+            "the request is sent once, not as history: {handoff}"
+        );
+        assert!(
+            !handoff.contains("and check the logs"),
+            "a message still in the queue leaked into the handoff: {handoff}"
+        );
+        let other = echoed.get(&completed[2]).expect("the last queued turn ran");
+        assert!(
+            other.ends_with("and check the logs"),
+            "the other queued prompt ran as its own turn: {other}"
+        );
+        assert_eq!(
+            other.matches("and check the logs").count(),
+            1,
+            "the queued prompt ran exactly once: {other}"
+        );
+        assert!(
+            !other.contains("Earlier conversation history"),
+            "only the first turn carries the history: {other}"
         );
         manager.shutdown().await;
     }
@@ -24174,6 +24572,7 @@ mod tests {
             },
             ceiling: None,
             grant: None,
+            item_id: "item_user_queued".into(),
         });
         let refusal = manager
             .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
@@ -24625,6 +25024,128 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A Stop and an approval answer on the same thread never deadlock.
+    ///
+    /// Both reach the same harness session. The Stop takes the session lock and
+    /// then the record; an answer that took the record and then waited for the
+    /// session would hold each other forever. Gated so the Stop holds the
+    /// session while the answer is ready to run.
+    #[tokio::test]
+    async fn a_stop_and_an_approval_answer_never_deadlock() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let approval = HarnessEvent::ApprovalRequested {
+            approval_id: "approval_1".into(),
+            kind: ApprovalKind::Command,
+            prompt: "run the tests".into(),
+            options: Vec::new(),
+        };
+        let manager = Arc::new(
+            open_test_manager(FakeHarness::with_events(vec![approval]), host.clone()).await,
+        );
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .map(|record| record.pending_approvals.contains_key("approval_1"))
+                .unwrap_or(false))
+            .await,
+            "the approval was recorded"
+        );
+
+        // The answer removes the cue and then waits, exactly as it does while a
+        // switch gate is taken.
+        let answer_pause = Arc::new(ApprovalPause::default());
+        *manager
+            .inner
+            .approval_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(answer_pause.clone());
+        let answering = {
+            let manager = Arc::clone(&manager);
+            let thread_id = created.thread_id.clone();
+            tokio::spawn(async move {
+                manager
+                    .respond_approval(
+                        &thread_id,
+                        "approval_1",
+                        ApprovalDecision::Approve,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+        answer_pause.removed.notified().await;
+
+        // Hold the session so the Stop is queued on it before the answer gets
+        // there, then let the Stop take it and pause before the record lock.
+        let session = handle
+            .lock()
+            .await
+            .live_session()
+            .cloned()
+            .expect("live session");
+        let held_session = session.lock().await;
+        let stopping = {
+            let manager = Arc::clone(&manager);
+            let thread_id = created.thread_id.clone();
+            tokio::spawn(async move { manager.interrupt(&thread_id).await })
+        };
+        tokio::task::yield_now().await;
+        let stop_pause = Arc::new(StopPause::default());
+        *manager
+            .inner
+            .stop_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stop_pause.clone());
+        drop(held_session);
+        stop_pause.held.notified().await;
+
+        // With the Stop holding the session, the answer must not be holding
+        // the record while it waits for that session.
+        answer_pause.resume.notify_one();
+        tokio::task::yield_now().await;
+        stop_pause.resume.notify_one();
+
+        let answered = tokio::time::timeout(Duration::from_secs(5), answering).await;
+        let stopped = tokio::time::timeout(Duration::from_secs(5), stopping).await;
+        assert!(
+            answered.is_ok(),
+            "the approval answer deadlocked against the Stop"
+        );
+        assert!(stopped.is_ok(), "the Stop deadlocked against the answer");
+        answered
+            .expect("answer task")
+            .expect("answer completed")
+            .expect("the answer reached the session");
+        stopped
+            .expect("stop task")
+            .expect("stop completed")
+            .expect("the Stop cancelled the turn");
+
+        *manager
+            .inner
+            .approval_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        manager
+            .inner
+            .stop_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        manager.shutdown().await;
+    }
+
     /// An approval left by a session that has since been replaced no longer
     /// blocks a switch, and it is not carried onto the new harness.
     #[tokio::test]
@@ -24669,6 +25190,20 @@ mod tests {
             .expect("a stale approval does not block the switch");
         assert_eq!(outcome.summary.harness, HarnessKind::Codex);
         assert!(handle.lock().await.pending_approvals.is_empty());
+        // The cue is gone from the record, and the clients are told so: a phone
+        // sheet or the thread's cue must not stay up for an answer no session
+        // can take.
+        let resolved = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::ApprovalResolved { approval_id, .. } = wire.event {
+                    return approval_id;
+                }
+            }
+        })
+        .await
+        .expect("the dropped approval was resolved on the clients");
+        assert_eq!(resolved, "approval_1");
         manager.shutdown().await;
     }
 

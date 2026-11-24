@@ -123,9 +123,9 @@ pub struct ThreadMeta {
     ///
     /// A harness switch clears the old resume id, so the first turn on the new
     /// harness has no native context to resume. It sends the history instead,
-    /// using the same builder and budget as an import fallback. Cleared when a
-    /// session actually starts, so a failed start does not lose the history a
-    /// later message needs.
+    /// using the same builder and budget as an import fallback. Cleared once the
+    /// session accepts the prompt that carried the handoff, so a failed start
+    /// does not lose the history a later message needs.
     pub handoff_pending: bool,
 }
 

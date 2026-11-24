@@ -137,7 +137,11 @@ conversation's original working folder:
 The handoff keeps the original request and the newest messages, in order, with
 their roles. The turn's own request is never part of that history block, even
 though it is already in the journal by then: it reaches the agent once, as the
-request that follows the history. The handoff is bounded in UTF-8 bytes: 16,000
+request that follows the history. A message still waiting behind the running turn
+is not history either: every queued prompt is left out by its recorded id, so it
+arrives once, as its own turn. An import with no session id to resume owes this
+history from its first turn, even when the new session reports its own id before
+the first prompt is delivered. The handoff is bounded in UTF-8 bytes: 16,000
 by default, clamped to 1,024–64,000. Set `H4RN_HANDOFF_BYTES` on the daemon to
 choose a different size.
 The budget covers the whole handoff — the header, every message as it is

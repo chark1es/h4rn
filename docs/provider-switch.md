@@ -30,7 +30,9 @@ only fail after the switch, so it is not listed.
    `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000. Your request is appended
    verbatim and is never shortened. The flag is cleared only once the harness
    accepts that prompt, so a failed start or write still sends the history on
-   the retry. Later messages resume the new session normally.
+   the retry. Later messages resume the new session normally. A message still
+   waiting behind the running turn is not history: the handoff leaves every
+   queued prompt out, by its recorded id, so it arrives once as its own turn.
 5. Each turn is metered against the harness and model that actually ran it.
 
 ## Settings that carry over
@@ -74,7 +76,8 @@ The switch itself is one durable decision. The thread row and the divider are
 written in one transaction, and only then is the old session ended; a journal
 that refuses the write leaves the thread on its old harness with its session
 intact. An approval whose session is gone is dropped rather than blocking every
-later switch.
+later switch, and is resolved on every client so no cue or phone sheet stays up
+for an answer no session can take.
 
 ## Known limits
 

@@ -131,7 +131,9 @@ function SwitchPanel({ summary, onClose }: { summary: ThreadSummary; onClose: ()
         modelDraft,
         agent?.models.map((model) => model.id) ?? [],
         proxyModelsFor(target.harness).map((model) => model.id),
-        reportedModels(target.harness, summary.host, threadValues),
+        // A host's reported models belong to whichever agent ran there. An ACP
+        // target lists its own agent's models, never a sibling agent's.
+        target.agentId ? [] : reportedModels(target.harness, summary.host, threadValues),
       )
     : [];
 
