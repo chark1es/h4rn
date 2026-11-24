@@ -1411,6 +1411,9 @@ fieldset.q-seg-fs {
   font-size: 14px;
   line-height: 21px;
   white-space: pre-wrap;
+  /* A pasted URL or a hash has no spaces to break at: wrap it instead of
+     pushing the row past the thread at phone width. */
+  overflow-wrap: anywhere;
   color: var(--fg-2);
   max-width: 84%;
 }

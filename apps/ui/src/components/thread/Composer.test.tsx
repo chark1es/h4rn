@@ -1550,6 +1550,57 @@ describe("follow-up behaviour and queued messages", () => {
     );
   });
 
+  it("a late Save reply does not close an edit opened after it", async () => {
+    let resolveSave: (ok: boolean) => void = () => undefined;
+    mock.editQueuedMessage.mockReturnValueOnce(
+      new Promise<boolean>((resolve) => {
+        resolveSave = resolve;
+      }),
+    );
+    render(
+      showQueued({}, [
+        queuedMessage("qm_one", "first queued"),
+        queuedMessage("qm_two", "second queued"),
+      ]),
+    );
+    const input = textarea();
+    const openEdit = (messageId: string, text: string) => {
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent("h4rn:edit-queued", {
+            detail: {
+              threadId: THREAD,
+              message: {
+                message_id: messageId,
+                text,
+                attachments: [],
+                queued_at: "2026-01-01T00:00:00.000Z",
+              },
+            },
+          }),
+        );
+      });
+    };
+
+    openEdit("qm_one", "first queued");
+    fireEvent.change(input, { target: { value: "edited qm_one" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mock.editQueuedMessage).toHaveBeenCalled());
+
+    // While that save is in flight the person opens the other message and
+    // starts typing.
+    openEdit("qm_two", "second queued");
+    fireEvent.change(input, { target: { value: "typing the second" } });
+
+    resolveSave(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(input.value).toBe("typing the second");
+    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+  });
+
   it("ends an edit when the message starts and keeps the text when no draft existed", () => {
     writeThreadDraft(HOST, THREAD, "");
     flushDrafts();

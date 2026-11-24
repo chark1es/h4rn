@@ -142,6 +142,14 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     /** The message's text when the edit began, to tell changed text apart. */
     originalText: string;
   } | null>(null);
+  /**
+   * The edit session on screen now, for a reply that started before it.
+   *
+   * A Save's answer may arrive after the person opened another message; it
+   * belongs to the edit that submitted it and must not close the new one.
+   */
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const followUp = useFollowUpBehavior();
   const multiline = useMultilineEnter();
   const running = isTurnRunning(summary);
@@ -443,18 +451,23 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
 
   const saveEdit = async () => {
     if (!editing) return;
-    const message = queued?.find((item) => item.message_id === editing.messageId);
+    const submitted = editing;
+    const message = queued?.find((item) => item.message_id === submitted.messageId);
     if (!message) {
       endEdit(false);
       return;
     }
     const ok = await editQueuedMessage(
       summary.thread_id,
-      editing.messageId,
+      submitted.messageId,
       text,
       message.attachments,
     );
     if (!ok) return;
+    // A reply that lands after another message was opened (or after the edit
+    // ended) must not touch the box: it acknowledges the message it saved, not
+    // whatever the person is editing now.
+    if (editingRef.current !== submitted) return;
     endEdit(true);
     requestAnimationFrame(autosize);
   };

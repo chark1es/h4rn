@@ -30,4 +30,8 @@ describe("queued message controls", () => {
     expect(moveRule).toMatch(/min-width: 44px/);
     expect(moveRule).toMatch(/min-height: 44px/);
   });
+
+  it("wraps a long unbroken message instead of overflowing the row", () => {
+    expect(rule(".q-queued-text {")).toMatch(/overflow-wrap: anywhere/);
+  });
 });

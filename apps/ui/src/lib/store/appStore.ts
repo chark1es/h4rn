@@ -1524,6 +1524,33 @@ export async function sendMessage(
     return true;
   } catch (error) {
     const proto = toProtoError(error);
+    if (proto.code === "delivery_unclear") {
+      // The daemon wrote the steer before the connection failed, so the turn
+      // may already hold it. The row stays sent and the person is told, because
+      // offering a resend could put the same words in the turn twice.
+      const current = getState();
+      const currentLog = current.logs[threadId];
+      if (currentLog) {
+        setState({
+          ...current,
+          logs: {
+            ...current.logs,
+            [threadId]: {
+              ...currentLog,
+              pending: currentLog.pending.map((message) =>
+                message.id === localId ? { ...message, sending: false } : message,
+              ),
+            },
+          },
+        });
+      }
+      pushToast({
+        variant: "info",
+        title: "Delivered, or maybe not.",
+        description: `${proto.message} Check the turn before sending it again.`,
+      });
+      return true;
+    }
     const current = getState();
     const currentLog = current.logs[threadId];
     if (currentLog) {
@@ -1589,11 +1616,20 @@ async function runQueueAction(
     return true;
   } catch (error) {
     const proto = toProtoError(error);
-    pushToast({
-      variant: "error",
-      title: `Couldn't ${label} the queued message.`,
-      description: proto.message,
-    });
+    const unclear = proto.code === "delivery_unclear";
+    pushToast(
+      unclear
+        ? {
+            variant: "info",
+            title: "Delivered, or maybe not.",
+            description: `${proto.message} Check the turn before trying again.`,
+          }
+        : {
+            variant: "error",
+            title: `Couldn't ${label} the queued message.`,
+            description: proto.message,
+          },
+    );
     return false;
   }
 }
@@ -1683,6 +1719,10 @@ export async function loadThreadQueue(threadId: ThreadId): Promise<void> {
 export function syncQueueWithSummary(summary: ThreadSummary): void {
   const state = getState();
   const held = state.queues[summary.thread_id];
+  // A summary the daemon wrote before the rows this client already holds is
+  // delayed, not news: applying its count would hide (or clear) a queue that
+  // has moved on, and end an edit of a row that still exists.
+  if (held && summary.queue_revision < held.revision) return;
   if (summary.queued_count === 0) {
     if (held && held.total === 0 && held.revision === summary.queue_revision) return;
     setState({

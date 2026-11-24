@@ -13,6 +13,7 @@ vi.mock("@/lib/client/config", () => ({
 }));
 
 import { onManualPlacement } from "@/features/notifications/placement";
+import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
 import {
   applyEvent,
@@ -23,6 +24,7 @@ import {
   loadThreadQueue,
   loadThreads,
   moveQueuedMessage,
+  sendMessage,
   sendQueuedNow,
   setThreadTab,
   steerOldestQueued,
@@ -651,6 +653,55 @@ describe("queued messages", () => {
       (message) => message.message_id === "qm_0",
     );
     expect(edited?.text).toBe("edited words");
+  });
+
+  it("ignores a delayed summary whose revision is behind the rows it holds", () => {
+    const current = getState().threads.queue_thread;
+    if (!current) throw new Error("the queue test thread is missing");
+
+    // Rows already loaded at revision 4; a summary written at revision 3 says
+    // nothing waits. It is older news, not a reason to clear the rows (or end
+    // the edit of a row that is still there).
+    syncQueueWithSummary({ ...current, queued_count: 0, queue_revision: 3 });
+
+    expect(queueIds("queue_thread")).toEqual(["qm_one", "qm_two"]);
+    expect(getState().queues.queue_thread?.revision).toBe(4);
+    expect(fake.request).not.toHaveBeenCalled();
+  });
+
+  it("reports an unclear steer as possibly delivered instead of offering a resend", async () => {
+    fake.request.mockRejectedValueOnce(
+      new H4rnRequestError(
+        protoError("delivery_unclear", "the message may have reached the agent: timed out"),
+        null,
+      ),
+    );
+
+    const ok = await sendMessage("queue_thread", "do not send this twice", [], { steer: true });
+
+    expect(ok).toBe(true);
+    const toasts = getState().toasts;
+    expect(toasts.at(-1)?.title).toBe("Delivered, or maybe not.");
+    expect(toasts.at(-1)?.variant).toBe("info");
+    const pending = getState().logs.queue_thread?.pending ?? [];
+    expect(pending.at(-1)?.text).toBe("do not send this twice");
+    expect(pending.at(-1)?.sending).toBe(false);
+  });
+
+  it("says a queued send may have landed rather than reporting it failed", async () => {
+    fake.request.mockRejectedValueOnce(
+      new H4rnRequestError(
+        protoError("delivery_unclear", "the message may have reached the agent: timed out"),
+        null,
+      ),
+    );
+
+    const ok = await sendQueuedNow("queue_thread", "qm_two");
+
+    expect(ok).toBe(false);
+    const toast = getState().toasts.at(-1);
+    expect(toast?.title).toBe("Delivered, or maybe not.");
+    expect(toast?.variant).toBe("info");
   });
 
   it("drops a queue reply that arrives after the summary says nothing waits", async () => {
