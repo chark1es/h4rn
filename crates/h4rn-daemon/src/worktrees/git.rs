@@ -864,7 +864,19 @@ pub fn checkpoint_commit(workspace: &Path) -> Option<String> {
     if !is_linked_worktree(workspace) {
         return None;
     }
-    let created = run_with_timeout(workspace, ["stash", "create"], OBSERVATION_GIT_TIMEOUT).ok()?;
+    let created = run_with_timeout(
+        workspace,
+        [
+            "-c",
+            "user.name=h4rn",
+            "-c",
+            "user.email=h4rn@localhost",
+            "stash",
+            "create",
+        ],
+        OBSERVATION_GIT_TIMEOUT,
+    )
+    .ok()?;
     if !created.is_empty() {
         return Some(created);
     }
