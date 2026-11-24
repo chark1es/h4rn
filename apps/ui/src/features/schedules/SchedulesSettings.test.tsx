@@ -28,7 +28,9 @@ function task(patch: Partial<ScheduleTask> = {}): ScheduleTask {
     thread_id: null,
     webhook_path_set: false,
     once_consumed: false,
-    next_run_at: "2026-11-24T08:00:00.000Z",
+    // A little ahead of the wall clock: once this instant passed, the component
+    // correctly said "Due now", so a fixed date made the test a time bomb.
+    next_run_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     last_run: null,
     created_at: "2026-11-20T10:00:00.000Z",
     updated_at: "2026-11-20T10:00:00.000Z",
