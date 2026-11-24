@@ -82,7 +82,9 @@ async fn a_pending_codex_rewind_reverts_the_provider_thread_before_the_first_pro
         .start_session(spec(
             directory.path().join("workspace"),
             Some("thread-1".into()),
-            Some(SessionRewind::KeepTurns { keep: 1 }),
+            Some(SessionRewind::BeforeTurn {
+                turn: "turn-b".into(),
+            }),
         ))
         .await
         .expect("start");
@@ -95,6 +97,45 @@ async fn a_pending_codex_rewind_reverts_the_provider_thread_before_the_first_pro
     assert_eq!(
         revert["beforeTurnId"], "turn-b",
         "the second provider turn is the first one removed"
+    );
+}
+
+#[tokio::test]
+async fn codex_refuses_a_boundary_its_conversation_does_not_know() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let log = directory.path().join("reverts.jsonl");
+    let path = install_script(&log);
+    let harness = CodexHarness::with_install(HarnessInstall {
+        path,
+        version: "test".into(),
+    });
+    let error = match harness
+        .start_session(spec(
+            directory.path().join("workspace"),
+            Some("thread-1".into()),
+            Some(SessionRewind::BeforeTurn {
+                turn: "turn-missing".into(),
+            }),
+        ))
+        .await
+    {
+        Ok(_) => panic!("an unknown boundary is not a success"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        HarnessError::Unsupported {
+            harness: HarnessKind::Codex,
+            ..
+        }
+    ));
+    assert!(
+        !log.exists()
+            || std::fs::read_to_string(&log)
+                .expect("log")
+                .trim()
+                .is_empty(),
+        "thread/revert was never asked to act on a turn the conversation does not hold"
     );
 }
 

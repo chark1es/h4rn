@@ -16,6 +16,7 @@
 //!   snooze expiry.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -351,6 +352,9 @@ pub enum ManagerError {
     /// The request conflicts with current state.
     #[error("{0}")]
     Conflict(String),
+    /// The request conflicts with current state, with its own next step.
+    #[error("{0}")]
+    ConflictWithHint(String, String),
     /// The request is malformed.
     #[error("{0}")]
     InvalidRequest(String),
@@ -379,6 +383,9 @@ impl ManagerError {
                 message,
                 "Wait for the current turn to finish or interrupt it first",
             ),
+            Self::ConflictWithHint(message, hint) => {
+                ProtoError::new(ProtoErrorCode::Conflict, message, hint)
+            }
             Self::InvalidRequest(message) => ProtoError::new(
                 ProtoErrorCode::InvalidRequest,
                 message,
@@ -418,6 +425,13 @@ struct Inner {
     /// Serialises rewinds: one durable edit at a time, and a restore never
     /// races another restore in the same checkout.
     rewind_lock: Arc<Mutex<()>>,
+    /// Workspace paths a restore is currently writing.
+    ///
+    /// A thread or agent session that would start inside one waits until the
+    /// rewind has committed, so nothing can change the tree mid-restore.
+    restore_reservations: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    /// A test-only failure the next journal append reports.
+    append_failure: std::sync::Mutex<Option<String>>,
     threads: Mutex<HashMap<String, ThreadHandle>>,
     ticker: std::sync::Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
@@ -557,10 +571,12 @@ impl AppendPause {
     /// summaries, and a test that wants the request's own window must not be
     /// woken by one of those.
     async fn hold(&self, domain: &[ThreadEvent]) {
-        if !domain
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::TurnQueued { .. }))
-        {
+        if !domain.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::TurnQueued { .. } | ThreadEvent::Rewound { .. }
+            )
+        }) {
             return;
         }
         if self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -684,6 +700,12 @@ type SharedSession = Arc<Mutex<Box<dyn HarnessSession>>>;
 
 /// One message waiting behind the running turn.
 struct QueuedTurn {
+    /// The turn this message will run in, chosen when it is queued.
+    ///
+    /// The journal records the message under this id immediately, so a later
+    /// rewind names the message's own turn instead of the one that happened to
+    /// be running when it arrived.
+    turn_id: TurnId,
     input: UserInput,
     /// The sender's permission ceiling, carried with the message so a later
     /// mode change cannot lift it.
@@ -1797,6 +1819,9 @@ struct ThreadFact {
     active: bool,
     queued: bool,
     approvals: bool,
+    guest_requests: bool,
+    questions: bool,
+    background: bool,
     scheduled: bool,
     phase_active: bool,
 }
@@ -1804,7 +1829,14 @@ struct ThreadFact {
 impl ThreadFact {
     /// Whether nothing about this thread could still write to its workspace.
     fn idle(&self) -> bool {
-        !self.active && !self.queued && !self.approvals && !self.scheduled && !self.phase_active
+        !self.active
+            && !self.queued
+            && !self.approvals
+            && !self.guest_requests
+            && !self.questions
+            && !self.background
+            && !self.scheduled
+            && !self.phase_active
     }
 }
 
@@ -1826,6 +1858,18 @@ fn descendants_of(root: &ThreadId, facts: &[ThreadFact]) -> HashSet<ThreadId> {
         }
     }
     descendants
+}
+
+/// Holds a restore's workspace reservation until the cut commits or aborts.
+struct RestoreReservation {
+    inner: Arc<Inner>,
+    workspace: std::path::PathBuf,
+}
+
+impl Drop for RestoreReservation {
+    fn drop(&mut self) {
+        self.inner.release_restore(&self.workspace);
+    }
 }
 
 impl Inner {
@@ -1850,11 +1894,52 @@ impl Inner {
                 active: record.active.is_some(),
                 queued: !record.queued.is_empty(),
                 approvals: !record.pending_approvals.is_empty(),
+                guest_requests: record.state.pending_guest_requests > 0,
+                questions: record.state.pending_question,
+                background: record.state.pr_watch,
                 scheduled: record.scheduled_limit.is_some() || record.meta.parked.is_some(),
                 phase_active: record.state.phase.is_active(),
             });
         }
         facts
+    }
+
+    /// The workspace a restore is writing through, when one overlaps `workspace`.
+    fn restore_conflict(&self, workspace: &Path) -> Option<std::path::PathBuf> {
+        self.restore_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|reserved| crate::rewind::paths_overlap(reserved, workspace))
+            .cloned()
+    }
+
+    /// Reserves `workspace` until the returned guard drops.
+    ///
+    /// A restore holds it from before the first file write through the journal
+    /// commit, so no thread or agent session can start inside the tree.
+    fn reserve_restore(self: &Arc<Self>, workspace: &Path) -> RestoreReservation {
+        self.restore_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(workspace.to_path_buf());
+        RestoreReservation {
+            inner: Arc::clone(self),
+            workspace: workspace.to_path_buf(),
+        }
+    }
+
+    fn release_restore(&self, workspace: &Path) {
+        let mut reservations = self
+            .restore_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = reservations
+            .iter()
+            .position(|reserved| reserved == workspace)
+        {
+            reservations.remove(index);
+        }
     }
 
     /// The one grant gate; see [`ThreadManager::grant_allows`].
@@ -1916,7 +2001,19 @@ impl ThreadRecord {
             unread: tab == ThreadTab::Done && !self.state.acknowledged,
             resume_at: self.resume_at,
             limit: self.limit.clone(),
-            rewind: h4rn_harness::rewind_method(self.meta.harness),
+            rewind: {
+                let advertised = h4rn_harness::rewind_method(self.meta.harness);
+                // The summary advertises the method the request will really
+                // use: an imported conversation or a thread with no provider
+                // session yet cannot name a native boundary.
+                if advertised == h4rn_protocol::RewindMethod::Native
+                    && (self.meta.imported.is_some() || self.meta.resume_id.is_none())
+                {
+                    h4rn_protocol::RewindMethod::Handoff
+                } else {
+                    advertised
+                }
+            },
             file_rewind: self.linked_worktree,
         }
     }
@@ -1977,7 +2074,7 @@ impl ThreadRecord {
     /// a ceiling or a grant.
     #[cfg(test)]
     fn begin_turn(&mut self, at: DateTime<Utc>, input: UserInput) -> Arc<TurnDispatch> {
-        self.begin_turn_for_work(at, input, None, None)
+        self.begin_turn_for_work(at, input, None, None, None)
     }
 
     /// [`Self::begin_turn`] for a turn an outside grant asked for.
@@ -1987,6 +2084,7 @@ impl ThreadRecord {
         input: UserInput,
         ceiling: Option<RuntimeMode>,
         grant: Option<WorkGrant>,
+        turn_id: Option<TurnId>,
     ) -> Arc<TurnDispatch> {
         // A new turn is a fresh attempt: the previous limit, any resume target
         // and the ceiling the paused turn carried no longer describe the thread.
@@ -1995,7 +2093,7 @@ impl ThreadRecord {
         self.transport_error_reported = None;
         self.transport_report = None;
         self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
-        let turn_id = TurnId::new_uuid_v7();
+        let turn_id = turn_id.unwrap_or_else(TurnId::new_uuid_v7);
         let item_id = assistant_item_id(&turn_id);
         let dispatch = Arc::new(TurnDispatch::new_for_work(
             turn_id.clone(),
@@ -2732,6 +2830,8 @@ impl ThreadManager {
                 events,
                 emit_lock: Arc::new(Mutex::new(())),
                 rewind_lock: Arc::new(Mutex::new(())),
+                restore_reservations: std::sync::Mutex::new(Vec::new()),
+                append_failure: std::sync::Mutex::new(None),
                 threads: Mutex::new(HashMap::new()),
                 ticker: std::sync::Mutex::new(None),
                 closed: AtomicBool::new(false),
@@ -2923,6 +3023,20 @@ impl ThreadManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
         gate
+    }
+
+    /// Makes the next journal append fail with `message`.
+    ///
+    /// An integration test uses it to prove a rewind whose cut cannot be
+    /// recorded puts its files and in-memory history back. Not read by the
+    /// production path.
+    #[doc(hidden)]
+    pub fn fail_next_append(&self, message: impl Into<String>) {
+        *self
+            .inner
+            .append_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message.into());
     }
 
     /// The outside grant whose turn is running, with that turn's ceiling.
@@ -3252,6 +3366,16 @@ impl ThreadManager {
         grant: Option<WorkGrant>,
     ) -> Result<CreatedThread, ManagerError> {
         request.workspace_path = expand_home(&request.workspace_path);
+        if let Some(conflict) = self
+            .inner
+            .restore_conflict(Path::new(&request.workspace_path))
+        {
+            return Err(ManagerError::Conflict(format!(
+                "{} is being rewound; wait for that to finish before starting work there",
+                conflict.display()
+            )));
+        }
+
         if !self.inner.harnesses.get(request.harness).is_some() {
             return Err(ManagerError::Unsupported(format!(
                 "no {:?} adapter is available in this daemon build",
@@ -3382,7 +3506,7 @@ impl ThreadManager {
         // The default title mode uses this thread's own harness, so a prompt is
         // never handed to a different provider unasked.
         let title_harness = request.harness;
-        let meta = ThreadMeta {
+        let mut meta = ThreadMeta {
             thread_id: thread_id.clone(),
             parent_thread_id: request.parent_thread_id.clone(),
             subagent_id: request.subagent_id.clone(),
@@ -3403,8 +3527,12 @@ impl ThreadManager {
             agent_fingerprint: None,
             parked: None,
             pending_rewind: None,
+            worktree_identity: None,
+            provider_turns: Default::default(),
             imported: None,
         };
+        meta.worktree_identity =
+            crate::worktrees::git::linked_identity(std::path::Path::new(&meta.workspace_path));
         let title_workspace = meta.workspace_path.clone();
 
         let mut record = ThreadRecord {
@@ -3449,6 +3577,7 @@ impl ThreadManager {
             },
             ceiling,
             grant,
+            None,
         );
         let turn_id = dispatch.turn_id.clone();
 
@@ -3571,6 +3700,8 @@ impl ThreadManager {
             agent_fingerprint: None,
             parked: None,
             pending_rewind: None,
+            worktree_identity: None,
+            provider_turns: Default::default(),
             imported: Some(crate::journal::ImportedOrigin {
                 source: request.source,
                 source_path,
@@ -3758,10 +3889,11 @@ impl ThreadManager {
                 "a turn is still running; stop it before editing an earlier prompt".into(),
             ));
         }
+        // Only a real armed resume or a parked prompt blocks the edit. A stale
+        // RateLimited phase after the person cancelled the resume does not.
         if record.scheduled_limit.is_some()
             || record.meta.parked.is_some()
             || record.resume_at.is_some()
-            || matches!(record.state.phase, h4rn_core::Phase::RateLimited)
         {
             return Err(ManagerError::Conflict(
                 "an automatic resume is armed; cancel it before editing an earlier prompt".into(),
@@ -3791,7 +3923,6 @@ impl ThreadManager {
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
         let prompts = crate::rewind::live_prompts(&events);
-        let all_prompts = crate::rewind::all_prompts(&events);
         let Some(index) = prompts
             .iter()
             .position(|prompt| prompt.item_id == before_item_id)
@@ -3801,13 +3932,13 @@ impl ThreadManager {
             ));
         };
         let target = prompts[index].clone();
-        // A previous rewind may have removed later turns whose files were kept.
-        // Rewinding further back with a file restore must undo those too, so
-        // the snapshot set comes from the whole journal while the lifecycle
-        // count only subtracts turns that were still live.
+        // Only turns that are still part of this conversation are restored: a
+        // prompt an earlier rewind removed (and whose files were kept) must not
+        // be reverted by a later edit.
         let removed = crate::rewind::removed_turns(&prompts, index);
-        let file_turns = crate::rewind::removed_turns(&all_prompts, index);
 
+        let mut prepared = None;
+        let mut reservation = None;
         if restore_files {
             if !record.linked_worktree {
                 return Err(ManagerError::Conflict(
@@ -3815,9 +3946,45 @@ impl ThreadManager {
                         .into(),
                 ));
             }
+            let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
+            // The path must still be the checkout this thread was created in:
+            // a moved worktree whose old path now holds another checkout must
+            // never receive its files.
+            let current = crate::worktrees::git::linked_identity(&workspace);
+            match (&record.meta.worktree_identity, current) {
+                (Some(expected), Some(actual)) if expected == &actual => {}
+                (Some(_), _) => {
+                    return Err(ManagerError::Conflict(
+                        "this worktree has moved or been replaced; reopening the thread in its real checkout is required before its files can be restored"
+                            .into(),
+                    ));
+                }
+                (None, _) => {
+                    return Err(ManagerError::Conflict(
+                        "this checkout has no recorded worktree identity, so its files cannot be restored safely"
+                            .into(),
+                    ));
+                }
+            }
+            let Some(store) = self.inner.snapshots.get().cloned() else {
+                return Err(ManagerError::Unsupported(
+                    "file snapshots are not available in this daemon build".into(),
+                ));
+            };
+            // Revert files too needs a checkpoint that covers the whole tree,
+            // not only the paths a tool call named. A turn without one (an
+            // older thread, or a harness that never recorded it) is refused
+            // before anything is written.
+            for turn in &removed {
+                if store.checkpoint(thread_id, turn).is_none() {
+                    return Err(ManagerError::Conflict(
+                        "this message has no complete file checkpoint, so its files cannot be restored"
+                            .into(),
+                    ));
+                }
+            }
             let facts = self.inner.thread_facts(thread_id).await;
             let descendants = descendants_of(thread_id, &facts);
-            let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
             for fact in &facts {
                 if &fact.thread_id == thread_id || !fact.workspace.is_dir() {
                     continue;
@@ -3828,51 +3995,93 @@ impl ThreadManager {
                 if descendants.contains(&fact.thread_id) && fact.idle() {
                     continue;
                 }
-                return Err(ManagerError::Conflict(format!(
-                    "another thread or agent session uses {}; restoring would erase its work",
-                    fact.workspace.display()
-                )));
-            }
-            let Some(store) = self.inner.snapshots.get().cloned() else {
-                return Err(ManagerError::Unsupported(
-                    "file snapshots are not available in this daemon build".into(),
+                return Err(ManagerError::ConflictWithHint(
+                    format!(
+                        "another thread or agent session uses {}; restoring would erase its work",
+                        fact.workspace.display()
+                    ),
+                    "Close the other thread or stop its agent session, then try again".into(),
                 ));
-            };
+            }
+            // Reserve the tree from before the first write through the commit,
+            // so no thread or agent session can start inside it meanwhile.
+            reservation = Some(self.inner.reserve_restore(&workspace));
             let workspace = workspace.clone();
             let thread = thread_id.clone();
-            let turns = file_turns.clone();
-            match tokio::task::spawn_blocking(move || {
-                crate::rewind::restore_files(&store, &workspace, &thread, &turns)
+            let turns = removed.clone();
+            let prepare_store = Arc::clone(&store);
+            let prepared_restore = match tokio::task::spawn_blocking(move || {
+                crate::rewind::prepare_restore(&prepare_store, &workspace, &thread, &turns)
             })
             .await
             {
-                Ok(Ok(_)) => {}
-                Ok(Err(message)) => return Err(ManagerError::Conflict(message)),
+                Ok(Ok(prepared)) => prepared,
+                Ok(Err(message)) => {
+                    return Err(ManagerError::ConflictWithHint(
+                        message,
+                        "Check that the worktree is writable and try again; nothing was changed"
+                            .into(),
+                    ));
+                }
                 Err(error) => {
                     return Err(ManagerError::Internal(format!(
                         "the file restore did not finish: {error}"
                     )));
                 }
+            };
+            let (prepared_restore, applied) = match tokio::task::spawn_blocking(move || {
+                let applied = crate::rewind::apply_restore(&prepared_restore);
+                (prepared_restore, applied)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(ManagerError::Internal(format!(
+                        "the file restore did not finish: {error}"
+                    )));
+                }
+            };
+            if let Err(message) = applied {
+                return Err(ManagerError::ConflictWithHint(
+                    message,
+                    "Check that the worktree is writable and try again; nothing was changed".into(),
+                ));
             }
+            prepared = Some(prepared_restore);
         }
 
+        // The provider boundary is the last kept message the provider really
+        // recorded, never a local prompt index. A boundary that cannot be named
+        // falls back to the handoff rather than sending a resume the CLI
+        // refuses.
+        let boundary = |turn: &TurnId| {
+            record
+                .meta
+                .provider_turns
+                .get(turn.as_str())
+                .cloned()
+                .unwrap_or_default()
+        };
         let native = match (advertised, record.meta.harness) {
             // An imported conversation's provider message ids were not chosen
             // by h4rn, so a native boundary cannot name them reliably.
             _ if record.meta.imported.is_some() => None,
             (h4rn_protocol::RewindMethod::Native, _) if record.meta.resume_id.is_none() => None,
             (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::ClaudeCode) => {
-                Some(h4rn_protocol::PendingRewind::Native {
-                    session: h4rn_protocol::SessionRewind::ResumeAtMessage {
-                        message: turn_suffix(&target.turn_id).to_string(),
-                    },
+                boundary(&target.turn_id).last_message_id.map(|message| {
+                    h4rn_protocol::PendingRewind::Native {
+                        session: h4rn_protocol::SessionRewind::ResumeAtMessage { message },
+                    }
                 })
             }
-            (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::Codex) => {
-                Some(h4rn_protocol::PendingRewind::Native {
-                    session: h4rn_protocol::SessionRewind::KeepTurns { keep: index as u32 },
-                })
-            }
+            (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::Codex) => prompts
+                .iter()
+                .skip(index)
+                .find_map(|prompt| boundary(&prompt.turn_id).turn_id)
+                .map(|turn| h4rn_protocol::PendingRewind::Native {
+                    session: h4rn_protocol::SessionRewind::BeforeTurn { turn },
+                }),
             _ => None,
         };
         let (pending, method) = match native {
@@ -3887,12 +4096,21 @@ impl ThreadManager {
             SessionSlot::Live { generation, .. } => Some(*generation),
             SessionSlot::None | SessionSlot::Starting(_) => None,
         };
-        let detached = generation.and_then(|generation| record.detach_session(generation));
+        // The journal row is written with the cut. If that write fails, the
+        // in-memory record must not be left describing a rewind that never
+        // happened, and the files must go back.
+        let old_pending = record.meta.pending_rewind.clone();
+        let old_resume = record.meta.resume_id.clone();
+        let old_fingerprint = record.meta.agent_fingerprint.clone();
+        let old_provider = record.meta.provider_turns.clone();
         if matches!(pending, h4rn_protocol::PendingRewind::Handoff) {
             record.meta.resume_id = None;
             record.meta.agent_fingerprint = None;
         }
         record.meta.pending_rewind = Some(pending);
+        for turn in &removed {
+            record.meta.provider_turns.remove(turn.as_str());
+        }
         let now = self.now();
         let domain = vec![h4rn_core::ThreadEvent::Rewound {
             removed_turns: removed.len() as u32,
@@ -3902,10 +4120,25 @@ impl ThreadManager {
             thread_id: thread_id.clone(),
             before_item_id: before_item_id.to_owned(),
             files_restored: restore_files,
+            restore_id: prepared.as_ref().map(|p| p.restore_id().to_owned()),
             at: now,
         }];
-        self.inner.emit(&mut record, domain, wire).await?;
+        if let Err(error) = self.inner.emit(&mut record, domain, wire).await {
+            record.meta.pending_rewind = old_pending;
+            record.meta.resume_id = old_resume;
+            record.meta.agent_fingerprint = old_fingerprint;
+            record.meta.provider_turns = old_provider;
+            if let Some(prepared) = &prepared {
+                crate::rewind::abort_restore(prepared);
+            }
+            return Err(error);
+        }
+        if let Some(prepared) = &prepared {
+            crate::rewind::finish_restore(prepared);
+        }
+        let detached = generation.and_then(|generation| record.detach_session(generation));
         drop(record);
+        drop(reservation);
         if let Some(session) = detached {
             tokio::spawn(async move {
                 let _ = session.lock().await.shutdown().await;
@@ -3978,11 +4211,12 @@ impl ThreadManager {
         }
 
         let now = self.now();
-        if let Some(active_turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
+        if record.active.is_some() {
             // A turn is running: the message waits its turn, and the thread
             // stays Working. `MessageReceived` records the user activity. Any
             // armed resume is now stale (the new message is the next turn), so
             // cancel it rather than let it fire a duplicate prompt.
+            let queued_turn_id = TurnId::new_uuid_v7();
             let stale_schedule = record.scheduled_limit.take().is_some();
             if stale_schedule {
                 // The new message is the next turn, so no resume target
@@ -4001,6 +4235,7 @@ impl ThreadManager {
             let release_pending =
                 stale_schedule && record.pending_turn() && record.parks_persisted_prompt();
             record.queued.push_back(QueuedTurn {
+                turn_id: queued_turn_id.clone(),
                 input: UserInput {
                     text: text.clone(),
                     attachments: harness_attachments,
@@ -4026,9 +4261,9 @@ impl ThreadManager {
             }
             let wire = vec![Event::ItemCompleted {
                 thread_id: thread_id.clone(),
-                turn_id: active_turn_id.clone(),
+                turn_id: queued_turn_id.clone(),
                 item: Item::Message {
-                    item_id: fresh_item_id("user"),
+                    item_id: user_item_id(&queued_turn_id),
                     role: MessageRole::User,
                     text,
                     attachments: resolved_attachments,
@@ -4046,7 +4281,7 @@ impl ThreadManager {
             let (_, seq) = emitted?;
             return Ok(AcceptedMessage {
                 thread_id: thread_id.clone(),
-                turn_id: active_turn_id,
+                turn_id: queued_turn_id,
                 seq,
             });
         }
@@ -4098,6 +4333,7 @@ impl ThreadManager {
             },
             ceiling,
             grant,
+            None,
         );
         let turn_id = dispatch.turn_id.clone();
         let stale_schedule = record.scheduled_limit.take().is_some();
@@ -5006,6 +5242,44 @@ impl ThreadManager {
     /// never observes two stores.
     pub fn set_snapshot_store(&self, store: Arc<crate::fs::SnapshotStore>) {
         let _ = self.inner.snapshots.set(store);
+    }
+
+    /// Finishes file restores a crash interrupted between the apply and the
+    /// journal commit.
+    ///
+    /// A restore whose `ThreadRewound` event reached the journal keeps its
+    /// files; every other one is put back from its durable backup. Runs once at
+    /// startup, after the snapshot store is installed.
+    pub async fn recover_pending_restores(&self) -> Result<(), ManagerError> {
+        let Some(store) = self.inner.snapshots.get().cloned() else {
+            return Ok(());
+        };
+        for restore_id in crate::rewind::pending_restore_ids(&store) {
+            let committed = match crate::rewind::restore_thread(&store, &restore_id) {
+                Some(thread_id) => self
+                    .inner
+                    .journal
+                    .read_wire_since(&thread_id, 0)
+                    .await
+                    .map(|events| {
+                        events.iter().any(|wire| {
+                            matches!(
+                                &wire.event,
+                                Event::ThreadRewound {
+                                    restore_id: Some(id),
+                                    ..
+                                } if id == &restore_id
+                            )
+                        })
+                    })
+                    .unwrap_or(false),
+                None => false,
+            };
+            if let Err(error) = crate::rewind::recover_restore(&store, &restore_id, committed) {
+                tracing::warn!(%restore_id, %error, "could not recover an interrupted file restore");
+            }
+        }
+        Ok(())
     }
 
     /// Every distinct workspace path any thread has used.
@@ -5958,6 +6232,14 @@ impl Inner {
         // it is durable, to close a socket in that exact window.
         self.pause_append(&domain).await;
         let _guard = self.emit_lock.lock().await;
+        if let Some(message) = self
+            .append_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            return Err(ManagerError::Internal(message));
+        }
         let seqs = self
             .journal
             .append(&record.meta, &domain, &wire)
@@ -6375,7 +6657,13 @@ impl Inner {
             && record.scheduled_limit.is_none()
             && let Some(queued) = record.queued.pop_front()
         {
-            let next = record.begin_turn_for_work(now, queued.input, queued.ceiling, queued.grant);
+            let QueuedTurn {
+                turn_id: queued_turn_id,
+                input,
+                ceiling,
+                grant,
+            } = queued;
+            let next = record.begin_turn_for_work(now, input, ceiling, grant, Some(queued_turn_id));
             // This turn is the daemon's next step, not a person's Send: if the
             // transport it inherits dies before it runs, it goes back to the
             // queue instead of failing (see `requeue_promoted_turn`).
@@ -6440,6 +6728,24 @@ impl Inner {
             else {
                 return;
             };
+            // The checkout is being restored by another thread's rewind. No
+            // agent may start inside it until that cut commits, or its files
+            // would change under the restore.
+            if let Some(conflict) = self.restore_conflict(Path::new(&record.meta.workspace_path)) {
+                let end = TurnEnd::failed(
+                    format!(
+                        "{} is being rewound; wait for that to finish before starting this turn",
+                        conflict.display()
+                    ),
+                    Some("Send the message again once the rewind finishes.".into()),
+                    true,
+                );
+                self.settle_turn_locked(&mut record, &turn.turn_id, end)
+                    .await;
+                drop(record);
+                self.spawn_advance(handle);
+                return;
+            }
             // Before a harness process is launched for this work: the grant
             // that asked for it must still be live. Refusing here is what makes
             // a revoked resume start nothing at all, rather than start an agent
@@ -6705,14 +7011,18 @@ impl Inner {
             {
                 return false;
             }
-            // Only an imported thread still holding a native resume falls
-            // back; every other startup failure keeps the ordinary path.
-            let applies = record
+            // An imported thread still holding a native resume, or a pending
+            // native rewind the adapter refused, falls back; every other
+            // startup failure keeps the ordinary path.
+            let applies = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            ) || (record
                 .meta
                 .imported
                 .as_ref()
                 .is_some_and(|imported| imported.native_resume)
-                && record.meta.resume_id.is_some();
+                && record.meta.resume_id.is_some());
             if !applies {
                 return false;
             }
@@ -6758,6 +7068,18 @@ impl Inner {
             let captured = record
                 .dispatch_for(&turn.turn_id)
                 .map(|_| turn.turn_id.clone());
+            // The native boundary was not applied (the adapter refused it, or
+            // the session never started). Keep the thread usable: later sends
+            // retry through the bounded handoff instead of the same refused
+            // boundary.
+            if matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            ) {
+                record.meta.pending_rewind = Some(h4rn_protocol::PendingRewind::Handoff);
+                record.meta.resume_id = None;
+                record.meta.agent_fingerprint = None;
+            }
             let settled = match captured {
                 Some(turn_id) => {
                     self.settle_turn_locked(
@@ -7400,6 +7722,30 @@ impl Inner {
             self.recover_delivery(&handle, &dispatch).await;
             return;
         }
+        // A complete pre-turn checkpoint covers every tracked file, including
+        // ones a shell command changes without a tool call naming them. It is
+        // captured before the prompt reaches the agent, so "revert files too"
+        // can put the whole worktree back.
+        if let Some(store) = self.snapshots.get().cloned() {
+            let checkpoint = {
+                let record = handle.lock().await;
+                record.linked_worktree.then(|| {
+                    (
+                        std::path::PathBuf::from(&record.meta.workspace_path),
+                        record.meta.thread_id.clone(),
+                    )
+                })
+            };
+            if let Some((workspace, thread)) = checkpoint {
+                let turn = dispatch.turn_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Some(commit) = crate::worktrees::git::checkpoint_commit(&workspace) {
+                        let _ = store.record_checkpoint(&workspace, &thread, &turn, &commit);
+                    }
+                })
+                .await;
+            }
+        }
         let mut guard = session.lock().await;
         let generation = match self.claim_delivery(&handle, &dispatch, &session).await {
             DeliveryClaim::Claimed(generation) => generation,
@@ -7444,7 +7790,11 @@ impl Inner {
         // until the write returns `Ok`, because until then the adapter could
         // still be draining the finished turn's output into this stream.
         let attempt = dispatch.begin_write();
-        let sent = guard.send(dispatch.input()).await;
+        // Claude Code records its own uuid for every user message; the turn id
+        // is the message id a later truncating resume can name. Adapters that
+        // record no prompt id ignore the tag.
+        let prompt_tag = turn_suffix(&turn_id).to_owned();
+        let sent = guard.send_tagged(dispatch.input(), Some(&prompt_tag)).await;
         drop(guard);
         match sent {
             Ok(()) => {
@@ -7452,6 +7802,20 @@ impl Inner {
                 // write belongs to this turn and is released in order.
                 dispatch.accept_write(attempt);
                 dispatch.note_write_settled();
+                // Record which provider message or turn this prompt really
+                // became, so a rewind names the provider's boundary instead of
+                // counting local prompts.
+                let provider = session.lock().await.provider_turn();
+                if provider.turn_id.is_some() || provider.last_message_id.is_some() {
+                    let mut record = handle.lock().await;
+                    record.meta.provider_turns.insert(
+                        turn_id.as_str().to_owned(),
+                        crate::journal::ProviderTurnRecord {
+                            turn_id: provider.turn_id,
+                            last_message_id: provider.last_message_id,
+                        },
+                    );
+                }
             }
             Err(error) => {
                 // Only the adapter's typed limit may arm a resume: an arbitrary
@@ -8648,6 +9012,10 @@ impl Inner {
             // not honour that resume: drop the dead id and retry the same turn
             // once with the bounded handoff instead of failing it.
             let mut retry: Option<Arc<TurnDispatch>> = None;
+            let rewinding = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            );
             let retryable = !started
                 && record.active.as_ref().is_some_and(|active| {
                     !matches!(
@@ -8657,12 +9025,13 @@ impl Inner {
                             | DispatchState::Settled
                     )
                 })
-                && record
-                    .meta
-                    .imported
-                    .as_ref()
-                    .is_some_and(|imported| imported.native_resume)
-                && record.meta.resume_id.is_some();
+                && (rewinding
+                    || (record
+                        .meta
+                        .imported
+                        .as_ref()
+                        .is_some_and(|imported| imported.native_resume)
+                        && record.meta.resume_id.is_some()));
             if retryable && let Some(active) = record.active.as_ref() {
                 let turn_id = active.turn_id.clone();
                 retry = Some(Arc::clone(&active.dispatch));
@@ -8806,12 +9175,17 @@ impl Inner {
             if !owns {
                 return HandoffRetry::Declined;
             }
-            let applies = record
-                .meta
-                .imported
-                .as_ref()
-                .is_some_and(|imported| imported.native_resume)
-                && record.meta.resume_id.is_some();
+            let rewinding = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            );
+            let applies = rewinding
+                || (record
+                    .meta
+                    .imported
+                    .as_ref()
+                    .is_some_and(|imported| imported.native_resume)
+                    && record.meta.resume_id.is_some());
             if !applies {
                 return HandoffRetry::Declined;
             }
@@ -8829,6 +9203,13 @@ impl Inner {
                 RecoveryOutcome::Settled => return HandoffRetry::Declined,
             }
             record.meta.resume_id = None;
+            record.meta.agent_fingerprint = None;
+            if rewinding {
+                // The native boundary could not be applied. The turn is retried
+                // as a bounded handoff, and later turns keep using the handoff
+                // until a session starts from it.
+                record.meta.pending_rewind = Some(h4rn_protocol::PendingRewind::Handoff);
+            }
             if let Some(imported) = record.meta.imported.as_mut() {
                 imported.native_resume = false;
             }
@@ -8850,7 +9231,20 @@ impl Inner {
                 })
                 .collect();
             let request = turn.input().text;
-            crate::handoff::build(&messages, crate::handoff::budget_from_env(), &request)
+            let header = if matches!(
+                meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Handoff)
+            ) {
+                crate::handoff::REWIND_HEADER
+            } else {
+                crate::handoff::IMPORT_HEADER
+            };
+            crate::handoff::build_with_header(
+                &messages,
+                crate::handoff::budget_from_env(),
+                &request,
+                header,
+            )
         };
         if let Some(block) = block {
             let request = turn.input().text;
@@ -9842,6 +10236,7 @@ impl Inner {
             },
             ceiling,
             grant,
+            None,
         );
         let turn_id = dispatch.turn_id.clone();
         let domain = vec![
@@ -11391,9 +11786,9 @@ mod tests {
             .send_message(&created.thread_id, "follow-up".into(), Vec::new())
             .await
             .expect("send");
-        assert_eq!(
+        assert_ne!(
             queued.turn_id, created.turn_id,
-            "the message waits behind the first turn"
+            "the queued message has its own turn, not the one it waits behind"
         );
 
         manager
@@ -11679,9 +12074,9 @@ mod tests {
             .send_message(&created.thread_id, "third".into(), Vec::new())
             .await
             .expect("send");
-        assert_eq!(
+        assert_ne!(
             third.turn_id, second.turn_id,
-            "the third message waits behind the second turn"
+            "the third message waits behind the second turn with its own id"
         );
         gate.release();
 
@@ -11844,9 +12239,9 @@ mod tests {
             .send_message(&created.thread_id, "second".into(), Vec::new())
             .await
             .expect("send");
-        assert_eq!(
+        assert_ne!(
             queued.turn_id, created.turn_id,
-            "the message waits behind the first turn"
+            "the queued message has its own turn, not the one it waits behind"
         );
         manager
             .interrupt(&created.thread_id)
@@ -12081,7 +12476,10 @@ mod tests {
             .send_message(&created.thread_id, "third".into(), Vec::new())
             .await
             .expect("send");
-        assert_eq!(third.turn_id, second.turn_id);
+        assert_ne!(
+            third.turn_id, second.turn_id,
+            "each queued message has its own turn"
+        );
 
         let mut errors = 0;
         loop {
@@ -12565,7 +12963,10 @@ mod tests {
             .send_message(&created.thread_id, "third".into(), Vec::new())
             .await
             .expect("send");
-        assert_eq!(third.turn_id, second.turn_id);
+        assert_ne!(
+            third.turn_id, second.turn_id,
+            "each queued message has its own turn"
+        );
 
         let (turn, status) = next_turn_completion(&mut events).await;
         assert_eq!(turn, second.turn_id);
@@ -12940,9 +13341,9 @@ mod tests {
                 .expect("B was promoted under the lock");
             drop(record);
             let c = sending.await.expect("send task").expect("send C");
-            assert_eq!(
+            assert_ne!(
                 c.turn_id, promoted,
-                "C queued behind the promoted B, not in front of it"
+                "C has its own turn and queues behind the promoted B"
             );
             assert_ne!(c.turn_id, a_turn);
         }
@@ -16675,9 +17076,9 @@ mod tests {
             .send_message(&thread_id, "third".into(), Vec::new())
             .await
             .expect("send");
-        assert_eq!(
+        assert_ne!(
             third.turn_id, second.turn_id,
-            "the new message queues behind the parked turn instead of replacing it"
+            "the new message queues behind the parked turn with its own id"
         );
         let summary = manager.thread_summary(&thread_id).await.expect("summary");
         assert_eq!(
@@ -17675,9 +18076,9 @@ mod tests {
             .send_message(&created.thread_id, "third".into(), Vec::new())
             .await
             .expect("send while paused");
-        assert_eq!(
+        assert_ne!(
             third.turn_id, second.turn_id,
-            "a Send while a turn is running queues behind that turn"
+            "a Send while a turn is running queues behind it with its own id"
         );
         let domain = manager
             .inner

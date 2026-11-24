@@ -16,14 +16,19 @@ All notable changes to h4rn are recorded here. The format follows
   a fresh session with a bounded handoff of the kept history, and the dialog
   says which one will run. **Revert files too** puts a thread's own linked
   worktree back to the checkpoint from before the message; it is offered only
-  there, warns that it also undoes the person's own later edits, and is refused
-  when another thread or agent session shares the directory (finished
-  subagents of the same thread do not block it). A rewind is refused while a
-  turn runs, a message is queued or parked, an approval is pending or an
-  automatic resume is armed. One durable event records the cut, and the
-  provider boundary survives a daemon restart; a failed file restore leaves
-  the conversation unchanged. See [docs/rewind.md](docs/rewind.md) and
-  ADR-047.
+  there and only when the removed turns have a complete checkpoint (the whole
+  tracked worktree, so a shell command's edits are covered), warns that it also
+  undoes the person's own later edits, and is refused when another thread or
+  agent session shares the directory (finished subagents with nothing queued or
+  pending do not block it). A rewind is refused while a turn runs, a message is
+  queued or parked, an approval is pending or an automatic resume is armed; a
+  cancelled resume no longer blocks it. Prompts and cuts are read in journal
+  order, a queued message belongs to the turn that finally ran it, and native
+  boundaries name what Claude Code or Codex really recorded. One durable event
+  records the cut, a durable restore journal ties the files to that commit, and
+  an interrupted restore is finished or rolled back at the next startup; a
+  failed file restore leaves the conversation unchanged. See
+  [docs/rewind.md](docs/rewind.md) and ADR-047.
 - **A new thread can run in its own git worktree.** Choose **Run in a new
   worktree** in the New thread dialog, with an optional branch name. The daemon
   checks out the project's current `HEAD` on a generated `h4rn/<name>` branch

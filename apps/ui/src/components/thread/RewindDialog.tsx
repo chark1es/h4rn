@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
-import { rewindRefusal, rewindThread } from "@/lib/store/appStore";
+import { filesRewindAvailable, rewindRefusal, rewindThread } from "@/lib/store/appStore";
 import type { ThreadLog } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +39,7 @@ export function RewindDialog({
   const [choice, setChoice] = useState<Choice>("keep");
   const [submitting, setSubmitting] = useState(false);
   const refusal = rewindRefusal(thread, log);
+  const canRestoreFiles = thread.file_rewind && filesRewindAvailable(log, itemId);
 
   useEffect(() => {
     if (!open) return;
@@ -80,7 +81,7 @@ export function RewindDialog({
             </span>
           </label>
 
-          {thread.file_rewind ? (
+          {canRestoreFiles ? (
             <label className={cn("q-rewind-choice", choice === "files" && "on")}>
               <input
                 type="radio"
@@ -98,13 +99,14 @@ export function RewindDialog({
             </label>
           ) : (
             <p className="q-rewind-note">
-              This thread runs in the project folder, so only its conversation is rewound. Files are
-              left alone.
+              {thread.file_rewind
+                ? "This message has no complete file checkpoint, so only its conversation is rewound. Files are left alone."
+                : "This thread runs in the project folder, so only its conversation is rewound. Files are left alone."}
             </p>
           )}
         </fieldset>
 
-        {thread.file_rewind && choice === "files" ? (
+        {canRestoreFiles && choice === "files" ? (
           <div className="q-rewind-warning" role="note">
             <TriangleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             <span>

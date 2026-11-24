@@ -212,6 +212,7 @@ function turnChanges(threadId: string, turnId: string): FsTurnChanges {
   return {
     thread_id: threadId,
     turn_id: turnId,
+    complete: false,
     note: null,
     files: [
       {

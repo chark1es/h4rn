@@ -210,6 +210,12 @@ before_item_id: string,
  */
 files_restored: boolean, 
 /**
+ * The durable restore record that committed with this cut, when files
+ * were restored. A restarted daemon uses it to finish or roll back a
+ * restore that was interrupted before the commit.
+ */
+restore_id?: string, 
+/**
  * When the rewind happened.
  */
 at: string, } | { "type": "agent_state_changed", 

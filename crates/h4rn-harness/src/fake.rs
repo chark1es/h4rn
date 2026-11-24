@@ -267,6 +267,8 @@ pub struct FakeHarness {
     rewind_method: RewindMethod,
     /// Every rewind boundary a session was started with, when a test asked.
     rewind_specs: Option<Arc<Mutex<Vec<Option<SessionRewind>>>>>,
+    /// The prompt id every tagged send carried, when a test asked.
+    tagged_prompts: Option<TaggedPrompts>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -627,6 +629,7 @@ impl Default for FakeHarness {
             event_injector: None,
             rewind_method: RewindMethod::Handoff,
             rewind_specs: None,
+            tagged_prompts: None,
         }
     }
 }
@@ -1098,6 +1101,13 @@ impl FakeHarness {
         (self, specs)
     }
 
+    /// Records the prompt id every tagged send carried.
+    pub fn with_tagged_prompts(mut self) -> (Self, TaggedPrompts) {
+        let prompts = TaggedPrompts::default();
+        self.tagged_prompts = Some(prompts.clone());
+        (self, prompts)
+    }
+
     /// Hands the test a handle on a live session's event stream.
     pub fn with_event_injector(mut self) -> (Self, EventInjector) {
         let injector = EventInjector::default();
@@ -1113,6 +1123,20 @@ pub struct RewindSpecs(Arc<Mutex<Vec<Option<SessionRewind>>>>);
 impl RewindSpecs {
     /// Every boundary, oldest start first.
     pub fn get(&self) -> Vec<Option<SessionRewind>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// The prompt ids tagged sends carried, in send order.
+#[derive(Clone, Debug, Default)]
+pub struct TaggedPrompts(Arc<Mutex<Vec<Option<String>>>>);
+
+impl TaggedPrompts {
+    /// Every prompt id, oldest send first.
+    pub fn get(&self) -> Vec<Option<String>> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1320,6 +1344,7 @@ impl Harness for FakeHarness {
             diagnostic_before_death: self.diagnostic_before_death.clone(),
             immediate_stream_end: self.immediate_stream_end,
             generic_death_gate: self.generic_death_gate.clone(),
+            tagged_prompts: self.tagged_prompts.clone(),
         }))
     }
 }
@@ -1401,6 +1426,8 @@ pub struct FakeSession {
     immediate_stream_end: bool,
     /// Holds a dead send's failure until this gate opens.
     generic_death_gate: Option<Gate>,
+    /// Where tagged prompt ids are recorded, when a test asked for them.
+    tagged_prompts: Option<TaggedPrompts>,
 }
 
 #[async_trait]
@@ -1709,6 +1736,35 @@ impl HarnessSession for FakeSession {
             gate_completion,
         );
         Ok(())
+    }
+
+    async fn send_tagged(
+        &mut self,
+        input: UserInput,
+        prompt_id: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        if let Some(prompts) = &self.tagged_prompts {
+            prompts
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(prompt_id.map(str::to_owned));
+        }
+        self.send(input).await
+    }
+
+    fn provider_turn(&self) -> crate::ProviderTurn {
+        match self.kind {
+            HarnessKind::Codex => crate::ProviderTurn {
+                turn_id: Some(format!("provider-turn-{}", self.sends)),
+                last_message_id: None,
+            },
+            _ => crate::ProviderTurn {
+                turn_id: None,
+                last_message_id: (self.sends > 1)
+                    .then(|| format!("provider-message-{}", self.sends - 1)),
+            },
+        }
     }
 
     async fn interrupt(&mut self) -> Result<(), HarnessError> {

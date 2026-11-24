@@ -269,6 +269,7 @@ function changes(): FsTurnChanges {
   return {
     thread_id: thread,
     turn_id: activeTurn,
+    complete: false,
     files: [
       {
         path: "a.ts",

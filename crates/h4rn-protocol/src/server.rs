@@ -1097,6 +1097,12 @@ pub enum Event {
         /// Whether workspace files were put back to the pre-message snapshot.
         #[serde(default)]
         files_restored: bool,
+        /// The durable restore record that committed with this cut, when files
+        /// were restored. A restarted daemon uses it to finish or roll back a
+        /// restore that was interrupted before the commit.
+        #[serde(default)]
+        #[ts(optional)]
+        restore_id: Option<String>,
         /// When the rewind happened.
         at: DateTime<Utc>,
     },

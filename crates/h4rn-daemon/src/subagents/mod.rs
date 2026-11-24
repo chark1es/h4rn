@@ -140,6 +140,7 @@ impl From<ManagerError> for SubagentError {
         match error {
             ManagerError::NotFound(message) => Self::NotFound(message),
             ManagerError::Conflict(message) => Self::Conflict(message),
+            ManagerError::ConflictWithHint(message, _) => Self::Conflict(message),
             ManagerError::InvalidRequest(message) => Self::Invalid(message),
             ManagerError::Unsupported(message) => Self::Unsupported(message),
             ManagerError::NotImplemented(message) => Self::Unsupported(message),

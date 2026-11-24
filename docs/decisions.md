@@ -1813,21 +1813,30 @@ another thread. A partial rewind — transcript edited but files half-restored,
 or files restored but history unchanged — is worse than refusing.
 
 **Decision.** **Edit from here** removes the chosen message and every later
-turn. One journaled `ThreadRewound` event is the durable cut; the UI folds it
-on replay, and the prompt returns only in the answer to the requesting device.
-The provider boundary is recorded with the thread and applied by the next
-session start (`--resume-session-at` for Claude Code, `thread/revert` for
-Codex); a harness without a native truncation gets a fresh session with a
-bounded handoff of the kept history. The file choice exists only for a thread
-in its own linked worktree, is refused when another thread or agent session
-shares the directory (completed subagents of the same thread excepted), and is
-performed before the journal write. A failed restore journals nothing, and its
-own bytes are rolled back. Current bytes are captured in memory for that
-rollback.
+turn. Prompts and cuts are folded in journal order, so a prompt sent after an
+earlier cut is live and editable; a queued message is journaled under the turn
+that really ran it. One journaled `ThreadRewound` event is the durable cut; the
+UI folds it on replay, and the prompt returns only in the answer to the
+requesting device. The provider boundary names what the provider really
+recorded: Claude Code's assistant-message uuid before the removed prompt,
+Codex's accepted provider turn for the first removed delivered prompt. A
+harness without a native truncation, or a boundary the provider refuses, gets a
+fresh session with a bounded handoff of the kept history. The file choice
+exists only for a thread in its own linked worktree with a complete pre-turn
+checkpoint (a git tree of the whole tracked worktree), is refused when another
+live thread or agent session shares the directory (finished, fully idle
+subagents of the same thread excepted), and requires the same worktree
+registration the thread was created with. The restore writes a durable journal
+with the replaced bytes, applies the files, commits the cut and the record
+changes together, and only then publishes the new in-memory state. A failed
+commit rolls the files back; a crash between apply and commit is rolled back at
+the next startup, while a committed cut keeps its files. The workspace is
+reserved through the commit so nothing starts inside it mid-restore. Symlinks
+are restored as directory entries and never followed.
 
 **Consequences.** The transcript and provider history can be at slightly
 different points between the rewind and the next prompt, but no session that
 still holds the removed turns is ever written to. The word "rewind" in the UI
-means the conversation; file restore is a separate, explicitly warned choice.
-A provider that loses its native boundary degrades to a handoff rather than
-resuming the wrong history.
+means the conversation; file restore is a separate, explicitly warned choice
+offered only where a complete checkpoint exists. A provider that loses its
+native boundary degrades to a handoff rather than resuming the wrong history.

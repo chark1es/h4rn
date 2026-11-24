@@ -15,6 +15,18 @@ import type { MessageRole, ThreadSummary } from "@/gen";
 import type { StreamTurn, ThreadLog, TurnItem } from "@/lib/store/projection";
 
 const mock = vi.hoisted(() => {
+  const restoredAttachments: {
+    id: string;
+    name: string;
+    mime: string;
+    size: number;
+    local_path: string;
+  }[] = [];
+  const restoreAttachments = vi.fn(
+    (attachments: typeof restoredAttachments) => {
+      restoredAttachments.push(...attachments);
+    },
+  );
   const state: {
     connection: { status: string };
     hosts: Record<string, { online: boolean; name: string }>;
@@ -45,6 +57,7 @@ const mock = vi.hoisted(() => {
   };
   return {
     state,
+    restoredAttachments,
     sendMessage:
       vi.fn<(threadId: string, text: string, attachments: unknown[]) => Promise<boolean>>(),
     interruptThread: vi.fn(),
@@ -53,10 +66,22 @@ const mock = vi.hoisted(() => {
     setPanelTab: vi.fn(),
     openNewThread: vi.fn(),
     consumeComposerRestore: vi.fn(),
-    restoreAttachments: vi.fn(),
+    restoreAttachments,
     attachments: () => ({
-      attachments: [] as unknown[],
-      tasks: [] as unknown[],
+      attachments: restoredAttachments,
+      tasks: restoredAttachments.map((attachment, index) => ({
+        key: `restored-${index}`,
+        file: { name: attachment.name, size: attachment.size },
+        snapshot: {
+          phase: "done",
+          totalBytes: attachment.size,
+          sentBytes: attachment.size,
+        },
+        failure: null,
+        invalid: null,
+        previewUrl: null,
+        restored: attachment,
+      })),
       uploading: false,
       failed: false,
       blockedReason: null,
@@ -68,7 +93,7 @@ const mock = vi.hoisted(() => {
       remove: () => undefined,
       retry: () => undefined,
       clear: () => undefined,
-      restore: mock.restoreAttachments,
+      restore: restoreAttachments,
     }),
   };
 });
@@ -1379,6 +1404,33 @@ describe("Composer / command menu", () => {
 describe("Composer rewind restore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mock.restoredAttachments.length = 0;
+    mock.state.ui.composerRestore = null;
+  });
+
+  it("renders a restored attachment and sends it with the prompt", async () => {
+    const attachment = {
+      id: "a".repeat(64),
+      name: "notes.txt",
+      mime: "text/plain",
+      size: 12,
+      local_path: "/tmp/notes.txt",
+    };
+    mock.state.ui.composerRestore = {
+      threadId: THREAD,
+      token: 11,
+      prompt: "the edited prompt",
+      attachments: [attachment],
+    };
+    mock.sendMessage.mockResolvedValue(true);
+    renderComposer();
+    runAnimationFrames();
+
+    expect(await screen.findByText("notes.txt")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() =>
+      expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "the edited prompt", [attachment]),
+    );
   });
 
   it("puts the restored prompt below the unsent draft and adopts its attachments", () => {

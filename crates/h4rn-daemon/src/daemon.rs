@@ -391,6 +391,10 @@ impl DaemonBuilder {
             }
         }
         manager.set_snapshot_store(fs.snapshots());
+        manager
+            .recover_pending_restores()
+            .await
+            .map_err(|error| anyhow::anyhow!("recover an interrupted file restore: {error}"))?;
         let projects = Arc::new(
             crate::projects::ProjectService::open(&self.config.data_dir, hosts.local_id())
                 .map_err(|error| anyhow::anyhow!("open the project list: {error}"))?

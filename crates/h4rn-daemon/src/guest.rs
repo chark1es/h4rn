@@ -2240,11 +2240,13 @@ fn guest_event(event: Event) -> Option<Event> {
             thread_id,
             before_item_id,
             files_restored,
+            restore_id,
             at,
         } => Some(Event::ThreadRewound {
             thread_id,
             before_item_id,
             files_restored,
+            restore_id,
             at,
         }),
         Event::AgentStateChanged { thread_id, state } => {

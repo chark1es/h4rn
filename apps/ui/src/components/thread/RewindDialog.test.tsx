@@ -9,11 +9,13 @@ import { RewindDialog } from "./RewindDialog";
 const mock = vi.hoisted(() => ({
   rewindThread: vi.fn(async () => ({}) as never),
   refusal: null as string | null,
+  filesAvailable: true,
 }));
 
 vi.mock("@/lib/store/appStore", () => ({
   rewindThread: mock.rewindThread,
   rewindRefusal: () => mock.refusal,
+  filesRewindAvailable: () => mock.filesAvailable,
 }));
 
 const thread: ThreadSummary = {
@@ -60,6 +62,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   mock.refusal = null;
+  mock.filesAvailable = true;
 });
 
 function open(overrides: Partial<ThreadSummary> = {}) {
@@ -102,6 +105,13 @@ describe("RewindDialog", () => {
       expect(mock.rewindThread).toHaveBeenCalledWith("thread_1", "item_user_1", true),
     );
     await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it("explains a missing complete checkpoint", () => {
+    mock.filesAvailable = false;
+    open();
+    expect(screen.queryByText("Revert files too")).toBeNull();
+    expect(screen.getByText(/no complete file checkpoint/)).toBeTruthy();
   });
 
   it("only offers the conversation when the thread is in the main folder", () => {

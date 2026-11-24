@@ -1513,10 +1513,31 @@ export function rewindRefusal(
   ) {
     return "Wait for the current turn to finish, or stop it first.";
   }
-  if (summary.agent_state === "scheduled" || summary.agent_state === "rate_limited") {
+  // Only a real armed resume blocks the edit. A cancelled resume can leave the
+  // thread's last state saying "rate_limited" with nothing scheduled.
+  if (summary.resume_at != null || summary.agent_state === "scheduled") {
     return "Cancel the automatic resume first.";
   }
   return null;
+}
+
+/**
+ * Whether every removed turn has a complete pre-turn file checkpoint.
+ *
+ * The checkpoint, not the diff list, decides whether "Revert files too" can
+ * cover a shell command or another change no tool call named. A turn without
+ * one refuses the file choice rather than quietly restoring a partial set.
+ */
+export function filesRewindAvailable(
+  log: ThreadLog | undefined,
+  beforeItemId: string | null,
+): boolean {
+  if (!log || !beforeItemId) return false;
+  const index = log.turns.findIndex((turn) =>
+    turn.items.some((item) => item.kind === "message" && item.itemId === beforeItemId),
+  );
+  if (index < 0) return false;
+  return log.turns.slice(index).every((turn) => turn.changes?.complete === true);
 }
 
 function harnessName(harness: ThreadSummary["harness"]): string {

@@ -2301,6 +2301,8 @@ fn idle_thread_meta(
         agent_fingerprint: None,
         parked: None,
         pending_rewind: None,
+        worktree_identity: None,
+        provider_turns: Default::default(),
         imported: None,
     }
 }

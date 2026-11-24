@@ -501,19 +501,25 @@ impl CodexSession {
 
         // A rewind recorded before this start drops the provider turns after
         // the boundary. It runs before the first prompt, so the session the
-        // daemon receives really has the edited history.
-        if let Some(SessionRewind::KeepTurns { keep }) = spec.rewind.as_ref() {
+        // daemon receives really has the edited history. A boundary this
+        // conversation does not know is not a success: the caller falls back to
+        // the handoff rather than pretending the provider was truncated.
+        if let Some(SessionRewind::BeforeTurn { turn }) = spec.rewind.as_ref() {
             let turns = lock(&self.shared).turns.clone();
-            let keep = *keep as usize;
-            if keep < turns.len() {
-                let before = turns[keep].clone();
-                self.request(
-                    "thread/revert",
-                    json!({ "threadId": thread_id, "beforeTurnId": before }),
-                )
-                .await?;
-                lock(&self.shared).turns.truncate(keep);
-            }
+            let Some(position) = turns.iter().position(|candidate| candidate == turn) else {
+                return Err(HarnessError::Unsupported {
+                    harness: self.kind,
+                    feature: format!(
+                        "the provider turn `{turn}` is no longer in this conversation"
+                    ),
+                });
+            };
+            self.request(
+                "thread/revert",
+                json!({ "threadId": thread_id, "beforeTurnId": turn }),
+            )
+            .await?;
+            lock(&self.shared).turns.truncate(position);
         }
 
         // The model catalogue says which efforts and speed tiers this thread
@@ -810,6 +816,13 @@ impl HarnessSession for CodexSession {
         self.interrupt_requested.store(false, Ordering::SeqCst);
         self.mark_state(AgentState::Thinking);
         Ok(())
+    }
+
+    fn provider_turn(&self) -> crate::ProviderTurn {
+        crate::ProviderTurn {
+            turn_id: lock(&self.shared).turns.last().cloned(),
+            ..crate::ProviderTurn::default()
+        }
     }
 
     async fn interrupt(&mut self) -> Result<(), HarnessError> {

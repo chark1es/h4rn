@@ -164,6 +164,20 @@ pub struct UserInput {
     pub attachments: Vec<AttachmentRef>,
 }
 
+/// What one accepted prompt became in the provider's own history.
+///
+/// Claude Code records a uuid for every message; the assistant reply before a
+/// prompt is the boundary a truncating resume keeps. Codex records a turn id
+/// for every `turn/start`; the first removed turn is what `thread/revert`
+/// names. Either can be absent when the adapter does not know it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderTurn {
+    /// Codex's provider turn id, once the prompt was accepted.
+    pub turn_id: Option<String>,
+    /// Claude Code's uuid for the assistant message just before the prompt.
+    pub last_message_id: Option<String>,
+}
+
 /// Normalized harness output.
 ///
 /// Adapters translate their vendor stream into these values; the daemon
@@ -539,6 +553,15 @@ pub trait HarnessSession: Send {
         _prompt_id: Option<&str>,
     ) -> Result<(), HarnessError> {
         self.send(input).await
+    }
+
+    /// What the prompt just accepted means to the provider's own history.
+    ///
+    /// The daemon records this beside the turn so a later rewind can name the
+    /// provider's last kept message or turn instead of guessing from a local
+    /// prompt index. An adapter that cannot name one keeps the default.
+    fn provider_turn(&self) -> ProviderTurn {
+        ProviderTurn::default()
     }
 
     /// Answers an approval request raised by the harness.

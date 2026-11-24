@@ -41,12 +41,11 @@ pub enum SessionRewind {
         /// The prompt uuid the harness recorded for the first removed turn.
         message: String,
     },
-    /// Resume the session, then keep only this many provider turns (Codex's
-    /// `thread/revert`).
-    KeepTurns {
-        /// Provider turns kept, oldest first.
-        #[ts(type = "number")]
-        keep: u32,
+    /// Resume the session, then drop this provider turn and everything after
+    /// it (Codex's `thread/revert`).
+    BeforeTurn {
+        /// The first removed provider turn id, as Codex accepted it.
+        turn: String,
     },
 }
 
@@ -98,12 +97,14 @@ mod tests {
     #[test]
     fn a_pending_native_rewind_names_its_boundary() {
         let pending = PendingRewind::Native {
-            session: SessionRewind::KeepTurns { keep: 2 },
+            session: SessionRewind::BeforeTurn {
+                turn: "turn-b".into(),
+            },
         };
         let value = serde_json::to_value(&pending).unwrap();
         assert_eq!(value["kind"], "native");
-        assert_eq!(value["session"]["kind"], "keep_turns");
-        assert_eq!(value["session"]["keep"], 2);
+        assert_eq!(value["session"]["kind"], "before_turn");
+        assert_eq!(value["session"]["turn"], "turn-b");
         assert_eq!(
             serde_json::from_value::<PendingRewind>(value).unwrap(),
             pending

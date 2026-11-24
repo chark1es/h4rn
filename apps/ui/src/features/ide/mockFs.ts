@@ -825,6 +825,7 @@ export class MockFs {
     return {
       thread_id: threadId,
       turn_id: turnId,
+      complete: false,
       note: null,
       files: TURN_CHANGES.map(({ path, added, removed }) => {
         return {

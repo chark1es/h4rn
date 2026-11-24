@@ -185,7 +185,7 @@ impl Harness for ClaudeCodeHarness {
         &self,
         spec: SessionSpec,
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
-        if matches!(spec.rewind, Some(SessionRewind::KeepTurns { .. })) {
+        if matches!(spec.rewind, Some(SessionRewind::BeforeTurn { .. })) {
             return Err(HarnessError::Unsupported {
                 harness: self.kind(),
                 feature: "that rewind boundary; Claude Code resumes at a message id".into(),
@@ -316,6 +316,7 @@ impl Harness for ClaudeCodeHarness {
             closed: false,
             control_seq: 0,
             prompt_id: None,
+            prompt_boundary: None,
             fixed_permission_mode: spec.env_overrides.contains_key(ENV_PERMISSION_MODE),
         }))
     }
@@ -345,6 +346,12 @@ pub struct ClaudeCodeSession {
     /// Claude Code records it as the message uuid, which is what a later
     /// truncating resume names.
     prompt_id: Option<String>,
+    /// The last assistant message uuid before the prompt being written.
+    ///
+    /// Claude Code's truncating resume keeps the named message and everything
+    /// before it, so the kept boundary is the assistant reply that preceded
+    /// the removed prompt, never the removed prompt itself.
+    prompt_boundary: Option<String>,
     /// The mode is pinned by an explicit environment override, so the thread
     /// control cannot change it.
     fixed_permission_mode: bool,
@@ -364,6 +371,11 @@ struct SharedState {
     /// The stdout task resolves one on the parsed frame; a request that is
     /// never answered times out in [`ClaudeCodeSession::send_control_request`].
     pending_controls: HashMap<String, tokio::sync::oneshot::Sender<ControlReply>>,
+    /// The uuid of the most recent assistant message the CLI emitted.
+    ///
+    /// Claude Code names every message; the last one before a prompt is the
+    /// boundary a truncating resume keeps.
+    last_assistant_uuid: Option<String>,
     /// Whether the stdout reader has ended, so no reply can ever arrive.
     ///
     /// Set and read under the same lock as `pending_controls`: a request that
@@ -382,6 +394,7 @@ impl SharedState {
             last_turn: None,
             touched_paths: Vec::new(),
             pending_controls: HashMap::new(),
+            last_assistant_uuid: None,
             control_closed: false,
         }
     }
@@ -556,6 +569,10 @@ impl ClaudeCodeSession {
         }
 
         let frame = build_user_frame(&input.text, &attachments, prompt_id)?;
+        // The assistant reply that came before this prompt is the last kept
+        // provider message: a truncating resume at it drops this prompt and
+        // everything after without dropping the kept answer.
+        self.prompt_boundary = lock(&self.shared).last_assistant_uuid.clone();
         self.write_frame(frame).await?;
         self.interrupt_requested.store(false, Ordering::SeqCst);
         self.mark_state(AgentState::Thinking);
@@ -580,6 +597,13 @@ impl HarnessSession for ClaudeCodeSession {
         prompt_id: Option<&str>,
     ) -> Result<(), HarnessError> {
         self.send_with_prompt(input, prompt_id).await
+    }
+
+    fn provider_turn(&self) -> crate::ProviderTurn {
+        crate::ProviderTurn {
+            last_message_id: self.prompt_boundary.clone(),
+            ..crate::ProviderTurn::default()
+        }
     }
 
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
@@ -783,6 +807,7 @@ fn spawn_stdout_reader(
                 state.state = parser.agent_state();
                 state.touched_paths = parser.touched_paths().to_vec();
                 state.last_turn = parser.last_turn().cloned();
+                state.last_assistant_uuid = parser.last_assistant_uuid().map(str::to_string);
             }
 
             let completed = events
@@ -1397,7 +1422,9 @@ mod tests {
                 .expect("runtime")
                 .block_on(harness.start_session({
                     let mut spec = spec(Path::new("/tmp"));
-                    spec.rewind = Some(SessionRewind::KeepTurns { keep: 1 });
+                    spec.rewind = Some(SessionRewind::BeforeTurn {
+                        turn: "turn-b".into(),
+                    });
                     spec
                 })) {
                 Ok(_) => panic!("a turn boundary is not a message boundary"),
