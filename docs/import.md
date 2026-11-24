@@ -83,7 +83,9 @@ project's quota is full, the rest of that project's Claude Code transcripts are
 not read at all; one already imported is still recognised and keeps its place in
 the project's count, including one that names no session id. A path-keyed
 transcript counts only while its size and content fingerprint still match what
-was imported, so one that grew or was rewritten is not counted as the old file.
+was imported, so one that grew or was rewritten is not counted as the old file;
+every claim stored for the path is checked, so a transcript imported, rewritten
+and imported again, then restored to the version imported first, still counts.
 That shortcut is per
 Claude Code folder, because its folder names the working directory. Codex
 rollouts live in date folders shared by every project, so each rollout is still
@@ -101,7 +103,12 @@ already in h4rn is not checked again.
 Starting an import adds any project that is new and creates one thread per
 conversation. Each source file's identity (its session id, or its path with size
 and content fingerprint when it names none) is recorded, so running the import
-again only adds conversations h4rn has not seen. The id used for the claim comes
+again only adds conversations h4rn has not seen. The stored identity names the
+kind of claim it is — `session:` before a session id, `path:` before a file — so
+a session id that is spelled exactly like a path key still counts as the session
+it is. A database written before kinds were stored is classified once, inside a
+write transaction when the journal opens, using the rules that were in force
+then. The id used for the claim comes
 from the full parse, not the scan's head, so two differently named copies whose
 session id sits in a later record still import once. The scan also checks the
 identity stored for each transcript, not only the one its head revealed, so an
@@ -127,9 +134,11 @@ secure transport is split into chunks the client joins before reading it, so a
 600 KiB prompt stays whole. The journal decides where each page ends from its
 stored byte budget and its event cap, and one statement returns both the page and
 whether anything follows it, so a replay is a consistent snapshot and asking for
-the next page reads one page rather than the rest of the thread. A page of
-history written by an older daemon can therefore end at a different event than it
-used to, but every event still arrives once and in order.
+the next page reads one page rather than the rest of the thread. The lookahead
+row that says a page has more returns only that flag: its own stored text is not
+read out, so a tiny page followed by a 32 MiB event never fetches that body. A
+page of history written by an older daemon can therefore end at a different
+event than it used to, but every event still arrives once and in order.
 
 ## Continuing an imported thread
 

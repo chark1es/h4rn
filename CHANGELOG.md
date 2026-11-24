@@ -636,9 +636,22 @@ All notable changes to h4rn are recorded here. The format follows
   the same id.
 - **A stored import claim is matched for what it really is.** A session id that
   merely looks like a path key (`path:vendor:42:nightly`) stays a session id, so
-  a transcript whose id appears only late in the file is not offered again. When
-  a full project recognises a transcript by path, the file must still match the
-  size and content fingerprint stored with it.
+  a transcript whose id appears only late in the file is not offered again. The
+  claim's kind is now stored in the key itself — `session:` before an id,
+  `path:` before a file — so a session id spelled exactly like a canonical path
+  key cannot be read as one or collide with a different transcript's path
+  claim. A database written before that is classified once, inside one write
+  transaction when the journal opens, using the rules that were in force then.
+  When a full project recognises a transcript by path, the file must still match
+  the size and content fingerprint stored with it, and every claim stored for
+  that path is checked rather than only the newest: a transcript imported,
+  rewritten and imported again, then restored to the version imported first,
+  still counts.
+- **A replay page's lookahead row does not fetch the body it rejects.** The
+  one statement that returns a page and its `more` flag now selects only the
+  flag for the row that did not fit, so a tiny page followed by a 32 MiB event
+  never reads that body out of the walk. Its page snapshot tests also run in
+  parallel without one test's injected write being consumed by another's read.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

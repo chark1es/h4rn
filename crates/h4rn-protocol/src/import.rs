@@ -156,7 +156,8 @@ pub struct ImportEvent {
 /// One conversation's source identity, stored so it is imported once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ImportedSource {
-    /// Dedupe key: source plus session id, or the transcript path.
+    /// Dedupe key: `source:session:<id>`, or the transcript path with its size
+    /// and content fingerprint.
     pub key: String,
     /// Thread the conversation became.
     pub thread_id: crate::ids::ThreadId,
@@ -169,9 +170,14 @@ pub struct ImportedSource {
 }
 
 /// Parses the same source key the daemon writes.
+///
+/// The kind of claim is part of the stored identity: a session claim always
+/// says `session:`, a path claim always says `path:`. A session id can spell
+/// anything, including `path:` followed by a size and digest, and it still
+/// stays a session claim because its own kind comes first.
 pub fn source_key(source: ImportSource, session_id: Option<&str>, path: &str) -> String {
     match session_id.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(id) => format!("{}:{id}", source.as_str()),
+        Some(id) => format!("{}:session:{id}", source.as_str()),
         None => format!("{}:path:{path}", source.as_str()),
     }
 }
@@ -211,6 +217,26 @@ fn path_key_parts(key: &str) -> Option<(u64, &str)> {
     Some((size.parse().ok()?, fingerprint))
 }
 
+/// The identity a claim written before its kind was stored should get.
+///
+/// Older daemons spelled a session claim as `source:<id>` and a path claim as
+/// the full `source:path:<path>:<size>:<fingerprint>`. Classifying such a key
+/// with the rules in force at that time gives its new identity; `None` means
+/// the key was already a path claim.
+///
+/// Only a stored database that has not run the migration should be passed in:
+/// a key that already says `session:` is read as an old session id whose own
+/// spelling begins with `session:`, which is how it would have been classified
+/// before kinds were stored. The migration runs once, marked in the journal, so
+/// no key is classified twice.
+pub fn migrated_claim_key(key: &str) -> Option<String> {
+    let (source, rest) = key.split_once(':')?;
+    if path_key_parts(key).is_some() {
+        return None;
+    }
+    Some(format!("{source}:session:{rest}"))
+}
+
 /// The file size a path key pins, when it has the full path-key shape.
 ///
 /// Keys without that exact suffix are not path keys: no daemon ever wrote a
@@ -229,9 +255,9 @@ pub fn path_keyed_source_fingerprint(key: &str) -> Option<&str> {
 /// A path key carries the file's size and content fingerprint, so it pins one
 /// version of the file: a transcript that keeps growing is a new conversation.
 /// A session-id key names the conversation itself, so it still recognises a
-/// transcript whose head read did not reveal the id. Only the full
-/// `:path:<path>:<size>:<fingerprint>` shape counts, so a session id that itself
-/// begins with `path:` is still a session id.
+/// transcript whose head read did not reveal the id. The claim's kind is its
+/// stored `path:` prefix; a session claim always says `session:` first, even
+/// when its id spells the rest of a path key, so no spelling can switch kinds.
 pub fn path_keyed_source_key(key: &str) -> bool {
     path_key_parts(key).is_some()
 }
@@ -244,7 +270,7 @@ mod tests {
     fn source_keys_prefer_the_session_id() {
         assert_eq!(
             source_key(ImportSource::ClaudeCode, Some("abc"), "/tmp/a.jsonl"),
-            "claude_code:abc"
+            "claude_code:session:abc"
         );
         assert_eq!(
             source_key(ImportSource::Codex, None, "/tmp/a.jsonl"),
@@ -318,6 +344,50 @@ mod tests {
         // Nor is one with characters outside lowercase hex.
         let not_hex = format!("codex:path:/tmp/a.jsonl:42:{}", "g".repeat(64));
         assert!(!path_keyed_source_key(&not_hex));
+    }
+
+    #[test]
+    fn a_session_id_spelled_exactly_like_a_path_key_stays_a_session_claim() {
+        // The id is the whole `path:<path>:<size>:<fingerprint>` tail a real
+        // path claim would carry, and the claim is stored with its own kind in
+        // front of it, so it can never be read as a path claim.
+        let path_claim = path_source_key(ImportSource::Codex, "/tmp/a.jsonl", 42, &fingerprint());
+        let id = path_claim
+            .strip_prefix("codex:")
+            .expect("a path key names its source");
+        let session = source_key(ImportSource::Codex, Some(id), "/tmp/a.jsonl");
+        assert_eq!(session, format!("codex:session:{id}"));
+        assert!(!path_keyed_source_key(&session));
+        assert_eq!(path_keyed_source_size(&session), None);
+        assert_ne!(session, path_claim, "one claim cannot stand for the other");
+        assert!(path_keyed_source_key(&path_claim));
+    }
+
+    #[test]
+    fn an_old_claim_gets_the_kind_it_was_written_with() {
+        // A session claim written before the kind was stored.
+        assert_eq!(
+            migrated_claim_key("claude_code:abc").as_deref(),
+            Some("claude_code:session:abc")
+        );
+        // A path claim keeps the spelling every daemon has used for it.
+        let path_claim = path_source_key(ImportSource::Codex, "/tmp/a.jsonl", 42, &fingerprint());
+        assert_eq!(migrated_claim_key(&path_claim), None);
+        // An old unsuffixed path claim was never recognised as path-keyed
+        // under the old rules, so it becomes the session claim it acted as.
+        assert_eq!(
+            migrated_claim_key("claude_code:path:/tmp/a.jsonl").as_deref(),
+            Some("claude_code:session:path:/tmp/a.jsonl")
+        );
+        // A key that already carries its kind was never written this way; an
+        // old session id that happens to begin with `session:` becomes the
+        // session claim it always was. The journal marks the migration so this
+        // runs once.
+        assert_eq!(
+            migrated_claim_key("claude_code:session:abc").as_deref(),
+            Some("claude_code:session:session:abc")
+        );
+        assert_eq!(migrated_claim_key("no-source"), None);
     }
 
     #[test]
