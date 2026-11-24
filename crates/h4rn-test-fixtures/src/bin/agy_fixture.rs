@@ -18,12 +18,13 @@
 //! the exit (`H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS`). The first answers with
 //! an ordinary newline-terminated frame, exactly as a real peer does, and
 //! `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the
-//! prompt queued behind the turn reaches it, so a test can force the ordering
-//! where the queue was promoted before the exit-only limit landed. A mid-turn
-//! exit with no stderr at all (`H4RN_FIXTURE_SILENT_EXIT`) proves the exit
-//! status still names the row when there is no stderr to outrank it. An idle
-//! death with no EOF at all (`H4RN_FIXTURE_IDLE_EXIT_ONLY`) holds stdout open
-//! from a keeper process, so only the exit report can announce it.
+//! prompt queued behind the turn reaches it, acts on that prompt without
+//! reporting a tool call, and only then exits, so a test can force the ordering
+//! where the queue was promoted and read before the exit-only limit landed. A
+//! mid-turn exit with no stderr at all (`H4RN_FIXTURE_SILENT_EXIT`) proves the
+//! exit status still names the row when there is no stderr to outrank it. An
+//! idle death with no EOF at all (`H4RN_FIXTURE_IDLE_EXIT_ONLY`) holds stdout
+//! open from a keeper process, so only the exit report can announce it.
 
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
@@ -496,11 +497,17 @@ fn main() {
                     // The same death, but the transport stays healthy until the
                     // prompt queued behind this turn reaches it: this process
                     // reads that promoted prompt (writing a marker so the test
-                    // knows it arrived) and only then closes stdout and exits
-                    // with the reset. That fixes the hard ordering: the daemon
-                    // promotes the queued turn while the transport is open, so
-                    // the exit-only limit lands after the promoted write.
+                    // knows it arrived), acts on it with an edit it never
+                    // reports as a tool call, and only then closes stdout and
+                    // exits with the reset. That fixes the hard ordering: the
+                    // daemon promotes the queued turn while the transport is
+                    // open, so the exit-only limit lands after the promoted
+                    // write.
                     wait_for_more_prompts(".agy-fixture-limit-after-queue-second");
+                    let _ = std::fs::write(
+                        std::path::Path::new(".agy-fixture-limit-after-queue-edit"),
+                        b"edited",
+                    );
                     wait_for_gate(
                         ".agy-fixture-limit-after-queue-waiting",
                         ".agy-fixture-limit-after-queue-gate",
