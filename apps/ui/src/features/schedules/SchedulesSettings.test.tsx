@@ -28,7 +28,9 @@ function task(patch: Partial<ScheduleTask> = {}): ScheduleTask {
     thread_id: null,
     webhook_path_set: false,
     once_consumed: false,
-    next_run_at: "2026-11-24T08:00:00.000Z",
+    // Always a day ahead of the real clock: the list only names a next run
+    // that is still in the future.
+    next_run_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     last_run: null,
     created_at: "2026-11-20T10:00:00.000Z",
     updated_at: "2026-11-20T10:00:00.000Z",
