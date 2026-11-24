@@ -17,14 +17,17 @@ import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
 import {
   applyEvent,
   createThread,
+  editQueuedMessage,
   getState,
   loadThread,
   loadThreadQueue,
   loadThreads,
   moveQueuedMessage,
+  sendQueuedNow,
   setThreadTab,
   steerOldestQueued,
   store,
+  syncQueueWithSummary,
 } from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
@@ -530,5 +533,213 @@ describe("queued messages", () => {
     expect(requests).toEqual([0, 1]);
     expect(queueIds("queue_thread")).toEqual(["qm_one", "qm_two"]);
     expect(getState().queues.queue_thread?.total).toBe(2);
+  });
+  it("names the turn it saw when a queued message is sent now", async () => {
+    seedQueue({ active_turn_id: "turn_seen" });
+    fake.response.current = {
+      type: "queue_updated",
+      thread_id: "queue_thread",
+      queued: [queued("qm_two", "second")],
+      total: 1,
+      revision: 5,
+      seq: 41,
+    };
+
+    await sendQueuedNow("queue_thread", "qm_one");
+
+    const body = fake.request.mock.calls[0]?.[0] as {
+      action: { type: string; turn_id: string | null };
+    };
+    expect(body.action).toEqual({ type: "send_now", turn_id: "turn_seen" });
+  });
+
+  it("restarts paging when the queue changes between two pages", async () => {
+    const current = getState().threads.queue_thread;
+    if (!current) throw new Error("the queue test thread is missing");
+    store.setState({
+      ...getState(),
+      queues: {},
+      threads: { queue_thread: { ...current, queued_count: 2, queue_revision: 7 } },
+    });
+    // A promotion lands between the pages: the second page belongs to a new
+    // queue, so joining them would show rows that never stood next to each
+    // other. The read starts over instead.
+    fake.request
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: [queued("qm_one", "first")],
+        total: 2,
+        next_offset: 1,
+        revision: 7,
+      }))
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: [queued("qm_two", "second")],
+        total: 1,
+        next_offset: 1,
+        revision: 8,
+      }))
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: [queued("qm_two", "second")],
+        total: 1,
+        next_offset: 1,
+        revision: 8,
+      }));
+
+    await loadThreadQueue("queue_thread");
+
+    const requests = fake.request.mock.calls.map((call) => (call[0] as { offset: number }).offset);
+    expect(requests).toEqual([0, 1, 0]);
+    expect(queueIds("queue_thread")).toEqual(["qm_two"]);
+    expect(getState().queues.queue_thread?.revision).toBe(8);
+  });
+
+  it("refetches every page when a reply carries only the first one", async () => {
+    const current = getState().threads.queue_thread;
+    if (!current) throw new Error("the queue test thread is missing");
+    store.setState({
+      ...getState(),
+      queues: {},
+      threadSeqs: { queue_thread: 40 },
+      threads: { queue_thread: { ...current, queued_count: 150, queue_revision: 5 } },
+    });
+    const rows = Array.from({ length: 150 }, (_, index) =>
+      queued(`qm_${index}`, `message ${index}`),
+    );
+    // The daemon's pages carry the edit that just landed.
+    const afterEdit = rows.map((message, index) =>
+      index === 0 ? { ...message, text: "edited words" } : message,
+    );
+    fake.response.current = null;
+    fake.request
+      .mockResolvedValueOnce({
+        type: "queue_updated",
+        thread_id: "queue_thread",
+        // A bounded reply: the first page of a much longer queue, with the
+        // edited row in it.
+        queued: rows.slice(0, 100),
+        total: 150,
+        revision: 5,
+        seq: 41,
+      })
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: afterEdit.slice(0, 100),
+        total: 150,
+        next_offset: 100,
+        revision: 5,
+      }))
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: afterEdit.slice(100),
+        total: 150,
+        next_offset: 150,
+        revision: 5,
+      }));
+
+    await editQueuedMessage("queue_thread", "qm_0", "edited words", []);
+
+    await vi.waitFor(() => expect(getState().queues.queue_thread?.total).toBe(150));
+    expect(getState().queues.queue_thread?.queued).toHaveLength(150);
+    const edited = getState().queues.queue_thread?.queued.find(
+      (message) => message.message_id === "qm_0",
+    );
+    expect(edited?.text).toBe("edited words");
+  });
+
+  it("drops a queue reply that arrives after the summary says nothing waits", async () => {
+    const current = getState().threads.queue_thread;
+    if (!current) throw new Error("the queue test thread is missing");
+    store.setState({
+      ...getState(),
+      queues: {
+        queue_thread: {
+          queued: [queued("qm_one", "first"), queued("qm_two", "second")],
+          total: 2,
+          revision: 4,
+        },
+      },
+      threads: { queue_thread: { ...current, queued_count: 2, queue_revision: 4 } },
+    });
+    // A fetch for the two-message queue is in flight when the message starts:
+    // the summary then says nothing waits, at a newer revision.
+    fake.request.mockImplementationOnce(async () => ({
+      type: "thread_queue",
+      thread_id: "queue_thread",
+      queued: [queued("qm_one", "first"), queued("qm_two", "second")],
+      total: 2,
+      next_offset: 2,
+      revision: 4,
+    }));
+    const inflight = loadThreadQueue("queue_thread");
+    syncQueueWithSummary({ ...current, queued_count: 0, queue_revision: 5 });
+
+    await inflight;
+
+    expect(queueIds("queue_thread")).toEqual([]);
+    expect(getState().queues.queue_thread?.revision).toBe(5);
+  });
+
+  it("loads the queue when the thread it opens still has messages waiting", async () => {
+    store.setState({ ...getState(), queues: {} });
+    const summary = {
+      ...threadSummary({ threadId: "queue_thread", host: "load_host_q" }),
+      queued_count: 1,
+      queue_revision: 9,
+    };
+    fake.request
+      .mockResolvedValueOnce({
+        type: "thread",
+        summary,
+        events: [],
+        next_seq: 0,
+        more: false,
+      })
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: [queued("qm_one", "first")],
+        total: 1,
+        next_offset: 1,
+        revision: 9,
+      }));
+
+    await loadThread("queue_thread", 0);
+
+    await vi.waitFor(() => expect(queueIds("queue_thread")).toEqual(["qm_one"]));
+  });
+
+  it("loads the queue for a thread list that still has messages waiting", async () => {
+    seedHosts(["load_host_q"]);
+    store.setState({ ...getState(), queues: {} });
+    fake.request
+      .mockImplementationOnce(async () => ({
+        type: "threads",
+        threads: [
+          {
+            ...threadSummary({ threadId: "queue_thread", host: "load_host_q" }),
+            queued_count: 1,
+            queue_revision: 9,
+          },
+        ],
+      }))
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: [queued("qm_one", "first")],
+        total: 1,
+        next_offset: 1,
+        revision: 9,
+      }));
+
+    await loadThreads();
+
+    await vi.waitFor(() => expect(queueIds("queue_thread")).toEqual(["qm_one"]));
   });
 });

@@ -1615,6 +1615,34 @@ describe("follow-up behaviour and queued messages", () => {
     expect(readThreadDraft(HOST, THREAD)).toBe("my draft");
   });
 
+  it("restores the draft another tab saved while the edit was open", () => {
+    writeThreadDraft(HOST, THREAD, "my draft");
+    flushDrafts();
+    render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
+    const input = textarea();
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+    fireEvent.change(input, { target: { value: "editing now" } });
+
+    // The other tab saved newer text while this box held the queued message.
+    // The edit began with "my draft", but that is not what the thread has now.
+    const key = draftStorageKey("thread", HOST, THREAD);
+    const stored = JSON.stringify({
+      text: "another tab's draft",
+      updatedAt: Date.now() + 5_000,
+      nonce: "another-tab",
+    });
+    window.localStorage.setItem(key, stored);
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key, newValue: stored }));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(input.value).toBe("another tab's draft");
+    expect(readThreadDraft(HOST, THREAD)).toBe("another tab's draft");
+  });
+
   it("keeps an active edit when another tab writes the thread's draft", () => {
     render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
     const input = textarea();

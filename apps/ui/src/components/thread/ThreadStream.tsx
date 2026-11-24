@@ -324,7 +324,7 @@ export function ThreadStream({
                   summary={summary}
                   message={row.message}
                   index={row.index}
-                  total={Math.max(queuedTotal, rows.length)}
+                  total={queuedTotal}
                   editing={queuedEditThread === threadId && editingId === row.message.message_id}
                 />
               )}

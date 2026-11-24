@@ -130,20 +130,17 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   const [anchor, setAnchor] = useState({ left: 0, bottom: 0, lineHeight: 21 });
   /**
-   * The queued message open for editing, with everything it displaced.
+   * The queued message open for editing, with the text it replaced.
    *
-   * Three texts stay separate: the box while editing (the edit buffer), the
-   * saved text of the message being edited, and the thread's own draft. The
-   * draft stays in storage untouched, so Cancel restores it; a second Edit
-   * keeps the same stored draft instead of replacing it with the first
-   * message's text.
+   * Two texts stay separate: the box while editing (the edit buffer) and the
+   * saved text of the message being edited. The thread's own draft stays in
+   * storage untouched, so Cancel reads it back and restores whatever is really
+   * saved — including text another tab wrote during the edit.
    */
   const [editing, setEditing] = useState<{
     messageId: string;
     /** The message's text when the edit began, to tell changed text apart. */
     originalText: string;
-    draftText: string;
-    draftRevision: DraftRevision | null;
   } | null>(null);
   const followUp = useFollowUpBehavior();
   const multiline = useMultilineEnter();
@@ -394,18 +391,12 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
 
   const beginEdit = (message: QueuedMessage) => {
     if (sending) return;
-    // A second Edit while one is open keeps the draft the first one displaced:
-    // the box holds that message, not the person's draft.
-    setEditing((current) =>
-      current
-        ? { ...current, messageId: message.message_id, originalText: message.text }
-        : {
-            messageId: message.message_id,
-            originalText: message.text,
-            draftText: text,
-            draftRevision: revision.current,
-          },
-    );
+    // A second Edit while one is open only points the edit at the other
+    // message: the thread's draft is in storage, so nothing is displaced.
+    setEditing({
+      messageId: message.message_id,
+      originalText: message.text,
+    });
     setText(message.text);
     setUi({
       queuedEdit: { threadId: summary.thread_id, messageId: message.message_id },
@@ -427,23 +418,22 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       if (!current) return;
       setEditing(null);
       setUi({ queuedEdit: null });
+      // Read the draft storage rather than the copy taken when the edit began:
+      // another tab may have saved newer text while this box held the queued
+      // message, and that text is what the person's thread really has.
+      const stored = readThreadDraftEntry(summary.host, summary.thread_id);
       if (restoreDraft) {
-        setText(current.draftText);
-        revision.current = current.draftRevision;
+        setText(stored.text);
+        revision.current = stored.revision;
         return;
       }
       // The queued message vanished while it was being edited (its turn
       // started, or another client removed it). Changed text moves into the
       // composer only when there was no draft to restore and something was
       // actually changed; otherwise the draft wins and the edit is dropped.
-      if (current.draftText.trim().length > 0) {
-        setText(current.draftText);
-        revision.current = current.draftRevision;
-        return;
-      }
-      if (text === current.originalText) {
-        setText(current.draftText);
-        revision.current = current.draftRevision;
+      if (stored.text.trim().length > 0 || text === current.originalText) {
+        setText(stored.text);
+        revision.current = stored.revision;
         return;
       }
       revision.current = writeThreadDraft(summary.host, summary.thread_id, text);
