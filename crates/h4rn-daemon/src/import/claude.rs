@@ -19,27 +19,31 @@ use serde::Deserialize;
 use super::record::{Content, RawText, Record, RecordReader};
 use super::{
     History, KeptMessage, ParsedConversation, Peek, SkipReason, derive_title, open_reader,
-    parse_time, read_line_bounded,
+    parse_time,
 };
 
 /// Reads just enough of a transcript to group it by folder.
+///
+/// Uses the same streaming record reader as the import, so a record with a
+/// multi-megabyte attachment beside a short prompt still shows its prompt; a
+/// fixed line cap would hide the conversation from discovery altogether.
 pub(crate) fn peek(path: &Path) -> Option<Peek> {
-    let mut reader = open_reader(path).ok()?;
-    let mut line = Vec::new();
-    let mut records = 0;
+    let mut records = RecordReader::new(open_reader(path).ok()?);
+    let mut count = 0;
     let mut cwd: Option<PathBuf> = None;
     let mut session_id: Option<String> = None;
     let mut has_visible = false;
-    while let Ok(Some(complete)) = read_line_bounded(&mut reader, &mut line) {
-        records += 1;
-        if records > 200 {
+    loop {
+        let outcome = records.next::<TranscriptRecord>();
+        count += 1;
+        if count > 200 {
             break;
         }
-        if !complete {
-            continue;
-        }
-        let Ok(record) = serde_json::from_slice::<TranscriptRecord>(&line) else {
-            continue;
+        let record = match outcome {
+            Ok(Record::Parsed(record)) => record,
+            Ok(Record::End) => break,
+            Ok(Record::Blank | Record::Malformed | Record::OverLimit) => continue,
+            Err(_) => break,
         };
         if cwd.is_none()
             && let Some(value) = record

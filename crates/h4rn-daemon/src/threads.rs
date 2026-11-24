@@ -5148,6 +5148,32 @@ impl Inner {
                     set_at: record.meta.created_at,
                 });
                 record.state.acknowledged = true;
+                // The import is history, so its agent is finished and the
+                // sidebar sorts by the newest message it contains, not by the
+                // moment h4rn wrote the thread. Without this a restart shows
+                // Idle, loses the "Imported from" receipt, and floats the
+                // thread to its first message.
+                record.state.agent_state = AgentState::Done;
+                match self
+                    .journal
+                    .read_wire_since(&record.meta.thread_id, 0)
+                    .await
+                {
+                    Ok(events) => {
+                        if let Some(at) = events.iter().rev().find_map(|wire| match &wire.event {
+                            Event::ItemCompleted { at: Some(at), .. } => Some(*at),
+                            _ => None,
+                        }) {
+                            record.state.last_activity = record.state.last_activity.max(at);
+                            record.state.last_user_activity =
+                                record.state.last_user_activity.max(at);
+                            record.state.last_event_at = record.state.last_event_at.max(at);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not read an imported thread's timestamps");
+                    }
+                }
             }
 
             if record.state.phase.is_active() {
@@ -11595,6 +11621,77 @@ mod tests {
             handle.lock().await.active.is_none(),
             "the turn ended instead of staying Working"
         );
+    }
+
+    /// A restart restores an imported thread's finished agent and its newest
+    /// message time, not the moment the thread was written.
+    #[tokio::test]
+    async fn a_restarted_import_is_done_at_its_newest_message_time() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let first =
+            open_test_manager_with_journal(FakeHarness::new(), host.clone(), Arc::clone(&journal))
+                .await;
+        let newest = DateTime::parse_from_rfc3339("2026-08-24T11:59:00Z")
+            .expect("time")
+            .with_timezone(&Utc);
+        let created = newest - chrono::TimeDelta::hours(3);
+        assert!(
+            first
+                .import_thread(NewImportedThread {
+                    host: host.clone(),
+                    harness: HarnessKind::ClaudeCode,
+                    workspace_path: workspace.path().display().to_string(),
+                    project_path: None,
+                    model: "fake-model".into(),
+                    title: "Imported".into(),
+                    created_at: created,
+                    last_active: created,
+                    resume_id: Some("saved-session".into()),
+                    source: h4rn_protocol::ImportSource::ClaudeCode,
+                    source_path: workspace.path().join("saved.jsonl").display().to_string(),
+                    source_key: "claude_code:saved-session".into(),
+                    messages: vec![
+                        ImportedThreadMessage {
+                            role: MessageRole::User,
+                            text: "an earlier request".into(),
+                            at: created,
+                        },
+                        ImportedThreadMessage {
+                            role: MessageRole::Assistant,
+                            text: "the newest reply".into(),
+                            at: newest,
+                        },
+                    ],
+                })
+                .await
+                .expect("import")
+        );
+        let thread_id = first
+            .list_threads(&ThreadFilter::default())
+            .await
+            .first()
+            .expect("imported thread")
+            .thread_id
+            .clone();
+        first.shutdown().await;
+
+        let second =
+            open_test_manager_with_journal(FakeHarness::new(), host, Arc::clone(&journal)).await;
+        let handle = second
+            .inner
+            .handle(&thread_id)
+            .await
+            .expect("restored thread");
+        let record = handle.lock().await;
+        assert_eq!(record.state.agent_state, AgentState::Done);
+        assert_eq!(record.state.last_activity, newest);
+        assert_eq!(record.state.last_user_activity, newest);
+        assert_eq!(record.state.last_event_at, newest);
+        drop(record);
+        second.shutdown().await;
     }
 
     /// A Stop inside the imported-resume retry settles the turn instead of

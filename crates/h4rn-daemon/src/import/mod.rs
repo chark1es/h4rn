@@ -15,7 +15,7 @@ mod record;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -47,12 +47,6 @@ pub const MAX_RECORDS: usize = 100_000;
 
 /// Most messages kept from one conversation.
 pub const MAX_KEPT_MESSAGES: usize = 200;
-
-/// A peeked line longer than this is skipped instead of parsed.
-///
-/// Only discovery reads whole lines; the parsers stream a record at a time so
-/// an attachment or tool result cannot hide the prompt beside it.
-const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// How recent a project must be to be offered already checked.
 const RECOMMENDED_AGE_DAYS: i64 = 30;
@@ -308,50 +302,6 @@ pub(crate) fn parse_time(value: Option<&str>) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-/// Reads one bounded line; `None` at end of file, `Some(false)` when the line
-/// was too long and its tail was discarded.
-pub(crate) fn read_line_bounded(
-    reader: &mut impl BufRead,
-    out: &mut Vec<u8>,
-) -> std::io::Result<Option<bool>> {
-    out.clear();
-    let mut truncated = false;
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            return Ok(if out.is_empty() {
-                None
-            } else {
-                Some(!truncated)
-            });
-        }
-        if let Some(position) = available.iter().position(|byte| *byte == b'\n') {
-            if out.len() < MAX_LINE_BYTES {
-                let take = (MAX_LINE_BYTES - out.len()).min(position);
-                out.extend_from_slice(&available[..take]);
-                if take < position {
-                    truncated = true;
-                }
-            } else {
-                truncated = true;
-            }
-            reader.consume(position + 1);
-            return Ok(Some(!truncated));
-        }
-        let length = available.len();
-        if out.len() < MAX_LINE_BYTES {
-            let take = (MAX_LINE_BYTES - out.len()).min(length);
-            out.extend_from_slice(&available[..take]);
-            if take < length {
-                truncated = true;
-            }
-        } else {
-            truncated = true;
-        }
-        reader.consume(length);
-    }
-}
-
 /// Finds the git checkout a folder belongs to, including linked worktrees.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct GitGroup {
@@ -513,15 +463,15 @@ fn content_fingerprint(path: &Path, size: u64) -> String {
 }
 
 /// The source identity the journal stores for one transcript.
-fn imported_key(source: ImportSource, session_id: Option<&str>, candidate: &Candidate) -> String {
-    let path = candidate.path.display().to_string();
+fn imported_key(source: ImportSource, session_id: Option<&str>, path: &Path, size: u64) -> String {
+    let path = path.display().to_string();
     match session_id.map(str::trim).filter(|id| !id.is_empty()) {
         Some(id) => h4rn_protocol::source_key(source, Some(id), &path),
         None => h4rn_protocol::path_source_key(
             source,
             &path,
-            candidate.size,
-            &content_fingerprint(&candidate.path, candidate.size),
+            size,
+            &content_fingerprint(Path::new(&path), size),
         ),
     }
 }
@@ -531,7 +481,7 @@ fn imported_key(source: ImportSource, session_id: Option<&str>, candidate: &Cand
 struct ConversationFile {
     source: ImportSource,
     path: PathBuf,
-    imported_key: String,
+    size: u64,
     already_imported: bool,
     /// The checkout this conversation belongs to, when it differed from the
     /// folder the conversation ran in.
@@ -894,16 +844,10 @@ impl ImportRunner {
         // cannot hold a worker thread that other requests need.
         let path = file.path.clone();
         let source = file.source;
-        let parsed = tokio::task::spawn_blocking(move || match source {
-            ImportSource::ClaudeCode => claude::parse(&path),
-            ImportSource::Codex => codex::parse(&path),
-        })
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "a transcript parser did not finish");
-            ImportFailure::Failed
-        })?
-        .map_err(ImportFailure::Skipped)?;
+        let parsed = match parse_off_runtime(source, path).await {
+            Ok(parsed) => parsed,
+            Err(failure) => return Err(failure),
+        };
         // The head named one folder; the full parser may have found another.
         // Whatever it picked still has to stay out of `~/Downloads`.
         if is_under_downloads(&parsed.cwd, &self.home) {
@@ -922,6 +866,17 @@ impl ImportRunner {
         if messages.is_empty() {
             return Ok(Imported::Nothing);
         }
+        // The claim uses the identity the full parse found, not the scan's
+        // provisional one: a record the scan's head did not reach may name the
+        // conversation's session id, and two copies of it must still import
+        // once. The unique claim inside the import transaction is the last
+        // check, so a concurrent run cannot slip between them.
+        let claim_key = imported_key(
+            parsed.source,
+            parsed.session_id.as_deref(),
+            &file.path,
+            file.size,
+        );
         let request = NewImportedThread {
             host: self.host.clone(),
             harness: file.source.harness(),
@@ -938,7 +893,7 @@ impl ImportRunner {
             resume_id: parsed.session_id,
             source: parsed.source,
             source_path: parsed.path.display().to_string(),
-            source_key: file.imported_key.clone(),
+            source_key: claim_key,
             messages,
         };
         self.threads
@@ -969,6 +924,30 @@ impl ImportRunner {
         let _ = self.events.send(ImportEvent {
             progress: progress.clone(),
         });
+    }
+}
+
+/// Parses one transcript on the blocking pool.
+///
+/// The parsers use ordinary blocking file I/O. Running them inline would stall
+/// the async worker for as long as the transcript takes to read, so a busy
+/// daemon could not answer anything else meanwhile.
+async fn parse_off_runtime(
+    source: ImportSource,
+    path: PathBuf,
+) -> Result<ParsedConversation, ImportFailure> {
+    let parsed = tokio::task::spawn_blocking(move || match source {
+        ImportSource::ClaudeCode => claude::parse(&path),
+        ImportSource::Codex => codex::parse(&path),
+    })
+    .await;
+    match parsed {
+        Ok(Ok(conversation)) => Ok(conversation),
+        Ok(Err(reason)) => Err(ImportFailure::Skipped(reason)),
+        Err(error) => {
+            tracing::warn!(%error, "a transcript parser did not finish");
+            Err(ImportFailure::Failed)
+        }
     }
 }
 
@@ -1072,13 +1051,13 @@ fn scan_blocking(
             // The quota is spent: no head is read. An already-imported source
             // still counts for its project, so older conversations are not
             // hidden behind it on a later attempt.
-            if let Some(imported_key) = imported.key_for_path(&candidate.path)
+            if imported.key_for_path(&candidate.path).is_some()
                 && let Some(group) = groups.get_mut(key)
             {
                 group.files.push(ConversationFile {
                     source: candidate.source,
                     path: candidate.path,
-                    imported_key: imported_key.to_owned(),
+                    size: candidate.size,
                     already_imported: true,
                     project_path: None,
                 });
@@ -1132,7 +1111,12 @@ fn scan_blocking(
                 None,
             ),
         };
-        let imported_key = imported_key(candidate.source, peek.session_id.as_deref(), &candidate);
+        let imported_key = imported_key(
+            candidate.source,
+            peek.session_id.as_deref(),
+            &candidate.path,
+            candidate.size,
+        );
         let already_imported = imported.contains(&imported_key);
         let group_key = key.clone();
         let group = groups.entry(key).or_insert_with(|| Group {
@@ -1184,8 +1168,8 @@ fn scan_blocking(
         group.files.push(ConversationFile {
             source: candidate.source,
             path: candidate.path,
+            size: candidate.size,
             already_imported,
-            imported_key,
             project_path: folded,
         });
     }
@@ -1476,6 +1460,76 @@ mod tests {
             },
         });
         format!("{user}\n{assistant}\n")
+    }
+
+    /// Parsing a transcript must not hold the async runtime.
+    ///
+    /// A FIFO with no writer yet blocks the parser's file open. A single-worker
+    /// runtime can deliver its heartbeat only while that read runs on the
+    /// blocking pool: without `spawn_blocking` the worker is stuck until the
+    /// writer arrives, so the heartbeat lands after the writer.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn parsing_a_transcript_does_not_stall_the_runtime() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("transcript.jsonl");
+        let fifo = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("path");
+        let made = unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        let workspace = dir.path().join("code");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let body = claude_transcript(&workspace, "fifo-session", "read from the pipe");
+
+        // The writer waits, so the parse is blocked on the FIFO while the
+        // heartbeat is due.
+        let writer_at = Arc::new(Mutex::new(None::<Instant>));
+        let writer_mark = Arc::clone(&writer_at);
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2_000));
+            *writer_mark.lock().expect("mark") = Some(Instant::now());
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&writer_path)
+                .expect("open fifo");
+            file.write_all(body.as_bytes()).expect("write");
+        });
+
+        let heartbeat_at = Arc::new(Mutex::new(None::<Instant>));
+        let heartbeat_mark = Arc::clone(&heartbeat_at);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            *heartbeat_mark.lock().expect("mark") = Some(Instant::now());
+        });
+        let parse_path = path.clone();
+        let parse =
+            tokio::spawn(
+                async move { parse_off_runtime(ImportSource::ClaudeCode, parse_path).await },
+            );
+
+        let parsed = tokio::time::timeout(Duration::from_secs(20), parse)
+            .await
+            .expect("the parser finished")
+            .expect("parser task");
+        writer.join().expect("writer");
+        let heartbeat = heartbeat_at.lock().expect("mark").expect("heartbeat ran");
+        let written = writer_at.lock().expect("mark").expect("writer ran");
+        assert!(
+            heartbeat < written,
+            "the runtime heartbeat waited for the transcript read: parsing ran inline"
+        );
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(_) => panic!("the transcript from the FIFO parsed"),
+        };
+        assert_eq!(
+            parsed.messages.first().expect("first message").text,
+            "read from the pipe"
+        );
     }
 
     #[test]

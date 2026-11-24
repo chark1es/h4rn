@@ -12,7 +12,7 @@ use h4rn_daemon::projects::ProjectService;
 use h4rn_daemon::threads::{ThreadManager, ThreadManagerOptions};
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
-    Event, HarnessKind, HostId, ImportEvent, MessageRole, ThreadFilter, ThreadTab,
+    AgentState, Event, HarnessKind, HostId, ImportEvent, MessageRole, ThreadFilter, ThreadTab,
 };
 use serde_json::json;
 
@@ -1062,6 +1062,16 @@ async fn an_imported_thread_is_still_done_with_its_timestamps_after_a_restart() 
     assert_eq!(claude.tab, ThreadTab::Done, "Done survives a restart");
     assert!(!claude.needs_attention, "an import raises no hand");
     assert!(!claude.unread);
+    assert_eq!(
+        claude.agent_state,
+        AgentState::Done,
+        "an imported thread stays finished after a restart"
+    );
+    assert_eq!(
+        claude.last_activity.to_rfc3339(),
+        "2026-11-18T09:02:00+00:00",
+        "the sidebar sorts by the newest imported message, not the write time"
+    );
 
     let snapshot = restarted
         .get_thread(&claude.thread_id, 0)
@@ -1084,6 +1094,141 @@ async fn an_imported_thread_is_still_done_with_its_timestamps_after_a_restart() 
         "2026-11-18T09:00:00+00:00",
         "the message keeps the time it was written"
     );
+}
+
+#[tokio::test]
+async fn a_prompt_beside_a_large_attachment_is_discovered_and_imported() {
+    // Discovery reads records with the same streaming reader the import uses,
+    // so a prompt sharing a record with a 5 MiB attachment is not hidden by a
+    // fixed line cap before the parser ever sees it.
+    let home = tempfile::tempdir().expect("home");
+    let home_path = home.path().to_path_buf();
+    let workspace = home_path.join("code/api");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let (_, manager, import) = services(
+        &home_path,
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let cwd = workspace.display().to_string();
+    let padding = "A".repeat(5 * 1024 * 1024);
+    write_jsonl(
+        &home_path
+            .join(".claude/projects/-code-api")
+            .join("session-large.jsonl"),
+        &[json!({
+            "type": "user",
+            "sessionId": "large-session",
+            "cwd": cwd,
+            "timestamp": "2026-11-18T09:00:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Summarise the screenshot"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": padding}},
+                ],
+            },
+        })],
+    );
+
+    let scan = import.scan().await;
+    assert_eq!(scan.projects.len(), 1, "{:?}", scan.warnings);
+    assert_eq!(
+        scan.projects[0].conversations, 1,
+        "the conversation beside the attachment is offered"
+    );
+    let mut events = import.subscribe();
+    import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    wait_finished(&mut events).await;
+
+    let thread = manager
+        .list_threads(&ThreadFilter::default())
+        .await
+        .into_iter()
+        .find(|thread| thread.harness == HarnessKind::ClaudeCode)
+        .expect("imported thread");
+    let snapshot = manager
+        .get_thread(&thread.thread_id, 0)
+        .await
+        .expect("snapshot");
+    assert!(
+        snapshot.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::ItemCompleted {
+                item: h4rn_protocol::Item::Message { text, .. },
+                ..
+            } if text == "Summarise the screenshot"
+        )),
+        "the short prompt beside the attachment reaches the import"
+    );
+}
+
+#[tokio::test]
+async fn two_differently_named_copies_with_a_late_session_id_import_once() {
+    // The session id sits in a record past the scan's head, so each copy's
+    // provisional identity is its own file name. The full parse finds the id,
+    // and the claim must use that identity: the conversation imports once.
+    let home = tempfile::tempdir().expect("home");
+    let home_path = home.path().to_path_buf();
+    let workspace = home_path.join("code/api");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let (_, manager, import) = services(
+        &home_path,
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let cwd = workspace.display().to_string();
+    let transcript = || {
+        let mut records = Vec::new();
+        for index in 0..250 {
+            let kind = if index % 2 == 0 { "user" } else { "assistant" };
+            let mut record = json!({
+                "type": kind,
+                "cwd": cwd,
+                "timestamp": "2026-11-18T09:00:00Z",
+                "message": {
+                    "role": kind,
+                    "content": [{"type": "text", "text": format!("message {index}")}],
+                },
+            });
+            if kind == "assistant" {
+                record["message"]["model"] = json!("claude-sonnet-5");
+            }
+            if index == 249 {
+                record["sessionId"] = json!("late-session");
+            }
+            records.push(record);
+        }
+        records
+    };
+    let directory = home_path.join(".claude/projects/-code-api");
+    write_jsonl(&directory.join("copy-one.jsonl"), &transcript());
+    write_jsonl(&directory.join("copy-two.jsonl"), &transcript());
+
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].conversations, 2,
+        "the head names no session, so both copies are offered"
+    );
+    let mut events = import.subscribe();
+    import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    wait_finished(&mut events).await;
+
+    let threads = manager
+        .list_threads(&ThreadFilter::default())
+        .await
+        .into_iter()
+        .filter(|thread| thread.harness == HarnessKind::ClaudeCode)
+        .count();
+    assert_eq!(threads, 1, "the two copies are one conversation");
 }
 
 #[tokio::test]

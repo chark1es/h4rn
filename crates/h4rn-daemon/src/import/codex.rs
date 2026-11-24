@@ -25,8 +25,14 @@
 //! that names the turn already open is not a boundary, because Codex writes
 //! the turn's generated context between `task_started` and `turn_context` with
 //! the same turn id.
+//!
+//! A canonical prompt is stored exactly as written; only the comparison key is
+//! trimmed. A rewound rollout (`session_meta.payload.history_base`) inherits a
+//! byte prefix of the rollout it replaced, streamed before its own records so
+//! the original request and reply stay in the imported conversation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -35,28 +41,45 @@ use serde::Deserialize;
 
 use super::record::{Content, Record, RecordReader, maybe_text};
 use super::{
-    History, KeptMessage, ParsedConversation, Peek, SkipReason, derive_title, open_reader,
-    parse_time, read_line_bounded,
+    History, KeptMessage, MAX_FILE_BYTES, ParsedConversation, Peek, SkipReason, derive_title,
+    open_reader, parse_time,
 };
 
+/// How many rollouts back a rewind chain may go.
+///
+/// A chain is one record per rewind; a corrupt `history_base` must not walk the
+/// whole sessions tree.
+const MAX_HISTORY_CHAIN: usize = 32;
+
+/// A rewound rollout's inherited prefix.
+#[derive(Clone, Debug)]
+struct HistoryBase {
+    thread_id: String,
+    /// Bytes of the replaced rollout, from its start, to stream first.
+    end_byte_offset: u64,
+}
+
 /// Reads just enough of a rollout to group it by folder.
+///
+/// Uses the same streaming record reader as the import, so a record with a
+/// multi-megabyte attachment beside a short prompt still shows its prompt.
 pub(crate) fn peek(path: &Path) -> Option<Peek> {
-    let mut reader = open_reader(path).ok()?;
-    let mut line = Vec::new();
-    let mut records = 0;
+    let mut records = RecordReader::new(open_reader(path).ok()?);
+    let mut count = 0;
     let mut cwd: Option<PathBuf> = None;
     let mut session_id: Option<String> = None;
     let mut has_visible = false;
-    while let Ok(Some(complete)) = read_line_bounded(&mut reader, &mut line) {
-        records += 1;
-        if records > 200 {
+    loop {
+        let outcome = records.next::<TranscriptRecord>();
+        count += 1;
+        if count > 200 {
             break;
         }
-        if !complete {
-            continue;
-        }
-        let Ok(record) = serde_json::from_slice::<TranscriptRecord>(&line) else {
-            continue;
+        let record = match outcome {
+            Ok(Record::Parsed(record)) => record,
+            Ok(Record::End) => break,
+            Ok(Record::Blank | Record::Malformed | Record::OverLimit) => continue,
+            Err(_) => break,
         };
         if cwd.is_none()
             && let Some(value) = record.cwd()
@@ -108,6 +131,10 @@ struct Payload {
     /// because the user text beside it would be lost.
     #[serde(rename = "internal_chat_message_metadata_passthrough")]
     metadata: Option<serde_json::Value>,
+    /// A rewound rollout names the prefix it inherits. Read leniently for the
+    /// same reason as `metadata`.
+    #[serde(rename = "history_base")]
+    history_base: Option<serde_json::Value>,
 }
 
 impl Payload {
@@ -120,6 +147,22 @@ impl Payload {
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
+    }
+
+    /// The prefix a rewound rollout inherits, when the record declares one.
+    fn history_base(&self) -> Option<HistoryBase> {
+        let base = self.history_base.as_ref()?.as_object()?;
+        let thread_id = base
+            .get("thread_id")?
+            .as_str()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())?
+            .to_owned();
+        let end_byte_offset = base.get("end_byte_offset")?.as_u64()?;
+        Some(HistoryBase {
+            thread_id,
+            end_byte_offset,
+        })
     }
 }
 
@@ -170,55 +213,236 @@ impl TranscriptRecord {
 }
 
 /// Parses one rollout, streaming its records one at a time.
+///
+/// A rewound rollout declares a byte prefix of the rollout it replaced in its
+/// own `session_meta`. Those inherited records stream first, so the original
+/// request and reply are part of the conversation; when the prefix cannot be
+/// read the rollout is imported on its own, as before.
 pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
-    let reader = open_reader(path)?;
     let fallback = file_time(path);
-    let mut records = RecordReader::new(reader);
-    let mut count = 0usize;
-    let mut cwd: Option<PathBuf> = None;
-    let mut session_id: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut last_seen: Option<DateTime<Utc>> = None;
-    let mut history = History::new();
-    let mut turn = TurnState::default();
+    let mut parser = RolloutParser::new(fallback);
+    let prefixes = inherited_rollouts(path)?;
+    for prefix in prefixes.iter().rev() {
+        // An inherited record counts toward the same record and text limits as
+        // the rollout's own records.
+        match read_prefix(prefix, &mut parser) {
+            Ok(()) => {}
+            // The prefix is gone or unreadable: import this rollout on its own
+            // rather than inventing or dropping its own turns.
+            Err(SkipReason::Unreadable | SkipReason::NoWorkingDirectory) => {
+                parser = RolloutParser::new(fallback);
+                break;
+            }
+            Err(reason) => return Err(reason),
+        }
+    }
+    let reader = open_reader(path)?;
+    stream_records(reader, &mut parser, true)?;
+    parser.finish(path)
+}
 
+/// The number of bytes of a transcript read in one bounded line.
+fn read_prefix(prefix: &InheritedRollout, parser: &mut RolloutParser) -> Result<(), SkipReason> {
+    if prefix.end_byte_offset > MAX_FILE_BYTES {
+        return Err(SkipReason::TooMuchText);
+    }
+    let reader = open_reader(&prefix.path)?;
+    stream_records(reader.take(prefix.end_byte_offset), parser, false)
+}
+
+/// Streams every record of one rollout (or its inherited prefix) in order.
+fn stream_records(
+    reader: impl std::io::BufRead,
+    parser: &mut RolloutParser,
+    take_session_id: bool,
+) -> Result<(), SkipReason> {
+    let mut records = RecordReader::new(reader);
     loop {
-        let record = match records.next::<TranscriptRecord>() {
-            Ok(Record::Parsed(record)) => record,
-            Ok(Record::End) => break,
+        match records.next::<TranscriptRecord>() {
+            Ok(Record::Parsed(record)) => parser.consume(record, take_session_id)?,
+            Ok(Record::End) => return Ok(()),
             Ok(Record::Blank | Record::Malformed) => continue,
             // A record too long to read cannot be kept whole; skipping the
             // conversation with a warning beats silently dropping its turn.
             Ok(Record::OverLimit) => return Err(SkipReason::TooMuchText),
             Err(_) => return Err(SkipReason::Unreadable),
+        }
+    }
+}
+
+/// One rollout file whose first bytes a rewound rollout inherits.
+#[derive(Clone, Debug)]
+struct InheritedRollout {
+    path: PathBuf,
+    end_byte_offset: u64,
+}
+
+/// The `history_base` chain a rewound rollout declares, newest first.
+///
+/// A missing or malformed link ends the chain: the caller then reads whatever
+/// prefixes it could resolve, which is the rollout's own history.
+fn inherited_rollouts(path: &Path) -> Result<Vec<InheritedRollout>, SkipReason> {
+    let mut prefixes = Vec::new();
+    let mut visited = HashSet::new();
+    let mut base = match rollout_history_base(path)? {
+        Some(base) => base,
+        None => return Ok(prefixes),
+    };
+    while prefixes.len() < MAX_HISTORY_CHAIN {
+        if !visited.insert(base.thread_id.clone()) {
+            break;
+        }
+        let Some(predecessor) = find_rollout(path, &base.thread_id) else {
+            break;
         };
-        count += 1;
-        super::record_limit(count)?;
+        let next = rollout_history_base(&predecessor)?;
+        prefixes.push(InheritedRollout {
+            path: predecessor,
+            end_byte_offset: base.end_byte_offset,
+        });
+        let Some(next) = next else {
+            break;
+        };
+        base = next;
+    }
+    Ok(prefixes)
+}
+
+/// Reads a rollout's own `history_base` from the `session_meta` near its start.
+fn rollout_history_base(path: &Path) -> Result<Option<HistoryBase>, SkipReason> {
+    let reader = match open_reader(path) {
+        Ok(reader) => reader,
+        // A missing predecessor is not this rollout's failure.
+        Err(_) => return Ok(None),
+    };
+    let mut records = RecordReader::new(reader);
+    for _ in 0..8 {
+        match records.next::<TranscriptRecord>() {
+            Ok(Record::Parsed(record)) => {
+                if record.kind.as_deref() == Some("session_meta") {
+                    return Ok(record.payload.as_ref().and_then(Payload::history_base));
+                }
+            }
+            Ok(Record::End) => return Ok(None),
+            Ok(Record::Blank | Record::Malformed) => continue,
+            Ok(Record::OverLimit) => return Err(SkipReason::TooMuchText),
+            Err(_) => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// Finds the newest rollout file that names `id` in its file name.
+///
+/// Codex writes an original rollout as `rollout-<time>-<thread id>` and a
+/// rewound one as `<thread id>_<rollout id>`; either way the declared base is
+/// the trailing id.
+fn find_rollout(path: &Path, id: &str) -> Option<PathBuf> {
+    // sessions/YYYY/MM/DD/rollout-….jsonl: the walk starts at sessions.
+    let root = path.parent()?.parent()?.parent()?.parent()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    find_rollout_in(root, id, 0, &mut best);
+    best.map(|(_, path)| path)
+}
+
+fn find_rollout_in(
+    directory: &Path,
+    id: &str,
+    depth: usize,
+    best: &mut Option<(std::time::SystemTime, PathBuf)>,
+) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten().take(2000) {
+        let path = entry.path();
+        if path.is_dir() {
+            find_rollout_in(&path, id, depth + 1, best);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        if !(stem.ends_with(&format!("-{id}")) || stem.ends_with(&format!("_{id}")) || stem == id) {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(seen, _)| modified > *seen) {
+            *best = Some((modified, path));
+        }
+    }
+}
+
+/// The streaming state of one rollout read.
+struct RolloutParser {
+    fallback: DateTime<Utc>,
+    count: usize,
+    cwd: Option<PathBuf>,
+    session_id: Option<String>,
+    model: Option<String>,
+    last_seen: Option<DateTime<Utc>>,
+    history: History,
+    turn: TurnState,
+}
+
+impl RolloutParser {
+    fn new(fallback: DateTime<Utc>) -> Self {
+        Self {
+            fallback,
+            count: 0,
+            cwd: None,
+            session_id: None,
+            model: None,
+            last_seen: None,
+            history: History::new(),
+            turn: TurnState::default(),
+        }
+    }
+
+    /// Folds one parsed record into the conversation.
+    fn consume(
+        &mut self,
+        record: TranscriptRecord,
+        take_session_id: bool,
+    ) -> Result<(), SkipReason> {
+        self.count += 1;
+        super::record_limit(self.count)?;
         if let Some(at) = parse_time(record.timestamp.as_deref()) {
-            last_seen = Some(last_seen.map_or(at, |seen| seen.max(at)));
+            self.last_seen = Some(self.last_seen.map_or(at, |seen| seen.max(at)));
         }
         if let Some(value) = record.cwd() {
-            cwd = Some(PathBuf::from(value));
+            self.cwd = Some(PathBuf::from(value));
         }
         // A fork rollout repeats `session_meta`; the first id names the
-        // conversation, exactly as `peek` and the discovery scan read it.
-        if session_id.is_none()
+        // conversation, exactly as `peek` and the discovery scan read it. An
+        // inherited prefix's `session_meta` names the rollout it came from, so
+        // it never provides this rollout's id.
+        if take_session_id
+            && self.session_id.is_none()
             && let Some(value) = record.session_id()
         {
-            session_id = Some(value);
+            self.session_id = Some(value);
         }
         let kind = record.kind.as_deref().unwrap_or_default();
         let Some(payload) = record.payload.as_ref() else {
-            continue;
+            return Ok(());
         };
-        let at = parse_time(record.timestamp.as_deref()).unwrap_or(fallback);
+        let at = parse_time(record.timestamp.as_deref()).unwrap_or(self.fallback);
         match kind {
-            "session_meta" => continue,
+            "session_meta" => {}
             "turn_context" => {
                 if let Some(value) = payload.model.as_deref() {
                     let value = value.trim();
                     if !value.is_empty() {
-                        model = Some(value.to_owned());
+                        self.model = Some(value.to_owned());
                     }
                 }
                 let turn_id = payload
@@ -231,22 +455,18 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
                 // context, and then `turn_context` with the same id, and
                 // flushing there would commit that context as response-only
                 // before the prompt's canonical event arrives.
-                if !turn.names_current(turn_id) {
-                    flush_turn(&mut history, &mut turn);
-                    turn.current_id = turn_id.map(str::to_owned);
+                if !self.turn.names_current(turn_id) {
+                    flush_turn(&mut self.history, &mut self.turn);
+                    self.turn.current_id = turn_id.map(str::to_owned);
                 }
-                continue;
             }
             "event_msg" => match payload.kind.as_deref() {
                 Some("user_message") => {
-                    let text = payload
-                        .message
-                        .as_deref()
-                        .unwrap_or_default()
-                        .trim()
-                        .to_owned();
-                    if text.is_empty() {
-                        continue;
+                    // A canonical prompt is stored exactly as written; the
+                    // trimmed form is only the comparison key.
+                    let text = payload.message.clone().unwrap_or_default();
+                    if text.trim().is_empty() {
+                        return Ok(());
                     }
                     let turn_id = payload
                         .turn_id
@@ -254,15 +474,15 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
                         .map(str::trim)
                         .filter(|id| !id.is_empty())
                         .map(str::to_owned)
-                        .or_else(|| turn.current_id.clone());
-                    turn.push(
+                        .or_else(|| self.turn.current_id.clone());
+                    self.turn.push(
                         PendingUser {
                             text,
                             at,
                             canonical: true,
                             turn_id,
                         },
-                        &mut history,
+                        &mut self.history,
                     );
                 }
                 // Codex writes these boundaries, and a turn ends where it says.
@@ -272,30 +492,30 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
                         .as_deref()
                         .map(str::trim)
                         .filter(|id| !id.is_empty());
-                    if !turn.names_current(turn_id) {
-                        flush_turn(&mut history, &mut turn);
+                    if !self.turn.names_current(turn_id) {
+                        flush_turn(&mut self.history, &mut self.turn);
                         if let Some(id) = turn_id {
-                            turn.current_id = Some(id.to_owned());
+                            self.turn.current_id = Some(id.to_owned());
                         }
                     }
                 }
                 Some("task_complete" | "turn_aborted") => {
-                    flush_turn(&mut history, &mut turn);
-                    turn.current_id = None;
+                    flush_turn(&mut self.history, &mut self.turn);
+                    self.turn.current_id = None;
                 }
                 _ => {}
             },
             "response_item" => {
                 if payload.kind.as_deref() != Some("message") {
-                    continue;
+                    return Ok(());
                 }
                 let role = payload.role.as_deref().unwrap_or_default();
                 let Some(content) = payload.content.as_ref() else {
-                    continue;
+                    return Ok(());
                 };
                 let text = content.visible_text();
                 if text.is_empty() {
-                    continue;
+                    return Ok(());
                 }
                 match role {
                     "user" => {
@@ -303,19 +523,19 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
                         // a canonical event; guessing the current turn would
                         // drop text an interrupted turn never duplicated.
                         let turn_id = payload.metadata_turn_id();
-                        turn.push(
+                        self.turn.push(
                             PendingUser {
                                 text,
                                 at,
                                 canonical: false,
                                 turn_id,
                             },
-                            &mut history,
+                            &mut self.history,
                         );
                     }
                     "assistant" => {
-                        flush_turn(&mut history, &mut turn);
-                        history.push(KeptMessage {
+                        flush_turn(&mut self.history, &mut self.turn);
+                        self.history.push(KeptMessage {
                             role: MessageRole::Assistant,
                             text,
                             at,
@@ -326,40 +546,45 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
             }
             _ => {}
         }
+        Ok(())
     }
-    flush_turn(&mut history, &mut turn);
 
-    let Some(cwd) = cwd else {
-        return Err(SkipReason::NoWorkingDirectory);
-    };
-    let first_message_at = history.first_at();
-    let first_user = history.first_text();
-    let title = first_user
-        .as_deref()
-        .map(derive_codex_title)
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| "Imported thread".to_owned());
-    let messages = history.finish()?;
-    if messages.is_empty() {
-        return Err(SkipReason::Empty);
+    /// Ends the last turn and builds the conversation.
+    fn finish(mut self, path: &Path) -> Result<ParsedConversation, SkipReason> {
+        flush_turn(&mut self.history, &mut self.turn);
+        let fallback = self.fallback;
+        let Some(cwd) = self.cwd else {
+            return Err(SkipReason::NoWorkingDirectory);
+        };
+        let first_message_at = self.history.first_at();
+        let first_user = self.history.first_text();
+        let title = first_user
+            .as_deref()
+            .map(derive_codex_title)
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Imported thread".to_owned());
+        let messages = self.history.finish()?;
+        if messages.is_empty() {
+            return Err(SkipReason::Empty);
+        }
+        let created_at = first_message_at.unwrap_or(fallback);
+        let last_active = messages
+            .last()
+            .map(|message| message.at)
+            .or(self.last_seen)
+            .unwrap_or(fallback);
+        Ok(ParsedConversation {
+            source: ImportSource::Codex,
+            path: path.to_path_buf(),
+            cwd,
+            session_id: self.session_id,
+            title,
+            model: self.model,
+            created_at,
+            last_active,
+            messages,
+        })
     }
-    let created_at = first_message_at.unwrap_or(fallback);
-    let last_active = messages
-        .last()
-        .map(|message| message.at)
-        .or(last_seen)
-        .unwrap_or(fallback);
-    Ok(ParsedConversation {
-        source: ImportSource::Codex,
-        path: path.to_path_buf(),
-        cwd,
-        session_id,
-        title,
-        model,
-        created_at,
-        last_active,
-        messages,
-    })
 }
 
 /// The persisted state of the turn currently being read.
@@ -435,6 +660,9 @@ struct PendingUser {
 /// canonical text is dropped. A turn with no canonical event is response-only,
 /// so its context stays; and a copy whose turn id names another turn is kept, so
 /// a repeated prompt after an aborted turn loses neither turn's text.
+///
+/// The comparison key is the trimmed text: a response copy is trimmed when it
+/// is parsed, while a canonical event is kept exactly as written.
 fn flush_turn(history: &mut History, turn: &mut TurnState) {
     let pending = std::mem::take(&mut turn.pending);
     turn.pending_bytes = 0;
@@ -447,7 +675,7 @@ fn flush_turn(history: &mut History, turn: &mut TurnState) {
             user.turn_id.as_deref().is_some_and(|turn_id| {
                 pending
                     .iter()
-                    .any(|other| other.canonical && other.text == user.text)
+                    .any(|other| other.canonical && other.text.trim() == user.text.trim())
                     && !turn_id.is_empty()
             })
         })
@@ -456,7 +684,9 @@ fn flush_turn(history: &mut History, turn: &mut TurnState) {
     // How many response copies each canonical event may still claim by text.
     let mut canonical_texts: HashMap<String, usize> = HashMap::new();
     for user in pending.iter().filter(|user| user.canonical) {
-        *canonical_texts.entry(user.text.clone()).or_default() += 1;
+        *canonical_texts
+            .entry(user.text.trim().to_owned())
+            .or_default() += 1;
     }
     for user in pending {
         if user.canonical {
@@ -474,7 +704,7 @@ fn flush_turn(history: &mut History, turn: &mut TurnState) {
         {
             continue;
         }
-        if let Some(left) = canonical_texts.get_mut(&user.text)
+        if let Some(left) = canonical_texts.get_mut(user.text.trim())
             && *left > 0
         {
             *left -= 1;
@@ -553,13 +783,28 @@ mod tests {
         let directory = dir.path().join("sessions/2026/11/20");
         std::fs::create_dir_all(&directory).expect("sessions dir");
         let path = directory.join("rollout-2026-11-20T10-00-00-session.jsonl");
+        std::fs::write(&path, body_of(lines)).expect("rollout");
+        (dir, path)
+    }
+
+    /// Writes one rollout under `sessions/2026/08/24` and returns its path and
+    /// exact byte length.
+    fn write_named_rollout(dir: &Path, name: &str, lines: &[serde_json::Value]) -> (PathBuf, u64) {
+        let directory = dir.join("sessions/2026/08/24");
+        std::fs::create_dir_all(&directory).expect("sessions dir");
+        let path = directory.join(name);
+        let body = body_of(lines);
+        std::fs::write(&path, &body).expect("rollout");
+        (path, body.len() as u64)
+    }
+
+    fn body_of(lines: &[serde_json::Value]) -> String {
         let mut body = String::new();
         for line in lines {
             body.push_str(&line.to_string());
             body.push('\n');
         }
-        std::fs::write(&path, body).expect("rollout");
-        (dir, path)
+        body
     }
 
     fn meta() -> serde_json::Value {
@@ -702,6 +947,86 @@ mod tests {
             .collect();
         assert_eq!(texts, ["do the thing", "did it"]);
         assert_eq!(parsed.session_id.as_deref(), Some("codex-session-1"));
+    }
+
+    #[test]
+    fn a_canonical_prompt_keeps_its_original_whitespace() {
+        // t3code's whitespace fixture: the canonical event is stored exactly as
+        // written, with its leading indentation and trailing newline, while its
+        // response copy is recognised by the trimmed comparison key.
+        let canonical = "\n  Keep the canonical prompt  \n";
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            event_user(canonical),
+            response_user("Keep the canonical prompt", Some("turn-1")),
+            assistant("kept"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), [canonical]);
+        assert_eq!(parsed.title, "Keep the canonical prompt");
+    }
+
+    #[test]
+    fn a_rewound_rollout_keeps_the_history_it_inherits() {
+        // t3code's rewind fixture: the new rollout declares a byte prefix of the
+        // rollout it replaced. Both the original request and its reply stay.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let thread = "019a0000-0000-7000-8000-000000000001";
+        let rollout = "019a0000-0000-7000-8000-000000000002";
+        let kept_history = [
+            json!({
+                "timestamp": "2026-08-24T09:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": thread, "cwd": "/home/user/code/api", "history_mode": "paginated"},
+            }),
+            event_user("Keep the first request"),
+            assistant("First reply"),
+        ];
+        let (_, end_byte_offset) = write_named_rollout(
+            dir.path(),
+            &format!("rollout-2026-08-24T10-00-00-{thread}.jsonl"),
+            &kept_history,
+        );
+        let (rewound, _) = write_named_rollout(
+            dir.path(),
+            &format!("rollout-2026-08-24T11-00-00-{thread}_{rollout}.jsonl"),
+            &[
+                json!({
+                    "timestamp": "2026-08-24T11:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": thread,
+                        "cwd": "/home/user/code/api",
+                        "history_mode": "paginated",
+                        "history_base": {
+                            "thread_id": thread,
+                            "end_ordinal_exclusive": 3,
+                            "end_byte_offset": end_byte_offset,
+                        },
+                    },
+                }),
+                event_user("Ask again"),
+                assistant("Final reply"),
+            ],
+        );
+        let parsed = parse(&rewound).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Keep the first request",
+                "First reply",
+                "Ask again",
+                "Final reply"
+            ]
+        );
+        assert_eq!(parsed.session_id.as_deref(), Some(thread));
+        assert_eq!(parsed.title, "Keep the first request");
     }
 
     #[test]
