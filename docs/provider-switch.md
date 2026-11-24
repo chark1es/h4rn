@@ -2,7 +2,7 @@
 
 A thread can change provider between turns. The history, workspace and every
 setting the new harness offers stay with it; the next turn starts a fresh
-session there and continues from a bounded summary of the conversation.
+session there and continues from a bounded handoff of the conversation.
 
 ## Where it is offered
 
@@ -22,13 +22,15 @@ only fail after the switch, so it is not listed.
    daemon restart cannot resume the old conversation.
 3. `HarnessSwitched { from, to, at }` is journaled and the transcript shows a
    quiet divider: **Switched from Claude Code to Codex**.
-4. The first message on the new harness starts a fresh session and sends a
-   bounded handoff of the thread's journaled messages before your request. The
-   builder and budget are the same ones the import fallback uses
+4. The first turn on the new harness starts a fresh session and sends a bounded
+   handoff of the thread's journaled messages before your request, whether that
+   turn began as a Send, a message promoted from the queue, or an auto-resume.
+   The builder and budget are the same ones the import fallback uses
    ([docs/import.md](import.md)): 16,000 UTF-8 bytes by default,
    `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000. Your request is appended
-   verbatim and is never shortened. Later messages resume the new session
-   normally.
+   verbatim and is never shortened. The flag is cleared only once the harness
+   accepts that prompt, so a failed start or write still sends the history on
+   the retry. Later messages resume the new session normally.
 5. Each turn is metered against the harness and model that actually ran it.
 
 ## Settings that carry over
@@ -42,8 +44,16 @@ held:
 - a reasoning effort the new harness does not expose returns to its default;
 - a fast tier moving to a harness without one is turned off.
 
+A configured ACP agent names its own modes and efforts at session start. The
+switch resolves that catalogue before it commits (the same check Settings runs),
+so a value the agent does not advertise is dropped to its safe default and
+reported instead of being carried into a session that cannot start.
+
 The model is chosen for the new harness rather than carried over, because model
 names rarely mean the same thing across providers.
+
+A thread already on a configured ACP agent can switch to a different configured
+agent; the agent id is part of what the switch changes.
 
 ## When a switch is refused
 
@@ -57,7 +67,14 @@ instead of splitting work across providers:
 - an approval is waiting for an answer.
 
 A refused switch changes nothing: the thread keeps its harness, its session and
-its queued or parked work.
+its queued or parked work. The refusal carries the advice that fits it, not a
+generic "wait for the turn".
+
+The switch itself is one durable decision. The thread row and the divider are
+written in one transaction, and only then is the old session ended; a journal
+that refuses the write leaves the thread on its old harness with its session
+intact. An approval whose session is gone is dropped rather than blocking every
+later switch.
 
 ## Known limits
 

@@ -349,6 +349,7 @@ pub async fn probe_acp_agent(agent: &AcpAgentSpec) -> AcpAgentProbe {
         version: None,
         models: Vec::new(),
         modes: Vec::new(),
+        efforts: Vec::new(),
         error: None,
     };
     let Some(program) = resolve_acp_command(&agent.command) else {
@@ -415,6 +416,7 @@ pub async fn probe_acp_agent(agent: &AcpAgentSpec) -> AcpAgentProbe {
                 description: mode.description.clone(),
             })
             .collect();
+        probe.efforts = session.efforts.clone();
         Ok::<(), crate::acp::AcpError>(())
     };
     // A probe must not hang Settings: bound the whole exchange and kill the

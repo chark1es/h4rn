@@ -42,6 +42,9 @@ struct StoredAgent {
     /// Modes from the last successful probe.
     #[serde(default)]
     modes: Vec<h4rn_protocol::AcpAgentMode>,
+    /// Reasoning-effort values from the last successful probe.
+    #[serde(default)]
+    efforts: Vec<String>,
 }
 
 /// Owns `acp-agents.json` for this daemon.
@@ -136,6 +139,7 @@ impl AcpAgentService {
             version: None,
             models: Vec::new(),
             modes: Vec::new(),
+            efforts: Vec::new(),
         });
         // Persist first: a failed save must leave the live list unchanged.
         save(&self.path, &next)?;
@@ -165,6 +169,7 @@ impl AcpAgentService {
         next[index].version = None;
         next[index].models.clear();
         next[index].modes.clear();
+        next[index].efforts.clear();
         next[index].spec = spec;
         save(&self.path, &next)?;
         let updated = view(&next[index]);
@@ -225,6 +230,7 @@ impl AcpAgentService {
         agent.version = probe.version.clone();
         agent.models = probe.models.clone();
         agent.modes = probe.modes.clone();
+        agent.efforts = probe.efforts.clone();
         if let Err(error) = save(&self.path, &next) {
             tracing::warn!(error = %error.message, "could not persist an ACP agent's probe result");
         } else {
@@ -237,6 +243,52 @@ impl AcpAgentService {
 impl AcpAgentConfigSource for AcpAgentService {
     fn acp_agent(&self, id: &str) -> Option<AcpAgentSpec> {
         self.spec(id)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::threads::AcpCapabilitySource for AcpAgentService {
+    /// What one configured agent advertises, from its last successful probe.
+    ///
+    /// A switch needs the target's real catalogue before it commits. An agent
+    /// this daemon has never described is probed here, exactly as Settings'
+    /// "Check" does, so the switch reports a mode or effort the agent does not
+    /// offer instead of reporting success and failing on the first message.
+    async fn resolve(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<crate::provider_switch::TargetCapabilities>, String> {
+        let cached = lock(&self.agents)
+            .iter()
+            .find(|agent| agent.spec.id == agent_id)
+            .map(|agent| (agent.modes.clone(), agent.efforts.clone()));
+        let Some((cached_modes, cached_efforts)) = cached else {
+            return Ok(None);
+        };
+        let (modes, efforts) = if cached_modes.is_empty() && cached_efforts.is_empty() {
+            let probe = self.probe(agent_id).await.map_err(|error| error.message)?;
+            if let Some(error) = probe.error {
+                return Err(format!("`{agent_id}` could not be checked: {error}"));
+            }
+            (probe.modes, probe.efforts)
+        } else {
+            (cached_modes, cached_efforts)
+        };
+        let mut mapped: Vec<h4rn_protocol::RuntimeMode> = Vec::new();
+        for mode in &modes {
+            if let Some(runtime_mode) = h4rn_harness::runtime_mode_for_acp_mode_id(&mode.id)
+                && !mapped.contains(&runtime_mode)
+            {
+                mapped.push(runtime_mode);
+            }
+        }
+        Ok(Some(crate::provider_switch::TargetCapabilities {
+            modes: mapped,
+            efforts,
+            // A configured agent has no fast tier; a thread that asked for one
+            // is told it was dropped.
+            fast: false,
+        }))
     }
 }
 

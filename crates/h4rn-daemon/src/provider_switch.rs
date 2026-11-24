@@ -32,6 +32,28 @@ pub struct CurrentSettings {
     pub reasoning_effort: Option<String>,
     /// Whether the old harness was asked for its fast tier.
     pub fast: bool,
+    /// Configured ACP instance the thread runs on, when it is an ACP thread.
+    ///
+    /// A switch from one configured agent to another keeps the same harness
+    /// kind, so the plan must tell "the same thread" from "another agent".
+    pub agent_id: Option<String>,
+}
+
+/// What the target harness really offers, when that is only known at runtime.
+///
+/// A built-in harness's controls are declared in
+/// [`h4rn_harness::thread_controls`]. A configured ACP agent advertises its own
+/// catalogue at session start, so a switch resolves it first and passes it here;
+/// a value the agent did not advertise is dropped and reported instead of being
+/// handed to a session that will refuse to start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetCapabilities {
+    /// Permission modes the target offers.
+    pub modes: Vec<RuntimeMode>,
+    /// Reasoning-effort values the target offers.
+    pub efforts: Vec<String>,
+    /// Whether the target has a fast tier.
+    pub fast: bool,
 }
 
 /// What the thread should look like after the switch.
@@ -129,16 +151,25 @@ pub fn refusal(
 /// and reported in [`SwitchPlan::dropped`]. The target's own model is required:
 /// model names rarely mean anything across harnesses, so guessing one would
 /// start a provider on a model it does not have.
+///
+/// `target` is the target harness's real catalogue when the daemon resolved one
+/// (a configured ACP agent advertises its modes and efforts at session start).
+/// Without it the declared controls in `h4rn_harness::thread_controls` stand in.
 pub fn plan(
     from: HarnessKind,
     request: &SwitchRequest,
     current: &CurrentSettings,
+    target: Option<&TargetCapabilities>,
 ) -> Result<SwitchPlan, SwitchPlanError> {
     if from == request.harness {
-        return Err(SwitchPlanError::Invalid(format!(
-            "this thread already runs on {}",
-            harness_label(from)
-        )));
+        let same_agent =
+            from != HarnessKind::Acp || current.agent_id.as_deref() == request.agent_id.as_deref();
+        if same_agent {
+            return Err(SwitchPlanError::Invalid(format!(
+                "this thread already runs on {}",
+                harness_label(from)
+            )));
+        }
     }
     let model = request.model.trim().to_owned();
     if model.is_empty() {
@@ -164,25 +195,33 @@ pub fn plan(
         _ => None,
     };
 
-    let controls = h4rn_harness::thread_controls(request.harness);
+    let declared = h4rn_harness::thread_controls(request.harness);
+    // The target's own catalogue wins when the switch resolved one. A harness
+    // with no runtime catalogue (or a switch that could not resolve it) keeps
+    // the declared controls.
+    let modes = target
+        .map(|caps| caps.modes.clone())
+        .unwrap_or(declared.modes);
+    let efforts = target
+        .map(|caps| caps.efforts.clone())
+        .unwrap_or(declared.efforts);
+    let fast_supported = target.map(|caps| caps.fast).unwrap_or(declared.fast);
     let mut dropped = Vec::new();
 
-    // ACP agents advertise their real catalogue only at session start, so the
-    // static controls accept every h4rn mode; the session refuses one it
-    // cannot map instead of silently changing the person's choice.
-    let runtime_mode =
-        if request.harness == HarnessKind::Acp || controls.offers_mode(current.runtime_mode) {
-            current.runtime_mode
-        } else {
-            dropped.push(DroppedSetting {
-                setting: DroppedSettingKind::RuntimeMode,
-                value: mode_slug(current.runtime_mode),
-            });
-            RuntimeMode::ApprovalRequired
-        };
+    let runtime_mode = if modes.contains(&current.runtime_mode) {
+        current.runtime_mode
+    } else {
+        dropped.push(DroppedSetting {
+            setting: DroppedSettingKind::RuntimeMode,
+            value: mode_slug(current.runtime_mode),
+        });
+        // Approval required asks for no mode change at all, so every agent can
+        // run there.
+        RuntimeMode::ApprovalRequired
+    };
 
     let reasoning_effort = match current.reasoning_effort.as_deref() {
-        Some(effort) if request.harness != HarnessKind::Acp && !controls.offers_effort(effort) => {
+        Some(effort) if !efforts.iter().any(|offered| offered == effort) => {
             dropped.push(DroppedSetting {
                 setting: DroppedSettingKind::ReasoningEffort,
                 value: effort.to_owned(),
@@ -192,7 +231,7 @@ pub fn plan(
         other => other.map(str::to_owned),
     };
 
-    let fast = if current.fast && !controls.fast {
+    let fast = if current.fast && !fast_supported {
         dropped.push(DroppedSetting {
             setting: DroppedSettingKind::Fast,
             value: "on".into(),
@@ -244,6 +283,14 @@ mod tests {
         }
     }
 
+    fn acp_request(agent_id: &str, model: &str) -> SwitchRequest {
+        SwitchRequest {
+            harness: HarnessKind::Acp,
+            agent_id: Some(agent_id.into()),
+            model: model.into(),
+        }
+    }
+
     fn current(
         runtime_mode: RuntimeMode,
         reasoning_effort: Option<&str>,
@@ -253,15 +300,26 @@ mod tests {
             runtime_mode,
             reasoning_effort: reasoning_effort.map(str::to_owned),
             fast,
+            agent_id: None,
+        }
+    }
+
+    fn acp_current(agent_id: &str) -> CurrentSettings {
+        CurrentSettings {
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
+            agent_id: Some(agent_id.into()),
         }
     }
 
     #[test]
     fn plan_keeps_settings_the_new_harness_offers() {
-        let plan = plan(
+        let plan = super::plan(
             HarnessKind::ClaudeCode,
             &request(HarnessKind::Codex, "gpt-5"),
             &current(RuntimeMode::AutoAcceptEdits, Some("high"), true),
+            None,
         )
         .expect("plan");
         assert_eq!(plan.harness, HarnessKind::Codex);
@@ -274,10 +332,11 @@ mod tests {
 
     #[test]
     fn plan_drops_a_plan_mode_the_new_harness_cannot_run() {
-        let plan = plan(
+        let plan = super::plan(
             HarnessKind::ClaudeCode,
             &request(HarnessKind::Codex, "gpt-5"),
             &current(RuntimeMode::Plan, None, false),
+            None,
         )
         .expect("plan");
         assert_eq!(plan.runtime_mode, RuntimeMode::ApprovalRequired);
@@ -292,10 +351,11 @@ mod tests {
 
     #[test]
     fn plan_drops_an_effort_and_fast_tier_the_new_harness_has_no_control_for() {
-        let plan = plan(
+        let plan = super::plan(
             HarnessKind::Codex,
             &request(HarnessKind::Opencode, "claude-sonnet-5"),
             &current(RuntimeMode::FullAccess, Some("ultra"), true),
+            None,
         )
         .expect("plan");
         assert_eq!(plan.reasoning_effort, None);
@@ -315,29 +375,131 @@ mod tests {
         );
     }
 
+    /// An ACP agent names its own modes, so a mode it never advertised is
+    /// dropped and reported instead of failing the first Send.
+    #[test]
+    fn plan_drops_a_mode_the_target_acp_agent_does_not_advertise() {
+        let capabilities = TargetCapabilities {
+            modes: vec![RuntimeMode::ApprovalRequired, RuntimeMode::FullAccess],
+            efforts: Vec::new(),
+            fast: false,
+        };
+        let plan = super::plan(
+            HarnessKind::ClaudeCode,
+            &acp_request("demo", "deepseek-chat"),
+            &current(RuntimeMode::Plan, None, false),
+            Some(&capabilities),
+        )
+        .expect("plan");
+        assert_eq!(plan.harness, HarnessKind::Acp);
+        assert_eq!(plan.agent_id.as_deref(), Some("demo"));
+        assert_eq!(plan.runtime_mode, RuntimeMode::ApprovalRequired);
+        assert_eq!(
+            plan.dropped,
+            vec![DroppedSetting {
+                setting: DroppedSettingKind::RuntimeMode,
+                value: "plan".into(),
+            }]
+        );
+
+        // A mode the agent did name is carried over unchanged.
+        let plan = super::plan(
+            HarnessKind::ClaudeCode,
+            &acp_request("demo", "deepseek-chat"),
+            &current(RuntimeMode::FullAccess, None, false),
+            Some(&capabilities),
+        )
+        .expect("plan");
+        assert_eq!(plan.runtime_mode, RuntimeMode::FullAccess);
+        assert!(plan.dropped.is_empty(), "{:?}", plan.dropped);
+    }
+
+    /// An effort the target agent never advertised would fail at session
+    /// start, so it returns to the agent's default and is reported.
+    #[test]
+    fn plan_drops_an_effort_the_target_acp_agent_does_not_advertise() {
+        let capabilities = TargetCapabilities {
+            modes: vec![RuntimeMode::ApprovalRequired],
+            efforts: vec!["low".into(), "high".into()],
+            fast: false,
+        };
+        let plan = super::plan(
+            HarnessKind::ClaudeCode,
+            &acp_request("demo", "deepseek-chat"),
+            &current(RuntimeMode::ApprovalRequired, Some("max"), false),
+            Some(&capabilities),
+        )
+        .expect("plan");
+        assert_eq!(plan.reasoning_effort, None);
+        assert_eq!(
+            plan.dropped,
+            vec![DroppedSetting {
+                setting: DroppedSettingKind::ReasoningEffort,
+                value: "max".into(),
+            }]
+        );
+
+        // The agent's own effort is kept.
+        let plan = super::plan(
+            HarnessKind::ClaudeCode,
+            &acp_request("demo", "deepseek-chat"),
+            &current(RuntimeMode::ApprovalRequired, Some("high"), false),
+            Some(&capabilities),
+        )
+        .expect("plan");
+        assert_eq!(plan.reasoning_effort.as_deref(), Some("high"));
+        assert!(plan.dropped.is_empty(), "{:?}", plan.dropped);
+    }
+
+    #[test]
+    fn plan_moves_between_two_configured_acp_agents_and_refuses_the_same_one() {
+        let plan = super::plan(
+            HarnessKind::Acp,
+            &acp_request("other", "deepseek-chat"),
+            &acp_current("demo"),
+            None,
+        )
+        .expect("another agent on the same harness is a real switch");
+        assert_eq!(plan.harness, HarnessKind::Acp);
+        assert_eq!(plan.agent_id.as_deref(), Some("other"));
+
+        assert!(matches!(
+            super::plan(
+                HarnessKind::Acp,
+                &acp_request("demo", "deepseek-chat"),
+                &acp_current("demo"),
+                None,
+            ),
+            Err(SwitchPlanError::Invalid(_))
+        ));
+    }
+
     #[test]
     fn plan_refuses_the_same_harness_an_empty_model_and_a_missing_agent() {
         assert!(matches!(
-            plan(
+            super::plan(
                 HarnessKind::Codex,
                 &request(HarnessKind::Codex, "gpt-5"),
                 &current(RuntimeMode::ApprovalRequired, None, false),
+                None,
             ),
             Err(SwitchPlanError::Invalid(_))
         ));
         assert!(matches!(
-            plan(
+            super::plan(
                 HarnessKind::ClaudeCode,
                 &request(HarnessKind::Codex, "  "),
                 &current(RuntimeMode::ApprovalRequired, None, false),
+                None,
             ),
             Err(SwitchPlanError::Invalid(_))
         ));
         assert!(matches!(
-            plan(
+            super::plan(
                 HarnessKind::ClaudeCode,
                 &request(HarnessKind::Acp, "demo"),
                 &current(RuntimeMode::ApprovalRequired, None, false),
+                None,
             ),
             Err(SwitchPlanError::Invalid(_))
         ));

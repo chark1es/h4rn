@@ -36,6 +36,14 @@ models: Array<AcpAgentModel>,
  */
 modes: Array<AcpAgentMode>, 
 /**
+ * Reasoning-effort values the agent advertises.
+ *
+ * Empty when the agent has no effort control. A thread that asks for an
+ * effort the agent never named cannot start a session, so a harness switch
+ * resolves this before it commits and drops an unsupported value.
+ */
+efforts: Array<string>, 
+/**
  * Why the probe did not complete, when it did not.
  */
 error?: string, };

@@ -43,7 +43,8 @@ mod test_scripts;
 pub mod versions;
 
 pub use controls::{
-    CLAUDE_EFFORTS, CODEX_EFFORTS, SessionControls, ThreadControls, thread_controls,
+    CLAUDE_EFFORTS, CODEX_EFFORTS, SessionControls, ThreadControls, runtime_mode_for_acp_mode_id,
+    thread_controls,
 };
 
 pub use acp_agent::{

@@ -1817,15 +1817,20 @@ answered by the session that asked for it. A switch therefore belongs between
 turns, next to the turn boundary the composer already respects, not inside the
 stream as a mid-turn migration.
 
-The old session is detached under the thread's record lock and shut down while
-the switch gate is held, so a Send cannot select a new session beside it. The
-record then names the new harness and model, clears the old harness-native
-resume id and its agent fingerprint, and persists a `handoff_pending` flag with
-the `HarnessSwitched` domain event and wire event in one journal append. Clearing
-the resume id is part of the same write, so a crash or restart cannot resurrect a
-conversation the new provider never had. `handoff_pending` survives a restart and
-is cleared only when a session actually reports that it started; a failed start
-must not lose the history a later message still needs.
+The switch is staged: the record names the new harness and model, clears the old
+harness-native resume id and its agent fingerprint, and sets a `handoff_pending`
+flag. That row and the `HarnessSwitched` domain and wire events are one journal
+append, so the switch is either durable in full or not at all. Only after the
+append commits is the old session detached under the thread's record lock and
+shut down while the switch gate is held, so a Send cannot select a new session
+beside it. A journal that refuses the write restores the staged fields and ends
+nothing. Clearing the resume id is part of the same write, so a crash or restart
+cannot resurrect a conversation the new provider never had. `handoff_pending`
+survives a restart and is cleared only once the new session accepts the prompt
+that carried the history; a failed start or write must not lose the history a
+later message still needs. A session that already died between turns belongs to
+the old provider too, so it is drained and shut down with the live one instead of
+letting its late exit report arm a resume on the switched thread.
 
 The first turn on the new harness reuses the import fallback instead of growing a
 second implementation: the same `handoff::build`, the same `H4RN_HANDOFF_BYTES`
@@ -1838,7 +1843,11 @@ the thread has live turns.
 
 Settings follow the thread where the target harness can honour them. A plan mode
 on a harness without one falls back to approval required; an effort or fast tier
-the target does not expose returns to its default. The response names every value
+the target does not expose returns to its default. A configured ACP agent names
+its own catalogue at session start, so the switch resolves that catalogue before
+it commits (probing the agent when this daemon has no answer yet) and drops a
+value the agent never advertised instead of reporting a switch whose first Send
+would fail. The response names every value
 that was dropped, and the transcript's divider names the two harnesses. Each
 `TurnStarted` event carries the harness that ran the turn, so a transcript that
 spans a switch does not relabel old turns with the new provider, and the metering
