@@ -1958,6 +1958,61 @@ async fn worktree_settings_refuse_a_location_inside_a_registered_project() {
 }
 
 #[tokio::test]
+async fn worktree_settings_refuse_a_location_that_holds_the_project_itself() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let repo = root.path().join("api");
+    std::fs::create_dir(&repo).expect("api");
+    git_in(&repo, &["init", "-b", "main"]);
+    git_in(&repo, &["config", "user.name", "h4rn test"]);
+    git_in(&repo, &["config", "user.email", "test@example.invalid"]);
+    git_in(&repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.txt"), "one\n").expect("write");
+    git_in(&repo, &["add", "a.txt"]);
+    git_in(&repo, &["commit", "-m", "Initial commit"]);
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: repo.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the project");
+
+    // New checkouts go to `<location>/api/<branch>`, which is the main
+    // checkout itself when the location is its parent folder.
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(root.path().to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the destination would sit in the main checkout");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error.message.contains("inside the project checkout"),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("outside the project checkout")),
+        "{error:?}"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_bad_saved_worktree_setting_does_not_stop_the_daemon() {
     let data_dir = tempfile::tempdir().expect("data");
     std::fs::write(

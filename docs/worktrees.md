@@ -39,10 +39,14 @@ already exists is refused: a branch you name reports that the folder is taken,
 while a generated name moves to the next suffix (`...-2`). h4rn never reuses an
 existing folder, because it may hold another thread's checkout.
 
-The location must be outside the project's own checkout. A folder inside it
-(including the project folder itself) is refused, both when the setting is
-saved and when a worktree is created, because a checkout inside the main
-checkout would make it dirty and confuse every command run there.
+The location must be outside the project's own checkout, and so must the folder
+h4rn puts a project's checkouts in. Checkouts go to
+`<location>/<project>/<branch>`, so an inside path (including the project folder
+itself) is refused, and so is the project's parent folder (`~/code` for the
+project `~/code/api`): that would put the new checkout in the main checkout.
+Both are refused when the setting is saved and when a worktree is created,
+because a checkout inside the main checkout would make it dirty and confuse
+every command run there.
 
 **Settings → Worktrees → New worktrees → Location** sets another directory:
 
@@ -71,7 +75,11 @@ than recreated, so its history is the one you asked for. Only a branch h4rn
 created is deleted if thread creation fails after the checkout was made.
 Cleanup after a failed request only touches the checkout and branch that
 request made: it is tied to the git registration the request created, so a
-newer thread's checkout at the same folder is never removed.
+newer thread's checkout at the same folder is never removed. The destination
+folder's lock is held through that cleanup, and a create re-reads the branch
+once it holds the lock, so a retry of the same branch either finishes before
+the cleanup or recreates the branch after it; it never loses a branch the
+cleanup removed while it was waiting.
 
 Repositories with submodules get them initialised recursively, so the agent
 does not work in an empty-looking folder. A repository whose `.gitmodules`

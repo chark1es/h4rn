@@ -80,21 +80,51 @@ async fn validate_for_save(
         return Ok(settings.clone());
     };
     let local = conn.state.manager.local_host();
-    for project in conn.state.projects.list().await {
-        if project.host != local || !project.git {
-            continue;
-        }
-        if location_inside_repo(Path::new(&project.path), &expanded) {
-            return Err(ProtoError::new(
-                ProtoErrorCode::InvalidRequest,
-                format!(
-                    "the worktree location {} is inside the project checkout {}; new checkouts would sit in the main checkout",
+    let projects: Vec<String> = conn
+        .state
+        .projects
+        .list()
+        .await
+        .into_iter()
+        .filter(|project| project.host == local && project.git)
+        .map(|project| project.path)
+        .collect();
+    // Checkouts go to `<location>/<project>/<branch>`, so the location may be
+    // outside the repository while the folder it holds for a project is the
+    // repository itself (Location `~/code` for the project `~/code/api`).
+    // Resolving the project folder shells out to git, so it runs off the
+    // runtime.
+    let refused = tokio::task::spawn_blocking(move || {
+        for path in projects {
+            let checkout = Path::new(&path).to_path_buf();
+            let repo = crate::worktrees::git::repo_of(&checkout).unwrap_or_else(|| checkout.clone());
+            let destination =
+                expanded.join(crate::worktrees::create::project_folder(&repo));
+            if location_inside_repo(&repo, &destination) {
+                return Some(format!(
+                    "the worktree location {} would put new checkouts (under {}) inside the project checkout {}; choose a folder outside it",
                     expanded.display(),
-                    project.path
-                ),
-                "Choose a folder outside the project checkout",
-            ));
+                    destination.display(),
+                    repo.display()
+                ));
+            }
         }
+        None
+    })
+    .await
+    .map_err(|error| {
+        ProtoError::new(
+            ProtoErrorCode::Internal,
+            format!("could not check the worktree location: {error}"),
+            "Try again",
+        )
+    })?;
+    if let Some(message) = refused {
+        return Err(ProtoError::new(
+            ProtoErrorCode::InvalidRequest,
+            message,
+            "Choose a folder outside the project checkout",
+        ));
     }
     Ok(settings.clone())
 }

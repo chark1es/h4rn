@@ -222,6 +222,37 @@ impl Drop for WorktreeRollback {
     }
 }
 
+/// Test-only: makes the workspace conversion fail for a chosen workspace, so a
+/// test can exercise a checkout whose path cannot be carried as UTF-8 without
+/// needing a real non-UTF-8 folder.
+#[cfg(test)]
+mod workspace_path_fault {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static FORCED: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub(super) fn force(workspace: &std::path::Path) {
+        *FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(workspace.to_path_buf());
+    }
+
+    pub(super) fn clear() {
+        *FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    pub(super) fn forced(workspace: &str) -> bool {
+        FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            .is_some_and(|forced| forced == std::path::Path::new(workspace))
+    }
+}
+
 /// What [`ThreadManager::restart_sessions`] did.
 #[derive(Clone, Debug, Default)]
 pub struct RestartedSessions {
@@ -3143,8 +3174,7 @@ impl ThreadManager {
         // Worktree creation is the last fallible setup: once the checkout
         // exists, the thread runs there. A failure after this point rolls the
         // new branch back, while a named branch that was already there stays.
-        let mut created_worktree = None;
-        if let Some(worktree) = request
+        let worktree_guard = if let Some(worktree) = request
             .worktree
             .as_ref()
             .filter(|worktree| worktree.is_requested())
@@ -3158,15 +3188,29 @@ impl ThreadManager {
                 .create_for_thread(&request.workspace_path, worktree, &request.prompt)
                 .await
                 .map_err(ManagerError::InvalidRequest)?;
-            // Guard it before anything else can fail, so the checkout is
-            // rolled back rather than leaked.
-            let workspace = created.path.to_str().map(str::to_owned);
-            created_worktree = Some(created);
-            request.workspace_path = workspace.ok_or_else(|| {
+            // The guard exists before the path conversion below, so a checkout
+            // whose path cannot be carried as UTF-8 is rolled back too.
+            let guard = WorktreeRollback(Some(created));
+            let path = guard
+                .0
+                .as_ref()
+                .expect("the guard was just given a checkout")
+                .path
+                .to_str()
+                .map(str::to_owned);
+            #[cfg(test)]
+            let path = if workspace_path_fault::forced(&request.workspace_path) {
+                None
+            } else {
+                path
+            };
+            request.workspace_path = path.ok_or_else(|| {
                 ManagerError::Internal("the new worktree path is not valid UTF-8".into())
             })?;
-        }
-        let worktree_guard = WorktreeRollback(created_worktree);
+            guard
+        } else {
+            WorktreeRollback(None)
+        };
         let title_eligible = request.parent_thread_id.is_none() && request.subagent_id.is_none();
         let title_prompt = request.prompt.clone();
         // The default title mode uses this thread's own harness, so a prompt is
@@ -10066,6 +10110,47 @@ mod tests {
         assert!(
             rolled_back,
             "the failed thread's checkout and branch are removed"
+        );
+    }
+
+    /// A checkout whose path cannot be carried as UTF-8 is still rolled back:
+    /// the guard exists before the conversion.
+    #[tokio::test]
+    async fn a_worktree_is_rolled_back_when_its_workspace_cannot_be_carried() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        manager.set_worktree_creator(Arc::new(crate::worktrees::create::WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        )));
+
+        let mut request = new_thread(HostId::new("host_test"), repo.path(), "Fix the encoding");
+        request.worktree = Some(h4rn_protocol::WorktreeRequest::Generated(true));
+        super::workspace_path_fault::force(repo.path());
+        let error = manager
+            .create_thread(request)
+            .await
+            .expect_err("the checkout path cannot be a thread workspace");
+        super::workspace_path_fault::clear();
+        assert!(
+            matches!(error, ManagerError::Internal(ref message) if message.contains("not valid UTF-8")),
+            "the refusal names the path: {error:?}"
+        );
+
+        let repo_path = repo.path().to_path_buf();
+        let rolled_back = wait_until(|| {
+            crate::worktrees::git::list_worktrees(&repo_path)
+                .map(|listed| listed.is_empty())
+                .unwrap_or(false)
+                && crate::worktrees::git::h4rn_branches(&repo_path)
+                    .map(|branches| branches.is_empty())
+                    .unwrap_or(false)
+        })
+        .await;
+        assert!(
+            rolled_back,
+            "the refused thread's checkout and branch are removed"
         );
     }
 

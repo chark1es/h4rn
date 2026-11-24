@@ -23,8 +23,9 @@ All notable changes to h4rn are recorded here. The format follows
   each other's checkout or branch: a create that finds the folder taken refuses
   (or moves to the next suffix), and cleanup after a failure removes only the
   folder, registration and branch that attempt created. A location that would
-  put the checkout inside the project's main checkout is refused both when the
-  setting is saved and when a checkout is made, a tag that shares a branch's
+  put the checkout inside the project's main checkout — even the project's
+  parent folder — is refused both when the setting is saved and when a
+  checkout is made, a tag that shares a branch's
   name no longer hides the branch, and an ACP agent configured with a fixed
   directory refuses a worktree request instead of silently ignoring the new
   checkout. A hand-edited settings file that no longer validates no longer stops
