@@ -968,12 +968,17 @@ impl Daemon {
         // daemon has no TLS listener, so a direct link is loopback only: the
         // bearer token must never cross a LAN in plaintext. The share dialog
         // says the link works only on this machine, and Connect is the way to
-        // share with a teammate elsewhere. The name uses the port the primary
-        // listener actually bound: a wildcard bind still answers loopback on
-        // that same port, so the link reaches it.
-        let primary_port = addrs[0].port();
-        self.guest
-            .set_local_base(format!("http://127.0.0.1:{primary_port}/guest"));
+        // share with a teammate elsewhere. Name the first listener that really
+        // serves direct guest routes: a loopback primary, an unspecified bind
+        // (which answers loopback on the same port), or a loopback extra bind.
+        // A LAN-only daemon has none, and the share dialog must say so instead
+        // of handing out a dead link.
+        if let Some(base) = addrs
+            .iter()
+            .find_map(|addr| server::direct_guest_base(*addr))
+        {
+            self.guest.set_local_base(base);
+        }
 
         let mut remote_tasks = Vec::new();
         // Guest links expire after 24 hours. Sweeping keeps their waiting

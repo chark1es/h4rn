@@ -17,4 +17,13 @@ expires_at: string,
 /**
  * Whether the first browser has already claimed it.
  */
-bound: boolean, };
+bound: boolean, 
+/**
+ * Whether this machine has no address the link can open on.
+ *
+ * A link can exist while the daemon only listens on concrete network
+ * addresses: its guest routes answer on no address this machine can
+ * reach. The share dialog then explains the remedy instead of calling
+ * the link usable.
+ */
+no_serving_listener: boolean, };

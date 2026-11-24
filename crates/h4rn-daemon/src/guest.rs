@@ -996,10 +996,13 @@ impl GuestService {
             links_enabled: enabled,
             link: Some(GuestLink {
                 url: raw
-                    .filter(|_| include_url)
+                    .filter(|_| include_url && !base.is_empty())
                     .map(|token| self.url_for(base, &token)),
                 expires_at: row.expires_at,
                 bound: row.binding_hash.is_some(),
+                // An empty base means neither Connect nor a loopback listener
+                // serves this machine, so the link cannot be opened anywhere.
+                no_serving_listener: base.is_empty(),
             }),
         })
     }
@@ -1067,6 +1070,7 @@ impl GuestService {
                 url: Some(self.url_for(base, &token)),
                 expires_at,
                 bound: false,
+                no_serving_listener: false,
             },
             token,
         })
@@ -1210,6 +1214,7 @@ impl GuestService {
         token: &str,
         cookie: Option<&str>,
         offer_pending: bool,
+        claim: bool,
     ) -> Result<Resolved, GuestError> {
         if !self.enabled().await? {
             return Ok(Resolved {
@@ -1269,8 +1274,11 @@ impl GuestService {
         };
 
         // An unbound link: a cookie that matches an unclaimed page load binds
-        // the browser now, while the page GET itself only offers one.
-        if let Some(value) = cookie
+        // the browser now, while the page GET itself only offers one. Connect
+        // forwards a browser's cookie to the page, so a page load must pass
+        // `claim = false` even when it presents one.
+        if claim
+            && let Some(value) = cookie
             && self.claim_pending_binding(&link, value).await?
         {
             return Ok(Resolved {
@@ -1384,7 +1392,12 @@ impl GuestService {
             return Err(self.error(error));
         }
         let resolved = match self
-            .resolve(guest_token(&input.path), input.cookie.as_deref(), false)
+            .resolve(
+                guest_token(&input.path),
+                input.cookie.as_deref(),
+                false,
+                true,
+            )
             .await
         {
             Ok(resolved) if resolved.state == GuestLinkState::Active => resolved,
@@ -1432,12 +1445,12 @@ impl GuestService {
             (Method::Get, []) => {
                 // A page load never claims the link; a preview crawler cannot
                 // bind it just by fetching the URL.
-                match self.resolve(token, cookie, true).await {
+                match self.resolve(token, cookie, true, false).await {
                     Ok(resolved) => self.page(resolved, path, input.public_prefix.as_deref()),
                     Err(error) => self.error(error),
                 }
             }
-            (Method::Get, ["state"]) => match self.resolve(token, cookie, false).await {
+            (Method::Get, ["state"]) => match self.resolve(token, cookie, false, true).await {
                 Ok(resolved) => match self.snapshot(&resolved, 0).await {
                     Ok(snapshot) => GuestHttpOutput::json(200, &snapshot),
                     Err(error) => self.error(error),
@@ -1446,7 +1459,7 @@ impl GuestService {
             },
             (Method::Get, ["state", seq]) => {
                 let since = seq.parse::<u64>().unwrap_or(0);
-                match self.resolve(token, cookie, false).await {
+                match self.resolve(token, cookie, false, true).await {
                     Ok(resolved) => match self.snapshot(&resolved, since).await {
                         Ok(snapshot) => GuestHttpOutput::json(200, &snapshot),
                         Err(error) => self.error(error),
@@ -1467,7 +1480,7 @@ impl GuestService {
                         );
                     }
                 };
-                match self.resolve(token, cookie, false).await {
+                match self.resolve(token, cookie, false, true).await {
                     Ok(resolved) => match self.submit(&resolved, input).await {
                         Ok(request) => GuestHttpOutput::json(202, &request),
                         Err(error) => self.error(error),
@@ -1475,7 +1488,7 @@ impl GuestService {
                     Err(error) => self.error(error),
                 }
             }
-            (Method::Get, ["blob", id]) => match self.resolve(token, cookie, false).await {
+            (Method::Get, ["blob", id]) => match self.resolve(token, cookie, false, true).await {
                 Ok(resolved) => match self.blob(&resolved, id, queried_thumbnail).await {
                     Ok((mime, bytes)) => GuestHttpOutput {
                         status: 200,
@@ -2455,20 +2468,26 @@ fn hash_secret(secret: &str) -> String {
 /// Whether a guest link may name this base address.
 ///
 /// A direct link is a bearer token over plain HTTP if it names a LAN address,
-/// so only HTTPS and loopback qualify. Loopback links are honest about being
-/// usable only on the machine that created them; the share dialog says so.
+/// so only HTTPS and loopback qualify. The host is parsed, not prefix-matched,
+/// so every address the listener rule treats as this machine — all of
+/// `127.0.0.0/8`, `::1` and `localhost` — is accepted. Loopback links are
+/// honest about being usable only on the machine that created them; the share
+/// dialog says so.
 fn guest_base_allowed(base: &str) -> bool {
-    let base = base.trim().to_ascii_lowercase();
-    if base.starts_with("https://") {
-        return true;
-    }
-    let Some(rest) = base.strip_prefix("http://") else {
+    let Ok(url) = url::Url::parse(base.trim()) else {
         return false;
     };
-    let authority = rest.split('/').next().unwrap_or("");
-    authority.starts_with("127.0.0.1")
-        || authority.starts_with("localhost")
-        || authority.starts_with("[::1]")
+    match url.scheme() {
+        // Connect is the TLS path: the relay terminates HTTPS for the guest.
+        "https" => true,
+        "http" => match url.host() {
+            Some(url::Host::Ipv4(ip)) => crate::server::is_loopback_ip(ip.into()),
+            Some(url::Host::Ipv6(ip)) => crate::server::is_loopback_ip(ip.into()),
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 #[async_trait::async_trait]
@@ -2669,9 +2688,15 @@ mod tests {
     fn a_direct_link_is_https_or_loopback_only() {
         assert!(guest_base_allowed("https://h4rn.example/guest"));
         assert!(guest_base_allowed("http://127.0.0.1:47810/guest"));
+        // Every loopback address the listener rule accepts is accepted here.
+        assert!(guest_base_allowed("http://127.0.0.2:47810/guest"));
+        assert!(guest_base_allowed("http://localhost:47810/guest"));
         assert!(guest_base_allowed("http://[::1]:47810/guest"));
         assert!(!guest_base_allowed("http://192.168.1.9:47810/guest"));
         assert!(!guest_base_allowed("http://h4rn.example/guest"));
+        // A host that merely starts with a loopback-looking prefix is not one.
+        assert!(!guest_base_allowed("http://127.0.0.1.evil.example/guest"));
+        assert!(!guest_base_allowed("http://localhost.evil.example/guest"));
     }
 
     fn post_input(origin: Option<&str>, host: Option<&str>, json: bool) -> GuestHttpInput {

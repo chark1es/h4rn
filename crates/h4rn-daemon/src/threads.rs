@@ -424,6 +424,12 @@ struct Inner {
     resync_retry: std::sync::Mutex<ResyncRetry>,
     /// The clock every lifecycle decision reads.
     clock: Arc<dyn Clock>,
+    /// Pauses the next journal append after the record changed.
+    ///
+    /// Used by an integration test that closes a socket while a request is
+    /// between marking a turn active and writing its events. It is not read by
+    /// the production path unless a test installs one.
+    append_pause: std::sync::Mutex<Option<Arc<AppendPause>>>,
     /// Pauses a restart between inspecting a thread and detaching its session.
     ///
     /// Test-only: this is the window a Send can claim the session in, and the
@@ -484,6 +490,51 @@ struct Inner {
     /// wait listens here instead of sleeping and hoping the attempt landed.
     #[cfg(test)]
     claim_refused: tokio::sync::Notify,
+}
+
+/// A test's hold on one journal append.
+///
+/// [`ThreadManager::pause_next_append`] installs it; the next append announces
+/// that it is about to write and waits for [`Self::release`]. It is public so
+/// an integration test can close a connection in that exact window instead of
+/// timing it.
+#[doc(hidden)]
+pub struct AppendPause {
+    /// One append holds the gate; a later one must never share it.
+    used: std::sync::atomic::AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl AppendPause {
+    /// Waits until an append reaches the gate.
+    pub async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    /// Lets the paused append continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+
+    /// Called by the append itself.
+    ///
+    /// Only a turn's first append pauses: lifecycle ticks write unrelated
+    /// summaries, and a test that wants the request's own window must not be
+    /// woken by one of those.
+    async fn hold(&self, domain: &[ThreadEvent]) {
+        if !domain
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::TurnQueued { .. }))
+        {
+            return;
+        }
+        if self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.arrived.notify_one();
+        self.release.notified().await;
+    }
 }
 
 /// A test's hold on the fire's claim-to-act window.
@@ -2594,6 +2645,7 @@ impl ThreadManager {
                 resync_pending: AtomicBool::new(false),
                 resync_retry: std::sync::Mutex::new(ResyncRetry::default()),
                 clock,
+                append_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 restart_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
@@ -2736,6 +2788,26 @@ impl ThreadManager {
         let handle = self.inner.handle(thread_id).await.ok()?;
         let record = handle.lock().await;
         Some(record.meta.clone())
+    }
+
+    /// Pauses the next journal append until the returned gate is released.
+    ///
+    /// Used by an integration test that closes a connection while a request is
+    /// between changing the record and writing its events. It is not read by
+    /// the production path unless a test installs one.
+    #[doc(hidden)]
+    pub fn pause_next_append(&self) -> Arc<AppendPause> {
+        let gate = Arc::new(AppendPause {
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .inner
+            .append_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
     }
 
     /// The outside grant whose turn is running, with that turn's ceiling.
@@ -5964,6 +6036,18 @@ impl Inner {
         }
     }
 
+    /// Waits at an append gate a test installed.
+    async fn pause_append(&self, domain: &[ThreadEvent]) {
+        let pause = self
+            .append_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.hold(domain).await;
+        }
+    }
+
     /// Applies `domain` to the lifecycle state, appends both logs, broadcasts,
     /// and returns the new summary.
     async fn emit(
@@ -5982,6 +6066,9 @@ impl Inner {
         // the journal, so the next tick must see the difference and publish it
         // instead of trusting a cache that is already ahead of storage.
 
+        // A test can hold the write here, after the record changed and before
+        // it is durable, to close a socket in that exact window.
+        self.pause_append(&domain).await;
         let _guard = self.emit_lock.lock().await;
         let seqs = self
             .journal
