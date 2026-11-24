@@ -52,10 +52,96 @@ pub enum RelayFrameKind {
     Open,
     /// Opaque Noise bytes for an established session.
     Data,
+    /// One guest HTTP exchange forwarded to the daemon (ADR-044).
+    ///
+    /// The payload is a JSON [`GuestHttpRequest`] from the relay to the
+    /// daemon, or a [`GuestHttpResponse`] back. Unlike `Data`, the relay reads
+    /// the envelope enough to correlate the answer with the waiting browser
+    /// request; it still never stores or logs a body.
+    GuestHttp,
+    /// One slice of a guest HTTP body (ADR-044).
+    ///
+    /// Large uploads and attachment downloads are split into frames so no
+    /// single WebSocket message approaches the transport's frame limit. The
+    /// payload is a JSON [`GuestHttpChunk`].
+    GuestHttpChunk,
     /// Tear the session down. The payload is optional and opaque to the relay.
     Close,
     /// Round-trip probe. The relay echoes it back to the sender.
     Ping,
+}
+
+/// One HTTP request from an unauthenticated guest, carried over the relay.
+///
+/// The path is relative to the daemon's guest router (`/guest/<token>/...`).
+/// The guest token in it is the only credential; the daemon hashes and checks
+/// it, so the relay cannot mint access by forwarding a request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GuestHttpRequest {
+    /// Correlates the response. Chosen by the relay.
+    pub request_id: String,
+    /// HTTP method: `GET` or `POST`.
+    pub method: String,
+    /// Path and query, beginning with `/guest/<token>/`.
+    pub path: String,
+    /// The public path the browser used, when the relay fronts the daemon.
+    ///
+    /// The daemon scopes the binding cookie to this path instead of its own
+    /// internal one, so a relay-prefixed link works in the browser.
+    #[serde(default)]
+    pub public_prefix: Option<String>,
+    /// Whether the body follows in [`GuestHttpChunk`] frames.
+    #[serde(default)]
+    pub chunked: bool,
+    /// Request headers worth forwarding.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Request body. Empty when `chunked` is set.
+    #[serde(with = "relay_base64")]
+    #[ts(type = "string")]
+    pub body: Vec<u8>,
+}
+
+/// The daemon's answer to one [`GuestHttpRequest`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GuestHttpResponse {
+    /// The request this answers.
+    pub request_id: String,
+    /// HTTP status code.
+    pub status: u16,
+    /// Whether the body follows in [`GuestHttpChunk`] frames.
+    #[serde(default)]
+    pub chunked: bool,
+    /// Response headers worth returning.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Response body. Empty when `chunked` is set.
+    #[serde(with = "relay_base64")]
+    #[ts(type = "string")]
+    pub body: Vec<u8>,
+    /// The daemon's `Set-Cookie`, when this answer binds a guest browser.
+    ///
+    /// It travels in its own field rather than as a header so the relay can
+    /// name it explicitly: only Connect may turn it into a browser response,
+    /// and only after it has checked every attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_cookie: Option<String>,
+}
+
+/// One slice of a guest HTTP body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GuestHttpChunk {
+    /// The exchange this slice belongs to.
+    pub request_id: String,
+    /// Zero-based slice number, in order.
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// True on the last slice.
+    pub last: bool,
+    /// Raw bytes of the body.
+    #[serde(with = "relay_base64")]
+    #[ts(type = "string")]
+    pub body: Vec<u8>,
 }
 
 /// A single relay frame.
@@ -467,7 +553,10 @@ pub enum PairScope {
 }
 
 impl PairScope {
-    /// Every scope.
+    /// Every scope a paired device can hold.
+    ///
+    /// A guest link is not one of them: it has no device identity and carries
+    /// its own token (ADR-044), so pairing never grants guest access.
     pub const ALL: [Self; 5] = [
         Self::View,
         Self::Approve,
@@ -1015,6 +1104,10 @@ mod tests {
         assert_eq!(PairScope::normalize([]), vec![PairScope::View]);
         assert_eq!(PairScope::parse("admin"), Some(PairScope::Admin));
         assert_eq!(PairScope::parse("root"), None);
+        // A guest link carries a token, not a device scope (ADR-044), so
+        // pairing can never grant one.
+        assert_eq!(PairScope::parse("guest"), None);
+        assert!(!PairScope::ALL.iter().any(|scope| scope.as_str() == "guest"));
         assert!(!PairScope::DEFAULT.contains(&PairScope::Admin));
     }
 

@@ -6,6 +6,7 @@ import type {
   Attachment,
   Event,
   FsTurnChanges,
+  GuestRequest,
   HarnessKind,
   HostId,
   MessageRole,
@@ -118,6 +119,8 @@ export type ThreadLog = {
   loading: boolean;
   approvals: Record<string, ApprovalState>;
   pending: PendingMessage[];
+  /** Guest messages waiting for this owner, oldest first. */
+  guestRequests: GuestRequest[];
 };
 
 export function createThreadLog(): ThreadLog {
@@ -128,6 +131,7 @@ export function createThreadLog(): ThreadLog {
     loading: false,
     approvals: {},
     pending: [],
+    guestRequests: [],
   };
 }
 
@@ -139,6 +143,7 @@ function cloneLog(log: ThreadLog): ThreadLog {
     loading: log.loading,
     approvals: { ...log.approvals },
     pending: [...log.pending],
+    guestRequests: [...log.guestRequests],
   };
 }
 
@@ -405,6 +410,24 @@ export function foldEvent(
         ...log.approvals[event.approval_id],
         status: "resolved",
       };
+      return log;
+    }
+
+    case "guest_requested": {
+      // A guest message is not part of the transcript until the owner sends
+      // it, so it waits in its own list and renders as a card above the
+      // composer.
+      const request = event.request;
+      if (!log.guestRequests.some((entry) => entry.request_id === request.request_id)) {
+        log.guestRequests.push(request);
+      }
+      return log;
+    }
+
+    case "guest_request_resolved": {
+      log.guestRequests = log.guestRequests.filter(
+        (entry) => entry.request_id !== event.request_id,
+      );
       return log;
     }
 

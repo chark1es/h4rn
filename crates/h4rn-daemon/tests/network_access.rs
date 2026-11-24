@@ -208,6 +208,18 @@ async fn the_network_listener_serves_healthz_and_noise_routes_only() {
         http_status(port, "/mcp").await.contains("404"),
         "the MCP hub must not be exposed on the LAN"
     );
+    // A guest link is a bearer token in the URL, so the plaintext LAN listener
+    // carries no guest route at all: direct links are loopback only.
+    let guest = http_status(port, "/guest/not-a-real-token").await;
+    assert!(
+        guest.contains("404"),
+        "a guest link must never be served on the LAN listener: {guest}"
+    );
+    let guest_state = http_status(port, "/guest/not-a-real-token/state").await;
+    assert!(
+        guest_state.contains("404"),
+        "a guest state route must never be served on the LAN listener: {guest_state}"
+    );
 
     // The same refusal over a real WebSocket client.
     match connect_async(format!("ws://127.0.0.1:{port}/ws")).await {

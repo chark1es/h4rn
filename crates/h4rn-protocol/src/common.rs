@@ -468,6 +468,9 @@ pub struct ThreadSummary {
     pub context_fill_percent: Option<u8>,
     /// Whether the thread is raising a hand.
     pub needs_attention: bool,
+    /// Guest messages waiting for the owner to send or dismiss (ADR-044).
+    #[serde(default)]
+    pub pending_guest_requests: u32,
     /// Whether a finished turn has not been acknowledged.
     pub unread: bool,
     /// When auto-resume will try this thread again, when scheduled (ADR-024).
@@ -716,6 +719,28 @@ mod tests {
     }
 
     #[test]
+    fn an_old_thread_summary_without_pending_guest_requests_still_deserializes() {
+        // Written by a daemon that predates guest links.
+        let json = serde_json::json!({
+            "thread_id": "th_pre_guest",
+            "host": "host_local",
+            "harness": "codex",
+            "title": "before guest links",
+            "workspace_path": "/tmp/work",
+            "model": "gpt-5",
+            "tab": "working",
+            "pinned": false,
+            "last_activity": "2026-01-01T00:00:00Z",
+            "agent_state": "idle",
+            "usage": Usage::default(),
+            "needs_attention": false,
+            "unread": false
+        });
+        let summary: ThreadSummary = serde_json::from_value(json).expect("old JSON");
+        assert_eq!(summary.pending_guest_requests, 0);
+    }
+
+    #[test]
     fn a_thread_summary_round_trips_its_thread_controls() {
         let mut summary = summary_with(None, None);
         summary.runtime_mode = RuntimeMode::Plan;
@@ -760,6 +785,7 @@ mod tests {
             context_window: None,
             context_fill_percent: None,
             needs_attention: false,
+            pending_guest_requests: 0,
             unread: false,
             resume_at,
             limit,

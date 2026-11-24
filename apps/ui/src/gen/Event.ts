@@ -9,6 +9,7 @@ import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { FsChangeKind } from "./FsChangeKind";
 import type { FsSearchMatch } from "./FsSearchMatch";
 import type { FsTurnChanges } from "./FsTurnChanges";
+import type { GuestRequest } from "./GuestRequest";
 import type { HostId } from "./HostId";
 import type { Item } from "./Item";
 import type { McpCaller } from "./McpCaller";
@@ -144,7 +145,27 @@ option_id: string | null,
 /**
  * Device that answered, when the daemon knows it.
  */
-by_device: DeviceId | null, } | { "type": "turn_completed", 
+by_device: DeviceId | null, } | { "type": "guest_requested", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * The waiting message, including its file names and sizes.
+ */
+request: GuestRequest, } | { "type": "guest_request_resolved", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * Request that was answered.
+ */
+request_id: string, 
+/**
+ * True when the owner sent it, false when they dismissed it.
+ */
+sent: boolean, } | { "type": "turn_completed", 
 /**
  * Thread.
  */

@@ -5,7 +5,7 @@ in. Agents h4rn did **not** start — Claude Code or Codex in your own terminal,
 connect to the daemon over OAuth, once you approve a level, and work with your projects and
 threads.
 
-The token model behind both is [ADR-044](decisions.md).
+The token model behind both is [ADR-045](decisions.md).
 
 ## Tools for agents h4rn runs
 

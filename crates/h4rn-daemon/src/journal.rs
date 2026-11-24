@@ -244,6 +244,14 @@ pub trait Journal: Send + Sync {
         number: u32,
     ) -> Result<Vec<PrLinkRecord>, JournalError>;
 
+    /// The SQLite pool backing this journal, when it has one.
+    ///
+    /// Guest links live in the same database file as the thread journal
+    /// (ADR-044), so the daemon needs the pool rather than a second writer.
+    fn sql_pool(&self) -> Option<&SqlitePool> {
+        None
+    }
+
     /// Inserts or refreshes one thread → issue link.
     async fn upsert_issue_link(&self, link: &IssueLinkRecord) -> Result<(), JournalError>;
 
@@ -636,6 +644,10 @@ async fn append_wire_on(
 
 #[async_trait]
 impl Journal for SqliteJournal {
+    fn sql_pool(&self) -> Option<&SqlitePool> {
+        Some(&self.pool)
+    }
+
     async fn upsert_thread(&self, meta: &ThreadMeta) -> Result<(), JournalError> {
         let mut conn = self.pool.acquire().await?;
         upsert_thread_on(&mut conn, meta).await
@@ -1471,6 +1483,7 @@ mod tests {
             context_window: None,
             context_fill_percent: None,
             needs_attention: false,
+            pending_guest_requests: 0,
             unread: false,
             resume_at: None,
             limit: None,
