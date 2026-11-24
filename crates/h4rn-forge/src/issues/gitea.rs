@@ -254,7 +254,7 @@ pub(crate) async fn update(
     // Gitea replaces labels through their own endpoint, by repository label
     // id; the issue PATCH body does not carry them.
     if let Some(names) = &update.labels {
-        let ids = label_ids(http, &base, names).await?;
+        let ids = label_ids(http, api, repo, number, names).await?;
         http.put_json(
             &format!("{base}/issues/{number}/labels"),
             &json!({"labels": ids}),
@@ -264,20 +264,109 @@ pub(crate) async fn update(
     get(http, api, repo, number).await
 }
 
-/// Resolves label names to repository label ids, paging through the
-/// catalogue until every requested label has been seen.
-async fn label_ids(http: &ForgeHttp, repo: &str, names: &[String]) -> Result<Vec<u64>> {
+/// Resolves the names in a label replacement to the ids Gitea accepts.
+///
+/// The labels already on the issue come from the issue's own label list,
+/// which a repository-scoped token can read. That matters because a label may
+/// belong to the organization that owns the repository, and h4rn's documented
+/// token scopes are repository-only: `GET /orgs/{org}/labels` needs an
+/// organization scope. Names that are not already applied are looked up in
+/// the repository catalogue and, for names it does not carry, the
+/// organization's catalogue. A `403` from the organization catalogue names
+/// the labels that could not be found instead of claiming the request failed.
+async fn label_ids(
+    http: &ForgeHttp,
+    api: &str,
+    repo: &ForgeRepoRef,
+    number: u32,
+    names: &[String],
+) -> Result<Vec<u64>> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
     let mut resolved: HashMap<String, u64> = HashMap::new();
+    let applied = http
+        .get_json(&format!("{}/issues/{number}/labels", repo_url(api, repo)))
+        .await?;
+    for label in applied.as_array().into_iter().flatten() {
+        let Some(id) = label["id"].as_u64() else {
+            continue;
+        };
+        let name = text(label, "name");
+        for requested in names {
+            if requested.eq_ignore_ascii_case(&name) {
+                resolved.entry(requested.clone()).or_insert(id);
+            }
+        }
+    }
+    if resolved.len() < names.len() {
+        read_label_catalogue(
+            http,
+            &format!("{}/labels", repo_url(api, repo)),
+            names,
+            &mut resolved,
+        )
+        .await?;
+    }
+    if resolved.len() < names.len() {
+        // A repository whose owner is not an organization answers 404; that
+        // means there is no second catalogue, not that the label request
+        // failed.
+        let org = format!(
+            "{api}/orgs/{}/labels",
+            form_urlencoded::byte_serialize(repo.owner.as_bytes()).collect::<String>()
+        );
+        read_label_catalogue(http, &org, names, &mut resolved).await?;
+    }
+    names
+        .iter()
+        .map(|name| {
+            resolved.get(name).copied().ok_or_else(|| {
+                ForgeError::InvalidRequest(format!(
+                    "the repository has no label called {name}; create it on the forge first"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Reads one label catalogue until every requested name resolves or the
+/// catalogue ends. Repository labels win: a name already resolved is not
+/// looked up again.
+///
+/// A catalogue may need a scope the token does not have: `GET
+/// /orgs/{org}/labels` answers `403` for a repository-only token. That is
+/// reported as the missing labels the walk was still looking for, so the
+/// person is told which label to create rather than shown a permission error
+/// with no next step. A `404` from the organization catalogue means the owner
+/// is not an organization.
+async fn read_label_catalogue(
+    http: &ForgeHttp,
+    catalog: &str,
+    names: &[String],
+    resolved: &mut HashMap<String, u64>,
+) -> Result<()> {
     let mut page = 1u32;
     let mut seen = 0u64;
     loop {
-        let url = format!("{repo}/labels?limit={PAGE_LIMIT}&page={page}");
+        let url = format!("{catalog}?limit={PAGE_LIMIT}&page={page}");
         let response = http
             .request(reqwest::Method::GET, &url, None, false)
             .await?;
+        if response.status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if response.status == reqwest::StatusCode::FORBIDDEN && catalog.contains("/orgs/") {
+            let missing = names
+                .iter()
+                .filter(|name| !resolved.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ForgeError::InvalidRequest(format!(
+                "the token cannot read the organization's label catalogue, so {missing} could not be found; create it on the repository or connect an account with organization access"
+            )));
+        }
         let total = header_u64(&response.headers, "x-total-count");
         let value = http.json(response)?;
         let available = value.as_array().cloned().unwrap_or_default();
@@ -309,16 +398,7 @@ async fn label_ids(http: &ForgeHttp, repo: &str, names: &[String]) -> Result<Vec
             break;
         }
     }
-    names
-        .iter()
-        .map(|name| {
-            resolved.get(name).copied().ok_or_else(|| {
-                ForgeError::InvalidRequest(format!(
-                    "the repository has no label called {name}; create it on the forge first"
-                ))
-            })
-        })
-        .collect()
+    Ok(())
 }
 
 fn map_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgeIssueSummary> {

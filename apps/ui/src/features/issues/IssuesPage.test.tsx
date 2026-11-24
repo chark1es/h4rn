@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -129,11 +130,19 @@ const mock = vi.hoisted(() => {
     hasMore: {} as Record<string, boolean>,
     /** Blocks the second page until the test resolves it. */
     page2Gate: null as Promise<void> | null,
+    /** Blocks one repository's first page, for a superseded listing. */
+    page1Gate: null as { repo: string; account?: string; promise: Promise<void> } | null,
+    /** A request type that fails, as a tracker that is briefly unreachable. */
+    fail: null as string | null,
     /** Details that differ from the list row. */
     detailLabels: null as { name: string; color: string | null }[] | null,
     detailAssignees: null as { login: string; name: string | null }[] | null,
+    /** Pull requests the detail reports, when not the fixture's one. */
+    detailPulls: null as ForgeIssue["linked_pull_requests"] | null,
     /** Simulates an issue leaving the list after a write. */
     hideRow: false,
+    /** Makes the next non-first page fail once, for a temporary tracker error. */
+    failPage2: false,
     /** The tracker's state after the last update. */
     closed: false,
     /** Whether the read reported a repository no project owns. */
@@ -166,13 +175,17 @@ const mock = vi.hoisted(() => {
     ],
   });
   const defaultRequest = async (request: ClientRequest): Promise<ResponseBody> => {
+    if (state.fail === request.type) {
+      throw new Error(`${request.type} is briefly unavailable`);
+    }
     switch (request.type) {
       case "forge_list_accounts":
         return {
           type: "forge_accounts",
           accounts: state.accounts as ForgeAccount[],
           capabilities: state.capabilities as ForgeCapabilityEntry[],
-          linear: state.linearCapabilities,
+          // An older daemon omits the field rather than sending null.
+          ...(state.linearCapabilities ? { linear: state.linearCapabilities } : {}),
         };
       case "linear_list_accounts":
         return {
@@ -221,7 +234,18 @@ const mock = vi.hoisted(() => {
         };
       }
       case "forge_list_issues": {
+        if (
+          request.page === 1 &&
+          state.page1Gate &&
+          state.page1Gate.repo === request.repo.repo &&
+          (!state.page1Gate.account || state.page1Gate.account === request.account_id)
+        ) {
+          await state.page1Gate.promise;
+        }
         if (request.page > 1 && state.page2Gate) await state.page2Gate;
+        if (request.page > 1 && state.failPage2) {
+          throw new Error("the tracker is briefly unavailable");
+        }
         return {
           type: "forge_issues",
           issues:
@@ -248,6 +272,7 @@ const mock = vi.hoisted(() => {
         detail.summary.state = state.closed ? "closed" : "open";
         if (state.detailLabels) detail.summary.labels = state.detailLabels;
         if (state.detailAssignees) detail.summary.assignees = state.detailAssignees;
+        if (state.detailPulls) detail.linked_pull_requests = state.detailPulls;
         return { type: "forge_issue", issue: detail, read_only: state.readOnly };
       }
       case "linear_get_issue": {
@@ -414,6 +439,7 @@ function resetTracker(
     detailAssignees?: { login: string; name: string | null }[];
     readOnly?: boolean;
     linearCapabilities?: ForgeCapabilities | null;
+    fail?: string | null;
   } = {},
 ) {
   mock.state.projects = options.projects ?? [
@@ -438,15 +464,22 @@ function resetTracker(
   mock.state.linearAccounts = options.linearAccounts ?? [];
   mock.state.hasMore = options.hasMore ?? {};
   mock.state.page2Gate = null;
+  mock.state.page1Gate = null;
+  mock.state.fail = options.fail ?? null;
   mock.state.linked = false;
   mock.state.detailLabels = options.detailLabels ?? null;
   mock.state.detailAssignees = options.detailAssignees ?? null;
+  mock.state.detailPulls = null;
   mock.state.hideRow = false;
+  mock.state.failPage2 = false;
   mock.state.closed = false;
   mock.state.readOnly = options.readOnly ?? false;
 }
 
 beforeEach(() => {
+  // Hidden projects and account choices are stored per browser; a test that
+  // hides one must not change what the next test sees.
+  window.localStorage.clear();
   mock.request.mockReset();
   mock.request.mockImplementation(mock.defaultRequest);
   resetTracker();
@@ -550,6 +583,156 @@ describe("the Issues page", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it("keeps the comment draft after a title edit is saved", async () => {
+    await openIssue();
+    const comment = screen.getByLabelText("New comment");
+    fireEvent.change(comment, { target: { value: "Still here after the edit" } });
+    const title = screen.getByLabelText("Issue title");
+    fireEvent.change(title, { target: { value: "Dark mode flickers on load" } });
+    fireEvent.blur(title);
+    await waitFor(() => expect(requestsOfType("forge_update_issue")).toHaveLength(1));
+    // The pane stayed mounted, so the draft the person typed is untouched;
+    // only the list behind it was refreshed.
+    const draft = await screen.findByLabelText("New comment");
+    expect((draft as HTMLTextAreaElement).value).toBe("Still here after the edit");
+  });
+
+  it("names a project whose repository no connected account serves", async () => {
+    resetTracker({
+      accounts: [
+        account({
+          account_id: "acct_gl",
+          forge: "gitlab",
+          base_url: "https://gitlab.com",
+          username: "alice",
+        }),
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText(/No GitHub account matches this repository/)).toBeTruthy();
+    expect(requestsOfType("forge_list_issues")).toHaveLength(0);
+  });
+
+  it("reads no Linear source when the accounts response has no linear field", async () => {
+    resetTracker({
+      linearCapabilities: null,
+      // A tracker that cannot answer the involvement filters must not offer
+      // them, so the assertion below is about the missing Linear field rather
+      // than GitHub's own capabilities.
+      capabilities: [capabilityEntry("github", issueCapabilities({ mentioning_filter: false }))],
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    // The forge group proves accounts, repositories and mappings all
+    // resolved; asserting before that only tested the loading state.
+    expect(await screen.findByText("GitHub · alice")).toBeTruthy();
+    // No Linear group, row or comment box: without the capability field there
+    // is no Linear source to read, so nothing Linear can be opened.
+    expect(screen.queryByText("Linear · Acme")).toBeNull();
+    expect(screen.queryByText("ENG-1")).toBeNull();
+    expect(screen.queryByLabelText("New comment")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Mentioning me" })).toBeNull();
+    expect(mock.request.mock.calls.map(([value]) => (value as ClientRequest).type)).not.toContain(
+      "linear_list_issues",
+    );
+  });
+
+  it("keeps the forge groups when only the Linear account list fails", async () => {
+    resetTracker({
+      fail: "linear_list_accounts",
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText("GitHub · alice")).toBeTruthy();
+    expect(await screen.findByText("linear_list_accounts is briefly unavailable")).toBeTruthy();
+    // The forge list did load, so its projects are not "unmatched".
+    expect(screen.queryByText(/No GitHub account matches this repository/)).toBeNull();
+    expect(screen.queryByText("Linear · Acme")).toBeNull();
+  });
+
+  it("does not claim no account matches when the forge account load fails", async () => {
+    resetTracker({ fail: "forge_list_accounts" });
+    render(<IssuesPage />);
+    expect(await screen.findByText("forge_list_accounts is briefly unavailable")).toBeTruthy();
+    // Repository detection republishes the listing, which must not clear the
+    // discovery error with its own (empty) state.
+    await waitFor(() => expect(requestsOfType("forge_detect_repo")).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByText("forge_list_accounts is briefly unavailable")).toBeTruthy();
+    expect(screen.queryByText(/account matches this repository/)).toBeNull();
+    expect(requestsOfType("forge_list_issues")).toHaveLength(0);
+  });
+
+  it("drives Linear's comment box and filters from the accounts response", async () => {
+    resetTracker({
+      linearCapabilities: linearCapabilities({ mentioning_filter: true }),
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText("Linear · Acme")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Mentioning me" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
+    expect(await screen.findByLabelText("New comment")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Comment" })).toBeTruthy();
+  });
+
+  it("hides Linear's comment box and mention filter when the field says so", async () => {
+    resetTracker({
+      linearCapabilities: linearCapabilities({ comments: false, mentioning_filter: false }),
+      mappings: [
+        {
+          project_id: "proj_1",
+          account_id: "lin_1",
+          team_id: "team_1",
+          team_key: "ENG",
+          team_name: "Engineering",
+        },
+      ],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText("Linear · Acme")).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Mentioning me" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /Rate limit the import/ }));
+    expect(await screen.findByRole("button", { name: /Link to this thread/ })).toBeTruthy();
+    expect(screen.queryByLabelText("New comment")).toBeNull();
   });
 
   it("links the issue to the open thread and unlinks it again", async () => {
@@ -815,6 +998,32 @@ describe("accounts, filters and detail", () => {
     expect(screen.queryByText("d73a4a")).toBeNull();
   });
 
+  it("lists two linked pull requests that share a number", async () => {
+    mock.state.detailPulls = [
+      {
+        number: 7,
+        title: "Fix flicker in the API",
+        state: "open",
+        web_url: "https://github.com/acme/api/pull/7",
+      },
+      {
+        number: 7,
+        title: "Fix flicker in the web client",
+        state: "open",
+        web_url: "https://github.com/acme/web/pull/7",
+      },
+    ];
+    const duplicateKey = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await openIssue();
+    expect(await screen.findByText("Fix flicker in the API")).toBeTruthy();
+    expect(screen.getByText("Fix flicker in the web client")).toBeTruthy();
+    // Keying by the provider number would collapse or duplicate the row.
+    expect(duplicateKey.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(
+      false,
+    );
+    duplicateKey.mockRestore();
+  });
+
   it("names Bitbucket Cloud's removed tracker per project and reads nothing", async () => {
     const bitbucketRepo: ForgeRepoRef = {
       forge: "bitbucket",
@@ -848,6 +1057,26 @@ describe("accounts, filters and detail", () => {
     expect(await screen.findByText(/Bitbucket Cloud has no issue API/)).toBeTruthy();
     expect(screen.getByText(/pull requests only/)).toBeTruthy();
     expect(requestsOfType("forge_list_issues")).toHaveLength(0);
+  });
+
+  it("shows Bitbucket's one note when no account serves the project", async () => {
+    const bitbucketRepo: ForgeRepoRef = {
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      owner: "acme",
+      repo: "widget",
+    };
+    resetTracker({
+      accounts: [],
+      capabilities: [capabilityEntry("bitbucket", issueCapabilities({ read: false }))],
+      repos: { "/work/widget": bitbucketRepo },
+    });
+    render(<IssuesPage />);
+    expect(await screen.findByText(/Bitbucket Cloud has no issue API/)).toBeTruthy();
+    // The removed tracker is already explained; "no account matches" would
+    // be a second, misleading note for the same project.
+    expect(screen.queryByText(/No Bitbucket account matches this repository/)).toBeNull();
+    expect(screen.queryByText(/account matches this repository/)).toBeNull();
   });
 });
 
@@ -942,6 +1171,217 @@ describe("issue paging", () => {
     await waitFor(() => expect(screen.queryByText("Stale page row")).toBeNull());
   });
 
+  it("keeps Load more when a page fails temporarily", async () => {
+    resetTracker({ hasMore: { widget: true } });
+    mock.state.failPage2 = true;
+    render(<IssuesPage />);
+    await screen.findByText("#12");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("the tracker is briefly unavailable")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+
+    // The same page can be tried again once the tracker answers.
+    mock.state.failPage2 = false;
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Stale page row")).toBeTruthy();
+  });
+
+  it("drops a page that arrives after its project is hidden", async () => {
+    resetTracker({
+      projects: [
+        {
+          id: "proj_1",
+          host: "host_local",
+          path: "/work/widget",
+          name: "widget",
+          created_at: "2026-01-01T00:00:00Z",
+          git: true,
+        },
+        {
+          id: "proj_2",
+          host: "host_local",
+          path: "/work/other",
+          name: "other",
+          created_at: "2026-01-01T00:00:00Z",
+          git: true,
+        },
+      ],
+      repos: {
+        "/work/widget": repo,
+        "/work/other": { ...repo, repo: "other" },
+      },
+      hasMore: { widget: true, other: true },
+    });
+    let release = () => {};
+    mock.state.page2Gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    render(<IssuesPage />);
+    await screen.findAllByText("#12");
+    const before = requestsOfType("forge_list_issues").filter(
+      (value) => value.type === "forge_list_issues" && value.page === 1,
+    ).length;
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    // Hold the relisting that follows hiding the project, so the delayed page
+    // lands first.
+    let releaseList = () => {};
+    mock.state.page1Gate = {
+      repo: "other",
+      promise: new Promise<void>((resolve) => {
+        releaseList = resolve;
+      }),
+    };
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Projects" }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "widget" }));
+    // It must not add the hidden project's rows back.
+    await waitFor(() => {
+      const now = requestsOfType("forge_list_issues").filter(
+        (value) => value.type === "forge_list_issues" && value.page === 1,
+      ).length;
+      expect(now).toBeGreaterThan(before);
+    });
+    release();
+    // The relisting is still held, so the hidden project's delayed page has
+    // landed and there has been time to render it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText("Stale page row")).toBeNull();
+    releaseList();
+    await waitFor(() => expect(screen.queryByText("Reading trackers…")).toBeNull());
+  });
+
+  it("drops a page two that was in flight when the account changed", async () => {
+    resetTracker({
+      accounts: [account(), account({ account_id: "acct_2", username: "bob" })],
+      hasMore: { widget: true },
+    });
+    let releasePage = () => {};
+    mock.state.page2Gate = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    render(<IssuesPage />);
+    await screen.findByText("GitHub · alice");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    // Hold the new account's relisting, so the stale page would stay on
+    // screen if it were spliced into the old group.
+    let releaseList = () => {};
+    mock.state.page1Gate = {
+      repo: "widget",
+      account: "acct_2",
+      promise: new Promise<void>((resolve) => {
+        releaseList = resolve;
+      }),
+    };
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Projects" }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "bob" }));
+    await waitFor(() =>
+      expect(
+        requestsOfType("forge_list_issues").some(
+          (value) => value.type === "forge_list_issues" && value.account_id === "acct_2",
+        ),
+      ).toBe(true),
+    );
+
+    releasePage();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText("Stale page row")).toBeNull();
+
+    releaseList();
+    await waitFor(() => expect(screen.queryByText("GitHub · alice")).toBeNull());
+  });
+
+  it("does not page a group that a new listing replaced", async () => {
+    resetTracker({
+      projects: [
+        {
+          id: "proj_1",
+          host: "host_local",
+          path: "/work/widget",
+          name: "widget",
+          created_at: "2026-01-01T00:00:00Z",
+          git: true,
+        },
+        {
+          id: "proj_2",
+          host: "host_local",
+          path: "/work/enterprise",
+          name: "enterprise",
+          created_at: "2026-01-01T00:00:00Z",
+          git: true,
+        },
+      ],
+      accounts: [
+        account(),
+        account({
+          account_id: "acct_2",
+          base_url: "https://github.example.test",
+          username: "bob",
+        }),
+      ],
+      repos: {
+        "/work/widget": repo,
+        "/work/enterprise": {
+          ...repo,
+          base_url: "https://github.example.test",
+          repo: "enterprise",
+        },
+      },
+      hasMore: { widget: true, enterprise: true },
+    });
+    render(<IssuesPage />);
+    await screen.findByText("GitHub · alice");
+    await screen.findByText("GitHub · bob");
+    const firstPages = requestsOfType("forge_list_issues").filter(
+      (value) => value.type === "forge_list_issues" && value.page === 1,
+    ).length;
+
+    // Hold the relisting that hiding the project starts, so the superseded
+    // group is still on screen when the test clicks it.
+    let releaseList = () => {};
+    mock.state.page1Gate = {
+      repo: "enterprise",
+      promise: new Promise<void>((resolve) => {
+        releaseList = resolve;
+      }),
+    };
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Projects" }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "widget" }));
+    await waitFor(() => {
+      const now = requestsOfType("forge_list_issues").filter(
+        (value) => value.type === "forge_list_issues" && value.page === 1,
+      ).length;
+      expect(now).toBeGreaterThan(firstPages);
+    });
+    // An open menu marks the page behind it aria-hidden; close it so the
+    // groups are part of the accessibility tree again.
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    const hiddenGroup = screen.getByRole("region", { name: "GitHub · alice" });
+    const more = within(hiddenGroup).getByRole("button", { name: "Load more" });
+    expect((more as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(more);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(
+      requestsOfType("forge_list_issues").filter(
+        (value) => value.type === "forge_list_issues" && value.page === 2,
+      ),
+    ).toHaveLength(0);
+
+    releaseList();
+    await waitFor(() => expect(screen.queryByText("Reading trackers…")).toBeNull());
+  });
+
   it("pages a Linear discussion with comments_after and keeps both pages", async () => {
     resetTracker({
       mappings: [
@@ -1006,5 +1446,17 @@ describe("Linear state families", () => {
       url: "https://linear.app/acme/issue/ENG-9",
     });
     expect(row.state).toBe("closed");
+  });
+});
+
+describe("the phone layout", () => {
+  it("lets the issue filters wrap with thumb-sized targets", () => {
+    const css = readFileSync("src/styles/quiet.css", "utf8");
+    const start = css.indexOf("@media (max-width: 560px)");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const block = css.slice(start, css.indexOf("\n}", start) + 2);
+    // Five involvement tabs do not fit across a 390 px screen in one row.
+    expect(block).toMatch(/\.q-issues-head \.q-seg \{[^}]*flex-wrap: wrap;/);
+    expect(block).toMatch(/\.q-issues-head \.q-seg > button \{[^}]*min-height: 44px;/);
   });
 });

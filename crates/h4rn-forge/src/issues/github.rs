@@ -84,9 +84,11 @@ pub(crate) async fn list(
             "is:issue".into(),
         ];
         match filter {
-            ForgeIssueFilter::Open | ForgeIssueFilter::Assigned => terms.push("is:open".into()),
             ForgeIssueFilter::Closed => terms.push("is:closed".into()),
-            _ => {}
+            // Opened and mentioning are involvement filters like assigned:
+            // they answer "my open work", so they close the state too.
+            ForgeIssueFilter::All => {}
+            _ => terms.push("is:open".into()),
         }
         if let Some(involvement) = involvement {
             terms.push(involvement.into());
@@ -156,11 +158,7 @@ pub(crate) async fn get(
     }
     let summary = map_summary(repo, &value)
         .ok_or_else(|| ForgeError::Parse("GitHub returned an incomplete issue".into()))?;
-    let linked_pull_requests = http
-        .get_json(&format!("{repo_url}/issues/{number}/timeline?per_page=100"))
-        .await
-        .map(|value| map_linked_prs(repo, &value))
-        .unwrap_or_default();
+    let linked_pull_requests = linked_pull_requests(http, &repo_url, number, repo).await;
     Ok(ForgeIssue {
         summary,
         body: text(&value, "body"),
@@ -316,11 +314,7 @@ pub(crate) async fn update(
         .await?;
     let summary = map_summary(repo, &value)
         .ok_or_else(|| ForgeError::Parse("GitHub returned an incomplete issue".into()))?;
-    let linked_pull_requests = http
-        .get_json(&format!("{repo_url}/issues/{number}/timeline?per_page=100"))
-        .await
-        .map(|value| map_linked_prs(repo, &value))
-        .unwrap_or_default();
+    let linked_pull_requests = linked_pull_requests(http, &repo_url, number, repo).await;
     Ok(ForgeIssue {
         summary,
         body: text(&value, "body"),
@@ -361,6 +355,64 @@ fn map_comment(value: &Value) -> Option<ForgeIssueComment> {
     })
 }
 
+/// Reads every timeline page that carries a cross-referenced pull request.
+///
+/// GitHub pages the timeline with a `Link` header; one request only sees the
+/// first hundred events, so an older cross-reference would never appear. The
+/// walk stops after ten pages even if the server keeps advertising a next
+/// one, and a failed later page keeps the links already found. A next link must
+/// stay on the API's own origin: a GitHub Enterprise host or a proxy can name
+/// another host, and following it would hand that host the account's
+/// Authorization header.
+const TIMELINE_PAGE_LIMIT: u32 = 10;
+
+async fn linked_pull_requests(
+    http: &ForgeHttp,
+    repo_url: &str,
+    number: u32,
+    repo: &ForgeRepoRef,
+) -> Vec<ForgeIssueLinkedPr> {
+    let mut linked: Vec<ForgeIssueLinkedPr> = Vec::new();
+    let mut next = Some(format!("{repo_url}/issues/{number}/timeline?per_page=100"));
+    let mut pages = 0;
+    while let Some(url) = next {
+        if pages >= TIMELINE_PAGE_LIMIT {
+            break;
+        }
+        pages += 1;
+        let response = match http.request(Method::GET, &url, None, false).await {
+            Ok(response) => response,
+            Err(_) => break,
+        };
+        let following = next_link(&response.headers);
+        let Ok(value) = http.json(response) else {
+            break;
+        };
+        for pull in map_linked_prs(repo, &value) {
+            // A pull request is identified by its own URL, not by its number:
+            // a cross-reference can name a pull request in another repository,
+            // whose number may match one already collected here.
+            if !linked
+                .iter()
+                .any(|existing| existing.web_url == pull.web_url)
+            {
+                linked.push(pull);
+            }
+        }
+        next = following.filter(|next| {
+            if crate::http::same_origin(next, repo_url) {
+                return true;
+            }
+            tracing::warn!(
+                next = next.as_str(),
+                "GitHub's timeline pointed at another origin; stopped paging"
+            );
+            false
+        });
+    }
+    linked
+}
+
 fn map_linked_prs(repo: &ForgeRepoRef, value: &Value) -> Vec<ForgeIssueLinkedPr> {
     let mut linked: Vec<ForgeIssueLinkedPr> = Vec::new();
     for event in value.as_array().into_iter().flatten() {
@@ -374,7 +426,8 @@ fn map_linked_prs(repo: &ForgeRepoRef, value: &Value) -> Vec<ForgeIssueLinkedPr>
         let Some(number) = source["number"].as_u64().map(|number| number as u32) else {
             continue;
         };
-        if linked.iter().any(|pr| pr.number == number) {
+        let web_url = optional_text(source, "html_url").unwrap_or_else(|| repo.pr_web_url(number));
+        if linked.iter().any(|pr| pr.web_url == web_url) {
             continue;
         }
         linked.push(ForgeIssueLinkedPr {
@@ -387,7 +440,7 @@ fn map_linked_prs(repo: &ForgeRepoRef, value: &Value) -> Vec<ForgeIssueLinkedPr>
             } else {
                 ForgePrState::Open
             }),
-            web_url: optional_text(source, "html_url").unwrap_or_else(|| repo.pr_web_url(number)),
+            web_url,
         });
     }
     linked

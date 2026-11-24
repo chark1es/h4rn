@@ -18,7 +18,7 @@ use url::form_urlencoded;
 
 use crate::common::{optional_text, parse_datetime, parse_optional_datetime, text, validate_repo};
 use crate::error::{ForgeError, Result};
-use crate::http::ForgeHttp;
+use crate::http::{ForgeHttp, encode_path_segment};
 
 /// Work item types the Issues page treats as issues.
 const ISSUE_TYPES: [&str; 2] = ["Issue", "Bug"];
@@ -32,12 +32,16 @@ const IN_PROGRESS: &str = "InProgress";
 /// Category for a state that has not started.
 const PROPOSED: &str = "Proposed";
 
-fn encode(value: &str) -> String {
+fn query_value(value: &str) -> String {
     form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn project_api(api: &str, repo: &ForgeRepoRef) -> String {
-    format!("{}/{}", api.trim_end_matches('/'), encode(&repo.owner))
+    format!(
+        "{}/{}",
+        api.trim_end_matches('/'),
+        encode_path_segment(&repo.owner)
+    )
 }
 
 fn wit_query(project: &str) -> String {
@@ -426,7 +430,7 @@ pub(crate) async fn comments(
         project_api(api, repo)
     );
     if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
-        url.push_str(&format!("&continuationToken={}", encode(cursor)));
+        url.push_str(&format!("&continuationToken={}", query_value(cursor)));
     }
     let value = http.get_json(&url).await?;
     let items = value["comments"].as_array().cloned().unwrap_or_default();
@@ -617,7 +621,7 @@ fn map_summary(
         format!(
             "{}/{}/_workitems/edit/{}",
             repo.base_url.trim_end_matches('/'),
-            encode(&repo.owner),
+            encode_path_segment(&repo.owner),
             value["id"].as_u64().unwrap_or_default()
         )
     });
@@ -736,8 +740,8 @@ async fn repository_web_url(
     let url = format!(
         "{}/{}/_apis/git/repositories/{}?api-version=7.1",
         api.trim_end_matches('/'),
-        encode(project),
-        encode(repository)
+        encode_path_segment(project),
+        encode_path_segment(repository)
     );
     let value = http.get_json(&url).await.ok()?;
     optional_text(&value, "webUrl").filter(|url| !url.is_empty())
@@ -766,8 +770,8 @@ async fn map_linked_pr(
         None => format!(
             "{}/{}/_git/{}/pullrequest/{number}",
             api.trim_end_matches('/'),
-            encode(project),
-            encode(repository)
+            encode_path_segment(project),
+            encode_path_segment(repository)
         ),
     };
     Some(ForgeIssueLinkedPr {
