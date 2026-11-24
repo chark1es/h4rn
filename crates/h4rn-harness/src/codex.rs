@@ -784,11 +784,9 @@ impl HarnessSession for CodexSession {
                     harness: self.kind,
                     feature: "steering without a running turn".into(),
                 })?;
-        self.request(
-            "turn/steer",
-            steer_params(&thread_id, &expected, &input.text, &input.attachments),
-        )
-        .await?;
+        let (method, params) =
+            steer_request(&thread_id, &expected, &input.text, &input.attachments);
+        self.request(method, params).await?;
         Ok(())
     }
 
@@ -1427,6 +1425,24 @@ pub fn steer_params(
     })
 }
 
+/// The request method and parameters that deliver one message into the
+/// running turn.
+///
+/// The method is app-server's own name; naming the expected turn is what makes
+/// a steer that loses its race a server-side rejection instead of a message
+/// landing in whatever turn runs next.
+pub fn steer_request(
+    thread_id: &str,
+    expected_turn_id: &str,
+    text: &str,
+    attachments: &[AttachmentRef],
+) -> (&'static str, Value) {
+    (
+        "turn/steer",
+        steer_params(thread_id, expected_turn_id, text, attachments),
+    )
+}
+
 /// path so the model can refer to the file even if the mention is ignored.
 pub fn build_turn_input(text: &str, attachments: &[AttachmentRef]) -> Vec<Value> {
     let mut input = Vec::new();
@@ -1730,6 +1746,12 @@ mod tests {
         assert_eq!(params["expectedTurnId"], "turn_running");
         assert_eq!(params["input"][0]["type"], "text");
         assert_eq!(params["input"][0]["text"], "turn left");
+    }
+
+    #[test]
+    fn a_steer_is_the_app_servers_own_turn_steer_method() {
+        let (method, _) = steer_request("thread_native", "turn_running", "turn left", &[]);
+        assert_eq!(method, "turn/steer");
     }
 
     #[test]

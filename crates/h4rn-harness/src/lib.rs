@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
 use h4rn_protocol::{
-    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, AttachmentId, HarnessCapabilities,
-    HarnessKind, RuntimeMode, ToolCall, TurnStatus, Usage,
+    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, AttachmentId, HarnessKind,
+    RuntimeMode, ToolCall, TurnStatus, Usage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -686,16 +686,38 @@ impl InstanceSnapshot {
 
 /// What one harness adapter can do beyond the common trait.
 ///
+/// Advertised per harness so the daemon can offer an action only where the
+/// adapter really implements it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HarnessCapabilities {
+    /// The adapter can take a user message into the turn that is already
+    /// running, without starting a new turn.
+    pub steer: bool,
+}
+
+/// What one harness adapter can do beyond the common trait.
+///
 /// This is a per-harness fact, not a per-thread one: everything h4rn spawns for
 /// a harness has the same mid-turn input. Keeping the matrix here means the
 /// daemon, the capability listing and the UI all answer from one place.
 pub fn capabilities(kind: HarnessKind) -> HarnessCapabilities {
     HarnessCapabilities {
-        // Claude Code accepts further stream-json user frames while a turn is
-        // running and reads them between tool calls; Codex app-server has a
-        // real `turn/steer` request. OpenCode's HTTP prompt starts a queued
-        // message and ACP has one prompt at a time, so neither is advertised.
-        steer: matches!(kind, HarnessKind::ClaudeCode | HarnessKind::Codex),
+        // Only Codex app-server has a request that really lands inside the
+        // running turn (`turn/steer`, which names the expected turn).
+        //
+        // Claude Code's stream-json stdin is a queue of turns, not a mid-turn
+        // channel. Measured against 2.1.330: a frame written while a turn is
+        // running is read between tool calls and folded into that turn's single
+        // `result` (`num_turns` counts it), but a frame that reaches the CLI
+        // after the `result` was emitted becomes a second turn with its own
+        // `result`. Both orders are legal and the stream does not say which one
+        // happened, so the daemon could not tell whether the first `result`
+        // settles the steer or a second one will follow. Guessing would settle a
+        // turn too early (losing the steer's answer) or wait for a `result` that
+        // never comes; h4rn's durable queue already gives Claude the honest
+        // follow-up, so Claude advertises no steer. OpenCode's HTTP prompt
+        // starts a queued message and ACP has one prompt at a time.
+        steer: matches!(kind, HarnessKind::Codex),
     }
 }
 
@@ -777,10 +799,14 @@ mod capability_tests {
     use super::*;
 
     #[test]
-    fn only_harnesses_with_a_real_mid_turn_input_advertise_steer() {
-        assert!(capabilities(HarnessKind::ClaudeCode).steer);
+    fn only_a_harness_with_a_real_mid_turn_input_advertises_steer() {
         assert!(capabilities(HarnessKind::Codex).steer);
+        assert!(
+            !capabilities(HarnessKind::ClaudeCode).steer,
+            "Claude's stdin is a turn queue, so a steer cannot be attributed"
+        );
         assert!(!capabilities(HarnessKind::Opencode).steer);
         assert!(!capabilities(HarnessKind::Antigravity).steer);
+        assert!(!capabilities(HarnessKind::Acp).steer);
     }
 }

@@ -544,22 +544,6 @@ impl HarnessSession for ClaudeCodeSession {
         Ok(())
     }
 
-    async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
-        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
-            return Err(HarnessError::Transport {
-                harness: self.kind,
-                message: "session is shut down".into(),
-            });
-        }
-
-        // A steer is one more user frame on the same stream-json stdin. The
-        // running turn owns the session's first-send attachments, so a steer
-        // never takes them; Claude reads the frame after the tool calls it was
-        // already running, inside the same turn.
-        let frame = build_user_frame(&input.text, &input.attachments)?;
-        self.write_frame(frame).await
-    }
-
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {
@@ -1440,6 +1424,44 @@ done
             other => panic!("expected Transport, got {other:?}"),
         }
         assert_eq!(control_log(&log).len(), 1, "the switch was really sent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    /// Claude's stdin is a queue of turns, so a steer written mid-turn cannot be
+    /// attributed to the running turn or to the next one. The adapter refuses it
+    /// instead of letting the daemon settle the wrong turn, and writes nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_refuses_a_steer_instead_of_writing_a_second_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (install, log) = fake_cli(workspace.path(), "      :");
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        let error = session
+            .steer(UserInput {
+                text: "go left".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("claude does not take a mid-turn steer");
+        match error {
+            HarnessError::Unsupported { feature, .. } => {
+                assert!(feature.contains("steering a running turn"), "{feature}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .all(|frame| frame["type"] != "user"),
+            "a refused steer writes no user frame"
+        );
         session.shutdown().await.expect("shutdown");
     }
 

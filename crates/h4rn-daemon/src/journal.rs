@@ -1500,7 +1500,9 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
-            queued: Vec::new(),
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
             steer: false,
         }
     }

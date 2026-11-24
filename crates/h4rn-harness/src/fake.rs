@@ -180,6 +180,8 @@ pub struct FakeHarness {
     steer_count: Option<SteerCount>,
     /// A test-only failure a steer reports instead of being accepted.
     steer_failure: Option<String>,
+    /// A test-only refusal a steer reports before touching the transport.
+    steer_rejection: Option<String>,
     /// A test-only count of interrupts the session received.
     interrupt_count: Option<InterruptCount>,
     /// Cancels still due to fail with a transient error (the session stays
@@ -308,12 +310,21 @@ impl SendCount {
 pub struct SteerCount {
     count: Arc<AtomicUsize>,
     notify: Arc<tokio::sync::Notify>,
+    texts: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl SteerCount {
     /// How many messages have been steered so far.
     pub fn get(&self) -> usize {
         self.count.load(Ordering::SeqCst)
+    }
+
+    /// The text of every steer, in the order the harness received it.
+    pub fn texts(&self) -> Vec<String> {
+        self.texts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Waits until at least `count` messages have been steered.
@@ -333,7 +344,11 @@ impl SteerCount {
     }
 
     /// Counts one more steer and wakes the waiters.
-    fn note(&self) {
+    fn note(&self, text: &str) {
+        self.texts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(text.to_owned());
         self.count.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_waiters();
     }
@@ -587,6 +602,7 @@ impl Default for FakeHarness {
             send_gate_after: 1,
             steer_count: None,
             steer_failure: None,
+            steer_rejection: None,
             write_gate: None,
             send_count: None,
             interrupt_count: None,
@@ -721,8 +737,20 @@ impl FakeHarness {
     }
 
     /// Makes every steer fail with this test-only transport error.
+    ///
+    /// A transport failure is unclear: the message may already be on the wire,
+    /// so it is the shape a timeout has.
     pub fn with_steer_failure(mut self, message: impl Into<String>) -> Self {
         self.steer_failure = Some(message.into());
+        self
+    }
+
+    /// Makes every steer refused with this test-only protocol error.
+    ///
+    /// A refusal is definite: the harness answered without taking the message,
+    /// so a queued message may safely stay queued.
+    pub fn with_steer_rejection(mut self, message: impl Into<String>) -> Self {
+        self.steer_rejection = Some(message.into());
         self
     }
 
@@ -1204,6 +1232,7 @@ impl Harness for FakeHarness {
             send_count: self.send_count.clone(),
             steer_count: self.steer_count.clone(),
             steer_failure: self.steer_failure.clone(),
+            steer_rejection: self.steer_rejection.clone(),
             interrupt_count: self.interrupt_count.clone(),
             interrupt_failures: self.interrupt_failures.clone(),
             dead_sends_after: self.dead_sends_after,
@@ -1265,6 +1294,8 @@ pub struct FakeSession {
     steer_count: Option<SteerCount>,
     /// A test-only failure a steer reports.
     steer_failure: Option<String>,
+    /// A test-only refusal a steer reports.
+    steer_rejection: Option<String>,
     /// A shared count of cancels this session received.
     interrupt_count: Option<InterruptCount>,
     /// Cancels still due to fail with a transient error.
@@ -1349,7 +1380,7 @@ impl HarnessSession for FakeSession {
         })
     }
 
-    async fn steer(&mut self, _input: UserInput) -> Result<(), HarnessError> {
+    async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed {
             return Err(HarnessError::Transport {
                 harness: self.kind,
@@ -1362,8 +1393,14 @@ impl HarnessSession for FakeSession {
                 message: message.clone(),
             });
         }
+        if let Some(message) = &self.steer_rejection {
+            return Err(HarnessError::Protocol {
+                harness: self.kind,
+                message: message.clone(),
+            });
+        }
         if let Some(count) = &self.steer_count {
-            count.note();
+            count.note(&input.text);
         }
         Ok(())
     }

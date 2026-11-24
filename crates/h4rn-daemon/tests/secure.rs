@@ -16,7 +16,7 @@ use h4rn_daemon::network_access::NetworkAccess;
 use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::schedules::ScheduleService;
 use h4rn_daemon::threads::ThreadManagerOptions;
-use h4rn_harness::FakeHarness;
+use h4rn_harness::{FakeHarness, HarnessEvent};
 use h4rn_protocol::{
     BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, FsOmitted,
     HarnessKind, HostId, PairScope, ProjectSource, ProtoError, ProtoErrorCode, ResponseBody,
@@ -81,6 +81,18 @@ async fn boot_at(
     devices: Arc<DeviceRegistry>,
     owned: Option<tempfile::TempDir>,
 ) -> TestDaemon {
+    boot_with_harness(data_dir, service, devices, owned, FakeHarness::new()).await
+}
+
+/// Boots with a harness a test scripted: an event list that never completes a
+/// turn leaves a thread running, so later messages really queue.
+async fn boot_with_harness(
+    data_dir: std::path::PathBuf,
+    service: Arc<SecureService>,
+    devices: Arc<DeviceRegistry>,
+    owned: Option<tempfile::TempDir>,
+    harness: FakeHarness,
+) -> TestDaemon {
     let workspace = data_dir.clone();
     let config = Config {
         data_dir,
@@ -101,7 +113,7 @@ async fn boot_at(
     let daemon = DaemonBuilder::new(config)
         // Titles never spawn the machine's own claude or codex.
         .without_title_agents()
-        .with_harness(Arc::new(FakeHarness::new()))
+        .with_harness(Arc::new(harness))
         .with_lifecycle(options)
         .with_secure(Arc::clone(&service))
         .with_devices(Arc::clone(&devices))
@@ -326,6 +338,27 @@ impl SecureClient {
     }
 
     /// Reads the next raw text frame, without parsing it.
+    /// Reads frames until this request's answer, and reports the serialized
+    /// length of the frame that carried it.
+    ///
+    /// The paired transport refuses a frame over its limit, so a path that can
+    /// carry an unbounded list needs a test that measures what actually goes on
+    /// the wire.
+    async fn response_size(&mut self, id: u64) -> (Result<ResponseBody, ProtoError>, usize) {
+        loop {
+            let text = self.read_raw_text().await;
+            let frame: ServerFrame = serde_json::from_str(&text).expect("parse ServerFrame");
+            match frame {
+                ServerFrame::Response {
+                    id: response_id,
+                    result,
+                } if response_id == id => return (result, text.len()),
+                ServerFrame::Event { seq, event } => self.pending.push_back((seq, event)),
+                _ => {}
+            }
+        }
+    }
+
     async fn read_raw_text(&mut self) -> String {
         loop {
             let event = tokio::time::timeout(Duration::from_secs(10), self.client.recv())
@@ -446,6 +479,127 @@ async fn secure_transport_creates_a_thread() {
     let summary = create_thread_over_secure().await;
     assert_eq!(summary.harness, HarnessKind::ClaudeCode);
     assert!(!summary.thread_id.as_str().is_empty());
+}
+
+/// A queue can be larger than a paired transport's frame, so the summary only
+/// counts it and the contents come in bounded pages.
+#[tokio::test]
+async fn a_large_queue_never_exceeds_one_secure_frame() {
+    let client_identity = device_identity();
+    let daemon_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(daemon_identity).with_policy(allowed),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    for key in service.allowed_devices() {
+        devices
+            .insert_direct(key, PairScope::ALL.to_vec())
+            .expect("persist");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workspace = dir.path().to_path_buf();
+    // A scripted turn that never completes keeps the thread running, so the
+    // messages really wait in the queue.
+    let harness = FakeHarness::with_events(vec![HarnessEvent::TextDelta {
+        text: "working".into(),
+    }]);
+    let daemon = boot_with_harness(
+        workspace.clone(),
+        Arc::clone(&service),
+        devices,
+        Some(dir),
+        harness,
+    )
+    .await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = host_of(&mut client).await;
+    let created = client
+        .request(create_thread_in(host, &workspace.display().to_string()))
+        .await
+        .expect("create");
+    let thread_id = match created {
+        ResponseBody::ThreadCreated { thread_id, .. } => thread_id,
+        other => panic!("unexpected CreateThread response: {other:?}"),
+    };
+
+    // Six messages of 120 KiB each: more than two whole frames if they were
+    // ever carried together.
+    let piece = "q".repeat(120 * 1024);
+    let mut expected = Vec::new();
+    for index in 0..6 {
+        let text = format!("{index}: {piece}");
+        expected.push(text.clone());
+        client
+            .request(ClientRequest::SendMessage {
+                thread_id: thread_id.clone(),
+                text,
+                attachments: Vec::new(),
+                steer: false,
+                turn_id: None,
+            })
+            .await
+            .expect("queue the message");
+    }
+
+    // The summary that counts them fits the frame, and says six wait.
+    let counted = loop {
+        let text = client.read_raw_text().await;
+        assert!(
+            text.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+            "a summary frame of {} bytes exceeds the transport's limit",
+            text.len()
+        );
+        let frame: ServerFrame = serde_json::from_str(&text).expect("parse ServerFrame");
+        if let ServerFrame::Event {
+            event: Event::ThreadUpserted(summary),
+            ..
+        } = frame
+            && summary.thread_id == thread_id
+        {
+            break summary;
+        }
+    };
+    assert_eq!(counted.queued_count, 6, "every message is counted");
+
+    // The queue comes back in pages, each of which fits.
+    let mut offset = 0;
+    let mut texts = Vec::new();
+    loop {
+        let id = client
+            .send(ClientRequest::GetThreadQueue {
+                thread_id: thread_id.clone(),
+                offset,
+            })
+            .await;
+        let (result, size) = client.response_size(id).await;
+        assert!(
+            size <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+            "a queue page of {size} bytes exceeds the transport's limit"
+        );
+        let page = match result.expect("queue page") {
+            ResponseBody::ThreadQueue {
+                queued,
+                total,
+                next_offset,
+                ..
+            } => {
+                assert_eq!(total, 6);
+                texts.extend(queued.iter().map(|message| message.text.clone()));
+                next_offset
+            }
+            other => panic!("unexpected queue response: {other:?}"),
+        };
+        if page >= 6 {
+            break;
+        }
+        assert!(page > offset, "a page must make progress");
+        offset = page;
+    }
+    assert_eq!(texts, expected, "every page carries a message whole");
+    client.close().await;
+    daemon.stop().await;
 }
 
 #[tokio::test]

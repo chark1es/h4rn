@@ -1419,6 +1419,7 @@ impl Connection {
                     text,
                     attachments,
                     steer,
+                    turn_id,
                 } => self
                     .state
                     .manager
@@ -1431,6 +1432,7 @@ impl Connection {
                         } else {
                             crate::threads::SendMode::Queue
                         },
+                        turn_id,
                     )
                     .await
                     .map(|accepted| ResponseBody::MessageAccepted {
@@ -1438,6 +1440,19 @@ impl Connection {
                         turn_id: accepted.turn_id,
                         seq: accepted.seq,
                         queued_message_id: accepted.queued_message_id,
+                    })
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::GetThreadQueue { thread_id, offset } => self
+                    .state
+                    .manager
+                    .thread_queue(&thread_id, offset)
+                    .await
+                    .map(|page| ResponseBody::ThreadQueue {
+                        thread_id: page.thread_id,
+                        next_offset: offset.saturating_add(page.queued.len() as u32),
+                        queued: page.queued,
+                        total: page.total,
+                        revision: page.revision,
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
                 ClientRequest::QueueMessage {
@@ -1469,6 +1484,8 @@ impl Connection {
                         .map(|update| ResponseBody::QueueUpdated {
                             thread_id: update.thread_id,
                             queued: update.queued,
+                            total: update.total,
+                            revision: update.revision,
                             seq: update.seq,
                         })
                         .map_err(crate::threads::ManagerError::into_proto)
@@ -2596,7 +2613,9 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
-            queued: Vec::new(),
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
             steer: true,
         }
     }
