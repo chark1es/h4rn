@@ -918,13 +918,20 @@ apply; the promoted write fails on the dead pipe instead, and the turn is handed
 rather than failed. Its prompt never reached the provider, so nothing it collected can be its own,
 and the armed schedule names it and delivers it after the reset. Only the write-failure path may
 requeue without the quiet check for that reason; a promoted turn whose own completion failed on a
-closed transport must still have produced nothing to go back, and a prompt the person sent into a
-dying session stays their failure to see. A paused prompt with no schedule that can be armed (no
-usage meter, or a ledger that refuses it) is failed honestly instead of being parked with no
-delivery owner. The `agy-fixture` peer keeps its replies ordinary (a newline terminator, as a real
-peer writes them): `H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers and exits at once with the reset on
-stderr, and `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the promoted
-prompt reaches it, so the promotion-before-the-limit order is fixed by the test, not by the machine.
+closed transport may go back only when the harness never accepted its prompt. Acceptance means the
+harness accepted the write; for ACP that is a successful flush of the prompt frame, not proof the
+agent read it. Because the prompt may already have been acted on (an edit it never reported), such a
+turn settles as limited with its trace and the person can resend it; it is never run again
+automatically. A Stop that lands while a closed session's write fails settles the turn Interrupted
+with no transport row, exactly as a Stop on a detached session does. A paused prompt with no
+schedule that can be armed (no usage meter, or a ledger that refuses it) is failed honestly instead
+of being parked with no delivery owner. A prompt is saved on the thread row only once a schedule
+really owns it, including the failed-write requeue: the ledger's refusal leaves no orphan prompt for
+a restart to deliver. The `agy-fixture` peer keeps its replies ordinary (a newline terminator, as a
+real peer writes them): `H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers and exits at once with the
+reset on stderr, and `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the
+promoted prompt reaches it, so the promotion-before-the-limit order is fixed by the test, not by the
+machine.
 
 **Addendum: work already done is never replayed, and a pause always owns its prompt.** Three rules
 refine the requeue. First, "produced nothing" is read from a turn-long marker, not from the running
@@ -937,25 +944,35 @@ plan and usage from the moment its prompt goes on the wire (`on_the_wire`) until
 `Ok`, and drops them when it fails: an adapter that has not accepted the prompt yet can still be
 draining the finished turn's output, so those events are neither published nor journaled under a
 turn whose write can fail and send the prompt back to the queue. Releasing in the adapter's order on
-success keeps the turn's own first words. ACP carries no turn id, so text a peer writes after it has
-read the new prompt is still indistinguishable from the new turn's own output; the hold covers
-exactly everything up to the acceptance. Third, a pause and its prompt are one record. The schedule
-binds to a turn only through `parked_turn_to_keep`, and the prompt is saved on the thread row only
-when the ledger really armed the schedule, in the same step, so a limit landing between promotion
-and claim survives a restart. A ledger that refuses the schedule leaves no prompt on the row for a
-restart to deliver again. A claim re-checks pause ownership under the record lock and refuses to
-write a prompt the pause now owns. A requeue keeps the dead session's exit status and stderr row
-instead of clearing it, and the published `auto_resume` flag is derived from the schedule that was
-actually armed: a limit that no meter or ledger could schedule reads as rate-limited, never as
-`Scheduled`. Reply resolution is independent of event delivery for the same "never lose the
-person's answer" reason: the reader publishes into its own queue drained by one forwarder, so a full
-session queue can no longer park it before the reply behind those updates. That queue is bounded at
-four session queues; when it overflows the newest ordinary update is dropped and counted. A
-permission request, a transport close, stdout's close and the exit report take a reserved queue:
-once more than one session queue of updates is waiting they get the next slot, so a flood cannot
-delay the event that decides what a request means or that the agent is gone. While the consumer
-keeps up the reader's order is kept, so a close never overtakes the words read before it. A
-settlement stays in the ordinary order, behind the updates the reader had already taken.
+success keeps the turn's own first words. Only lifecycle reports are uncapped - a completion, a
+usage limit, a transport close (the exit and status report), an approval and a session-started
+report - and they are never dropped, or the turn would stay active forever. Everything else counts
+against the hold's bound, including the diagnostic error the bridge makes from an unparseable
+stdout line; like text, an error past the bound is dropped, so an agent that floods garbage during
+the write cannot grow the hold without limit. An acceptance that lands between the hold's check and
+the next event releases the held output before that event is applied, so output read first is
+published first. ACP carries no turn id, so text a peer writes after it has read the new prompt is still
+indistinguishable from the new turn's own output; the hold covers exactly everything up to the
+acceptance. Third, a pause and its prompt are one record. The schedule binds to a turn only through
+`parked_turn_to_keep`, and the prompt is saved on the thread row only when the ledger really armed
+the schedule, in the same step, so a limit landing between promotion and claim survives a restart.
+A ledger that refuses the schedule leaves no prompt on the row for a restart to deliver again. A
+claim re-checks pause ownership under the record lock and refuses to write a prompt the pause now
+owns. A requeue keeps the dead session's exit status and stderr row instead of clearing it, and the
+published `auto_resume` flag is derived from the schedule that was actually armed: a limit that no
+meter or ledger could schedule reads as rate-limited, never as `Scheduled`. Reply resolution is
+independent of event delivery for the same "never lose the person's answer" reason: the reader
+publishes into its own queue drained by one forwarder, so a full session queue can no longer park it
+before the reply behind those updates. That queue is bounded at four session queues for every
+non-settlement event - a session update, an unknown notification and an unparseable frame's error
+are counted alike - and the newest is dropped and counted when it overflows. Permission requests
+have their own small bound, and a request past it is answered at once with the cancelled outcome
+rather than left unanswered; the terminal reports (`TransportClosed`, `Closed` and `Exited`) take
+a third queue that is never counted or dropped, so a permission backlog can never delay an exit.
+Under pressure a reserved event takes the next slot; with room the three lanes are merged by the
+arrival sequence `publish` assigns, so a permission request that arrived before an update is not
+overtaken and a close never overtakes the words read before it. A settlement stays in the ordinary
+order, behind the updates the reader had already taken.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 
@@ -1510,7 +1527,103 @@ the result names what is on disk, not what the registry promised. The registry c
 process runner are injectable seams, so no test touches the network or a real global CLI.
 
 
-## ADR-044: Imported conversations resume natively, with a bounded handoff as the fallback
+## ADR-044: A guest link is a narrow HTTP surface bound to one thread and one browser
+
+**Status:** Accepted
+
+A guest link exists so one teammate can follow one thread without an account.
+That rules out the device protocol: a guest has no Noise identity, no pairing
+and no access token, and inventing a device for them would widen every scope
+check. The link is therefore a bearer URL and the daemon answers a small HTTP
+surface instead of upgrading `/ws`.
+
+The token is 256 random bits. The journal stores its BLAKE3 hash and the hash of
+the browser's cookie, never the raw values; both comparisons are constant time.
+The raw token lives only in the running daemon's memory, so a restart keeps a
+guest working but the owner must create a new link to copy it again. That is a
+deliberate cost: a stolen journal cannot be replayed as a link.
+
+A link names exactly one thread. The client never sends a thread id, so a
+malicious page cannot ask for another thread; every read, submission and blob
+fetch resolves the token first and then uses the link's thread. The surface has
+four routes: the page, a snapshot of events after a sequence, a message
+submission, and one attachment from a message in that thread. Events pass through
+an explicit allow-list projection: the workspace path (`ThreadUpserted`),
+approvals, filesystem events, subagent threads and MCP administration are absent;
+turn changes are stripped and attachment `local_path` values are cleared. Tool
+calls lose their raw arguments, and a file-editing tool loses its output too, so
+a Codex file change's structured diff or an `apply_patch` body never appears.
+
+Loading the page does not claim the link. The page offers a short-lived unclaimed
+cookie and the first state read or submission that presents it binds the browser
+atomically. A link-preview crawler that only fetches the URL therefore cannot
+take the link, and a cookie-less second fetch changes nothing. A submission must
+be a same-origin JSON POST, and its token and binding are checked from the
+headers before the body is read.
+
+A guest message is not a turn. It is a row in the journal and an event,
+`GuestRequested`, which raises a hand in the lifecycle and renders as a Request
+at the end of the thread; `SendGuestRequest` uploads its files, calls the normal
+`SendMessage` path with the thread's current permission mode, and
+`DismissGuestRequest` deletes the files. A submission reserves the pending
+budget (8 messages, 20 MB of text and files) before it writes any file, then
+inserts the request in one transaction whose guard requires the link to still
+exist and the Labs switch to still be on; a racing Stop sharing, new link,
+settle or switch-off therefore leaves no request and no files. The row becomes
+visible to the owner, and its `GuestRequested` event is raised, only after the
+files are written; both steps happen while the submission lock is held, so
+ending a link can never race a card into existence. Send and Dismiss claim a
+request with one conditional update, so two actions can never run the same
+message twice.
+
+Every removal of a request raises `GuestRequestResolved` before its row is
+deleted, and the resolved event names its request. A crash between the claim and
+the event therefore leaves a row the startup sweep can resolve, and a repeated
+event from that sweep cannot clear another guest's hand. The periodic sweep
+leaves a `sending` or `reserving` row alone while a task may still be reading
+it; only the startup pass, where no reader can exist, recovers it.
+
+Ending access and deleting files are separate steps. Ending a link deletes its
+row first and removes its page-load cookies, then settles waiting messages; a
+disk error never leaves a token live. A periodic sweep (also run at startup)
+removes expired links, ends any link whose thread has settled, discards their
+files, and retries cleanup for requests whose link or turn is already gone.
+Settling a thread (a person, the 24-hour idle rule, a merged branch), stopping
+sharing, creating a new link, the 24-hour expiry and turning the Labs switch off
+all end a link; a settled thread refuses a new link, a submission and a Send or
+Dismiss, and turning the switch back on does not revive one.
+
+A guest link has no pairing scope. It carries its own token and no device
+identity, so `PairScope` has no guest variant and pairing can never grant one.
+The narrow surface is enforced by the token's single thread, not by a scope.
+
+When the machine is linked to Connect, the link names
+`<connect>/guest/<machine>/<token>`. Connect serves the guest page itself, from a
+fixed document admitted by a hash-based CSP; it never relays daemon HTML onto its
+own origin. Each exchange travels to the daemon over its existing authenticated
+relay socket and is answered by that daemon only: a waiter is bound to the
+selected daemon's device id, and a reply from any other device is ignored.
+Bodies are split into bounded frames, so a 10 MB upload never grows a shared
+WebSocket frame; Connect refuses an exchange over the guest limit before it
+reaches the socket, and rebuilds every response header, including the binding
+cookie's path, which must name the public `/guest/<machine>/<token>` prefix.
+Every relayed answer carries `Content-Security-Policy: sandbox; default-src
+'none'`, and a PDF or opaque file is served as an attachment rather than opened
+in Connect's tab. Guest routes are traced by template, never by raw URI. The
+payload is plaintext at that hop, as the rest of the relay path is TLS to
+Connect plus Noise only for device sessions; a guest has no Noise key.
+
+Without Connect the daemon names its own loopback listener. A direct link is a
+bearer token and the daemon has no TLS listener, so it is not offered over a LAN
+address; the share dialog says the link works only on this machine and points to
+Connect for a teammate elsewhere. Only the owner or an admin-scoped device may
+copy the URL; a view device gets the link metadata with `url: null`.
+
+The guest page polls its snapshot every couple of seconds rather than opening a
+second long-lived socket. That keeps one transport (HTTP) working through both
+the direct address and the relay proxy, and the thread still follows live work
+within that interval.
+## ADR-045: Imported conversations resume natively, with a bounded handoff as the fallback
 
 **Status:** Accepted
 

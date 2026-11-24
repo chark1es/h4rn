@@ -517,6 +517,7 @@ function summary(input: {
     agent_state: input.state,
     usage: input.usage ?? usage(12_000, 3_400, 42_000, 31_000),
     needs_attention: input.needsAttention ?? false,
+    pending_guest_requests: 0,
     unread: input.unread ?? false,
     resume_at: input.resumeAtMs === undefined ? null : iso(input.resumeAtMs),
     ttft_ms: input.ttftMs ?? 640,
@@ -2319,6 +2320,7 @@ class MockDaemon {
           agent_state: "queued",
           usage: usage(0, 0, 0, 0),
           needs_attention: false,
+          pending_guest_requests: 0,
           unread: false,
           resume_at: null,
           limit: null,
@@ -2418,6 +2420,7 @@ class MockDaemon {
           agent_state: "done",
           unread: true,
           needs_attention: false,
+          pending_guest_requests: 0,
           last_activity: iso(),
         };
         this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
@@ -3809,6 +3812,7 @@ class MockDaemon {
       tab: "working",
       agent_state: "rate_limited",
       needs_attention: false,
+      pending_guest_requests: 0,
       resume_at: resetAt,
       limit: {
         harness: entry.summary.harness,
@@ -4022,6 +4026,7 @@ class MockDaemon {
       tab: "working",
       agent_state: "thinking",
       needs_attention: false,
+      pending_guest_requests: 0,
       unread: false,
       last_activity: iso(),
     };
@@ -4256,6 +4261,7 @@ class MockDaemon {
         agent_state: "done",
         unread: true,
         needs_attention: false,
+        pending_guest_requests: 0,
         last_activity: iso(),
       };
       this.emit(approval.threadId, { type: "thread_upserted", ...entry.summary });
@@ -4304,6 +4310,7 @@ class MockDaemon {
             agent_state: "done",
             unread: true,
             needs_attention: false,
+            pending_guest_requests: 0,
             last_activity: iso(),
           };
           this.emit(approval.threadId, { type: "thread_upserted", ...thread.summary });

@@ -801,6 +801,16 @@ pub enum ResponseBody {
         /// The thread with its new title.
         summary: ThreadSummary,
     },
+    /// Sharing state for one thread (ADR-044).
+    GuestSharing {
+        /// Whether links are on and the thread's live link, if any.
+        sharing: crate::guest::GuestSharing,
+    },
+    /// The machine-wide guest-links setting.
+    GuestSettings {
+        /// Whether guest links may be created and used.
+        settings: crate::guest::GuestSettings,
+    },
     /// A subscription was accepted and the replay it asked for is finished.
     ///
     /// Every journal event at or below `replay_through` was either sent as
@@ -996,6 +1006,25 @@ pub enum Event {
         option_id: Option<String>,
         /// Device that answered, when the daemon knows it.
         by_device: Option<DeviceId>,
+    },
+    /// A guest submitted a message that waits for the owner (ADR-044).
+    ///
+    /// The message has not run: it appears at the end of the thread as a
+    /// request, and the owner sends or dismisses it.
+    GuestRequested {
+        /// Thread.
+        thread_id: ThreadId,
+        /// The waiting message, including its file names and sizes.
+        request: crate::guest::GuestRequest,
+    },
+    /// A waiting guest message was sent (and ran) or dismissed.
+    GuestRequestResolved {
+        /// Thread.
+        thread_id: ThreadId,
+        /// Request that was answered.
+        request_id: String,
+        /// True when the owner sent it, false when they dismissed it.
+        sent: bool,
     },
     /// A turn finished.
     TurnCompleted {

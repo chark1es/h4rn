@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ShortcutCaps } from "@/components/common/Kbd";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
+import { GuestSettingsForm } from "@/features/guest/GuestSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import {
   type NotificationPermissionState,
@@ -645,6 +646,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   notifications: NotificationsForm,
   shortcuts: ShortcutsForm,
   account: LiveAccountForm,
+  labs: GuestSettingsForm,
 };
 
 /** Static settings surfaces, ported from the approved prototype. */

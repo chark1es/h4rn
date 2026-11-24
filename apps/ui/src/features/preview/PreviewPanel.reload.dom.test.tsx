@@ -97,6 +97,7 @@ const thread: ThreadSummary = {
   context_window: null,
   context_fill_percent: null,
   needs_attention: false,
+  pending_guest_requests: 0,
   unread: false,
   resume_at: null,
   limit: null,

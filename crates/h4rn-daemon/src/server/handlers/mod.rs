@@ -14,6 +14,7 @@ use crate::server::Connection;
 pub(super) mod acp_agents;
 pub(super) mod forge;
 pub(super) mod git_actions;
+pub(super) mod guest;
 pub(super) mod harness_versions;
 pub(super) mod import;
 pub(super) mod mcp;
@@ -90,6 +91,7 @@ declare_services! {
     Projects => projects,
     NetworkAccess => network_access,
     TextGeneration => text_generation,
+    Guest => guest,
     Schedules => schedules,
     Import => import,
 }

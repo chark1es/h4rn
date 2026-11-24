@@ -33,6 +33,7 @@ function log(turns: StreamTurn[], pendingText: string[] = []): ThreadLog {
     loaded: true,
     loading: false,
     approvals: {},
+    guestRequests: [],
     pending: pendingText.map((text, index) => ({
       id: `pending-${index}`,
       text,

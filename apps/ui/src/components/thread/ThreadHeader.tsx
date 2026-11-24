@@ -29,6 +29,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ThreadPullRequestBadge } from "@/features/forge/ThreadPullRequestBadge";
+import { openGuestShare } from "@/features/guest/guestStore";
 import { useThreadSettings } from "@/features/threads/settings";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -192,6 +193,12 @@ export function ThreadHeader({
           Snooze for 1 h
         </DropdownMenuItem>
         <DropdownMenuSeparator />
+        {summary.tab !== "settled" ? (
+          <DropdownMenuItem onSelect={() => openGuestShare(summary.thread_id)}>
+            <Share2Icon aria-hidden />
+            Share with guest…
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem
           onSelect={() => {
             void navigator.clipboard

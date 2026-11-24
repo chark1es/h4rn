@@ -7,6 +7,22 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Share one thread with a teammate through an expiring guest link.** A link is
+  bound to one thread and one browser, lasts 24 hours, and works through the
+  Connect relay when the machine is linked; without Connect it works only in a
+  browser on this machine. The guest sees that thread's real events — messages,
+  replies, plans and tool output — and can attach up to four files (10 MB and
+  32 KB of text per message; at most 8 messages and 20 MB waiting); they never
+  see diffs, other threads, files, terminals or settings, and they cannot answer
+  the agent or change the model. Every message they write waits as a **Request**
+  above your composer and in the sidebar; **Send** runs it as a normal turn with
+  the thread's current permissions, **Dismiss** deletes it and its files.
+  Settling the thread, Stop sharing, a new link, turning Settings → Labs → Guest
+  links off, or the 24-hour expiry ends the link and deletes waiting files; an
+  expired link is swept at startup and periodically. The journal stores only
+  hashes of the link token and the browser cookie, only an admin device may copy
+  the URL, and the page through Connect never runs on Connect's origin with
+  daemon HTML.
 - **Issues from every forge and Linear sit beside your projects, and can be linked to a
   thread.** The new Issues page reads each visible project's tracker, grouped per account, with
   open/closed, assigned/opened/mentioning filters, a per-project visibility toggle and search that
@@ -542,6 +558,66 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A guest exchange never stalls the relay, and a guest request is one decision with its card.**
+  Guest work now runs in its own tasks behind a small concurrency cap, so a chunked 10 MB answer, a
+  snapshot or a file write can never block the loop that drains the relay socket or starve other
+  paired devices. A submission reserves the pending budget before writing any file and becomes
+  visible only once its files are written; ending a link, a new link, settling the thread and the
+  Labs switch all take the same lock, so a racing submission leaves no request and no directory. A
+  sweep and a Send or Dismiss raise `GuestRequestResolved` before deleting a row, and the event names
+  its request, so a crash between the claim and the event cannot leave a card nobody can answer and
+  a repeated event cannot clear another guest's hand. A settled thread now ends its guest link from
+  the lifecycle tick and from the sweep (including after a restart), and refuses a new link, a
+  submission, a Send or a Dismiss; its header hides **Share with guest…** like the row menu and
+  palette. The guest page reuses one node per streamed reply and one plan list per turn, so a live
+  stream, a reload replay and a plan update each render once, and its "Waiting for the connection"
+  notice stays up while it retries. Pairing lost the unused `guest` scope. Connect now sends
+  `Content-Security-Policy: sandbox; default-src 'none'` on every relayed answer, downloads PDFs and
+  opaque files, and forgets a guest waiter on every failure. Reading a guest link's URL from a paired
+  device is audited; reading it on the machine itself is not a remote action. The custom-journal
+  fallback uses one in-memory SQLite connection, so its tables do not vanish.
+- **Guest links bind the first browser through Connect, and each request and its card stay one
+  decision.** The relay now carries the daemon's page-load cookie back to Connect, which checks its
+  name, path, `HttpOnly`, `Secure` and `SameSite=Strict` before rebuilding it, so a fresh link opens
+  bound instead of showing "opened in another browser". A request is written in a `publishing` step
+  before its card and finished as `pending`, and startup either raises the same card or discards the
+  row and its files, so a crash never leaves a row that uses quota without a card. Publication
+  re-checks the link, the Labs switch and the thread's placement, so an expired, revoked or settled
+  guest gets a refusal and leaves nothing behind. Cleanup claims each row with a conditional update
+  like Send and Dismiss, so a sweep cannot delete an attachment a Send already claimed or release a
+  reservation its writer still owns. Turning the Labs switch off saves the setting and ends every
+  link in one transaction, so re-enabling it cannot revive a link. A guest's page also sees only its
+  own link's queued messages: a new link never replays the previous guest's dismissed text or file
+  names. The LAN listener serves no guest route at all, direct links stay loopback-only, and the
+  guest page shows real plan text (not "Step 1"), keys plans by turn, and draws its focus ring on
+  the visible attach control. `?thumbnail=0` now serves the original image, not a thumbnail.
+- **A guest link follows the address the daemon really bound, and a dropped upload still
+  finishes.** The direct guest routes are chosen from each listener's actual bound address: a
+  loopback bind, or a wildcard bind whose loopback connection reaches the same port. The guest
+  handlers repeat the peer check `/ws` makes and answer 404 to any other address, so a plaintext
+  network request never reaches a token. The direct link names the primary listener's port instead
+  of the Network-access port, and a full pending queue is refused from the request headers before
+  an upload is buffered. A submission or a Send now runs to completion on the daemon when the
+  guest's browser or the owner's app disconnects, so a half-written request, its files and its
+  quota are never stranded until the next restart. The guest page opens on the state the daemon
+  served — expired, revoked, disabled or unbound shows its notice with no composer — and its attach
+  focus ring appears only for keyboard focus.
+- **A queued message runs at most once, even when the agent hits a limit.** A prompt the agent has
+  accepted is never sent again automatically, whether or not it reported work: the turn settles as
+  limited with its trace, and the person can resend. Only a write that failed before acceptance is
+  handed back to the pause. While a promoted turn's write is in flight, its output is held and
+  released in order; a flood of tool updates can no longer push its completion out of the hold, and
+  an acceptance that lands between two events still releases the earlier output first, so the turn
+  can never stay Working forever. The hold also counts stale diagnostics, so an agent that floods
+  the stream with garbage during the write cannot grow it without limit while the completion is
+  still kept. The ACP reader now bounds every event it queues, not only session updates: a
+  notification or stdout-garbage flood drops the excess like text does, a permission backlog has
+  its own small bound, and a permission flood can never delay the exit report. A permission request
+  the backlog cannot take is answered at once with the cancelled outcome instead of being dropped,
+  so the agent never waits on a request no one will answer and a turn never hangs on it. Below
+  that pressure the lanes keep their arrival order, so a permission request that arrives before an
+  update is not overtaken. A turn stopped while a closed session's write fails ends Interrupted with
+  no transport row, and a prompt is saved for a restart only once a schedule really owns it.
 - **Issues follow through on the tracker's answers.** An Azure team project whose name has a
   space (`Platform Team`) now reads through percent-encoded paths and links instead of a 404, and
   Gitea/Forgejo finds a label that belongs to the organization as well as one that belongs to the

@@ -149,6 +149,10 @@ context_fill_percent: number | null,
  */
 needs_attention: boolean, 
 /**
+ * Guest messages waiting for the owner to send or dismiss (ADR-044).
+ */
+pending_guest_requests: number, 
+/**
  * Whether a finished turn has not been acknowledged.
  */
 unread: boolean, 
