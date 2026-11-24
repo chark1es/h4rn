@@ -12,6 +12,7 @@ import {
 import type { FsDiff, FsTurnChanges, ThreadSummary, TurnId } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient, pushToast, useApp } from "@/lib/store/appStore";
+import { isRealTurn, latestRealTurn } from "@/lib/store/projection";
 
 export type ChangeMode = "agent" | "head";
 
@@ -43,12 +44,10 @@ export function usePanelChanges(thread: ThreadSummary | null): PanelChanges {
   const log = useApp((state) => (threadId ? state.logs[threadId] : undefined));
   const turns = useMemo(
     () =>
-      (log?.turns ?? [])
-        .filter((turn) => !turn.divider && !turn.id.startsWith("cue:user:"))
-        .map((turn, index) => ({
-          id: turn.id,
-          label: `Turn ${index + 1}`,
-        })),
+      (log?.turns ?? []).filter(isRealTurn).map((turn, index) => ({
+        id: turn.id,
+        label: `Turn ${index + 1}`,
+      })),
     [log?.turns],
   );
 
@@ -61,8 +60,7 @@ export function usePanelChanges(thread: ThreadSummary | null): PanelChanges {
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
 
-  const latestTurn =
-    [...turns].reverse().find((turn) => !turn.id.startsWith("cue:user:"))?.id ?? null;
+  const latestTurn = latestRealTurn(log?.turns)?.id ?? null;
   const turnId = pickedTurn ?? latestTurn;
 
   // A different thread starts from its latest logged turn again.

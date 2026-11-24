@@ -2302,6 +2302,7 @@ fn idle_thread_meta(
         parked: None,
         imported: None,
         handoff_pending: false,
+        switch_generation: 0,
     }
 }
 

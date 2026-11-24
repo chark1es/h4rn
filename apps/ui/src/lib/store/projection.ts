@@ -177,6 +177,27 @@ function cloneLog(log: ThreadLog): ThreadLog {
   };
 }
 
+/**
+ * Whether a turn is one an agent really ran.
+ *
+ * A harness-switch divider and a user-message cue are synthetic rows: neither
+ * has an agent turn behind it, so neither can own a turn scope, a change set or
+ * a receipt.
+ */
+export function isRealTurn(turn: StreamTurn): boolean {
+  return !turn.divider && !turn.id.startsWith("cue:user:");
+}
+
+/** The newest turn an agent really ran, or `null` before one did. */
+export function latestRealTurn(turns: readonly StreamTurn[] | undefined): StreamTurn | null {
+  if (!turns) return null;
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn && isRealTurn(turn)) return turn;
+  }
+  return null;
+}
+
 function latestRunningTurn(log: ThreadLog): StreamTurn | null {
   for (let index = log.turns.length - 1; index >= 0; index -= 1) {
     const turn = log.turns[index];

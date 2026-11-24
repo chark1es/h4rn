@@ -2631,6 +2631,7 @@ mod tests {
             parent_thread_id: None,
             host: h4rn_protocol::HostId::new("host"),
             harness: h4rn_protocol::HarnessKind::ClaudeCode,
+            imported_from: None,
             agent_id: None,
             title: "shared".into(),
             workspace_path: "/home/secret/work".into(),

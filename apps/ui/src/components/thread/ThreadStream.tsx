@@ -8,6 +8,7 @@ import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel } from "@/lib/entities";
 import { absoluteTime, cost, duration, tokens } from "@/lib/format";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
+import { isRealTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { TurnBlock } from "./TurnBlock";
 
@@ -37,8 +38,14 @@ export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turn
   if (summary.tab !== "done" || summary.agent_state !== "done") return null;
   // A switch divider is not a turn the agent wrote: it must neither make a
   // conversation look imported nor hide that it was.
-  const written = turns.filter((turn) => !turn.divider);
+  const written = turns.filter(isRealTurn);
   const imported = written.length > 0 && written.every((turn) => turn.imported);
+  // The thread may have switched harness since the import. The receipt names
+  // where the conversation came from, never the provider it runs on now.
+  const source =
+    summary.imported_from ??
+    written.find((turn) => turn.imported && turn.harness)?.harness ??
+    summary.harness;
   return (
     <div className="q-col q-receipt">
       <div className="q-live-line">
@@ -46,7 +53,7 @@ export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turn
         <span>
           {imported ? (
             <>
-              Imported from {harnessLabel(summary.harness)} · {absoluteTime(summary.last_activity)}
+              Imported from {harnessLabel(source)} · {absoluteTime(summary.last_activity)}
             </>
           ) : (
             <>

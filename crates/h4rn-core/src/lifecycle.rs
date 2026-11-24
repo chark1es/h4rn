@@ -430,7 +430,18 @@ impl ThreadState {
             // A harness switch lands between turns. It changes which provider
             // runs next, never the thread's placement, so only the shared
             // activity clock above moves.
-            ThreadEvent::HarnessSwitched { .. } => {}
+            ThreadEvent::HarnessSwitched { .. } => {
+                // A limit belonged to the provider the thread just left. The
+                // new harness has its own account and reset, so the old
+                // countdown must not keep the thread paused (or show in the
+                // sidebar and the phone inbox) after the switch.
+                if matches!(self.phase, Phase::RateLimited) {
+                    self.phase = Phase::Idle;
+                    self.agent_state = AgentState::Idle;
+                    self.usage_limit = None;
+                    self.pending_failure = false;
+                }
+            }
         }
 
         // A raised hand always wins over a stale snooze (ADR-004): run

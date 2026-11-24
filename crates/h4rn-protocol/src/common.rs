@@ -384,6 +384,14 @@ pub struct ThreadSummary {
     pub host: HostId,
     /// Harness driving the thread.
     pub harness: HarnessKind,
+    /// Harness the conversation was imported from, when it was imported.
+    ///
+    /// The thread can later switch harness, so this is the one durable answer
+    /// to "where did this conversation come from?"; the thread's current
+    /// `harness` no longer names it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub imported_from: Option<HarnessKind>,
     /// Configured ACP agent instance, when `harness` is [`HarnessKind::Acp`].
     ///
     /// Older daemons did not have this field; threads written before it
@@ -798,6 +806,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            imported_from: None,
             agent_id: None,
             title: "usage limit".into(),
             workspace_path: "/tmp/work".into(),

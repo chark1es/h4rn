@@ -51,4 +51,26 @@ describe("usePanelChanges", () => {
     // A switch is a divider, not a turn: the panel opens on the last real one.
     expect(result.current.turnId).toBe("turn_b");
   });
+
+  it("still opens on the last real turn when the switch is the newest row", () => {
+    const log = mock.state.logs.th_1;
+    const original = log.turns;
+    log.turns = [
+      ...original,
+      {
+        id: "switch:codex:claude_code:2026-01-02T00:00:00Z",
+        divider: true,
+        items: [],
+        status: "completed",
+      },
+    ];
+    try {
+      const thread = { thread_id: "th_1" } as ThreadSummary;
+      const { result, unmount } = renderHook(() => usePanelChanges(thread));
+      expect(result.current.turnId).toBe("turn_b");
+      unmount();
+    } finally {
+      log.turns = original;
+    }
+  });
 });

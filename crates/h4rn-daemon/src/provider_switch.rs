@@ -210,14 +210,28 @@ pub fn plan(
 
     let runtime_mode = if modes.contains(&current.runtime_mode) {
         current.runtime_mode
-    } else {
+    } else if modes.is_empty() || modes.contains(&RuntimeMode::ApprovalRequired) {
         dropped.push(DroppedSetting {
             setting: DroppedSettingKind::RuntimeMode,
             value: mode_slug(current.runtime_mode),
         });
-        // Approval required asks for no mode change at all, so every agent can
-        // run there.
+        // Approval required asks for no mode change at all, so an agent with
+        // no catalogue (or one that offers `default`) can run there. An agent
+        // that named its modes but not that one would refuse the session at
+        // startup, so the switch must not claim success and fail later.
         RuntimeMode::ApprovalRequired
+    } else {
+        return Err(SwitchPlanError::Unsupported(format!(
+            "{} offers {}, none of which can take this thread's `{}` mode; \
+             switch it to a mode the agent lists, or to another harness",
+            harness_label(request.harness),
+            modes
+                .iter()
+                .map(|mode| format!("`{}`", mode_slug(*mode)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            mode_slug(current.runtime_mode),
+        )));
     };
 
     let reasoning_effort = match current.reasoning_effort.as_deref() {
@@ -372,6 +386,29 @@ mod tests {
                     value: "on".into(),
                 },
             ]
+        );
+    }
+
+    /// An ACP agent that offers only `accept-edits` has no safe replacement
+    /// for Plan: startup would refuse `default`, so the switch stops before
+    /// committing and names what the agent does offer.
+    #[test]
+    fn plan_refuses_when_the_target_acp_agent_has_no_safe_mode() {
+        let capabilities = TargetCapabilities {
+            modes: vec![RuntimeMode::AutoAcceptEdits],
+            efforts: Vec::new(),
+            fast: false,
+        };
+        let error = super::plan(
+            HarnessKind::ClaudeCode,
+            &acp_request("demo", "deepseek-chat"),
+            &current(RuntimeMode::Plan, None, false),
+            Some(&capabilities),
+        )
+        .expect_err("there is no mode the agent can start in");
+        assert!(
+            matches!(&error, SwitchPlanError::Unsupported(message) if message.contains("`plan`") && message.contains("`auto_accept_edits`")),
+            "{error:?}"
         );
     }
 

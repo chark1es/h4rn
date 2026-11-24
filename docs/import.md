@@ -150,6 +150,12 @@ history from its first turn, even when the new session reports its own id before
 the first prompt is delivered. The handoff is bounded in UTF-8 bytes: 16,000
 by default, clamped to 1,024–64,000. Set `H4RN_HANDOFF_BYTES` on the daemon to
 choose a different size.
+A row imported by an older daemon, with no native resume and no durable handoff
+flag, gets that flag backfilled on the first restart, so its history is not lost
+by the upgrade. The thread's receipt names the import source even after the
+thread has switched harness: the label says where the conversation came from,
+not which provider runs it now.
+
 The budget covers the whole handoff — the header, every message as it is
 serialised, the lead-in and your new request — so the saved history never pushes
 your request past it. The newest messages fill the budget from the end, and once

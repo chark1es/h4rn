@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { ToolCall, Usage } from "@/gen";
 
-import { createThreadLog, foldEvent, totalTokens } from "./projection";
+import {
+  createThreadLog,
+  foldEvent,
+  isRealTurn,
+  latestRealTurn,
+  type StreamTurn,
+  totalTokens,
+} from "./projection";
 
 const USAGE: Usage = {
   input_tokens: 100,
@@ -598,6 +605,29 @@ describe("foldEvent", () => {
     });
 
     expect(source.turns).toHaveLength(0);
+  });
+});
+
+describe("latestRealTurn", () => {
+  it("skips a switch divider and a user cue after the last agent turn", () => {
+    const turn = (id: string, extra: Partial<StreamTurn> = {}): StreamTurn => ({
+      id,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      status: "completed",
+      items: [],
+      usage: null,
+      changes: null,
+      ...extra,
+    });
+    const turns = [
+      turn("turn_a"),
+      turn("switch:claude_code:codex", { divider: true }),
+      turn("cue:user:item_1"),
+    ];
+
+    expect(latestRealTurn(turns)?.id).toBe("turn_a");
+    expect(isRealTurn(turns[1] as StreamTurn)).toBe(false);
+    expect(isRealTurn(turns[2] as StreamTurn)).toBe(false);
   });
 });
 

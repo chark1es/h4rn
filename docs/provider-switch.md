@@ -30,10 +30,19 @@ only fail after the switch, so it is not listed.
    `H4RN_HANDOFF_BYTES` clamped to 1,024–64,000. Your request is appended
    verbatim and is never shortened. The flag is cleared only once the harness
    accepts that prompt, so a failed start or write still sends the history on
-   the retry. Later messages resume the new session normally. A message still
-   waiting behind the running turn is not history: the handoff leaves every
-   queued prompt out, by its recorded id, so it arrives once as its own turn.
+   the retry. That clear also names the switch it belongs to and changes only
+   the flag, so a write that finishes after the thread has switched again can
+   never restore the old harness, model or resume id. Later messages resume the
+   new session normally. A message still waiting behind the running turn is not
+   history: the handoff leaves every queued prompt out, by its recorded id, and
+   those ids are kept durably until a provider accepts the prompt, so a restart
+   does not turn a queued message into history. A rate-limited write parks the
+   request you sent, not the prompt with its handoff block; the block is built
+   again for the next delivery instead of being wrapped twice.
 5. Each turn is metered against the harness and model that actually ran it.
+6. A recorded usage limit belonged to the old provider, so the switch clears
+   it and its countdown leaves the sidebar and the phone inbox. An armed
+   auto-resume still refuses the switch, because it owns a prompt.
 
 ## Settings that carry over
 
@@ -49,7 +58,11 @@ held:
 A configured ACP agent names its own modes and efforts at session start. The
 switch resolves that catalogue before it commits (the same check Settings runs),
 so a value the agent does not advertise is dropped to its safe default and
-reported instead of being carried into a session that cannot start.
+reported instead of being carried into a session that cannot start. When the
+agent names its modes but none is a safe replacement — for example it offers
+only `accept-edits` and the thread is in Plan — the switch is refused before it
+commits and names the modes the agent does offer, rather than reporting success
+and failing on the first Send.
 
 The model is chosen for the new harness rather than carried over, because model
 names rarely mean the same thing across providers.
@@ -77,7 +90,10 @@ written in one transaction, and only then is the old session ended; a journal
 that refuses the write leaves the thread on its old harness with its session
 intact. An approval whose session is gone is dropped rather than blocking every
 later switch, and is resolved on every client so no cue or phone sheet stays up
-for an answer no session can take.
+for an answer no session can take. Each cue has a daemon-minted client id, and
+the harness's own request id stays private to its session: two agents can both
+ask approval `7` without either answer reaching the other's question, and an
+answer for a retired cue is refused instead of resolving a newer one.
 
 ## Known limits
 

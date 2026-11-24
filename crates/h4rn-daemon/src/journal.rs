@@ -112,6 +112,13 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// The switch this thread's durable row last committed to.
+    ///
+    /// A late write from a session the thread has already left (clearing the
+    /// handoff flag, say) names the generation it saw. The row only accepts a
+    /// change that still matches, so an old write can never undo a later
+    /// switch's metadata.
+    pub switch_generation: u64,
     /// The saved conversation this thread was imported from, when it was.
     ///
     /// An imported thread starts with no live session. The kept messages, with
@@ -185,8 +192,14 @@ pub struct ImportedSourceRecord {
 pub struct ParkedPrompt {
     /// The turn the prompt belongs to, already recorded in the journal.
     pub turn_id: h4rn_protocol::TurnId,
-    /// Prompt text exactly as the person sent it.
+    /// Prompt text exactly as the person sent it, without any handoff block.
     pub text: String,
+    /// The journaled id of the user message this prompt was recorded as.
+    ///
+    /// A parked prompt is also still in the transcript; keeping its item id
+    /// lets the next handoff leave the prompt out of its own history.
+    #[serde(default)]
+    pub item_id: Option<String>,
     /// Attachments to deliver with it.
     pub attachments: Vec<ParkedAttachment>,
     /// The permission ceiling the sender attached to this prompt, if any.
@@ -324,6 +337,35 @@ pub trait Journal: Send + Sync {
 
     /// The domain log for one thread, used to rebuild lifecycle state.
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError>;
+
+    /// Clears the handoff flag only when the row is still on `switch_generation`.
+    ///
+    /// A session that accepted a handoff may report it after the thread has
+    /// switched again. This changes that one flag and nothing else, and only
+    /// while the switch the session belongs to is still the durable one, so a
+    /// late write can never restore an old harness, model or resume id.
+    async fn clear_handoff_pending(
+        &self,
+        thread_id: &ThreadId,
+        switch_generation: u64,
+    ) -> Result<bool, JournalError>;
+
+    /// Remembers that a journaled user item has not reached a provider yet.
+    async fn mark_item_pending(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &str,
+    ) -> Result<(), JournalError>;
+
+    /// Forgets a pending item once a provider accepted its prompt.
+    async fn mark_item_accepted(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &str,
+    ) -> Result<(), JournalError>;
+
+    /// Every journaled user item no provider has accepted, oldest row first.
+    async fn pending_item_ids(&self, thread_id: &ThreadId) -> Result<Vec<String>, JournalError>;
 
     /// Inserts or refreshes one thread → pull request link.
     async fn upsert_pr_link(&self, link: &PrLinkRecord) -> Result<(), JournalError>;
@@ -500,7 +542,8 @@ impl SqliteJournal {
                 agent_fingerprint TEXT,
                 parked_json    TEXT,
                 imported_json  TEXT,
-                handoff_pending INTEGER NOT NULL DEFAULT 0
+                handoff_pending INTEGER NOT NULL DEFAULT 0,
+                switch_generation INTEGER NOT NULL DEFAULT 0
             )",
         )
         .execute(&self.pool)
@@ -534,6 +577,12 @@ impl SqliteJournal {
             "INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "switch_generation",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
         self.ensure_column("daemon_threads", "reasoning_effort", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "fast", "INTEGER NOT NULL DEFAULT 0")
@@ -559,6 +608,21 @@ impl SqliteJournal {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_wire_events_thread_seq
              ON daemon_wire_events (thread_id, seq)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // A person's message is journaled before a provider accepts it. The
+        // queue lives in memory across turns but not across a restart, so the
+        // ids of messages no provider has accepted are kept durably. A later
+        // handoff leaves those items out instead of reading a prompt that was
+        // waiting as if the old provider had already seen it.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_pending_items (
+                thread_id TEXT NOT NULL,
+                item_id   TEXT NOT NULL,
+                PRIMARY KEY (thread_id, item_id)
+            )",
         )
         .execute(&self.pool)
         .await?;
@@ -731,8 +795,8 @@ async fn upsert_thread_on(
     let imported_json = serde_json::to_string(&meta.imported)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, handoff_pending)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, handoff_pending, switch_generation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -752,7 +816,8 @@ async fn upsert_thread_on(
             agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json,
             imported_json = excluded.imported_json,
-            handoff_pending = excluded.handoff_pending",
+            handoff_pending = excluded.handoff_pending,
+            switch_generation = excluded.switch_generation",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -775,6 +840,7 @@ async fn upsert_thread_on(
     .bind(parked_json)
     .bind(imported_json)
     .bind(meta.handoff_pending as i64)
+    .bind(meta.switch_generation as i64)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -816,7 +882,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, handoff_pending
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, handoff_pending, switch_generation
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -871,6 +937,7 @@ impl Journal for SqliteJournal {
                     .try_get::<Option<String>, _>("imported_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
                 handoff_pending: row.try_get::<i64, _>("handoff_pending")? != 0,
+                switch_generation: row.try_get::<i64, _>("switch_generation").unwrap_or(0) as u64,
             });
         }
         Ok(metas)
@@ -1050,6 +1117,66 @@ impl Journal for SqliteJournal {
             .into_iter()
             .map(|stored| stored.event)
             .collect())
+    }
+
+    async fn clear_handoff_pending(
+        &self,
+        thread_id: &ThreadId,
+        switch_generation: u64,
+    ) -> Result<bool, JournalError> {
+        let result = sqlx::query(
+            "UPDATE daemon_threads SET handoff_pending = 0
+             WHERE thread_id = ? AND switch_generation = ?",
+        )
+        .bind(thread_id.as_str())
+        .bind(switch_generation as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn mark_item_pending(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &str,
+    ) -> Result<(), JournalError> {
+        sqlx::query(
+            "INSERT INTO daemon_pending_items (thread_id, item_id) VALUES (?, ?)
+             ON CONFLICT(thread_id, item_id) DO NOTHING",
+        )
+        .bind(thread_id.as_str())
+        .bind(item_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_item_accepted(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &str,
+    ) -> Result<(), JournalError> {
+        sqlx::query("DELETE FROM daemon_pending_items WHERE thread_id = ? AND item_id = ?")
+            .bind(thread_id.as_str())
+            .bind(item_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn pending_item_ids(&self, thread_id: &ThreadId) -> Result<Vec<String>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT item_id FROM daemon_pending_items WHERE thread_id = ? ORDER BY rowid ASC",
+        )
+        .bind(thread_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                row.try_get::<String, _>("item_id")
+                    .map_err(JournalError::from)
+            })
+            .collect()
     }
 
     async fn upsert_pr_link(&self, link: &PrLinkRecord) -> Result<(), JournalError> {
@@ -1777,6 +1904,7 @@ mod tests {
             parked: None,
             imported: None,
             handoff_pending: false,
+            switch_generation: 0,
         }
     }
 
@@ -1786,6 +1914,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            imported_from: None,
             agent_id: None,
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
@@ -1824,6 +1953,7 @@ mod tests {
         one.parked = Some(ParkedPrompt {
             turn_id: h4rn_protocol::TurnId::new("turn_one"),
             text: "carry on".into(),
+            item_id: Some("item_user_one".into()),
             attachments: Vec::new(),
             mode_ceiling: Some(RuntimeMode::ApprovalRequired),
             grant: Some(h4rn_protocol::WorkGrant {

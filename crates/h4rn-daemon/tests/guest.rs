@@ -2718,6 +2718,39 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         self.0.read_domain(thread_id).await
     }
 
+    async fn clear_handoff_pending(
+        &self,
+        thread_id: &ThreadId,
+        switch_generation: u64,
+    ) -> Result<bool, h4rn_daemon::journal::JournalError> {
+        self.0
+            .clear_handoff_pending(thread_id, switch_generation)
+            .await
+    }
+
+    async fn mark_item_pending(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &str,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.mark_item_pending(thread_id, item_id).await
+    }
+
+    async fn mark_item_accepted(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &str,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0.mark_item_accepted(thread_id, item_id).await
+    }
+
+    async fn pending_item_ids(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<String>, h4rn_daemon::journal::JournalError> {
+        self.0.pending_item_ids(thread_id).await
+    }
+
     async fn upsert_pr_link(
         &self,
         link: &h4rn_daemon::pr_links::PrLinkRecord,

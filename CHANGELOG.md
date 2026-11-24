@@ -654,6 +654,20 @@ All notable changes to h4rn are recorded here. The format follows
   replaced session is resolved on every client, the Changes panel no longer counts
   the switch divider as a turn, and a switch to a configured ACP agent lists that
   agent's own models. See [docs/provider-switch.md](docs/provider-switch.md).
+- **A switch stays the one that happened last.** Every approval cue now has its
+  own daemon-minted client id, so two agents that both ask approval `7` can
+  never answer each other's question; a late handoff-flag write names the switch
+  it belongs to and changes only that flag, so it cannot restore an older
+  harness, model or resume id. Messages no provider accepted are remembered
+  durably, so a restart never reads a queued follow-up back as history. A parked
+  prompt stores your request rather than the wrapped handoff, and a failed
+  history read keeps the handoff owed for the retry. An imported row from before
+  the flag existed is backfilled on restart, the receipt names the import source
+  even after a later switch, an ACP agent with no safe mode refuses the switch
+  and names what it offers, the old provider's limit countdown leaves with the
+  switch, and the IDE's Turn scope follows the newest real turn past a switch
+  divider. See [docs/import.md](docs/import.md) and
+  [docs/provider-switch.md](docs/provider-switch.md).
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

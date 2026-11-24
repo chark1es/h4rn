@@ -255,6 +255,24 @@ async fn create_parent(daemon: &TestDaemon, workspace: &std::path::Path) -> Thre
     .await
 }
 
+/// The child's own cue id, which is what reaches its harness session.
+async fn wait_for_child_approval(manager: &ThreadManager, child: &ThreadId) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let snapshot = manager.get_thread(child, 0).await.expect("child thread");
+        for wire in snapshot.events {
+            if let Event::ApprovalRequested { approval_id, .. } = wire.event {
+                return approval_id;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child approval never reached the child thread"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn wait_for_parent_approval(
     manager: &ThreadManager,
     parent: &ThreadId,
@@ -468,7 +486,10 @@ async fn subagents_round_trip_through_the_mcp_hub() {
             .await,
     );
     let parent_approval = wait_for_parent_approval(&daemon.manager, &parent, &approval_child).await;
-    assert_eq!(parent_approval, "sa:a1");
+    assert!(
+        parent_approval.starts_with("ap_"),
+        "the parent cue is daemon-minted: {parent_approval}"
+    );
     daemon
         .manager
         .respond_approval(
@@ -499,7 +520,7 @@ async fn subagents_round_trip_through_the_mcp_hub() {
         &hub.spawn(json!({"task": "cancel while approving", "harness": "opencode"}))
             .await,
     );
-    wait_for_parent_approval(&daemon.manager, &parent, &pending_child).await;
+    let pending_parent = wait_for_parent_approval(&daemon.manager, &parent, &pending_child).await;
     let cancelled = hub
         .call(
             "h4rn__cancel_subagent",
@@ -515,9 +536,11 @@ async fn subagents_round_trip_through_the_mcp_hub() {
         .as_str()
         .expect("child thread id")
         .to_owned();
-    wait_for_mirrored_resolutions(&daemon.manager, &ThreadId::new(child_thread), "a1", 1).await;
-
-    wait_for_mirrored_resolutions(&daemon.manager, &parent, "sa:a1", 2).await;
+    let child_thread = ThreadId::new(child_thread);
+    let child_approval = wait_for_child_approval(&daemon.manager, &child_thread).await;
+    wait_for_mirrored_resolutions(&daemon.manager, &child_thread, &child_approval, 1).await;
+    wait_for_mirrored_resolutions(&daemon.manager, &parent, &pending_parent, 1).await;
+    wait_for_mirrored_resolutions(&daemon.manager, &parent, &parent_approval, 1).await;
 
     // 4. A token scoped to another thread cannot touch this parent's child.
     let stranger = create_parent(&daemon, repo.path()).await;
