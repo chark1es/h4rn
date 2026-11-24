@@ -919,16 +919,19 @@ rather than failed. Its prompt never reached the provider, so nothing it collect
 and the armed schedule names it and delivers it after the reset. Only the write-failure path may
 requeue without the quiet check for that reason; a promoted turn whose own completion failed on a
 closed transport may go back only when the harness never accepted its prompt. Acceptance means the
-agent read it and may already have acted (an edit it never reported), so that turn settles as
-limited with its trace and the person can resend it; it is never run again automatically. A Stop
-that lands while a closed session's write fails settles the turn Interrupted with no transport row,
-exactly as a Stop on a detached session does. A paused prompt with no schedule that can be armed (no
-usage meter, or a ledger that refuses it) is failed honestly instead of being parked with no
-delivery owner. A prompt is saved on the thread row only once a schedule really owns it, including
-the failed-write requeue: the ledger's refusal leaves no orphan prompt for a restart to deliver. The `agy-fixture` peer keeps its replies ordinary (a newline terminator, as a real
-peer writes them): `H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers and exits at once with the reset on
-stderr, and `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the promoted
-prompt reaches it, so the promotion-before-the-limit order is fixed by the test, not by the machine.
+harness accepted the write; for ACP that is a successful flush of the prompt frame, not proof the
+agent read it. Because the prompt may already have been acted on (an edit it never reported), such a
+turn settles as limited with its trace and the person can resend it; it is never run again
+automatically. A Stop that lands while a closed session's write fails settles the turn Interrupted
+with no transport row, exactly as a Stop on a detached session does. A paused prompt with no
+schedule that can be armed (no usage meter, or a ledger that refuses it) is failed honestly instead
+of being parked with no delivery owner. A prompt is saved on the thread row only once a schedule
+really owns it, including the failed-write requeue: the ledger's refusal leaves no orphan prompt for
+a restart to deliver. The `agy-fixture` peer keeps its replies ordinary (a newline terminator, as a
+real peer writes them): `H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN` answers and exits at once with the
+reset on stderr, and `H4RN_FIXTURE_LIMIT_EXIT_AFTER_QUEUE` keeps the transport healthy until the
+promoted prompt reaches it, so the promotion-before-the-limit order is fixed by the test, not by the
+machine.
 
 **Addendum: work already done is never replayed, and a pause always owns its prompt.** Three rules
 refine the requeue. First, "produced nothing" is read from a turn-long marker, not from the running
@@ -941,11 +944,14 @@ plan and usage from the moment its prompt goes on the wire (`on_the_wire`) until
 `Ok`, and drops them when it fails: an adapter that has not accepted the prompt yet can still be
 draining the finished turn's output, so those events are neither published nor journaled under a
 turn whose write can fail and send the prompt back to the queue. Releasing in the adapter's order on
-success keeps the turn's own first words. Only content is dropped when the hold is full: a
-completion, a usage limit, an exit or a status report is naturally rare and is always kept, or the
-turn would stay active forever. An acceptance that lands between the hold's check and the next
-event releases the held output before that event is applied, so output read first is published
-first. ACP carries no turn id, so text a peer writes after it has read the new prompt is still
+success keeps the turn's own first words. Only lifecycle reports are uncapped - a completion, a
+usage limit, a transport close (the exit and status report), an approval and a session-started
+report - and they are never dropped, or the turn would stay active forever. Everything else counts
+against the hold's bound, including the diagnostic error the bridge makes from an unparseable
+stdout line and, like text, an error past the bound is dropped; an agent that floods garbage during
+the write cannot grow the hold without limit. An acceptance that lands between the hold's check and
+the next event releases the held output before that event is applied, so output read first is
+published first. ACP carries no turn id, so text a peer writes after it has read the new prompt is still
 indistinguishable from the new turn's own output; the hold covers exactly everything up to the
 acceptance. Third, a pause and its prompt are one record. The schedule binds to a turn only through
 `parked_turn_to_keep`, and the prompt is saved on the thread row only when the ledger really armed
@@ -960,7 +966,8 @@ publishes into its own queue drained by one forwarder, so a full session queue c
 before the reply behind those updates. That queue is bounded at four session queues for every
 non-settlement event - a session update, an unknown notification and an unparseable frame's error
 are counted alike - and the newest is dropped and counted when it overflows. Permission requests
-have their own small bound, and the terminal reports (`TransportClosed`, `Closed` and `Exited`) take
+have their own small bound, and a request past it is answered at once with the cancelled outcome
+rather than left unanswered; the terminal reports (`TransportClosed`, `Closed` and `Exited`) take
 a third queue that is never counted or dropped, so a permission backlog can never delay an exit.
 Under pressure a reserved event takes the next slot; with room the three lanes are merged by the
 arrival sequence `publish` assigns, so a permission request that arrived before an update is not

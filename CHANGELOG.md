@@ -495,9 +495,13 @@ All notable changes to h4rn are recorded here. The format follows
   handed back to the pause. While a promoted turn's write is in flight, its output is held and
   released in order; a flood of tool updates can no longer push its completion out of the hold, and
   an acceptance that lands between two events still releases the earlier output first, so the turn
-  can never stay Working forever. The ACP reader now bounds every event it queues, not only session
-  updates: a notification or stdout-garbage flood drops the excess like text does, a permission
-  backlog has its own small bound, and a permission flood can never delay the exit report. Below
+  can never stay Working forever. The hold also counts stale diagnostics, so an agent that floods
+  the stream with garbage during the write cannot grow it without limit while the completion is
+  still kept. The ACP reader now bounds every event it queues, not only session updates: a
+  notification or stdout-garbage flood drops the excess like text does, a permission backlog has
+  its own small bound, and a permission flood can never delay the exit report. A permission request
+  the backlog cannot take is answered at once with the cancelled outcome instead of being dropped,
+  so the agent never waits on a request no one will answer and a turn never hangs on it. Below
   that pressure the lanes keep their arrival order, so a permission request that arrives before an
   update is not overtaken. A turn stopped while a closed session's write fails ends Interrupted with
   no transport row, and a prompt is saved for a restart only once a schedule really owns it.

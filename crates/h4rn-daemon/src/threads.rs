@@ -790,10 +790,34 @@ const NO_GENERATION: u64 = 0;
 ///
 /// Text deltas are coalesced, so this bounds tools, plans and usage reports; it
 /// is far more than an adapter produces in the time one write takes, and a hold
-/// that overflows drops the newest content event rather than growing without
-/// limit. Lifecycle reports (a completion, a limit, an exit, a status report)
-/// are never counted against this bound and never dropped.
+/// that overflows drops the newest counted event rather than growing without
+/// limit. Only lifecycle reports are exempt: a completion, a usage limit, a
+/// transport close/exit, an approval and a session-started report are naturally
+/// rare and never counted or dropped (`is_held_lifecycle`). A diagnostic
+/// `HarnessEvent::Error` is *not* exempt: the ACP bridge makes one from every
+/// unparseable stdout line, so an agent that floods garbage while the write is
+/// held counts against this same bound instead of growing the hold without
+/// limit. It shares the content bound rather than getting a cap of its own, and
+/// the first few diagnostics are kept because the hold starts empty.
 const HELD_PROMOTED_EVENTS: usize = 1024;
+
+/// Whether a harness event is a lifecycle report the hold must never drop.
+///
+/// A completion, a usage limit, a transport close (the exit and status report),
+/// an approval hand or session started: each is naturally rare, and losing one
+/// would leave the turn active forever or hide the event that decides what a
+/// request means. Everything else, including a plain error diagnostic, is
+/// counted against [`HELD_PROMOTED_EVENTS`].
+fn is_held_lifecycle(event: &HarnessEvent) -> bool {
+    matches!(
+        event,
+        HarnessEvent::SessionStarted { .. }
+            | HarnessEvent::ApprovalRequested { .. }
+            | HarnessEvent::LimitHit { .. }
+            | HarnessEvent::TurnCompleted { .. }
+            | HarnessEvent::TransportClosed { .. }
+    )
+}
 
 /// Where a prompt goes after the session that claimed it was detached.
 enum DeliveryRetarget {
@@ -5974,10 +5998,11 @@ impl Inner {
         // or journaled, so a finished turn's late text can never be kept as a
         // turn that the write then fails.
         let mut held: VecDeque<HarnessEvent> = VecDeque::new();
-        // How many *content* events `held` holds. Lifecycle reports share the
-        // queue but are never counted or dropped, so a flood of tool updates
-        // cannot evict a completion, a usage limit or an exit report.
-        let mut held_content = 0usize;
+        // How many counted events `held` holds. Lifecycle reports share the
+        // queue but are never counted or dropped, so a flood of tool updates or
+        // stale diagnostics cannot evict a completion, a usage limit or an exit
+        // report.
+        let mut held_counted = 0usize;
         let mut held_owner: Option<(Arc<TurnDispatch>, u64)> = None;
         loop {
             // Settle held output before anything read after it, so releasing it
@@ -5999,13 +6024,13 @@ impl Inner {
                 };
                 if !holding || !active {
                     held.clear();
-                    held_content = 0;
+                    held_counted = 0;
                     held_owner = None;
                 } else if dispatch.write_accepted() {
                     // The held events were read after anything already in
                     // `pending`, so they belong behind it, in their own order.
                     pending.extend(held.drain(..));
-                    held_content = 0;
+                    held_counted = 0;
                     held_owner = None;
                 }
             }
@@ -6080,7 +6105,7 @@ impl Inner {
             {
                 pending.extend(held.drain(..));
                 pending.push_back(event);
-                held_content = 0;
+                held_counted = 0;
                 held_owner = None;
                 continue;
             }
@@ -6176,20 +6201,17 @@ impl Inner {
             // order is kept, until the write is accepted (the top of the loop
             // releases them) or fails (it drops them). Consecutive text is
             // coalesced so a chatty agent cannot grow the *number* of held
-            // events without bound; tools, plans and usage are rare and are
-            // held one for one. A lifecycle report is always kept, even when
-            // the content bound is full: a completion, a limit, an exit or a
-            // status report is naturally rare, and dropping one would leave the
-            // turn active forever. The hold lasts only as long as one write.
+            // events without bound; tools, plans and usage are held one for one.
+            // A lifecycle report is always kept, even when the hold is full: a
+            // completion, a limit, an exit or a status report is naturally
+            // rare, and dropping one would leave the turn active forever.
+            // Everything else - text, tools, plans, usage and a plain
+            // diagnostic error (one per unparseable stdout line) - counts
+            // against the same bound and is dropped once it is full. The hold
+            // lasts only as long as one write.
             if record.holds_promoted_write() {
-                let content = matches!(
-                    &event,
-                    HarnessEvent::TextDelta { .. }
-                        | HarnessEvent::ToolCall { .. }
-                        | HarnessEvent::Plan { .. }
-                        | HarnessEvent::Usage { .. }
-                );
-                if content || !held.is_empty() {
+                let counted = !is_held_lifecycle(&event);
+                if counted || !held.is_empty() {
                     let (dispatch, attempt) = {
                         let active = record.active.as_ref().expect("a held write");
                         (
@@ -6206,14 +6228,14 @@ impl Inner {
                         coalesced = true;
                     }
                     if !coalesced {
-                        if !content {
-                            // Only content is dropped on overflow: a
-                            // lifecycle report must reach the turn, or its
-                            // completion, limit or exit is lost and the turn
-                            // hangs.
+                        if !counted {
+                            // Only a lifecycle report is kept past the bound: a
+                            // completion, a limit, an exit or a status report
+                            // must reach the turn, or it hangs. Everything
+                            // else, errors included, is dropped once full.
                             held.push_back(event);
-                        } else if held_content < HELD_PROMOTED_EVENTS {
-                            held_content += 1;
+                        } else if held_counted < HELD_PROMOTED_EVENTS {
+                            held_counted += 1;
                             held.push_back(event);
                         } else {
                             tracing::debug!(
@@ -18682,6 +18704,125 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// The exit report survives the non-accepted requeue.
+    ///
+    /// A promoted turn whose prompt the harness never accepted goes back to the
+    /// pause instead of being failed for a death it never touched. The
+    /// transport's exit status and stderr still describe the session that died,
+    /// and clearing the held report while requeueing would erase the only row
+    /// the person has for that death.
+    #[tokio::test]
+    async fn a_requeued_turn_keeps_the_exit_report_of_the_session_that_died() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let completed = || {
+            vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }]
+        };
+        let harness = FakeHarness::with_session_scripts(vec![completed(), completed(), Vec::new()]);
+        let (harness, injector) = harness.with_event_injector();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, write) = harness.with_send_gate_after(2);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // The message queued behind the second turn is what its completion
+        // promotes.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+        let promoted = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnStarted { turn_id, .. } = wire.event
+                && turn_id != created.turn_id
+                && turn_id != second.turn_id
+            {
+                break turn_id;
+            }
+        };
+        // The promoted write is on the wire but has not been accepted: the fake
+        // holds it until the test opens the gate.
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        // The session dies without producing anything for the promoted prompt.
+        // The exit report follows the completion, the way a reaped process's
+        // does, so the pump's bounded wait is what reads it.
+        injector.close_transport();
+        injector.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Failed,
+            usage: Usage::default(),
+        });
+        injector.emit(HarnessEvent::TransportClosed {
+            message: "the peer exited (exit status: 9): the provider is unavailable".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
+            reset_at: Some(reset_at),
+        });
+
+        let mut death = None;
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while death.is_none() {
+                let wire = next_event(&mut events).await;
+                if let Event::Error { message, .. } = wire.event {
+                    death = Some(message);
+                }
+            }
+        })
+        .await;
+        let death = death.expect("the exit report kept its row");
+        assert!(
+            death.contains("exit status: 9") && death.contains("provider is unavailable"),
+            "the row names the exit and its stderr: {death}"
+        );
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        let record = handle.lock().await;
+        assert!(
+            record.pending_turn(),
+            "the promoted turn did not go back to the pause"
+        );
+        assert_eq!(
+            record
+                .meta
+                .parked
+                .as_ref()
+                .map(|parked| parked.turn_id.clone()),
+            Some(promoted.clone()),
+            "the pause does not name the requeued prompt"
+        );
+        assert!(
+            record.transport_report.is_none(),
+            "the published report is not left behind for a second row"
+        );
+        drop(record);
+
+        write.release();
+        manager.shutdown().await;
+    }
+
     /// A promoted turn whose write is accepted releases what it held.
     ///
     /// The hold must not lose the turn's own first updates, and it must release
@@ -18946,6 +19087,111 @@ mod tests {
         .expect("an overflowing hold dropped the turn's completion");
         assert_eq!(turn, promoted);
         assert_eq!(status, TurnStatus::Completed);
+
+        manager.shutdown().await;
+    }
+
+    /// A flood of stale diagnostics cannot grow the promoted-write hold.
+    ///
+    /// The ACP bridge turns every unparseable stdout line into a
+    /// `HarnessEvent::Error`. While a promoted prompt is being written, those
+    /// errors arrive as the finished turn's late output. Keeping every
+    /// non-content event uncapped would let a garbage-flooding agent grow the
+    /// hold without limit; errors now count against the same bound as text,
+    /// tools, plans and usage, and the completion behind the flood is still
+    /// kept and still settles the turn.
+    #[tokio::test]
+    async fn a_diagnostic_flood_in_the_promoted_write_hold_is_bounded() {
+        const FLOOD: usize = 5_000;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let completed = || {
+            vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }]
+        };
+        let harness = FakeHarness::with_session_scripts(vec![completed(), completed(), Vec::new()]);
+        let (harness, injector) = harness.with_event_injector();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, write) = harness.with_send_gate_after(2);
+        // A small queue makes each injected event wait for the pump, so the
+        // flood is read while the write is still in flight instead of being
+        // buffered in the fake until after acceptance.
+        let harness = harness.with_bounded_event_queue(8);
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let promoted = promote_a_queued_message(&manager, &mut events, &created.thread_id).await;
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        // One late delta opens the hold (an error alone is applied at once
+        // while nothing is held), and the flood follows it.
+        injector
+            .send(HarnessEvent::TextDelta {
+                text: "late".into(),
+            })
+            .await;
+        for index in 0..FLOOD {
+            injector
+                .send(HarnessEvent::Error {
+                    message: format!("unparseable ACP frame {index}"),
+                    retryable: false,
+                })
+                .await;
+        }
+        injector
+            .send(HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            })
+            .await;
+        write.release();
+
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted {
+                    turn_id, status, ..
+                } = wire.event
+                    && turn_id == promoted
+                {
+                    return (turn_id, status);
+                }
+            }
+        })
+        .await
+        .expect("the completion behind the diagnostic flood never settled the turn");
+        assert_eq!(turn, promoted);
+        assert_eq!(status, TurnStatus::Completed);
+
+        // Count what the hold really kept from the journal, which every applied
+        // event is written to (the broadcast channel may lag under the flood).
+        let stored = journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("the journal");
+        let errors = stored
+            .iter()
+            .filter(|event| matches!(&event.event, Event::Error { .. }))
+            .count();
+        assert!(errors > 0, "the hold kept no diagnostic at all");
+        assert!(
+            errors <= HELD_PROMOTED_EVENTS + 16,
+            "the promoted-write hold kept {errors} diagnostics, past its bound of \
+             {HELD_PROMOTED_EVENTS}"
+        );
 
         manager.shutdown().await;
     }
