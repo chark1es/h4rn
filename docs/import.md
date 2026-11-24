@@ -52,7 +52,13 @@ generated environment block and the project's private AGENTS.md instructions
 included — and a copy that exactly repeats the canonical text is dropped too. A
 turn with no canonical event keeps its context, and a copy whose turn id names
 another turn is kept, so a repeated prompt after an aborted turn loses neither
-turn's text. For Claude Code, a whole harness element is recognised by its
+turn's text. The canonical prompt itself is kept exactly as written, its leading
+indentation and trailing newline included; only the comparison used for dedupe
+is trimmed. A rewound Codex rollout declares a byte prefix of the rollout it
+replaced, and that prefix streams before the rollout's own records, so the
+original request and reply stay in the imported conversation; when the prefix
+cannot be read the rollout is imported on its own. For Claude Code, a whole
+harness element is recognised by its
 content block — a command or notification must be complete, so a prompt that
 merely begins with `<task-notification` is still a prompt. Slash commands and
 `!` shell commands are kept exactly as typed, while their output, background
@@ -63,7 +69,8 @@ arrived yet.
 Malformed records are ignored, and unreadable or empty conversations are skipped.
 Records are streamed one at a time: a record larger than the text worth keeping
 is read past its attachment or tool output, so a short prompt is never lost to a
-screenshot beside it. A conversation is skipped with a warning when its
+screenshot beside it. Discovery reads the same streamed records, so a prompt
+sharing a record with a multi-megabyte attachment is still offered. A conversation is skipped with a warning when its
 transcript is over 4 GiB, when the kept text and metadata need more than 32 MiB,
 when any single record is longer than 48 MiB — the person's text, a tool result
 or an attachment alike, not only user text — or when it has more than 100,000
@@ -90,13 +97,22 @@ already in h4rn is not checked again.
 Starting an import adds any project that is new and creates one thread per
 conversation. Each source file's identity (its session id, or its path with size
 and content fingerprint when it names none) is recorded, so running the import
-again only adds conversations h4rn has not seen. A source is claimed and its
+again only adds conversations h4rn has not seen. The id used for the claim comes
+from the full parse, not the scan's head, so two differently named copies whose
+session id sits in a later record still import once. A source is claimed and its
 thread written in one transaction: two copies of a conversation in one run, two
 runs at once, or a crash between the claim and the write cannot produce a second
 thread. Progress appears in the dialog, with any limit a scan hit, and the import
 runs in the daemon, so you can close the dialog or leave the view; reopening it
 shows the current counts. Imported threads land in Done without raising a hand,
-with each message's original time, and stay there after a restart.
+with each message's original time, and a restart restores that finished state
+and sorts the thread by its newest imported message rather than the moment h4rn
+wrote it.
+
+A long replay crosses a paired connection without shortening anything: the
+daemon sends a thread's history in bounded pages, and a frame too large for the
+secure transport is split into chunks the client joins before reading it, so a
+600 KiB prompt stays whole.
 
 ## Continuing an imported thread
 

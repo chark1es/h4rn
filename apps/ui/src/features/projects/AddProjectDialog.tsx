@@ -8,7 +8,6 @@ import {
   FolderPlusIcon,
   GitBranchIcon,
   HomeIcon,
-  LoaderCircleIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -443,9 +442,6 @@ export function AddProjectDialog() {
             Cancel
           </Button>
           <Button onClick={() => void submit()} disabled={!ready}>
-            {busy || (mode === "import" && (importStarting || importRunning)) ? (
-              <LoaderCircleIcon className="q-icon s14 animate-spin" aria-hidden />
-            ) : null}
             {submitLabel}
           </Button>
         </DialogFooter>

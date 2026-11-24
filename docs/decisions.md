@@ -1629,11 +1629,14 @@ within that interval.
 
 Claude Code and Codex already keep their conversations on disk, so h4rn reads
 those transcripts instead of asking the person to copy them. Discovery and
-parsing live in `crates/h4rn-daemon/src/import/` and are read-only; a scan peeks
-at the head of each transcript to group it and to skip a session that never wrote
-a visible message, and a full parse streams one JSONL record at a time and names
-only the fields it keeps, so a megabyte-sized attachment or tool result is read
-past instead of being loaded or deciding that the line is malformed.
+parsing live in `crates/h4rn-daemon/src/import/` and are read-only; a scan reads
+the head of each transcript with the same streaming record reader the import
+uses to group it and to skip a session that never wrote a visible message, and a
+full parse streams one JSONL record at a time and names only the fields it keeps,
+so a megabyte-sized attachment or tool result is read past instead of being
+loaded or deciding that the line is malformed. A Codex rollout that was rewound
+declares a byte prefix of the rollout it replaced; the prefix streams before the
+rollout's own records, under the same limits.
 
 An imported thread is an ordinary thread whose transcript is journaled as message
 items and whose `ThreadMeta` carries the imported origin. That origin holds only
@@ -1664,9 +1667,14 @@ The handoff builder is separate (`crates/h4rn-daemon/src/handoff.rs`) and takes
 only roles and text, so provider switching and forking can reuse the same
 selection later. Import identity is the source session id, or the transcript path
 with its size and a content fingerprint when none exists, recorded in
-`daemon_imported_sources`. The source is claimed and its thread written in one
+`daemon_imported_sources`. The claim uses the identity the full parse found, not
+the scan's head, so a session id in a later record still identifies both copies.
+The source is claimed and its thread written in one
 transaction, so overlapping runs, two copies of one session in a run, or a crash
-between the claim and the write all import the conversation exactly once.
+between the claim and the write all import the conversation exactly once. A long
+imported transcript crosses a paired connection in bounded pages, and a frame
+over the secure transport's limit is split into chunks the client joins, so a
+large message is never shortened to fit.
 
 Discovery caps each attempt at 100 not-yet-imported conversations and 4 GiB per
 project, newest first, and skips a transcript over 4 GiB, a conversation over

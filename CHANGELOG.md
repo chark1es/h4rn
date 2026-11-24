@@ -65,17 +65,25 @@ All notable changes to h4rn are recorded here. The format follows
   activity, attachments and setup context are left out — for Codex a turn's
   canonical user event wins, so the generated environment block and the
   project's private AGENTS.md instructions never reach the import, while a turn
-  with no canonical event keeps its context). The transcript is kept as it was
+  with no canonical event keeps its context). A canonical prompt is stored
+  exactly as written — its indentation and trailing newline included — and only
+  the comparison key is trimmed. A rewound Codex rollout streams the byte prefix
+  it inherits from the rollout it replaced, so its original request and reply
+  stay in the imported conversation. The transcript is kept as it was
   written — a long first prompt is stored whole and the handoff applies its own
   ceiling later — and a record is streamed past attachments and tool output
-  instead of being dropped for its size; a single record over 48 MiB — text, a
+  instead of being dropped for its size; discovery uses the same streaming
+  reader, so a short prompt beside a 5 MiB attachment is still offered. A single
+  record over 48 MiB — text, a
   tool result or an attachment — skips the conversation with a warning, and
   retention stops as soon as a limit is crossed, so one oversized conversation
   cannot grow memory toward its file size. Each source session id is
   recorded, so running the import again only adds what is new; a transcript
   without one is identified by its path, size and content. The claim and the
   new thread are written in one transaction, so overlapping runs and a crash
-  cannot import a conversation twice. Progress is visible and counts the
+  cannot import a conversation twice, and the claim uses the identity the full
+  parse found, so two copies whose session id sits past the scan's head still
+  import once. Progress is visible and counts the
   conversations finished, with the limits a scan hit, and the import keeps
   running if you leave the view; reopening it shows the current counts.
   Discovery is read-only, skips
@@ -86,7 +94,9 @@ All notable changes to h4rn are recorded here. The format follows
   peeked to learn their project), and skips
   transcripts over 4 GiB, conversations over 32 MiB of kept text or 100,000
   records; the list shows what a scan could not read. Imported threads land in
-  Done with their own message times and stay there after a restart; their replies
+  Done with their own message times and stay there after a restart — including
+  their finished agent and their place in the sidebar, which sorts by the newest
+  imported message rather than the moment h4rn wrote the thread; their replies
   render as finished history — never as a live or paused stream — and the thread
   says **Imported from** with the conversation's own time instead of a duration
   and token count it never had. An imported thread starts a session when you send
@@ -98,7 +108,10 @@ All notable changes to h4rn are recorded here. The format follows
   request is sent once: the fallback never includes the current turn's own prompt
   in the history block, so a large request cannot push the recent messages out of
   the handoff. The handoff reads the history from the thread's journaled messages,
-  so no second copy of the transcript is stored. Message text is never logged and
+  so no second copy of the transcript is stored. A long prompt still crosses a
+  paired connection: a replay arrives in bounded pages, and an oversized frame
+  is split into chunks the client joins, so no message is shortened to fit.
+  Message text is never logged and
   token shapes are redacted before storage. See [docs/import.md](docs/import.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
