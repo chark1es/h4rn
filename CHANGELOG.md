@@ -465,12 +465,24 @@ All notable changes to h4rn are recorded here. The format follows
 - **Steer a running turn, and edit or reorder the queue.** Settings → Chat chooses whether a reply
   sent while the agent works waits in the queue or goes into the running turn; Cmd/Ctrl+Enter (or
   adding Shift when Enter inserts a new line) uses the other action, and the send button shows which
-  one it will take. Steer is offered only for Claude Code and Codex, which have a real mid-turn
-  input; the daemon refuses it with a clear error for any other harness rather than pretending.
+  one it will take. Steer is offered only for Codex, whose app-server has a real `turn/steer`: the
+  request names the turn the person saw, so a turn that ended in the meantime is refused instead of
+  catching a newer one. Claude Code's stream-json stdin is a queue of turns rather than a mid-turn
+  channel — a frame written while a turn runs is sometimes folded into it and sometimes becomes a
+  second turn, and its result stream cannot say which — so Claude is not offered Steer and the
+  daemon refuses it with a clear error instead of guessing; its follow-ups use the queue. A steer is
+  delivered at most once: the daemon records the delivery before the agent sees it, puts a message
+  back only when the agent definitely refused it, and reports a timeout without sending it twice.
   Queued messages are durable across a restart, appear at the end of the thread as dashed rows, and
   can be sent now, edited in the composer, removed or moved up and down without a promotion racing
-  the edit. `Cmd/Ctrl+Shift+Enter` steers the oldest queued message and `Alt/Option+Up` at the start
-  of the composer edits the newest; both appear in Settings → Shortcuts.
+  the edit; an edit in the composer keeps the person's own draft separate, and a failed journal write
+  leaves the queue exactly as it was. Starting work by hand — a send, a Send now, an idle promotion
+  or a steer — cancels an armed auto-resume, so the message behind it is promoted instead of waiting
+  for a schedule that no longer fires. `Cmd/Ctrl+Shift+Enter` steers the oldest queued message (while
+  a turn is really running) and `Alt/Option+Up` at the start of the composer edits the newest; both
+  appear in Settings → Shortcuts. The queue's contents are not part of the thread summary, because a
+  full queue can be larger than a paired connection's frame: the summary counts the messages and the
+  client pages the rows in.
 
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another

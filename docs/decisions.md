@@ -1624,7 +1624,7 @@ second long-lived socket. That keeps one transport (HTTP) working through both
 the direct address and the relay proxy, and the thread still follows live work
 within that interval.
 
-## ADR-045: A queued message is durable; a steer uses the harness's own mid-turn input
+## ADR-045: A queued message is durable; a steer needs an attributable turn
 
 **Status:** Accepted
 
@@ -1635,21 +1635,57 @@ of a transcript row: queued messages are not yet part of the conversation. **Ste
 text into the turn that is already running, adds the user row to that turn, and never also queues
 it. With no turn running, a steer is an ordinary send.
 
-Steering is advertised per harness (`HarnessCapabilities.steer`) and only Claude Code and Codex say
-yes: Claude Code reads further stream-json user frames between tool calls, and Codex app-server has
-`turn/steer` with the expected turn id. OpenCode's HTTP prompt starts a queued message and ACP has
-one prompt at a time, so those adapters leave the bit off and the daemon refuses a steer with a
-typed `Unsupported` error before it invents one. A failed steer is an error, never a silent second
-delivery.
+**Only Codex steers.** Codex app-server has `turn/steer` with an `expectedTurnId`, so the server
+itself refuses a request aimed at a turn that has ended. Claude Code is not offered it: its
+stream-json input is a queue of user frames over one long-lived conversation, and a frame written
+while a turn runs is either read between tool calls and folded into that turn's single `result`, or
+read after the turn's `result` was emitted and answered as a second turn with its own `result`.
+Measured against 2.1.330 both happen, and nothing in the stream says which: a mid-turn steer that
+carried a Bash call produced one `result` with `num_turns: 2`, while two frames written before the
+process read them produced two `result`s. Settling on the first `result` would put the steer's
+answer on the next turn, and holding the turn open for a second `result` would hang whenever the
+first one already contained it. h4rn's durable queue already gives Claude the honest follow-up, so
+Claude advertises no steer; the daemon refuses it with a typed `Unsupported` error rather than
+guessing. OpenCode's HTTP prompt starts a queued message and ACP has one prompt at a time, so they
+do not advertise it either. Claude's steering was withdrawn in the council's first review round.
+
+A steer is delivered **at most once**. It names the turn the client observed (`SendMessage.turn_id`)
+and the daemon refuses a stale id and a turn whose first prompt the harness has not accepted yet.
+Sending now from the queue claims the message durably before the adapter sees it: the queue row is
+journaled without the message first. If the journal write fails the claim is undone and nothing was
+delivered; if the adapter definitely refuses (unsupported, missing binary, a protocol error answer)
+the message goes back where it was; if the outcome is unclear (a timeout, a dead transport) the
+claim stands and the error is reported, because a second automatic delivery is worse than a row the
+person has to retype. The claim also reads the message under the same lock that removes it, so an
+edit committed in between cannot send text the person already replaced.
 
 Queue edits, removals, moves and Send now are one daemon request (`QueueMessage`). Every mutation
 and the promotion of the next turn take the same thread-record lock, so a message that has just
 started is refused with `Conflict` rather than edited or removed after the harness already got it.
-`Send now` steers when the running harness can, otherwise moves the message to the front (and starts
-a turn if none runs). The queue's contents are part of `ThreadSummary`, so every client renders the
-same durable order; the transcript row is written once, when the message's own turn starts.
+A mutation is published only after the journal accepted it; a failed write restores the in-memory
+queue exactly, so memory and storage never disagree. `Send now` steers when the running harness can,
+otherwise moves the message to the front (and starts a turn if none runs).
+
+**Starting work by hand cancels an armed auto-resume.** An ordinary send, an idle promotion of an
+older queue, `Send now` and a steer into a paused turn all take the thread's `scheduled_limit`, clear
+the summary's resume target and limit, cancel the ledger schedule, and publish
+`LimitResumeReleased` when the pause really held the pending prompt. Without that, the schedule
+fired a stale resume later and its guard kept the next queued message from ever being promoted.
+
+The queue's **contents are not in `ThreadSummary`**. A full queue is unbounded while a paired
+transport refuses a frame over 512 KiB, so carrying it in every summary made a large queue break the
+connection. The summary carries `queued_count` and a `queue_revision`; the rows come from
+`GetThreadQueue` in bounded pages (whole messages only, at most 100 and about 256 KiB per page) and a
+client pages with `offset`. A `QueueUpdated` reply names the revision it came from, so a reply that
+arrives after a newer summary is ignored instead of putting back a message that already started.
+
+The composer keeps three texts apart while editing a queued message: the edit buffer in the box, the
+message's saved text, and the thread's own draft (which stays in storage). A second Edit keeps the
+draft the first one displaced, another tab's draft write never replaces an active edit, and when the
+message starts under the edit the composer refills only with text that actually changed.
 
 Clients choose a per-device default for follow-ups (Queue or Steer) in Settings → Chat. Enter (or
 Cmd/Ctrl+Enter when `Enter inserts a new line` is on) uses that default; Cmd/Ctrl+Enter (or adding
 Shift in multiline mode) uses the opposite action. `Cmd/Ctrl+Shift+Enter` steers the oldest queued
-message, and `Alt/Option+Up` at the start of the composer edits the newest one; both are rebindable.
+message while a turn is really running, and `Alt/Option+Up` at the start of the composer edits the
+newest one; both are rebindable.
