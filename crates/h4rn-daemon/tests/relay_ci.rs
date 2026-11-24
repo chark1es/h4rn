@@ -40,9 +40,10 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
 use h4rn_protocol::{
-    ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HostId, McpEnabledMatrix,
-    McpRequest, McpServerInput, McpSharePolicy, McpTransportInput, PROTOCOL_VERSION,
-    PairingClaimRequest, ProtoError, RelayOpen, RelayService, ResponseBody, ServerFrame,
+    ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HarnessKind, HostId,
+    McpEnabledMatrix, McpRequest, McpServerInput, McpSharePolicy, McpTransportInput,
+    PROTOCOL_VERSION, PairScope, PairingClaimRequest, ProtoError, RelayOpen, RelayService,
+    ResponseBody, RuntimeMode, ServerFrame,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -325,6 +326,8 @@ impl h4rn_transport::relay::RelayLink for ConnectRelayLink {
                     }
                     h4rn_protocol::RelayFrameKind::Ping => continue,
                     h4rn_protocol::RelayFrameKind::Open => continue,
+                    h4rn_protocol::RelayFrameKind::GuestHttp => continue,
+                    h4rn_protocol::RelayFrameKind::GuestHttpChunk => continue,
                 },
                 h4rn_protocol::RelayServerEvent::Error { conn_id, .. }
                     if conn_id.as_deref().is_some_and(|id| id != self.conn_id) =>
@@ -414,10 +417,6 @@ async fn boot_with_host(
         task,
         mcp,
     }
-}
-
-async fn boot(data_dir: &Path, service: Arc<SecureService>) -> TestDaemon {
-    boot_with_host(data_dir, service, None).await
 }
 
 struct RemoteClient {
@@ -993,7 +992,12 @@ async fn relay_pairing_waits_for_host_sas_confirmation() {
     let service = Arc::new(SecureService::new(SecureOptions::new(
         daemon_identity.clone(),
     )));
-    let daemon = boot(daemon_dir.path(), Arc::clone(&service)).await;
+    let daemon = boot_with_host(
+        daemon_dir.path(),
+        Arc::clone(&service),
+        Some((HostId::new("host_relay_ci_pair"), "relay-ci-daemon")),
+    )
+    .await;
 
     // The claim needs the daemon's relay socket online so `DevicePaired` has a
     // destination.
@@ -1014,7 +1018,7 @@ async fn relay_pairing_waits_for_host_sas_confirmation() {
     );
 
     let pairing = daemon_connect
-        .create_pairing(None)
+        .create_pairing(Some(vec![PairScope::View, PairScope::Admin]))
         .await
         .expect("create pairing");
     let claim = client
@@ -1098,6 +1102,68 @@ async fn relay_pairing_waits_for_host_sas_confirmation() {
         .await
         .expect("hello over the relay");
 
+    // A guest link's URL is its bearer credential. A paired admin device may
+    // read it, and that remote read is written to the daemon's audit trail;
+    // the local owner reading it is not a remote action and is not recorded.
+    let thread_id = match host
+        .request(ClientRequest::CreateThread {
+            host: HostId::new("host_relay_ci_pair"),
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: daemon_dir.path().display().to_string(),
+            model: "fake-model".into(),
+            prompt: "audited guest link".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+        })
+        .await
+    {
+        Ok(ResponseBody::ThreadCreated { thread_id, .. }) => thread_id,
+        other => panic!("the host could not create a thread: {other:?}"),
+    };
+    host.request(ClientRequest::SetGuestSettings { enabled: true })
+        .await
+        .expect("enable guest links");
+    match host
+        .request(ClientRequest::ShareThreadWithGuest {
+            thread_id: thread_id.clone(),
+        })
+        .await
+    {
+        Ok(ResponseBody::GuestSharing { sharing }) => {
+            assert!(sharing.link.expect("the new link").url.is_some());
+        }
+        other => panic!("the host could not share the thread: {other:?}"),
+    }
+    match remote
+        .request(ClientRequest::GetGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("an admin may read the guest URL")
+    {
+        ResponseBody::GuestSharing { sharing } => {
+            assert!(
+                sharing.link.expect("the link").url.is_some(),
+                "an admin device did not receive the URL it may copy"
+            );
+        }
+        other => panic!("unexpected guest sharing response: {other:?}"),
+    }
+    let audit = std::fs::read_to_string(daemon_dir.path().join("remote-audit.jsonl"))
+        .expect("the remote audit trail");
+    assert!(
+        audit.contains("\"action\":\"guest.link_viewed\""),
+        "reading a guest URL from a paired device must be audited: {audit}"
+    );
+    assert!(
+        audit.contains(thread_id.as_str()),
+        "the audit line must name the thread: {audit}"
+    );
+
     // Revoking the device removes it from the transport allowlist.
     daemon_connect
         .revoke_device(&client_device_id)
@@ -1107,6 +1173,160 @@ async fn relay_pairing_waits_for_host_sas_confirmation() {
         (!service.is_allowed(&client_identity.public().noise_public)).then_some(())
     })
     .await;
+
+    daemon.stop().await;
+    relay.stop().await;
+}
+
+/// Boots one logged-in daemon and shares one thread over Connect.
+async fn boot_sharing_daemon(
+    relay: &RelayServer,
+    subject: &str,
+    machine_name: &str,
+) -> (TestDaemon, tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("daemon dir");
+    let identity = load_or_create(&FileKeyStore::new(dir.path().join("transport-identity")))
+        .expect("daemon identity");
+    let connect = mint_login(
+        relay,
+        dir.path(),
+        &identity,
+        ConnectDeviceKind::Daemon,
+        Some(machine_name),
+        subject,
+    )
+    .await;
+    let machine = connect.machine_id().expect("daemon machine");
+    let service = Arc::new(SecureService::new(SecureOptions::new(identity)));
+    let host_id = HostId::new(format!("host_{machine_name}"));
+    let daemon = boot_with_host(
+        dir.path(),
+        Arc::clone(&service),
+        Some((host_id.clone(), machine_name)),
+    )
+    .await;
+    wait_machine_online(&connect, &machine).await;
+
+    let mut host = HostClient::connect(daemon.addr, dir.path()).await;
+    let thread_id = match host
+        .request(ClientRequest::CreateThread {
+            host: host_id,
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: dir.path().display().to_string(),
+            model: "fake-model".into(),
+            prompt: "hello guest".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+        })
+        .await
+    {
+        Ok(ResponseBody::ThreadCreated { thread_id, .. }) => thread_id,
+        other => panic!("the host could not create a thread: {other:?}"),
+    };
+    match host
+        .request(ClientRequest::SetGuestSettings { enabled: true })
+        .await
+    {
+        Ok(ResponseBody::GuestSettings { settings }) => assert!(settings.enabled),
+        other => panic!("the host could not enable guest links: {other:?}"),
+    }
+    let url = match host
+        .request(ClientRequest::ShareThreadWithGuest {
+            thread_id: thread_id.clone(),
+        })
+        .await
+    {
+        Ok(ResponseBody::GuestSharing { sharing }) => sharing
+            .link
+            .and_then(|link| link.url)
+            .expect("the shared link's URL"),
+        other => panic!("the host could not share the thread: {other:?}"),
+    };
+    (daemon, dir, url)
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (run in the connect-postgres CI job)"]
+async fn a_connect_guest_link_binds_the_first_browser_and_refuses_the_second() {
+    let relay = RelayServer::start().await;
+    let subject = format!("relay-ci-guest-{}", uuid::Uuid::now_v7());
+    let (daemon, _dir, url) = boot_sharing_daemon(&relay, &subject, "relay-ci-guest").await;
+    assert!(
+        url.starts_with(&format!("{}/guest/", relay.base_url)),
+        "the shared URL must name the relay: {url}"
+    );
+
+    // A browser with a real cookie jar. Loading the page asks the daemon for
+    // its page-load cookie; the answer must carry that cookie through the
+    // relay, or the first state read sees the unbound screen.
+    let first = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("cookie jar");
+    let page = first.get(&url).send().await.expect("first page");
+    assert_eq!(page.status(), StatusCode::OK);
+    let cookie = page
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .expect("the relayed page-load cookie")
+        .to_owned();
+    assert!(cookie.starts_with("h4rn_guest="), "{cookie}");
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(
+        cookie.contains("Path=/guest/"),
+        "the cookie must name the public path: {cookie}"
+    );
+
+    let state: serde_json::Value = first
+        .get(format!("{url}/state"))
+        .send()
+        .await
+        .expect("first state")
+        .json()
+        .await
+        .expect("first state json");
+    assert_eq!(
+        state["state"], "active",
+        "the page-load cookie did not bind the first browser through Connect: {state}"
+    );
+    let again: serde_json::Value = first
+        .get(format!("{url}/state"))
+        .send()
+        .await
+        .expect("second state")
+        .json()
+        .await
+        .expect("second state json");
+    assert_eq!(
+        again["state"], "active",
+        "the bound browser lost its cookie"
+    );
+
+    // A second browser is refused: the link is bound to the first.
+    let second = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("second cookie jar");
+    let page = second.get(&url).send().await.expect("second page");
+    assert_eq!(page.status(), StatusCode::OK);
+    let refused: serde_json::Value = second
+        .get(format!("{url}/state"))
+        .send()
+        .await
+        .expect("second state")
+        .json()
+        .await
+        .expect("second state json");
+    assert_eq!(
+        refused["state"], "unbound",
+        "a second browser was allowed into the link: {refused}"
+    );
 
     daemon.stop().await;
     relay.stop().await;

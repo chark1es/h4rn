@@ -77,6 +77,11 @@ impl RemoteAudit {
         self.data_dir.join(AUDIT_FILE)
     }
 
+    /// The Connect client this trail mirrors to, when signed in.
+    pub fn client(&self) -> Option<&Arc<ConnectClient>> {
+        self.client.as_ref()
+    }
+
     /// The paired-device registry this audit trail attributes with.
     pub fn devices(&self) -> &DeviceRegistry {
         &self.devices

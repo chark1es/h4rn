@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::SEC_WEBSOCKET_PROTOCOL};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -110,6 +110,8 @@ pub struct AppState {
     pub projects: Arc<crate::projects::ProjectService>,
     /// Title generation: coding-agent CLI or a configured text generator.
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
+    /// Guest links and messages waiting for the owner (ADR-044).
+    pub guest: Arc<crate::guest::GuestService>,
     /// Scheduled tasks and webhook automations.
     pub schedules: Arc<crate::schedules::ScheduleService>,
     /// Server boot time, for `/healthz`.
@@ -122,8 +124,8 @@ pub struct AppState {
 /// the loopback bind and binds the operator named carry it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ListenerKind {
-    /// The primary loopback bind (`--bind`).
-    Loopback,
+    /// The primary bind (`--bind`).
+    Primary,
     /// An extra address the operator named (`--extra-bind`).
     ExtraBind,
     /// The address discovered on the tailnet by Tailscale auto mode.
@@ -135,33 +137,55 @@ pub enum ListenerKind {
 impl ListenerKind {
     /// Whether this listener serves `/webhooks/{secret}`.
     ///
-    /// Only the loopback bind and an explicitly configured extra bind do. The
+    /// Only the primary bind and an explicitly configured extra bind do. The
     /// tailnet address and the LAN listener carry the encrypted session routes
     /// only, so a webhook secret never leaves the listeners the operator chose.
     pub fn serves_webhooks(self) -> bool {
-        matches!(self, Self::Loopback | Self::ExtraBind)
+        matches!(self, Self::Primary | Self::ExtraBind)
     }
 
     /// The router this listener serves.
-    pub fn router(self, state: AppState) -> Router {
+    ///
+    /// Which guest routes exist is decided from the address the listener
+    /// actually bound, not from the flag that created it: `--bind 0.0.0.0` is
+    /// still the primary listener, but it is not a loopback address.
+    pub fn router(self, state: AppState, bound: SocketAddr) -> Router {
         match self {
-            Self::Loopback | Self::ExtraBind => router(state),
+            Self::Primary | Self::ExtraBind => operator_router(state, bound),
             Self::Tailnet => core_router(state),
             Self::NetworkAccess => network_router(state),
         }
     }
 }
 
-/// Builds the daemon router.
+/// Builds the router for a listener the operator chose.
 ///
-/// This is the loopback and explicit-bind router: it carries the webhook
-/// endpoint because the operator chose where it listens. `/secure` is always
-/// registered so a remote client gets a clear "not enabled" response instead
-/// of a 404, while plain WebSocket access stays loopback-only (ADR-009).
-pub fn router(state: AppState) -> Router {
-    core_routes()
-        .route("/webhooks/{secret}", post(webhook_post))
-        .with_state(state)
+/// It carries the webhook endpoint because the operator chose where it
+/// listens. `/secure` is always registered so a remote client gets a clear
+/// "not enabled" response instead of a 404, while plain WebSocket access stays
+/// loopback-only (ADR-009). Direct guest routes are mounted only where the
+/// bound address can answer this machine: loopback, or the wildcard address,
+/// which still accepts a loopback connection.
+fn operator_router(state: AppState, bound: SocketAddr) -> Router {
+    let app = core_routes().route("/webhooks/{secret}", post(webhook_post));
+    let app = if serves_direct_guest(bound) {
+        app.merge(guest_router())
+    } else {
+        app
+    };
+    app.with_state(state)
+}
+
+/// Whether a listener bound to `bound` may serve the direct guest routes.
+///
+/// A direct guest link is a bearer token in a URL over plaintext HTTP, so the
+/// socket must be one only this machine can reach: a loopback bind, or the
+/// wildcard address, whose loopback connection is the same socket. The guest
+/// handlers repeat the check on the peer address, so a wildcard bind still
+/// refuses a LAN peer. A concrete non-loopback bind has no direct guest path;
+/// Connect is the way to share from there.
+fn serves_direct_guest(bound: SocketAddr) -> bool {
+    bound.ip().is_loopback() || bound.ip().is_unspecified()
 }
 
 /// Every route except the webhook endpoint.
@@ -187,17 +211,42 @@ fn core_routes() -> Router<AppState> {
         )
 }
 
-/// Router for the network listener: liveness plus the encrypted routes only.
+/// Router for the network listener: liveness and the encrypted routes.
 ///
 /// Plaintext `/ws` is deliberately absent, so a device on the LAN cannot open
 /// an unencrypted session even if it learns the access token. `/mcp` is absent
 /// too: the hub endpoint carries a bearer token and stays loopback-only.
+///
+/// Guest routes are absent for the same reason a plaintext `/ws` is: a guest
+/// link is a bearer token in a URL, and serving it over a LAN listener would
+/// put that token on the network in the clear. Direct links live on loopback
+/// only; a teammate on another machine reaches the link through Connect.
 pub fn network_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/secure", get(secure_handler))
         .route("/secure-mcp", get(secure_mcp_handler))
         .with_state(state)
+}
+
+/// Capacity of a guest message body, including base64 overhead.
+const GUEST_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Routes the guest page reads.
+///
+/// A message carries up to 10 MB of files, which is about 13.4 MB as base64 in
+/// JSON, so these routes raise axum's default body limit for themselves.
+fn guest_router() -> Router<AppState> {
+    Router::new()
+        .route("/guest/{token}", get(guest_page_handler))
+        .route("/guest/{token}/state", get(guest_state_handler))
+        .route(
+            "/guest/{token}/state/{since}",
+            get(guest_state_since_handler),
+        )
+        .route("/guest/{token}/messages", post(guest_message_handler))
+        .route("/guest/{token}/blob/{id}", get(guest_blob_handler))
+        .layer(DefaultBodyLimit::max(GUEST_BODY_LIMIT))
 }
 
 /// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
@@ -211,6 +260,264 @@ async fn mcp_http_get(State(state): State<AppState>) -> Response {
 
 async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
     crate::mcp::http_delete(state.mcp.http_state(), headers).await
+}
+
+// ---------------------------------------------------------------------------
+// Guest links (ADR-044)
+// ---------------------------------------------------------------------------
+
+/// The guest page for one link token.
+async fn guest_page_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}"),
+        None,
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// The guest snapshot, with history from the start.
+async fn guest_state_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}/state"),
+        None,
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// The guest snapshot after one sequence.
+async fn guest_state_since_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((token, since)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}/state/{since}"),
+        None,
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// One guest message with its files.
+///
+/// The link and its browser binding are checked from the headers *before* the
+/// body is read: an unauthenticated upload is refused without buffering it.
+async fn guest_message_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
+    let input = guest_input(
+        crate::guest::Method::Post,
+        format!("/guest/{token}/messages"),
+        None,
+        &headers,
+        Vec::new(),
+    );
+    if let Err(output) = state.guest.check_submission(&input).await {
+        return guest_output(output);
+    }
+    let body = match read_guest_body(body, GUEST_BODY_LIMIT).await {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    // The submission runs in its own task. A browser that disconnects while
+    // the row is being written must not cancel it half-way: that would leave a
+    // `reserving` row, its files and its quota behind until the next restart.
+    let guest = Arc::clone(&state.guest);
+    let task = tokio::spawn(async move {
+        let mut input = input;
+        input.body = body;
+        guest.handle(input).await
+    });
+    match task.await {
+        Ok(output) => guest_output(output),
+        Err(error) => guest_output(crate::guest::GuestHttpOutput::text(
+            500,
+            &format!("The message could not be submitted: {error}"),
+        )),
+    }
+}
+
+/// One attachment the thread shows.
+async fn guest_blob_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path((token, id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
+    // Forward the value unchanged: the guest surface decides what `1` and `0`
+    // mean, and a bare `?thumbnail=0` must not turn into a thumbnail request.
+    let suffix = query
+        .get("thumbnail")
+        .map(|value| format!("?thumbnail={value}"))
+        .unwrap_or_default();
+    guest_exchange(
+        &state,
+        crate::guest::Method::Get,
+        format!("/guest/{token}/blob/{id}{suffix}"),
+        None,
+        &headers,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Refuses a direct guest request from a peer that is not this machine.
+///
+/// The direct routes are mounted only on a loopback or wildcard bind, but a
+/// wildcard socket also accepts LAN peers. This is the second guard, the same
+/// one `/ws` makes. It answers 404 like an unmounted route: a network peer
+/// must not be able to confirm that a guest path exists.
+fn guest_peer_refused(peer: SocketAddr) -> Option<Response> {
+    (!peer.ip().is_loopback())
+        .then(|| guest_output(crate::guest::GuestHttpOutput::text(404, "Not found.")))
+}
+
+/// Runs one exchange through the guest surface and renders its answer.
+pub(crate) async fn guest_exchange(
+    state: &AppState,
+    method: crate::guest::Method,
+    path: String,
+    public_prefix: Option<String>,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+) -> Response {
+    let output = state
+        .guest
+        .handle(guest_input(method, path, public_prefix, headers, body))
+        .await;
+    guest_output(output)
+}
+
+/// Builds the guest surface's input from request headers.
+pub(crate) fn guest_input(
+    method: crate::guest::Method,
+    path: String,
+    public_prefix: Option<String>,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+) -> crate::guest::GuestHttpInput {
+    let cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(guest_cookie);
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    crate::guest::GuestHttpInput {
+        method,
+        path,
+        public_prefix,
+        cookie,
+        content_type: header("content-type"),
+        origin: header("origin"),
+        host: header("host"),
+        fetch_site: header("sec-fetch-site"),
+        body,
+    }
+}
+
+/// Reads a guest request body, refusing it as soon as it passes the limit.
+async fn read_guest_body(body: axum::body::Body, limit: usize) -> Result<Vec<u8>, Box<Response>> {
+    use futures::StreamExt as _;
+    let mut stream = body.into_data_stream();
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return Err(Box::new(guest_output(crate::guest::GuestHttpOutput::text(
+                400,
+                "The message body could not be read.",
+            ))));
+        };
+        if buffer.len().saturating_add(chunk.len()) > limit {
+            return Err(Box::new(guest_output(crate::guest::GuestHttpOutput::text(
+                413,
+                "A message holds at most 10 MB of files.",
+            ))));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
+}
+
+/// Extracts the guest cookie from a `Cookie` header.
+pub(crate) fn guest_cookie(header: &str) -> Option<String> {
+    header.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == h4rn_protocol::GUEST_COOKIE).then(|| value.to_owned())
+    })
+}
+
+/// Turns a guest answer into an HTTP response.
+pub(crate) fn guest_output(output: crate::guest::GuestHttpOutput) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(output.content_type),
+    );
+    for (name, value) in output.headers {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(name),
+            axum::http::HeaderValue::try_from(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+    if let Some(cookie) = output.set_cookie
+        && let Ok(value) = axum::http::HeaderValue::try_from(cookie)
+    {
+        headers.insert(axum::http::header::SET_COOKIE, value);
+    }
+    (
+        StatusCode::from_u16(output.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        headers,
+        output.body,
+    )
+        .into_response()
 }
 
 /// One webhook delivery.
@@ -1151,13 +1458,23 @@ impl Connection {
                     thread_id,
                     tab,
                     pinned,
-                } => self
-                    .state
-                    .manager
-                    .set_thread_tab(&thread_id, tab, pinned)
-                    .await
-                    .map(|_| ResponseBody::Ack)
-                    .map_err(crate::threads::ManagerError::into_proto),
+                } => {
+                    let result = self
+                        .state
+                        .manager
+                        .set_thread_tab(&thread_id, tab, pinned)
+                        .await
+                        .map(|_| ResponseBody::Ack)
+                        .map_err(crate::threads::ManagerError::into_proto);
+                    // Settling is h4rn's archive: the guest link ends and its
+                    // waiting files go with it (ADR-044).
+                    if result.is_ok() && tab == h4rn_protocol::ThreadTab::Settled {
+                        if let Err(error) = self.state.guest.thread_settled(&thread_id).await {
+                            tracing::warn!(%error, thread = %thread_id.as_ref(), "could not end the guest link on settle");
+                        }
+                    }
+                    result
+                }
                 ClientRequest::SetThreadRuntimeMode { thread_id, mode } => self
                     .state
                     .manager
@@ -2165,10 +2482,23 @@ mod tests {
 
     #[test]
     fn webhook_routes_are_exposed_only_on_operator_chosen_listeners() {
-        assert!(ListenerKind::Loopback.serves_webhooks());
+        assert!(ListenerKind::Primary.serves_webhooks());
         assert!(ListenerKind::ExtraBind.serves_webhooks());
         assert!(!ListenerKind::Tailnet.serves_webhooks());
         assert!(!ListenerKind::NetworkAccess.serves_webhooks());
+    }
+
+    #[test]
+    fn direct_guest_routes_need_an_address_this_machine_can_reach_as_loopback() {
+        assert!(serves_direct_guest("127.0.0.1:47800".parse().unwrap()));
+        assert!(serves_direct_guest("[::1]:47800".parse().unwrap()));
+        // The wildcard bind answers a loopback connection on the same socket;
+        // the handlers' peer check keeps a LAN peer out.
+        assert!(serves_direct_guest("0.0.0.0:47800".parse().unwrap()));
+        assert!(serves_direct_guest("[::]:47800".parse().unwrap()));
+        // A concrete network address is not a place a bearer token may live.
+        assert!(!serves_direct_guest("192.168.1.9:47800".parse().unwrap()));
+        assert!(!serves_direct_guest("100.64.1.5:47800".parse().unwrap()));
     }
 
     #[test]
@@ -2218,6 +2548,7 @@ mod tests {
             context_window: None,
             context_fill_percent: None,
             needs_attention: false,
+            pending_guest_requests: 0,
             unread: false,
             resume_at: None,
             limit: None,

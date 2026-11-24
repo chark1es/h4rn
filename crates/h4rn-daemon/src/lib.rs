@@ -32,6 +32,7 @@ pub mod doctor;
 pub mod forge;
 pub mod fs;
 pub mod git_actions;
+pub mod guest;
 pub mod harness_versions;
 pub mod harnesses;
 pub mod hosts;

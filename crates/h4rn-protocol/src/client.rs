@@ -1503,6 +1503,45 @@ pub enum ClientRequest {
         #[serde(default)]
         path: Option<String>,
     },
+    // ------------------------------------------------------------------
+    // Guest links: one thread, one browser, no account (ADR-044).
+    // ------------------------------------------------------------------
+    /// Read whether guest links are on and this thread already has a link.
+    GetGuestSharing {
+        /// Thread to report.
+        thread_id: ThreadId,
+    },
+    /// Create a link for one thread, ending any earlier one.
+    ShareThreadWithGuest {
+        /// Thread to share.
+        thread_id: ThreadId,
+    },
+    /// End the thread's link and delete the files of its waiting messages.
+    StopGuestSharing {
+        /// Thread to stop sharing.
+        thread_id: ThreadId,
+    },
+    /// Run one waiting guest message as a normal turn.
+    SendGuestRequest {
+        /// Thread the request belongs to.
+        thread_id: ThreadId,
+        /// Request to send.
+        request_id: String,
+    },
+    /// Discard one waiting guest message and its files.
+    DismissGuestRequest {
+        /// Thread the request belongs to.
+        thread_id: ThreadId,
+        /// Request to dismiss.
+        request_id: String,
+    },
+    /// Read the machine-wide guest-links setting.
+    GetGuestSettings,
+    /// Turn guest links on or off for this machine.
+    SetGuestSettings {
+        /// New setting. Turning it off disables every live link at once.
+        enabled: bool,
+    },
 }
 
 impl ClientRequest {
@@ -1558,6 +1597,8 @@ impl ClientRequest {
             | Self::ListDirectDevices
             | Self::ListTextGenerators
             | Self::GetTextGenerationSettings
+            | Self::GetGuestSharing { .. }
+            | Self::GetGuestSettings
             | Self::ListSchedules
             | Self::ListScheduleRuns { .. }
             | Self::GitStatus { .. } => View,
@@ -1599,7 +1640,9 @@ impl ClientRequest {
             | Self::UnlinkIssue { .. }
             | Self::RenameThread { .. }
             | Self::RenameProject { .. }
-            | Self::RemoveProject { .. } => Approve,
+            | Self::RemoveProject { .. }
+            | Self::SendGuestRequest { .. }
+            | Self::DismissGuestRequest { .. } => Approve,
             Self::TerminalOpen { .. }
             | Self::TerminalAttach { .. }
             | Self::TerminalList { .. }
@@ -1666,6 +1709,9 @@ impl ClientRequest {
             | Self::RemoveTextGenerator { .. }
             | Self::TestTextGenerator { .. }
             | Self::SetTextGenerationSettings { .. }
+            | Self::ShareThreadWithGuest { .. }
+            | Self::StopGuestSharing { .. }
+            | Self::SetGuestSettings { .. }
             | Self::CreateSchedule { .. }
             | Self::UpdateSchedule { .. }
             | Self::DeleteSchedule { .. }
@@ -2010,6 +2056,40 @@ mod tests {
                 Approve,
             ),
             (ClientRequest::McpRemove { name: "x".into() }, Admin),
+            (ClientRequest::GetGuestSettings, View),
+            (ClientRequest::SetGuestSettings { enabled: true }, Admin),
+            (
+                ClientRequest::GetGuestSharing {
+                    thread_id: thread(),
+                },
+                View,
+            ),
+            (
+                ClientRequest::ShareThreadWithGuest {
+                    thread_id: thread(),
+                },
+                Admin,
+            ),
+            (
+                ClientRequest::StopGuestSharing {
+                    thread_id: thread(),
+                },
+                Admin,
+            ),
+            (
+                ClientRequest::SendGuestRequest {
+                    thread_id: thread(),
+                    request_id: "greq_1".into(),
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::DismissGuestRequest {
+                    thread_id: thread(),
+                    request_id: "greq_1".into(),
+                },
+                Approve,
+            ),
             // Version reads are harmless; running a package manager is not.
             (ClientRequest::ListHarnessVersions, View),
             (ClientRequest::ListAcpAgents, View),

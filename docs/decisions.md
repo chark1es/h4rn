@@ -1526,3 +1526,100 @@ with no shell and its arguments as an array, streams output as transient `Harnes
 the result names what is on disk, not what the registry promised. The registry client and the
 process runner are injectable seams, so no test touches the network or a real global CLI.
 
+
+## ADR-044: A guest link is a narrow HTTP surface bound to one thread and one browser
+
+**Status:** Accepted
+
+A guest link exists so one teammate can follow one thread without an account.
+That rules out the device protocol: a guest has no Noise identity, no pairing
+and no access token, and inventing a device for them would widen every scope
+check. The link is therefore a bearer URL and the daemon answers a small HTTP
+surface instead of upgrading `/ws`.
+
+The token is 256 random bits. The journal stores its BLAKE3 hash and the hash of
+the browser's cookie, never the raw values; both comparisons are constant time.
+The raw token lives only in the running daemon's memory, so a restart keeps a
+guest working but the owner must create a new link to copy it again. That is a
+deliberate cost: a stolen journal cannot be replayed as a link.
+
+A link names exactly one thread. The client never sends a thread id, so a
+malicious page cannot ask for another thread; every read, submission and blob
+fetch resolves the token first and then uses the link's thread. The surface has
+four routes: the page, a snapshot of events after a sequence, a message
+submission, and one attachment from a message in that thread. Events pass through
+an explicit allow-list projection: the workspace path (`ThreadUpserted`),
+approvals, filesystem events, subagent threads and MCP administration are absent;
+turn changes are stripped and attachment `local_path` values are cleared. Tool
+calls lose their raw arguments, and a file-editing tool loses its output too, so
+a Codex file change's structured diff or an `apply_patch` body never appears.
+
+Loading the page does not claim the link. The page offers a short-lived unclaimed
+cookie and the first state read or submission that presents it binds the browser
+atomically. A link-preview crawler that only fetches the URL therefore cannot
+take the link, and a cookie-less second fetch changes nothing. A submission must
+be a same-origin JSON POST, and its token and binding are checked from the
+headers before the body is read.
+
+A guest message is not a turn. It is a row in the journal and an event,
+`GuestRequested`, which raises a hand in the lifecycle and renders as a Request
+at the end of the thread; `SendGuestRequest` uploads its files, calls the normal
+`SendMessage` path with the thread's current permission mode, and
+`DismissGuestRequest` deletes the files. A submission reserves the pending
+budget (8 messages, 20 MB of text and files) before it writes any file, then
+inserts the request in one transaction whose guard requires the link to still
+exist and the Labs switch to still be on; a racing Stop sharing, new link,
+settle or switch-off therefore leaves no request and no files. The row becomes
+visible to the owner, and its `GuestRequested` event is raised, only after the
+files are written; both steps happen while the submission lock is held, so
+ending a link can never race a card into existence. Send and Dismiss claim a
+request with one conditional update, so two actions can never run the same
+message twice.
+
+Every removal of a request raises `GuestRequestResolved` before its row is
+deleted, and the resolved event names its request. A crash between the claim and
+the event therefore leaves a row the startup sweep can resolve, and a repeated
+event from that sweep cannot clear another guest's hand. The periodic sweep
+leaves a `sending` or `reserving` row alone while a task may still be reading
+it; only the startup pass, where no reader can exist, recovers it.
+
+Ending access and deleting files are separate steps. Ending a link deletes its
+row first and removes its page-load cookies, then settles waiting messages; a
+disk error never leaves a token live. A periodic sweep (also run at startup)
+removes expired links, ends any link whose thread has settled, discards their
+files, and retries cleanup for requests whose link or turn is already gone.
+Settling a thread (a person, the 24-hour idle rule, a merged branch), stopping
+sharing, creating a new link, the 24-hour expiry and turning the Labs switch off
+all end a link; a settled thread refuses a new link, a submission and a Send or
+Dismiss, and turning the switch back on does not revive one.
+
+A guest link has no pairing scope. It carries its own token and no device
+identity, so `PairScope` has no guest variant and pairing can never grant one.
+The narrow surface is enforced by the token's single thread, not by a scope.
+
+When the machine is linked to Connect, the link names
+`<connect>/guest/<machine>/<token>`. Connect serves the guest page itself, from a
+fixed document admitted by a hash-based CSP; it never relays daemon HTML onto its
+own origin. Each exchange travels to the daemon over its existing authenticated
+relay socket and is answered by that daemon only: a waiter is bound to the
+selected daemon's device id, and a reply from any other device is ignored.
+Bodies are split into bounded frames, so a 10 MB upload never grows a shared
+WebSocket frame; Connect refuses an exchange over the guest limit before it
+reaches the socket, and rebuilds every response header, including the binding
+cookie's path, which must name the public `/guest/<machine>/<token>` prefix.
+Every relayed answer carries `Content-Security-Policy: sandbox; default-src
+'none'`, and a PDF or opaque file is served as an attachment rather than opened
+in Connect's tab. Guest routes are traced by template, never by raw URI. The
+payload is plaintext at that hop, as the rest of the relay path is TLS to
+Connect plus Noise only for device sessions; a guest has no Noise key.
+
+Without Connect the daemon names its own loopback listener. A direct link is a
+bearer token and the daemon has no TLS listener, so it is not offered over a LAN
+address; the share dialog says the link works only on this machine and points to
+Connect for a teammate elsewhere. Only the owner or an admin-scoped device may
+copy the URL; a view device gets the link metadata with `url: null`.
+
+The guest page polls its snapshot every couple of seconds rather than opening a
+second long-lived socket. That keeps one transport (HTTP) working through both
+the direct address and the relay proxy, and the thread still follows live work
+within that interval.

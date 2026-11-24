@@ -26,6 +26,7 @@ import type { ApprovalItem } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
+import { GuestRequestCard } from "./GuestRequestCard";
 import { PhoneApprovalSheet, PhoneApprovalSummary } from "./PhoneApproval";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadStream, ThreadStreamSkeleton } from "./ThreadStream";
@@ -390,12 +391,14 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                     onReview={() => setApprovalSheetOpen(true)}
                   />
                 ) : null}
+                <GuestRequestCard threadId={threadId} />
                 <Composer summary={summary} />
                 <UsageFooter threadId={threadId} />
               </>
             ) : (
               <>
                 <AutoResumeCards threadId={threadId} />
+                <GuestRequestCard threadId={threadId} />
                 <ApprovalCard threadId={threadId} />
                 <Composer summary={summary} />
                 <UsageFooter threadId={threadId} />

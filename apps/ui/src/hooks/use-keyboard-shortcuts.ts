@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { openGuestShare } from "@/features/guest/guestStore";
 import { threadsForTab } from "@/lib/inbox";
 import { type CommandId, chordFromEvent, commandSpec, matchCommand } from "@/lib/keybindings";
 import {
@@ -162,6 +163,10 @@ export function runCommand(id: CommandId, state: State = getState()): boolean {
     case "thread.reopen":
       if (thread?.tab !== "settled") return false;
       void setThreadTab(thread.thread_id, "done");
+      return true;
+    case "guest.share":
+      if (!thread || thread.tab === "settled") return false;
+      openGuestShare(thread.thread_id);
       return true;
     case "composer.attach":
       // The focused composer owns its file picker and listens for this event.

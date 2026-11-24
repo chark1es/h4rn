@@ -125,6 +125,14 @@ impl ConnectClient {
         })
     }
 
+    /// The public Connect base URL, when signed in.
+    ///
+    /// Used for guest links: the relay forwards a guest's HTTP requests to this
+    /// machine, so the URL names Connect rather than a LAN address.
+    pub fn public_base_url(&self) -> Option<String> {
+        self.base_url().ok()
+    }
+
     /// Sets the connect URL used before the first login.
     pub fn set_connect_url(&self, url: &str) {
         *self

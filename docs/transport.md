@@ -423,6 +423,27 @@ not on the allowlist until the host confirms the SAS with `ConfirmPairing`.
 sends a transport `Close` control so the client learns immediately rather than
 waiting for a probe timeout.
 
+### Guest HTTP over the relay
+
+A guest has no Noise key, so a guest link cannot use the device session. Connect
+serves the fixed guest page from its own origin and only forwards JSON and
+allowed media: daemon HTML never runs there. Each exchange is a `GuestHttp`
+frame naming the method, path, public prefix and headers; a body larger than one
+frame arrives in `GuestHttpChunk` frames of at most 512 KB, and a large answer
+comes back the same way. Connect registers one waiter per request, bound to the
+selected daemon's device id, so an answer from any other device is ignored.
+
+The daemon answers in-process through the guest surface, after checking the
+token from the request headers and before buffering a chunked upload. The token
+in the path is the only credential; Connect cannot mint access because only the
+daemon knows the hash. Connect does not store the path or body, but it does see
+them while forwarding, just as it sees any plaintext that is not a Noise
+session. It rebuilds the response headers it passes on, including the binding
+cookie's path, and refuses an exchange over the guest limit before it reaches
+the shared socket. Tracing names `/guest/{token}/...` templates, never the raw
+URI.
+
+
 ### Pairing
 
 ```sh

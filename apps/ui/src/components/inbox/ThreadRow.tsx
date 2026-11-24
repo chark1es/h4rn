@@ -10,6 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { openGuestShare } from "@/features/guest/guestStore";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { agentStateLabel, glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
@@ -46,6 +47,13 @@ function tomorrowMorning(): string {
 }
 
 function statusFor(thread: ThreadSummary): { text: string; tone: string } {
+  const critical =
+    thread.agent_state === "awaiting_approval" ||
+    thread.agent_state === "error" ||
+    thread.agent_state === "unreachable";
+  if ((thread.pending_guest_requests ?? 0) > 0 && !critical) {
+    return { text: "Request", tone: "you" };
+  }
   switch (thread.agent_state) {
     case "awaiting_approval":
       return { text: "Needs approval", tone: "you" };
@@ -201,6 +209,11 @@ export function ThreadRow({
           ) : null}
           {isSettled ? <DropdownMenuItem onSelect={onReopen}>Reopen</DropdownMenuItem> : null}
           {!isSettled ? <DropdownMenuItem onSelect={onSettle}>Settle now</DropdownMenuItem> : null}
+          {!isSettled ? (
+            <DropdownMenuItem onSelect={() => openGuestShare(thread.thread_id)}>
+              Share with guest…
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem onSelect={onPin}>
             {thread.pinned ? "Unpin from Working" : "Keep in Working"}
             <span className="ml-auto text-small text-fg-3">P</span>

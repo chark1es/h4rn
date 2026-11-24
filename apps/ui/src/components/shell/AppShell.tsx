@@ -36,6 +36,7 @@ import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
 import { LinkPullRequestDialog } from "@/features/forge/LinkPullRequestDialog";
+import { GuestShareDialog } from "@/features/guest/GuestShareDialog";
 import { IdePane } from "@/features/ide/IdePane";
 import { McpApprovalCard } from "@/features/mcp/McpApprovalCard";
 import { ensureMcpEvents } from "@/features/mcp/store";
@@ -778,6 +779,7 @@ export function AppShell() {
 
         <NewThreadDialog />
         <AddProjectDialog />
+        <GuestShareDialog />
         <CommandPalette />
         <LinkPullRequestDialog
           open={linkPrOpen}
@@ -830,6 +832,7 @@ export function AppShell() {
 
       <NewThreadDialog />
       <AddProjectDialog />
+      <GuestShareDialog />
       <CommandPalette />
       <LinkPullRequestDialog
         open={linkPrOpen}
