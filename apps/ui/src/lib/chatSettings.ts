@@ -49,13 +49,6 @@ export function setFollowUpBehavior(next: FollowUpBehavior): void {
   notify();
 }
 
-/** Whether the send button should steer: only while a supported turn runs. */
-export function defaultFollowUpFor(running: boolean, canSteer: boolean): FollowUpBehavior {
-  if (!running) return "queue";
-  if (!canSteer) return "queue";
-  return followUp;
-}
-
 export function multilineEnter(): boolean {
   return multiline;
 }

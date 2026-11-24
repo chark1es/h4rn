@@ -69,29 +69,40 @@ function summary(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     unread: false,
     resume_at: null,
     limit: null,
-    queued: [message],
+    queued_count: 1,
+    queue_revision: 1,
     steer: true,
     ...overrides,
   };
 }
 
 function renderQueued(
-  options: { editing?: boolean; index?: number; total?: number; steer?: boolean } = {},
+  options: {
+    editing?: boolean;
+    index?: number;
+    total?: number;
+    steer?: boolean;
+    running?: boolean;
+  } = {},
 ) {
+  const total = options.total ?? 2;
+  const rows = Array.from({ length: total }, (_, index) => ({
+    ...message,
+    message_id: `qm_${index}`,
+    text: `message ${index}`,
+  }));
   const threadSummary = summary({
     steer: options.steer ?? true,
-    queued: Array.from({ length: options.total ?? 2 }, (_, index) => ({
-      ...message,
-      message_id: `qm_${index}`,
-      text: `message ${index}`,
-    })),
+    queued_count: total,
+    ...(options.running === false ? { agent_state: "rate_limited" } : {}),
   });
   return render(
     <QueuedTurn
       threadId="th_one"
       summary={threadSummary}
-      message={threadSummary.queued[options.index ?? 0] as QueuedMessage}
+      message={rows[options.index ?? 0] as QueuedMessage}
       index={options.index ?? 0}
+      total={total}
       editing={options.editing ?? false}
     />,
   );
@@ -151,5 +162,21 @@ describe("QueuedTurn", () => {
   it("marks the message open for editing", () => {
     const { container } = renderQueued({ editing: true });
     expect(container.querySelector(".q-queued")?.getAttribute("data-editing")).toBe("true");
+  });
+
+  it("only promises steering while a turn is really running", () => {
+    const running = renderQueued();
+    expect(screen.getByText("Send now steers it into this turn")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send now" }).getAttribute("title") ?? "").toContain(
+      "Steer",
+    );
+    running.unmount();
+
+    // A paused thread has no running turn, so Send now starts the message next.
+    renderQueued({ running: false });
+    expect(screen.getByText("Send now starts it next")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send now" }).getAttribute("title") ?? "").toContain(
+      "front of the queue",
+    );
   });
 });

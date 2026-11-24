@@ -18,6 +18,7 @@ import {
   applyEvent,
   createThread,
   getState,
+  loadThreadQueue,
   loadThreads,
   moveQueuedMessage,
   setThreadTab,
@@ -74,7 +75,8 @@ function threadSummary(input: { threadId: string; host: string }): ThreadSummary
     unread: false,
     resume_at: null,
     limit: null,
-    queued: [],
+    queued_count: 0,
+    queue_revision: 0,
     steer: true,
   };
 }
@@ -278,12 +280,35 @@ describe("queued messages", () => {
     queued_at: "2026-01-01T00:00:00.000Z",
   });
 
-  const seedQueue = () => {
-    const thread = threadSummary({ threadId: "queue_thread", host: "queue_host" });
-    thread.queued = [queued("qm_one", "first"), queued("qm_two", "second")];
-    thread.steer = true;
-    store.setState({ ...getState(), threads: { queue_thread: thread } });
+  /**
+   * Seeds a running thread with rows in the queue cache and a summary that
+   * counts them, the way the daemon publishes them.
+   */
+  const seedQueue = (overrides: Partial<ThreadSummary> = {}) => {
+    const thread = {
+      ...threadSummary({ threadId: "queue_thread", host: "queue_host" }),
+      agent_state: "thinking" as const,
+      queued_count: 2,
+      queue_revision: 4,
+      steer: true,
+      ...overrides,
+    };
+    store.setState({
+      ...getState(),
+      threads: { queue_thread: thread },
+      threadSeqs: { ...getState().threadSeqs, queue_thread: 40 },
+      queues: {
+        queue_thread: {
+          queued: [queued("qm_one", "first"), queued("qm_two", "second")],
+          total: 2,
+          revision: 4,
+        },
+      },
+    });
   };
+
+  const queueIds = (threadId: string) =>
+    getState().queues[threadId]?.queued.map((message) => message.message_id) ?? [];
 
   beforeEach(() => {
     fake.request.mockClear();
@@ -295,7 +320,9 @@ describe("queued messages", () => {
       type: "queue_updated",
       thread_id: "queue_thread",
       queued: [queued("qm_two", "second")],
-      seq: 9,
+      total: 1,
+      revision: 5,
+      seq: 41,
     };
 
     expect(steerOldestQueued("queue_thread")).toBe(true);
@@ -310,7 +337,34 @@ describe("queued messages", () => {
   });
 
   it("does not steer when nothing is queued", () => {
-    store.setState({ ...getState(), threads: {} });
+    seedQueue({ queued_count: 0 });
+    store.setState({ ...getState(), queues: {} });
+    expect(steerOldestQueued("queue_thread")).toBe(false);
+    expect(fake.request).not.toHaveBeenCalled();
+  });
+
+  it("does not steer when no turn is running", () => {
+    seedQueue({ agent_state: "rate_limited" });
+    expect(steerOldestQueued("queue_thread")).toBe(false);
+    expect(fake.request).not.toHaveBeenCalled();
+  });
+
+  it("steers a turn a limit paused but the daemon still reports as active", () => {
+    seedQueue({ agent_state: "rate_limited", active_turn_id: "turn_running" });
+    fake.response.current = {
+      type: "queue_updated",
+      thread_id: "queue_thread",
+      queued: [queued("qm_two", "second")],
+      total: 1,
+      revision: 5,
+      seq: 41,
+    };
+    expect(steerOldestQueued("queue_thread")).toBe(true);
+    expect(fake.request).toHaveBeenCalled();
+  });
+
+  it("does not steer a harness without mid-turn input", () => {
+    seedQueue({ steer: false });
     expect(steerOldestQueued("queue_thread")).toBe(false);
     expect(fake.request).not.toHaveBeenCalled();
   });
@@ -320,7 +374,9 @@ describe("queued messages", () => {
       type: "queue_updated",
       thread_id: "queue_thread",
       queued: [queued("qm_two", "second"), queued("qm_one", "first")],
-      seq: 10,
+      total: 2,
+      revision: 5,
+      seq: 41,
     };
 
     await moveQueuedMessage("queue_thread", "qm_two", "up");
@@ -331,18 +387,92 @@ describe("queued messages", () => {
     };
     expect(body.type).toBe("queue_message");
     expect(body.action).toEqual({ type: "move", direction: "up" });
-    expect(getState().threads.queue_thread?.queued.map((m) => m.message_id)).toEqual([
-      "qm_two",
-      "qm_one",
-    ]);
+    expect(queueIds("queue_thread")).toEqual(["qm_two", "qm_one"]);
   });
 
   it("asks the daemon to move a message and keeps its error off the queue", async () => {
     fake.request.mockRejectedValueOnce(new Error("no"));
     expect(await moveQueuedMessage("queue_thread", "qm_one", "down")).toBe(false);
-    expect(getState().threads.queue_thread?.queued.map((m) => m.message_id)).toEqual([
-      "qm_one",
-      "qm_two",
-    ]);
+    expect(queueIds("queue_thread")).toEqual(["qm_one", "qm_two"]);
+  });
+
+  it("ignores a queue reply older than the summary this client already has", async () => {
+    // A newer summary moved the queue on; the reply describes the old one.
+    const current = getState().threads.queue_thread;
+    if (!current) throw new Error("the queue test thread is missing");
+    store.setState({
+      ...getState(),
+      threads: {
+        queue_thread: { ...current, queue_revision: 6 },
+      },
+      queues: {
+        queue_thread: { queued: [queued("qm_two", "second")], total: 1, revision: 6 },
+      },
+      threadSeqs: { queue_thread: 42 },
+    });
+    fake.response.current = {
+      type: "queue_updated",
+      thread_id: "queue_thread",
+      queued: [queued("qm_one", "first"), queued("qm_two", "second")],
+      total: 2,
+      revision: 5,
+      seq: 41,
+    };
+
+    await moveQueuedMessage("queue_thread", "qm_one", "down");
+
+    expect(queueIds("queue_thread")).toEqual(["qm_two"]);
+  });
+
+  it("keeps newer rows when a no-op reply arrives", async () => {
+    fake.response.current = {
+      type: "queue_updated",
+      thread_id: "queue_thread",
+      queued: [],
+      total: 0,
+      revision: 0,
+      seq: 0,
+    };
+
+    await moveQueuedMessage("queue_thread", "qm_one", "up");
+
+    expect(queueIds("queue_thread")).toEqual(["qm_one", "qm_two"]);
+    expect(getState().queues.queue_thread?.total).toBe(2);
+  });
+
+  it("fetches the queue in pages, separately from the summary", async () => {
+    const current = getState().threads.queue_thread;
+    if (!current) throw new Error("the queue test thread is missing");
+    store.setState({
+      ...getState(),
+      queues: {},
+      threads: {
+        queue_thread: { ...current, queued_count: 2, queue_revision: 7 },
+      },
+    });
+    fake.request
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: [queued("qm_one", "first")],
+        total: 2,
+        next_offset: 1,
+        revision: 7,
+      }))
+      .mockImplementationOnce(async () => ({
+        type: "thread_queue",
+        thread_id: "queue_thread",
+        queued: [queued("qm_two", "second")],
+        total: 2,
+        next_offset: 2,
+        revision: 7,
+      }));
+
+    await loadThreadQueue("queue_thread");
+
+    const requests = fake.request.mock.calls.map((call) => (call[0] as { offset: number }).offset);
+    expect(requests).toEqual([0, 1]);
+    expect(queueIds("queue_thread")).toEqual(["qm_one", "qm_two"]);
+    expect(getState().queues.queue_thread?.total).toBe(2);
   });
 });

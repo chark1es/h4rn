@@ -86,11 +86,13 @@ export function glyphForAgentState(state: AgentState, toolName?: string): AgentG
 /**
  * Whether the thread has a turn in flight right now.
  *
- * `queued` alone is not enough: a thread with messages waiting behind a running
- * turn stays in one of the active states below, and an approval hand holds the
- * same turn open.
+ * The daemon's `active_turn_id` is the authority: a turn that a usage limit
+ * paused is still running (its agent may be mid-tool), and the agent state on
+ * its own would call that `rate_limited` and claim nothing is in flight. The
+ * state list stays as the fallback for a daemon too old to report the id.
  */
 export function isTurnRunning(summary: ThreadSummary): boolean {
+  if (summary.active_turn_id) return true;
   return (
     summary.agent_state === "thinking" ||
     summary.agent_state === "searching" ||

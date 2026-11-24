@@ -216,7 +216,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     loaded &&
     turns.length === 0 &&
     pending.length === 0 &&
-    (summary.queued?.length ?? 0) === 0 &&
+    summary.queued_count === 0 &&
     summary.agent_state !== "done";
   const pendingApprovals = turns
     .flatMap((turn) => turn.items)
@@ -356,7 +356,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           host={host?.name ?? summary.host}
           harness={harnessLabel(summary.harness)}
         />
-      ) : turns.length === 0 && (summary.queued?.length ?? 0) === 0 ? (
+      ) : turns.length === 0 && summary.queued_count === 0 ? (
         <div className="q-center-empty">
           <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />

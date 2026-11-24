@@ -37,6 +37,7 @@ const mock = vi.hoisted(() => {
   };
   const state = {
     threads: { thread_ui: summary },
+    queues: {},
     hosts: { host_ui: { online: true, name: "atlas" } },
     logs: {
       thread_ui: { turns: [], pending: [], loaded: true, loading: false, approvals: {} },

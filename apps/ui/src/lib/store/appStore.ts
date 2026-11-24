@@ -18,6 +18,7 @@ import type {
   ThreadTab,
   WorktreeRequest,
 } from "@/gen";
+import { isTurnRunning } from "@/lib/agent";
 import type { H4rnClient } from "@/lib/client/client";
 import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
@@ -160,6 +161,20 @@ export type PendingCreate = {
   at: number;
 };
 
+/**
+ * The queue rows this client has for one thread.
+ *
+ * The thread summary only counts the queue, because a full queue can be larger
+ * than a paired transport's frame. The rows are fetched separately and paged;
+ * `revision` says which version of the queue they are, so a late reply cannot
+ * put back a message that already started.
+ */
+export type ThreadQueue = {
+  queued: QueuedMessage[];
+  total: number;
+  revision: number;
+};
+
 export type AppState = {
   connection: ConnectionSnapshot;
   hosts: Record<HostId, HostSummary>;
@@ -171,6 +186,8 @@ export type AppState = {
    * overwrite a summary projected from a newer event.
    */
   threadSeqs: Record<ThreadId, number>;
+  /** Queue rows per thread, fetched separately from the summary. */
+  queues: Record<ThreadId, ThreadQueue>;
   logs: Record<ThreadId, ThreadLog>;
   threadErrors: Record<ThreadId, ProtoError>;
   loadingThreads: boolean;
@@ -224,6 +241,7 @@ function createInitialState(): AppState {
     hosts: {},
     threads: {},
     threadSeqs: {},
+    queues: {},
     logs: {},
     threadErrors: {},
     loadingThreads: true,
@@ -798,6 +816,11 @@ export function flushEvents(): void {
   }
   setState(next);
   if (routePath(before.ui.route) !== routePath(next.ui.route)) replaceRoute(next.ui.route);
+  // The summary only counts the queue; it never carries the rows, because a
+  // full queue can be larger than a paired transport's frame.
+  for (const envelope of batch) {
+    if (envelope.event.type === "thread_upserted") syncQueueWithSummary(envelope.event);
+  }
 }
 
 function enqueueEvent(envelope: EventEnvelope): void {
@@ -831,6 +854,9 @@ export function startConnection(): void {
       daemonMachineId: info.daemonMachineId,
       connection: { ...state.connection, error: null },
     });
+    // Queue rows are keyed by the daemon's revision counter, which starts over
+    // with a new daemon: a reconnect refetches them from scratch.
+    setState({ ...getState(), queues: {} });
     void loadThreads().then(() => {
       const current = getState();
       if (info.reconnected) {
@@ -1438,6 +1464,9 @@ export async function sendMessage(
     },
   });
 
+  // A steer names the turn the client saw, so a turn that ended in the
+  // meantime is refused instead of catching a newer one.
+  const observedTurn = options.steer ? getState().threads[threadId]?.active_turn_id : undefined;
   try {
     const response = await getClient().request({
       type: "send_message",
@@ -1445,6 +1474,7 @@ export async function sendMessage(
       text: body,
       attachments: attachments.map((attachment) => attachment.id),
       steer: options.steer ?? false,
+      ...(observedTurn ? { turn_id: observedTurn } : {}),
     });
     // A queued message has no transcript item yet: the durable queue row from
     // `thread_upserted` replaces the optimistic one, so drop the local row.
@@ -1497,7 +1527,10 @@ export async function sendMessage(
  * Applies one queue change and reflects the daemon's answer immediately.
  *
  * The daemon also broadcasts a new summary; using the response keeps the row
- * from flickering while that event travels.
+ * from flickering while that event travels. A reply can, however, arrive after
+ * a newer summary (or after another client's change): it names the revision it
+ * came from, and anything older than what this client already holds is ignored
+ * rather than putting back a message whose turn has started.
  */
 async function runQueueAction(
   threadId: ThreadId,
@@ -1513,17 +1546,14 @@ async function runQueueAction(
       action,
     });
     if (response.type === "queue_updated") {
+      // A no-op (a move at the end of the queue) changed nothing and carries no
+      // event; replacing newer rows with it would only lose state.
+      if (response.seq === 0) return true;
       const state = getState();
-      const summary = state.threads[threadId];
-      if (summary) {
-        setState({
-          ...state,
-          threads: {
-            ...state.threads,
-            [threadId]: { ...summary, queued: response.queued },
-          },
-        });
-      }
+      const latest = state.threadSeqs[threadId] ?? 0;
+      const held = state.queues[threadId]?.revision ?? 0;
+      if (response.seq < latest || response.revision < held) return true;
+      applyQueue(threadId, response.queued, response.total, response.revision);
     }
     return true;
   } catch (error) {
@@ -1535,6 +1565,77 @@ async function runQueueAction(
     });
     return false;
   }
+}
+
+/** Replaces the cached queue rows for one thread. */
+function applyQueue(
+  threadId: ThreadId,
+  queued: QueuedMessage[],
+  total: number,
+  revision: number,
+): void {
+  const state = getState();
+  const held = state.queues[threadId];
+  if (held && revision < held.revision) return;
+  setState({
+    ...state,
+    queues: { ...state.queues, [threadId]: { queued, total, revision } },
+  });
+}
+
+/**
+ * Fetches a thread's queue, following pages until `total` is covered.
+ *
+ * A queue larger than one frame comes back in bounded pages; each is applied in
+ * order, and the loop is bounded by the total the daemon reported.
+ */
+export async function loadThreadQueue(threadId: ThreadId): Promise<void> {
+  let offset = 0;
+  const rows: QueuedMessage[] = [];
+  for (;;) {
+    let page: { queued: QueuedMessage[]; total: number; next_offset: number; revision: number };
+    try {
+      const response = await getClient().request({
+        type: "get_thread_queue",
+        thread_id: threadId,
+        offset,
+      });
+      if (response.type !== "thread_queue") return;
+      page = response;
+    } catch {
+      // The next summary with a newer revision retries this; a toast for a
+      // queue nobody is looking at would be noise.
+      return;
+    }
+    rows.push(...page.queued);
+    if (page.next_offset <= offset || page.next_offset >= page.total) {
+      applyQueue(threadId, rows, page.total, page.revision);
+      return;
+    }
+    offset = page.next_offset;
+  }
+}
+
+/**
+ * Keeps the cached rows in step with a summary.
+ *
+ * The summary only counts the queue. A count that does not match what this
+ * client holds, or a revision it has not applied, means the rows are stale.
+ */
+function syncQueueWithSummary(summary: ThreadSummary): void {
+  const state = getState();
+  const held = state.queues[summary.thread_id];
+  if (summary.queued_count === 0) {
+    if (!held) return;
+    const queues = { ...state.queues };
+    delete queues[summary.thread_id];
+    setState({ ...state, queues });
+    return;
+  }
+  if (held && held.revision === summary.queue_revision && held.total === summary.queued_count) {
+    return;
+  }
+  void loadThreadQueue(summary.thread_id);
 }
 
 export function editQueuedMessage(
@@ -1576,19 +1677,18 @@ export function steerQueuedMessage(threadId: ThreadId, messageId: string): Promi
 /**
  * Steers the oldest queued message into the running turn.
  *
- * The shortcut leaves the composer's draft alone; an empty queue or a harness
- * without mid-turn input is a quiet no-op here, with no row to act on.
+ * The shortcut leaves the composer's draft alone. It needs both a running turn
+ * and a harness that really takes mid-turn input: without either, "steer" would
+ * refuse or mean something else, so the key does nothing instead of guessing.
  */
 export function steerOldestQueued(threadId: ThreadId): boolean {
-  const queued = getState().threads[threadId]?.queued ?? [];
-  const oldest = queued[0];
+  const state = getState();
+  const summary = state.threads[threadId];
+  if (!summary?.steer || !isTurnRunning(summary)) return false;
+  const oldest = state.queues[threadId]?.queued[0];
   if (!oldest) return false;
   void steerQueuedMessage(threadId, oldest.message_id);
   return true;
-}
-
-export function queuedFor(threadId: ThreadId): QueuedMessage[] {
-  return getState().threads[threadId]?.queued ?? [];
 }
 
 export type CreateThreadInput = {
@@ -1691,7 +1791,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     ttft_ms: null,
     context_window: null,
     context_fill_percent: null,
-    queued: [],
+    queued_count: 0,
+    queue_revision: 0,
     steer: false,
   };
 

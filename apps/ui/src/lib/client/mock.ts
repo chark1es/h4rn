@@ -47,6 +47,7 @@ import type {
   ProxyProfile,
   ProxyProfilePatch,
   ProxyTestReport,
+  QueuedMessage,
   Resets,
   ResponseBody,
   ResumeSchedule,
@@ -84,6 +85,10 @@ type MockThread = {
   summary: ThreadSummary;
   events: Event[];
   wire: SeqEvent[];
+  /** Messages waiting for the mock turn to finish. */
+  queued?: QueuedMessage[];
+  /** The queue revision the mock last published. */
+  queueRevision?: number;
 };
 
 type MockApproval = {
@@ -205,6 +210,18 @@ function usage(input: number, output: number, durationMs: number, costMicros: nu
 }
 
 const TOTAL_USAGE: Usage = usage(3_000, 15_400, 252_000, 420_000);
+
+/** Whether an agent state means a turn is in flight. */
+function workingAgentState(state: ThreadSummary["agent_state"]): boolean {
+  return (
+    state === "thinking" ||
+    state === "searching" ||
+    state === "reading" ||
+    state === "editing" ||
+    state === "running_tool" ||
+    state === "awaiting_approval"
+  );
+}
 
 /** The files the mock turn touched, matching the mock workspace snapshots. */
 function turnChanges(threadId: string, turnId: string): FsTurnChanges {
@@ -531,8 +548,10 @@ function summary(input: {
             reset_at: iso(input.limitResetAtMs),
             message: "Weekly limit reached. Auto-resume is armed.",
           },
-    queued: [],
-    steer: input.harness === "claude_code" || input.harness === "codex",
+    queued_count: 0,
+    queue_revision: 0,
+    ...(input.state === "thinking" ? { active_turn_id: `turn_${input.id}` } : {}),
+    steer: input.harness === "codex",
   };
 }
 
@@ -2329,8 +2348,10 @@ class MockDaemon {
           ttft_ms: 0,
           context_window: 200_000,
           context_fill_percent: 0,
-          queued: [],
-          steer: body.harness === "claude_code" || body.harness === "codex",
+          queued_count: 0,
+          queue_revision: 0,
+          active_turn_id: turnId,
+          steer: body.harness === "codex",
         };
         this.threads.set(id, { summary: thread, events: [], wire: [] });
         this.ok(frame.id, {
@@ -2357,6 +2378,25 @@ class MockDaemon {
           return;
         }
         const turnId = uid("turn");
+        if (workingAgentState(entry.summary.agent_state)) {
+          // A turn is running: the message waits in the durable queue.
+          const message: QueuedMessage = {
+            message_id: uid("qm"),
+            text: body.text,
+            attachments: this.attachmentsFor(body.attachments),
+            queued_at: iso(),
+          };
+          this.setMockQueue(body.thread_id, [...(entry.queued ?? []), message]);
+          this.ok(frame.id, {
+            type: "message_accepted",
+            thread_id: body.thread_id,
+            turn_id: turnId,
+            seq: this.seq + 1,
+            queued_message_id: message.message_id,
+          });
+          this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+          return;
+        }
         this.ok(frame.id, {
           type: "message_accepted",
           thread_id: body.thread_id,
@@ -2376,6 +2416,93 @@ class MockDaemon {
         this.later(380, () =>
           this.runTurn(body.thread_id, body.text, turnId, this.attachmentsFor(body.attachments)),
         );
+        return;
+      }
+      case "queue_message": {
+        const entry = this.threads.get(body.thread_id);
+        if (!entry) {
+          this.err(frame.id, "not_found", "That thread is no longer open.", "Reload the queue.");
+          return;
+        }
+        const queued = [...(entry.queued ?? [])];
+        const index = queued.findIndex((message) => message.message_id === body.message_id);
+        if (index < 0) {
+          this.err(
+            frame.id,
+            "conflict",
+            "That message already started.",
+            "The queue changed; nothing was sent twice.",
+          );
+          return;
+        }
+        switch (body.action.type) {
+          case "edit":
+            queued[index] = {
+              ...(queued[index] as QueuedMessage),
+              text: body.action.text,
+              attachments: this.attachmentsFor(body.action.attachments),
+            };
+            break;
+          case "remove":
+            queued.splice(index, 1);
+            break;
+          case "move": {
+            const target = body.action.direction === "up" ? index - 1 : index + 1;
+            if (target >= 0 && target < queued.length) {
+              const [moved] = queued.splice(index, 1);
+              if (moved) queued.splice(target, 0, moved);
+            }
+            break;
+          }
+          case "send_now":
+          case "steer": {
+            const [moved] = queued.splice(index, 1);
+            this.setMockQueue(body.thread_id, queued);
+            const turn = uid("turn");
+            this.ok(frame.id, {
+              type: "queue_updated",
+              thread_id: body.thread_id,
+              queued: queued.slice(0, 100),
+              total: queued.length,
+              revision: entry.queueRevision ?? 0,
+              seq: this.seq + 1,
+            });
+            if (moved) {
+              this.later(120, () =>
+                this.runTurn(body.thread_id, moved.text, turn, moved.attachments),
+              );
+            }
+            this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+            return;
+          }
+        }
+        this.setMockQueue(body.thread_id, queued);
+        this.ok(frame.id, {
+          type: "queue_updated",
+          thread_id: body.thread_id,
+          queued: queued.slice(0, 100),
+          total: queued.length,
+          revision: entry.queueRevision ?? 0,
+          seq: this.seq + 1,
+        });
+        this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+        return;
+      }
+      case "get_thread_queue": {
+        const entry = this.threads.get(body.thread_id);
+        if (!entry) {
+          this.err(frame.id, "not_found", "That thread is no longer open.", "Reload the queue.");
+          return;
+        }
+        const queued = entry.queued ?? [];
+        this.ok(frame.id, {
+          type: "thread_queue",
+          thread_id: body.thread_id,
+          queued: queued.slice(body.offset, body.offset + 100),
+          total: queued.length,
+          next_offset: Math.min(queued.length, body.offset + 100),
+          revision: entry.queueRevision ?? 0,
+        });
         return;
       }
       case "respond_approval": {
@@ -4027,6 +4154,7 @@ class MockDaemon {
     const itemId = uid("msg");
     entry.summary = {
       ...entry.summary,
+      active_turn_id: turnId,
       tab: "working",
       agent_state: "thinking",
       needs_attention: false,
@@ -4108,8 +4236,10 @@ class MockDaemon {
           });
           const thread = this.threads.get(threadId);
           if (thread) {
+            const finished = { ...thread.summary };
+            delete finished.active_turn_id;
             thread.summary = {
-              ...thread.summary,
+              ...finished,
               tab: "done",
               agent_state: "done",
               unread: true,
@@ -4117,6 +4247,7 @@ class MockDaemon {
               usage: usage(8_400, 1_900, 24_000, 14_000),
             };
             this.emit(threadId, { type: "thread_upserted", ...thread.summary });
+            this.promoteMockQueue(threadId);
           }
         });
         return;
@@ -4514,6 +4645,34 @@ class MockDaemon {
         to_version: to,
       });
     });
+  }
+
+  /**
+   * Replaces one thread's queue and republishes the summary that counts it.
+   *
+   * The rows never ride in the summary: the mock behaves like the daemon, where
+   * a full queue can be larger than one transport frame.
+   */
+  private setMockQueue(threadId: string, queued: QueuedMessage[]): void {
+    const entry = this.threads.get(threadId);
+    if (!entry) return;
+    entry.queued = queued;
+    entry.queueRevision = (entry.queueRevision ?? 0) + 1;
+    entry.summary = {
+      ...entry.summary,
+      queued_count: queued.length,
+      queue_revision: entry.queueRevision,
+    };
+  }
+
+  /** Starts the next queued message once a mock turn finishes. */
+  private promoteMockQueue(threadId: string): void {
+    const entry = this.threads.get(threadId);
+    const next = entry?.queued?.[0];
+    if (!entry || !next) return;
+    const rest = (entry.queued ?? []).slice(1);
+    this.setMockQueue(threadId, rest);
+    this.later(160, () => this.runTurn(threadId, next.text, uid("turn"), next.attachments));
   }
 
   private mockTurnRunning(harness: HarnessKind): boolean {

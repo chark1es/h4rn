@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { isTurnRunning } from "@/lib/agent";
 import { absoluteTime, cost, duration, tokens } from "@/lib/format";
 import {
   moveQueuedMessage,
@@ -28,27 +29,47 @@ type Row =
   | { kind: "pending"; message: PendingMessage; key: string }
   | { kind: "queued"; message: QueuedMessage; key: string; index: number };
 
+/**
+ * The copy for what Send now will really do right now.
+ *
+ * Steering is only a promise while a turn is running on a harness that takes
+ * mid-turn input; otherwise Send now moves the message to the front of the
+ * queue, and the row says exactly that.
+ */
+export function sendNowHint(summary: ThreadSummary): string {
+  if (isTurnRunning(summary)) {
+    return summary.steer ? "Send now steers it into this turn" : "Waits for this turn to finish";
+  }
+  return "Send now starts it next";
+}
+
 export function QueuedTurn({
   threadId,
   summary,
   message,
   index,
+  total,
   editing,
 }: {
   threadId: string;
   summary: ThreadSummary;
   message: QueuedMessage;
   index: number;
+  /**
+   * How many messages wait in total.
+   *
+   * The rows are a bounded page, so the last visible row is not necessarily the
+   * queue's last; the caller knows the full count.
+   */
+  total: number;
   editing: boolean;
 }) {
-  const total = summary.queued?.length ?? 0;
+  const steers = isTurnRunning(summary) && summary.steer;
   return (
     <div className="q-queued" data-editing={editing || undefined}>
       <div className="q-queued-h">
         <span className="q-queued-label">Queued</span>
-        <span className="q-faint">
-          {summary.steer ? "Send now steers it into this turn" : "Waits for this turn to finish"}
-        </span>
+        <span className="q-faint">{sendNowHint(summary)}</span>
       </div>
       <div className="q-queued-text">{message.text}</div>
       {message.attachments.length > 0 ? (
@@ -60,7 +81,7 @@ export function QueuedTurn({
           className="q-btn ghost"
           onClick={() => void sendQueuedNow(threadId, message.message_id)}
           title={
-            summary.steer
+            steers
               ? "Steer this message into the running turn"
               : "Move this message to the front of the queue"
           }
@@ -152,6 +173,11 @@ export function ThreadStream({
 
   const editingId = useApp((state) => state.ui.queuedEdit?.messageId ?? null);
   const queuedEditThread = useApp((state) => state.ui.queuedEdit?.threadId ?? null);
+  // The queue's rows are fetched separately from the summary, which only counts
+  // them: a full queue can be larger than one transport frame.
+  const queue = useApp((state) => state.queues[threadId]);
+  const queued = queue?.queued;
+  const queuedTotal = queue?.total ?? 0;
 
   const rows = useMemo<Row[]>(() => {
     const next: Row[] = turns.map((turn) => ({
@@ -162,7 +188,7 @@ export function ThreadStream({
     for (const message of pending) {
       next.push({ kind: "pending", message, key: message.id });
     }
-    (summary.queued ?? []).forEach((message, index) => {
+    (queued ?? []).forEach((message, index) => {
       next.push({
         kind: "queued",
         message,
@@ -171,7 +197,7 @@ export function ThreadStream({
       });
     });
     return next;
-  }, [turns, pending, summary.queued]);
+  }, [turns, pending, queued]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -266,6 +292,7 @@ export function ThreadStream({
                   summary={summary}
                   message={row.message}
                   index={row.index}
+                  total={Math.max(queuedTotal, rows.length)}
                   editing={queuedEditThread === threadId && editingId === row.message.message_id}
                 />
               )}

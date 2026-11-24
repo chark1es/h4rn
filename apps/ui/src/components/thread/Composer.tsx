@@ -130,13 +130,18 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   const [anchor, setAnchor] = useState({ left: 0, bottom: 0, lineHeight: 21 });
   /**
-   * The queued message open for editing, with the draft it interrupted.
+   * The queued message open for editing, with everything it displaced.
    *
-   * While editing, typing goes to the queue message instead of the draft: the
-   * stored draft stays exactly as it was, so Cancel can restore it.
+   * Three texts stay separate: the box while editing (the edit buffer), the
+   * saved text of the message being edited, and the thread's own draft. The
+   * draft stays in storage untouched, so Cancel restores it; a second Edit
+   * keeps the same stored draft instead of replacing it with the first
+   * message's text.
    */
   const [editing, setEditing] = useState<{
     messageId: string;
+    /** The message's text when the edit began, to tell changed text apart. */
+    originalText: string;
     draftText: string;
     draftRevision: DraftRevision | null;
   } | null>(null);
@@ -146,7 +151,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const canSteer = summary.steer;
   const defaultAction = running && canSteer ? followUp : "queue";
   const beginEditRef = useRef<(message: QueuedMessage) => void>(() => {});
-  const queued = summary.queued ?? [];
+  // Rows come from the queue cache, which the daemon serves separately from
+  // the summary; a bounded page is all this composer needs to act on.
+  const queued = useApp((state) => state.queues[summary.thread_id]?.queued);
   const ref = useRef<HTMLTextAreaElement | null>(null);
   /** True from compositionstart to compositionend; IME never drives the menu. */
   const composing = useRef(false);
@@ -256,18 +263,20 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   }, [focusNonce]);
 
   // Another tab may edit this thread's draft. Adopt its text only while this
-  // composer has no unsaved edit of its own.
+  // composer has no unsaved edit of its own: an active queue edit owns the box,
+  // and adopting a draft would silently replace the text being edited.
   useEffect(() => {
     return subscribeDraftChanges((change) => {
       if (change.scope !== "thread") return;
       if (change.host !== summary.host || change.target !== summary.thread_id) return;
+      if (editing) return;
       historyIndex.current = -1;
       historyDraft.current = "";
       revision.current = change.revision;
       setText(change.text);
       setMenu(null);
     });
-  }, [summary.host, summary.thread_id]);
+  }, [summary.host, summary.thread_id, editing]);
 
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, !newThreadOpen);
@@ -385,11 +394,18 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
 
   const beginEdit = (message: QueuedMessage) => {
     if (sending) return;
-    setEditing({
-      messageId: message.message_id,
-      draftText: text,
-      draftRevision: revision.current,
-    });
+    // A second Edit while one is open keeps the draft the first one displaced:
+    // the box holds that message, not the person's draft.
+    setEditing((current) =>
+      current
+        ? { ...current, messageId: message.message_id, originalText: message.text }
+        : {
+            messageId: message.message_id,
+            originalText: message.text,
+            draftText: text,
+            draftRevision: revision.current,
+          },
+    );
     setText(message.text);
     setUi({
       queuedEdit: { threadId: summary.thread_id, messageId: message.message_id },
@@ -416,10 +432,16 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         revision.current = current.draftRevision;
         return;
       }
-      // The queued message vanished while it was being edited. The edited text
-      // moves into the composer only when that composer had no draft of its own
-      // to restore; otherwise the draft wins and the edit is dropped.
+      // The queued message vanished while it was being edited (its turn
+      // started, or another client removed it). Changed text moves into the
+      // composer only when there was no draft to restore and something was
+      // actually changed; otherwise the draft wins and the edit is dropped.
       if (current.draftText.trim().length > 0) {
+        setText(current.draftText);
+        revision.current = current.draftRevision;
+        return;
+      }
+      if (text === current.originalText) {
         setText(current.draftText);
         revision.current = current.draftRevision;
         return;
@@ -431,7 +453,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
 
   const saveEdit = async () => {
     if (!editing) return;
-    const message = queued.find((item) => item.message_id === editing.messageId);
+    const message = queued?.find((item) => item.message_id === editing.messageId);
     if (!message) {
       endEdit(false);
       return;
@@ -468,7 +490,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   // edit ends; changed text stays only when there was no draft to restore.
   useEffect(() => {
     if (!editing) return;
-    if (queued.some((item) => item.message_id === editing.messageId)) return;
+    if (queued?.some((item) => item.message_id === editing.messageId)) return;
     endEdit(false);
   }, [queued, editing, endEdit]);
 
@@ -694,7 +716,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         }
         // Alt/Option+Up with the caret at the very start edits the newest
         // queued message; the chord is rebindable in Settings → Shortcuts.
-        if (!editing && queued.length > 0) {
+        if (!editing && (queued?.length ?? 0) > 0) {
           const chord = chordFromEvent(event);
           if (
             chord &&
@@ -703,7 +725,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             (element.selectionEnd ?? 0) === 0
           ) {
             event.preventDefault();
-            const newest = queued[queued.length - 1];
+            const newest = queued?.[(queued?.length ?? 0) - 1];
             if (newest) beginEdit(newest);
             return;
           }

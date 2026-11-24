@@ -19,6 +19,7 @@ const mock = vi.hoisted(() => {
     connection: { status: string };
     hosts: Record<string, { online: boolean; name: string }>;
     logs: Record<string, unknown>;
+    queues: Record<string, { queued: unknown[]; total: number; revision: number }>;
     ui: {
       focusComposerNonce: number;
       newThreadOpen: boolean;
@@ -29,6 +30,7 @@ const mock = vi.hoisted(() => {
     connection: { status: "online" },
     hosts: { host_ui: { online: true, name: "atlas" } },
     logs: {},
+    queues: {},
     ui: {
       focusComposerNonce: 0,
       newThreadOpen: false,
@@ -151,7 +153,8 @@ const summary: ThreadSummary = {
   unread: false,
   resume_at: null,
   limit: null,
-  queued: [],
+  queued_count: 0,
+  queue_revision: 0,
   steer: true,
 };
 
@@ -1395,14 +1398,37 @@ describe("follow-up behaviour and queued messages", () => {
   const running: Partial<ThreadSummary> = {
     agent_state: "thinking",
     steer: true,
-    queued: [],
+    queued_count: 0,
+    queue_revision: 0,
   };
 
-  const showQueued = (overrides: Partial<ThreadSummary> = {}) => (
-    <WorkspaceFilesContext.Provider value={fileLister}>
-      <Composer summary={{ ...summary, ...running, ...overrides }} />
-    </WorkspaceFilesContext.Provider>
-  );
+  /**
+   * Renders a running thread with the queue rows the store cache holds.
+   *
+   * The summary only counts the queue, so the rows are seeded where the
+   * component reads them: `state.queues`, keyed by thread.
+   */
+  const showQueued = (
+    overrides: Partial<ThreadSummary> = {},
+    queue: Array<ReturnType<typeof queuedMessage>> = [],
+  ) => {
+    mock.state.queues = {
+      ...mock.state.queues,
+      [THREAD]: { queued: queue, total: queue.length, revision: 1 },
+    };
+    return (
+      <WorkspaceFilesContext.Provider value={fileLister}>
+        <Composer
+          summary={{
+            ...summary,
+            ...running,
+            ...overrides,
+            queued_count: queue.length,
+          }}
+        />
+      </WorkspaceFilesContext.Provider>
+    );
+  };
 
   beforeEach(() => {
     mock.sendMessage.mockResolvedValue(true);
@@ -1493,7 +1519,7 @@ describe("follow-up behaviour and queued messages", () => {
   });
 
   it("edits the newest queued message with Option+Up and Cancel restores the draft", () => {
-    render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
     const input = textarea();
     fireEvent.change(input, { target: { value: "my draft" } });
     input.setSelectionRange(0, 0);
@@ -1511,7 +1537,7 @@ describe("follow-up behaviour and queued messages", () => {
   });
 
   it("saves an edit in place", async () => {
-    render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
     const input = textarea();
     input.setSelectionRange(0, 0);
     fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
@@ -1527,28 +1553,109 @@ describe("follow-up behaviour and queued messages", () => {
   it("ends an edit when the message starts and keeps the text when no draft existed", () => {
     writeThreadDraft(HOST, THREAD, "");
     flushDrafts();
-    const view = render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    const view = render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
     const input = textarea();
     input.setSelectionRange(0, 0);
     fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
     fireEvent.change(input, { target: { value: "changed while it started" } });
 
-    view.rerender(showQueued({ queued: [] }));
+    view.rerender(showQueued({}, []));
 
     expect(input.value).toBe("changed while it started");
     expect(readThreadDraft(HOST, THREAD)).toBe("changed while it started");
   });
 
   it("restores the draft when the message is removed mid-edit", () => {
-    const view = render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    const view = render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
     const input = textarea();
     fireEvent.change(input, { target: { value: "a draft" } });
     input.setSelectionRange(0, 0);
     fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
     fireEvent.change(input, { target: { value: "changed" } });
 
-    view.rerender(showQueued({ queued: [] }));
+    view.rerender(showQueued({}, []));
 
     expect(input.value).toBe("a draft");
+  });
+
+  it("keeps the original draft when a second message is opened for editing", () => {
+    render(
+      showQueued({}, [
+        queuedMessage("qm_one", "first queued"),
+        queuedMessage("qm_two", "second queued"),
+      ]),
+    );
+    const input = textarea();
+    fireEvent.change(input, { target: { value: "my draft" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+    expect(input.value).toBe("second queued");
+
+    // The person picks another queued message from the thread. The box holds
+    // that message; the draft stays the one the first edit displaced.
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("h4rn:edit-queued", {
+          detail: {
+            threadId: THREAD,
+            message: {
+              message_id: "qm_one",
+              text: "first queued",
+              attachments: [],
+              queued_at: "2026-01-01T00:00:00.000Z",
+            },
+          },
+        }),
+      );
+    });
+    expect(input.value).toBe("first queued");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(input.value).toBe("my draft");
+    expect(readThreadDraft(HOST, THREAD)).toBe("my draft");
+  });
+
+  it("keeps an active edit when another tab writes the thread's draft", () => {
+    render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
+    const input = textarea();
+    fireEvent.change(input, { target: { value: "my draft" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+    fireEvent.change(input, { target: { value: "editing now" } });
+
+    // Another tab saved this thread's draft; a storage event is how this tab
+    // hears about it, after this tab's own earlier write reached the disk.
+    act(() => {
+      flushDrafts();
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: draftStorageKey("thread", HOST, THREAD),
+          newValue: JSON.stringify({
+            text: "another tab's draft",
+            updatedAt: Date.now() + 1_000,
+            nonce: "another-tab",
+          }),
+        }),
+      );
+    });
+
+    expect(input.value).toBe("editing now");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(input.value).toBe("my draft");
+  });
+
+  it("does not refill the composer when an unchanged edit ends", () => {
+    writeThreadDraft(HOST, THREAD, "");
+    flushDrafts();
+    const view = render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
+    const input = textarea();
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+
+    // The message starts while it is open here, and nothing was changed.
+    view.rerender(showQueued({}, []));
+
+    expect(input.value).toBe("");
+    expect(readThreadDraft(HOST, THREAD)).toBe("");
   });
 });

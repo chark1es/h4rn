@@ -1416,9 +1416,18 @@ fieldset.q-seg-fs {
 }
 .q-queued-a {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   width: 100%;
+}
+/* A phone finger needs 44 px on the move buttons, which are icon-only. */
+@media (max-width: 639px) {
+  .q-queued-a .q-ibtn {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
 }
 .q-edit-bar {
   display: flex;
