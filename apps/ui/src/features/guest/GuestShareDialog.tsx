@@ -188,8 +188,14 @@ export function GuestShareDialog() {
                     </p>
                   )}
                   <div className="q-faint" style={{ fontSize: 11.5 }}>
-                    {expiryText(link.expires_at, now)} ·{" "}
-                    {link.bound ? "Bound to the first browser" : "First browser that opens it"}
+                    {expiryText(link.expires_at, now)}
+                    {link.no_serving_listener ? null : (
+                      <>
+                        {" "}
+                        ·{" "}
+                        {link.bound ? "Bound to the first browser" : "First browser that opens it"}
+                      </>
+                    )}
                   </div>
                   {link.url && isLoopbackLink(link.url) ? (
                     <p className="q-danger" role="note" style={{ margin: 0, fontSize: 12 }}>

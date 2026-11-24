@@ -59,8 +59,17 @@ pub const GUEST_COOKIE: &str = "h4rn_guest";
 pub const GUEST_PAGE_HTML: &str = include_str!("guest-page.html");
 
 /// Renders the page with its initial link state.
+///
+/// The initial visibility is part of the markup, not something the script
+/// fixes up on load: a dead link shows its notice and hides the composer
+/// before any script runs, so the first paint is never a composer that cannot
+/// work.
 pub fn guest_page_html(state: &str) -> String {
-    GUEST_PAGE_HTML.replace("__STATE__", state)
+    let active = state == "active";
+    GUEST_PAGE_HTML
+        .replace("__STATE__", state)
+        .replace("__NOTICE_HIDDEN__", if active { " hidden" } else { "" })
+        .replace("__COMPOSER_HIDDEN__", if active { "" } else { " hidden" })
 }
 
 /// A content-security policy that admits only the page's own inline style and
@@ -282,6 +291,36 @@ mod tests {
         assert!(page.contains("data-state=\"active\""));
         assert!(!page.contains("__STATE__"));
         assert!(!page.contains("h4rn_guest="));
+    }
+
+    #[test]
+    fn a_dead_link_paints_its_notice_before_any_script_runs() {
+        // The served markup itself decides what a first paint shows: a link
+        // that cannot work never flashes a composer before the script runs.
+        for state in ["expired", "revoked", "disabled", "unbound"] {
+            let page = guest_page_html(state);
+            assert!(
+                page.contains(r#"id="composer-wrap" hidden"#),
+                "{state} left the composer visible before the script"
+            );
+            assert!(
+                page.contains(r#"id="notice" class="notice">"#),
+                "{state} hid the notice before the script"
+            );
+        }
+        // An active link still starts with its composer.
+        let page = guest_page_html("active");
+        assert!(page.contains(r#"id="composer-wrap">"#), "{page}");
+        assert!(
+            page.contains(r#"id="notice" class="notice" hidden>"#),
+            "an active link showed its notice before the script"
+        );
+        // No attribute placeholder survives rendering.
+        for state in ["active", "expired", "revoked", "disabled", "unbound"] {
+            let page = guest_page_html(state);
+            assert!(!page.contains("__NOTICE_HIDDEN__"), "{state}");
+            assert!(!page.contains("__COMPOSER_HIDDEN__"), "{state}");
+        }
     }
 
     #[test]

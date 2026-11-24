@@ -1947,26 +1947,32 @@ async fn guest_page(
     Ok(guest_page_response(cookie, state))
 }
 
-/// The browser's guest binding cookie, if it has one.
+/// The value of the browser's `h4rn_guest` cookie, if it has one.
 ///
 /// Only the guest cookie is forwarded to the daemon; every other cookie in the
-/// request stays on Connect's origin.
-fn guest_binding_cookie(headers: &HeaderMap) -> Option<String> {
-    let cookies = headers.get_all(axum::http::header::COOKIE);
-    for value in cookies {
-        let Ok(value) = value.to_str() else {
+/// request stays on Connect's origin. One parser serves both the page request
+/// and the relayed requests, so the cookie's name has a single source.
+fn guest_cookie_value(headers: &HeaderMap) -> Option<String> {
+    let mut value = None;
+    for header in headers.get_all(axum::http::header::COOKIE) {
+        let Ok(header) = header.to_str() else {
             continue;
         };
-        for pair in value.split(';') {
-            let pair = pair.trim();
-            if let Some(binding) = pair.strip_prefix("h4rn_guest=")
-                && !binding.is_empty()
-            {
-                return Some(binding.to_owned());
+        for pair in header.split(';') {
+            let Some((name, binding)) = pair.trim().split_once('=') else {
+                continue;
+            };
+            if name == h4rn_protocol::GUEST_COOKIE {
+                value = Some(binding.to_owned());
             }
         }
     }
-    None
+    value
+}
+
+/// The browser's guest binding cookie, if it has a value.
+fn guest_binding_cookie(headers: &HeaderMap) -> Option<String> {
+    guest_cookie_value(headers).filter(|binding| !binding.is_empty())
 }
 
 /// Fetches the page-load binding cookie and rendered state from a machine's
@@ -2665,14 +2671,7 @@ fn forwarded_guest_headers(
 
 /// The `h4rn_guest` cookie from a request, ignoring every other cookie.
 fn guest_only_cookie(headers: &HeaderMap) -> Option<String> {
-    let header = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())?;
-    let value = header.split(';').find_map(|pair| {
-        let (name, value) = pair.trim().split_once('=')?;
-        (name == h4rn_protocol::GUEST_COOKIE).then_some(value)
-    })?;
-    Some(format!("{}={value}", h4rn_protocol::GUEST_COOKIE))
+    guest_cookie_value(headers).map(|value| format!("{}={value}", h4rn_protocol::GUEST_COOKIE))
 }
 
 /// Requires a guest submission to be a same-origin JSON POST.

@@ -65,8 +65,13 @@ import { GuestShareDialog } from "./GuestShareDialog";
 
 beforeEach(() => {
   harness.state.sharing = {};
+  harness.state.sharingLoading = {};
+  harness.state.creating = {};
+  harness.state.stopping = {};
+  harness.state.answering = {};
   harness.state.settingsEnabled = true;
   harness.state.dialogThreadId = "th_1";
+  harness.state.error = null;
   harness.send.mockReset();
   harness.dismiss.mockReset();
   harness.share.mockReset();
@@ -143,13 +148,14 @@ describe("GuestShareDialog", () => {
     render(<GuestShareDialog />);
     expect(screen.getByText(/add a loopback listener/i)).toBeTruthy();
     expect(screen.getByText(/link this machine to Connect/i)).toBeTruthy();
+    // A link nobody can open has no first browser to promise.
+    expect(screen.queryByText(/first browser/i)).toBeNull();
   });
 
-  it("shows the daemon's remedy when creating a link fails", () => {
-    harness.state.error =
-      "This machine has no address a guest link can open on. Add a loopback listener, or link this machine to Connect, then share again.";
+  it("shows the error the store holds in an alert", () => {
+    harness.state.error = "Sharing is unavailable right now.";
     render(<GuestShareDialog />);
-    expect(screen.getByRole("alert").textContent).toContain("Add a loopback listener");
+    expect(screen.getByRole("alert").textContent).toContain("Sharing is unavailable right now.");
   });
 
   it("says only an admin device may show the URL", () => {

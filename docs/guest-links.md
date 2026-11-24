@@ -34,7 +34,9 @@ it on this machine: the loopback address of the primary listener, a wildcard
 bind such as `--bind 0.0.0.0:47800`, or a loopback `--extra-bind`. It uses
 `127.0.0.1` for an IPv4 wildcard bind and `[::1]` for an IPv6 loopback or
 wildcard bind, and a concrete loopback bind such as `127.0.0.2` names itself,
-on the port that listener actually bound. Any address in `127.0.0.0/8` counts
+on the port that listener actually bound. An IPv4-mapped loopback bind such as
+`[::ffff:127.0.0.2]` names the IPv4 address it really listens on, never
+`[::1]`, where nothing would answer. Any address in `127.0.0.0/8` counts
 as loopback both when the listener is chosen and when the link's URL is
 checked. A direct link works only in a browser on this machine; the share
 dialog says so. Any request that arrives from a non-loopback address answers
@@ -83,8 +85,10 @@ because each has its own cookie and path.
 
 A page for an expired, revoked, switched-off or already-bound link opens on its
 notice with no composer: the daemon renders the link's state into the page, and
-Connect passes that state through to the page it serves from its own origin, so
-the guest never sees a message box that cannot work while the first poll runs.
+the served markup starts with that notice visible and the composer hidden, so
+the first paint before any script runs is already correct. Connect passes the
+same state through to the page it serves from its own origin, so the guest
+never sees a message box that cannot work while the first poll runs.
 Connect also sends the browser's existing binding cookie with that page request,
 so a bound browser reloads to its own state while a fresh browser on the same
 link sees "unbound"; a page load still never claims the link. A token the
@@ -140,14 +144,17 @@ Send, Dismiss and every cleanup pass claim a request with one conditional
 update, so a message can never be both sent and dismissed, and the sweep can
 never pull the files out from under a Send that already claimed them, even when
 it read the row just before that Send claimed it. A submission or a Send runs to
-completion on the daemon even if the guest's browser or your app disconnects
-while it is writing, so a dropped connection cannot strand a half-written
+completion on the daemon while it keeps running, even if the guest's browser
+disconnects or the owner's connection drops while it is writing, so a dropped
+connection cannot strand a half-written
 request and its quota. The connection runs each request to completion, so a
 closed socket never cancels a step that already changed the record, and the
 guest submission, Send and Dismiss each continue on their own task. A Send or
 Dismiss writes its audit line there too, so the owner's disconnect after the
-claim still leaves a record. Turning the Labs switch off saves the setting and
-ends every link in one transaction, so re-enabling it cannot bring a link back.
+claim still leaves a record; if the daemon itself stops, the startup sweep
+resolves the interrupted row instead. Turning the Labs switch off saves the
+setting and ends every link in one transaction, so re-enabling it cannot bring
+a link back.
 
 A guest request can only read that thread's events, submit a waiting message,
 and fetch an attachment that belongs to a message in that thread. Events are
