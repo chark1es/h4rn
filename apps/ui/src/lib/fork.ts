@@ -17,6 +17,10 @@ export function forkableTurn(turn: StreamTurn, turns: StreamTurn[]): string | nu
     if (!daemonTurn || daemonTurn.status === "running") return null;
     return turn.forkTurnId;
   }
+  // A prompt row is never itself a turn. One with no owner — an older
+  // journal's queued prompt, whose real turn the projection cannot name — is
+  // refused rather than sent as a turn id the daemon does not have.
+  if (turn.id.startsWith("cue:")) return null;
   if (turn.status === "running") return null;
   if (turn.items.length === 0) return null;
   return turn.id;

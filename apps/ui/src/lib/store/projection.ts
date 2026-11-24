@@ -110,6 +110,10 @@ export type StreamTurn = {
    * A live user message is shown as its own row with a `cue:` id, while the
    * agent's work is a second row with the real turn id. Imported history has
    * no such second row, so the cue keeps the real id for a fork to name.
+   *
+   * A cue with no `forkTurnId` is a prompt this projection could not tie to a
+   * turn — an older journal's queued prompt filed under the turn it waited
+   * behind — and no fork is offered from it.
    */
   forkTurnId?: TurnId;
 };
@@ -343,11 +347,25 @@ export function foldEvent(
             usage: null,
             changes: null,
           };
-          // The cue always names the daemon turn it belongs to. A fork from
-          // this row is only offered once that turn has settled, which the
-          // live daemon row says; copied history has no live row and is
-          // settled by definition.
-          cue.forkTurnId = turn_id;
+          // The cue names the daemon turn it belongs to. A fork from this row
+          // is only offered once that turn has settled, which the live daemon
+          // row says; copied history has no live row and is settled by
+          // definition.
+          //
+          // An older journal filed a queued prompt under the turn it waited
+          // behind. That prompt is not the turn's own, and the event does not
+          // name the turn it really became, so this row has no owner to fork
+          // from: leaving `forkTurnId` unset is what refuses it. The same rule
+          // as the daemon's replay, where such a prompt is never attached to a
+          // later turn that already has one.
+          const owner = log.turns.find((candidate) => candidate.id === turn_id);
+          const queuedBehindAnOpenTurn =
+            owner !== undefined &&
+            owner.status === "running" &&
+            log.turns.some(
+              (candidate) => candidate.id.startsWith("cue:") && candidate.forkTurnId === turn_id,
+            );
+          if (!queuedBehindAnOpenTurn) cue.forkTurnId = turn_id;
           if (imported) cue.imported = true;
           log.turns.push(cue);
           return log;

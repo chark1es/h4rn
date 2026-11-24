@@ -85,6 +85,17 @@ describe("forkableTurn", () => {
     const row = turn({ id: "turn_1", items: [] });
     expect(forkableTurn(row, [row])).toBeNull();
   });
+
+  it("refuses a prompt row whose owner could not be named", () => {
+    // An older journal's queued prompt: the projection refused to point it at
+    // the turn it was filed under, so there is no turn to fork.
+    const row: StreamTurn = {
+      ...cue({ id: "item_1", turnId: "turn_1" }),
+    };
+    delete row.forkTurnId;
+    expect(forkableTurn(row, [row, turn({ id: "turn_1" })])).toBeNull();
+    expect(latestForkableTurn([turn({ id: "turn_0" }), row])).toBeNull();
+  });
 });
 
 describe("latestForkableTurn", () => {
