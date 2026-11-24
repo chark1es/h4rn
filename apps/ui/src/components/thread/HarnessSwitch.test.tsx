@@ -2,24 +2,60 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-
+import { CommandPalette } from "@/components/dialogs/CommandPalette";
 import type { ThreadSummary } from "@/gen";
 import type { SwitchHarnessResult } from "@/lib/store/appStore";
-import { HarnessSwitch } from "./HarnessSwitch";
+import { HarnessSwitch, HarnessSwitchCommand } from "./HarnessSwitch";
 
 const mock = vi.hoisted(() => ({
   switchThreadHarness: vi.fn(async (): Promise<SwitchHarnessResult> => ({ ok: true, dropped: [] })),
   pushToast: vi.fn(),
+  phone: false,
   rows: [
     { harness: "claude_code", installed: "2.1.0" },
     { harness: "codex", installed: "0.171.0" },
   ],
   agents: [] as { id: string; name: string; installed: boolean; models: { id: string }[] }[],
+  state: {
+    connection: { status: "online" },
+    hosts: {},
+    threads: {} as Record<string, ThreadSummary>,
+    logs: {},
+    ui: {
+      paletteOpen: true,
+      route: { kind: "thread", threadId: "th_1" },
+      selectedThreadId: "th_1",
+      layout: { sidebarOpen: true, panelOpen: false, terminalOpen: false },
+    },
+  },
 }));
 
 vi.mock("@/lib/store/appStore", () => ({
   switchThreadHarness: mock.switchThreadHarness,
   pushToast: mock.pushToast,
+  useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
+  // The real palette's actions and state reads.
+  acknowledgeThread: vi.fn(),
+  closePalette: vi.fn(),
+  getClient: () => ({ request: vi.fn(async () => ({ type: "forge_repos", repos: [] })) }),
+  interruptThread: vi.fn(),
+  navigate: vi.fn(),
+  openLinkPullRequest: vi.fn(),
+  openNewThread: vi.fn(),
+  openShortcuts: vi.fn(),
+  openThread: vi.fn(),
+  pendingApprovalIn: () => null,
+  requestSearchFocus: vi.fn(),
+  respondApproval: vi.fn(),
+  setPanelTab: vi.fn(),
+  setTab: vi.fn(),
+  setThreadTab: vi.fn(),
+  togglePanel: vi.fn(),
+  togglePin: vi.fn(),
+  toggleSidebar: vi.fn(),
+  toggleTerminal: vi.fn(),
+  toggleTheme: vi.fn(),
+  toggleView: vi.fn(),
 }));
 
 vi.mock("@/features/harnesses/harnessStore", () => ({
@@ -33,6 +69,8 @@ vi.mock("@/features/proxy/proxyStore", () => ({
   useProxyCatalog: () => undefined,
   proxyModelsFor: () => [],
 }));
+
+vi.mock("@/hooks/use-media-query", () => ({ useIsPhone: () => mock.phone }));
 
 function summary(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
   return {
@@ -78,6 +116,8 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   mock.agents = [];
+  mock.phone = false;
+  mock.state.threads = {};
   window.localStorage.clear();
 });
 
@@ -106,10 +146,36 @@ describe("HarnessSwitch", () => {
         expect.objectContaining({
           variant: "success",
           title: "Switched to Codex.",
-          description: expect.stringContaining("Plan mode"),
+          // The picker's own label for the mode, not a slug with a suffix.
+          description: expect.stringContaining("Dropped Plan;"),
         }),
       ),
     );
+  });
+
+  it("says the thread continues from a handoff, not a summary", () => {
+    render(<HarnessSwitch summary={summary()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Switch harness/i }));
+    const dialog = screen.getByRole("dialog", { name: "Switch harness" });
+    expect(dialog.textContent).toContain("handoff");
+    expect(dialog.textContent).not.toContain("summary");
+  });
+
+  it("defaults to the model the host's live catalogue reports", () => {
+    mock.state.threads = {
+      th_codex: summary({
+        thread_id: "th_codex",
+        harness: "codex",
+        host: "host_1",
+        model: "gpt-5.4",
+        models: ["gpt-5.4", "gpt-5.4-mini"],
+        last_activity: "2026-02-01T00:00:00Z",
+      }),
+    };
+    render(<HarnessSwitch summary={summary()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Switch harness/i }));
+    const input = screen.getByLabelText("Model for the new harness") as HTMLInputElement;
+    expect(input.value).toBe("gpt-5.4");
   });
 
   it("shows a refusal in the panel instead of pretending the switch happened", async () => {
@@ -129,9 +195,42 @@ describe("HarnessSwitch", () => {
     expect(screen.getByRole("dialog", { name: "Switch harness" })).toBeTruthy();
   });
 
-  it("opens from the palette's request event", () => {
+  it("opens a viewport-bounded sheet with full-size rows on a phone", () => {
+    mock.phone = true;
     render(<HarnessSwitch summary={summary()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Switch harness/i }));
+    const dialog = screen.getByRole("dialog", { name: "Switch harness" });
+    expect(dialog.className).toContain("q-ph-sheet");
+    expect(dialog.className).toContain("q-switch-sheet");
+    // The phone gets buttons, not a desktop popover.
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeNull();
+    expect(dialog.textContent).toContain("Codex");
+  });
+
+  it("asks for a switch from the command palette", () => {
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    Element.prototype.scrollIntoView = vi.fn();
+    mock.state.threads = { th_1: summary() };
+    const heard = vi.fn();
+    window.addEventListener("h4rn:switch-harness", heard);
+    render(<CommandPalette />);
+    fireEvent.click(screen.getByText("Switch harness…"));
+    expect(heard).toHaveBeenCalledTimes(1);
+    window.removeEventListener("h4rn:switch-harness", heard);
+  });
+
+  it("opens the switch panel for the focused thread without a thread header", () => {
+    mock.state.threads = { th_1: summary() };
+    // No ThreadHeader anywhere: the palette's surface must still reach the
+    // thread the shell is showing.
+    render(<HarnessSwitchCommand />);
     fireEvent(window, new CustomEvent("h4rn:switch-harness"));
-    expect(screen.getByRole("dialog", { name: "Switch harness" })).toBeTruthy();
+    const dialog = screen.getByRole("dialog", { name: "Switch harness" });
+    expect(dialog.textContent).toContain("Codex");
+    expect(screen.getByLabelText("Model for the new harness")).toBeTruthy();
   });
 });

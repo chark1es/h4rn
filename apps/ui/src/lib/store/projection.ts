@@ -278,6 +278,13 @@ export function foldEvent(
     }
 
     case "harness_switched": {
+      // Every turn journaled before a switch ran on the harness it names, even
+      // when its own `TurnStarted` predates the field. Backfilling from the
+      // divider is what keeps an older turn labelled with the provider that
+      // really ran it instead of the thread's current one.
+      for (const turn of log.turns) {
+        if (!turn.divider && !turn.harness) turn.harness = event.from;
+      }
       const id = `switch:${event.from}:${event.to}:${at}`;
       const item: HarnessSwitchItem = {
         kind: "harness_switch",
@@ -296,9 +303,6 @@ export function foldEvent(
         items: [item],
         usage: null,
         changes: null,
-        // A thread switched before its first live turn still shows where it
-        // came from, so the receipt keeps naming the imported conversation.
-        imported: true,
         divider: true,
       });
       return log;

@@ -35,7 +35,10 @@ function PendingTurn({ message }: { message: PendingMessage }) {
  */
 export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turns: StreamTurn[] }) {
   if (summary.tab !== "done" || summary.agent_state !== "done") return null;
-  const imported = turns.length > 0 && turns.every((turn) => turn.imported);
+  // A switch divider is not a turn the agent wrote: it must neither make a
+  // conversation look imported nor hide that it was.
+  const written = turns.filter((turn) => !turn.divider);
+  const imported = written.length > 0 && written.every((turn) => turn.imported);
   return (
     <div className="q-col q-receipt">
       <div className="q-live-line">

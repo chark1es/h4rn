@@ -91,6 +91,53 @@ describe("ThreadReceipt", () => {
     expect(markup).not.toContain("Imported from");
   });
 
+  it("does not read a thread that switched harness as imported", () => {
+    const divider: StreamTurn = {
+      id: "switch:claude_code:codex",
+      startedAt: "2026-11-18T09:10:00Z",
+      status: "completed",
+      items: [
+        {
+          kind: "harness_switch",
+          itemId: "switch:claude_code:codex",
+          from: "claude_code",
+          to: "codex",
+        },
+      ],
+      usage: null,
+      changes: null,
+      divider: true,
+    };
+    const markup = renderToStaticMarkup(
+      <ThreadReceipt summary={summary} turns={[turn(false), divider]} />,
+    );
+    expect(markup).not.toContain("Imported from");
+    expect(markup).toContain("Finished");
+  });
+
+  it("still names an imported thread that has switched harness", () => {
+    const divider: StreamTurn = {
+      id: "switch:codex:claude_code",
+      startedAt: "2026-11-18T09:10:00Z",
+      status: "completed",
+      items: [
+        {
+          kind: "harness_switch",
+          itemId: "switch:codex:claude_code",
+          from: "codex",
+          to: "claude_code",
+        },
+      ],
+      usage: null,
+      changes: null,
+      divider: true,
+    };
+    const markup = renderToStaticMarkup(
+      <ThreadReceipt summary={summary} turns={[turn(true), divider]} />,
+    );
+    expect(markup).toContain("Imported from Claude Code");
+  });
+
   it("stays out of a thread that is not done", () => {
     expect(
       renderToStaticMarkup(

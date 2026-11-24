@@ -2274,15 +2274,6 @@ fieldset.q-seg-fs {
 .q-turn-divider {
   margin: 0;
 }
-.q-tctrl-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  margin-top: 12px;
-}
-.q-rot180 {
-  transform: rotate(180deg);
-}
 /* Thread controls: a quiet panel of one-choice rows. */
 .q-tctrl {
   display: flex;
@@ -6757,4 +6748,77 @@ fieldset.q-seg-fs {
   .q-issues-head .q-issues-search {
     min-width: 0;
   }
+}
+
+/* A harness switch opened from the palette, and the phone sheet it becomes.
+   Both are bounded by the viewport so neither can grow past the screen. */
+.q-switch-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  border: 0;
+  padding: 0;
+  background: var(--scrim);
+  animation: q-fade var(--dur-2) var(--ease-out);
+}
+.q-switch-dialog {
+  position: fixed;
+  z-index: 22;
+  left: 50%;
+  top: 14vh;
+  transform: translateX(-50%);
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(72dvh, calc(100dvh - 120px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-raised);
+  border-radius: 12px;
+  box-shadow:
+    var(--sh-dlg),
+    inset 0 0 0 1px var(--line);
+  padding: 14px;
+}
+.q-switch-dialog:focus {
+  outline: none;
+}
+.q-switch-sheet {
+  max-height: min(72dvh, calc(100dvh - 64px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
+}
+.q-switch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.q-switch-sheet .q-switch-head,
+.q-switch-sheet .q-tctrl {
+  padding: 0 20px;
+}
+.q-switch-head .q-tctrl-head {
+  margin: 0;
+}
+/* Full-size touch targets in the phone sheet: 44 px rows and fields. */
+.q-switch-sheet .q-tctrl-row {
+  min-height: 44px;
+  padding: 0 8px;
+  font-size: 14px;
+}
+.q-switch-sheet .q-tctrl-model input {
+  height: 44px;
+  font-size: 14px;
+}
+.q-switch-sheet .q-tctrl-actions .q-btn {
+  min-height: 44px;
+}
+.q-tctrl-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 12px;
+}
+.q-rot180 {
+  transform: rotate(180deg);
 }

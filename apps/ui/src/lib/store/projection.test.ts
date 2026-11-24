@@ -132,6 +132,61 @@ describe("foldEvent", () => {
     expect(log.turns.find((turn) => turn.id === "turn_2")?.harness).toBe("codex");
   });
 
+  it("keeps an older turn's real harness when its own event predates the field", () => {
+    // The daemon's normal order: a turn journaled before the upgrade carries
+    // no harness on its `turn_started`; the switch that follows names where the
+    // thread came from.
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: "2026-01-01T00:00:00.000Z",
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      status: "completed",
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_input_tokens: 0,
+        cost_micros: 0,
+        duration_ms: 0,
+        generation_ms: 0,
+        tps: 0,
+      },
+    });
+    log = foldEvent(log, {
+      type: "harness_switched",
+      thread_id: "t1",
+      from: "claude_code",
+      to: "codex",
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_2",
+      started_at: "2026-01-01T00:02:00.000Z",
+      harness: "codex",
+    });
+    expect(log.turns.find((turn) => turn.id === "turn_1")?.harness).toBe("claude_code");
+    expect(log.turns.find((turn) => turn.id === "turn_2")?.harness).toBe("codex");
+  });
+
+  it("does not mark the switch divider as an imported turn", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "harness_switched",
+      thread_id: "t1",
+      from: "claude_code",
+      to: "codex",
+    });
+    const divider = log.turns.find((turn) => turn.divider);
+    expect(divider?.imported).toBeUndefined();
+  });
+
   it("keeps one plan item per turn, updated in place", () => {
     let log = createThreadLog();
     log = foldEvent(log, {
