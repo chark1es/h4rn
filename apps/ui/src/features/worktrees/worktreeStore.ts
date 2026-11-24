@@ -1,6 +1,12 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 
-import type { ProtoError, SkippedWorktree, TrackedWorktree, WorktreeOrigin } from "@/gen";
+import type {
+  ProtoError,
+  SkippedWorktree,
+  TrackedWorktree,
+  WorktreeOrigin,
+  WorktreeSettings,
+} from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient } from "@/lib/store/appStore";
@@ -32,6 +38,13 @@ export type WorktreeState = {
   outcomeSource: H4rnClient | null;
   /** Set when a clear request itself failed, as opposed to skipping entries. */
   clearError: string | null;
+  /** This machine's defaults for new worktrees, once read. */
+  settings: WorktreeSettings | null;
+  /** The client that produced `settings`; null until loaded. */
+  settingsSource: H4rnClient | null;
+  settingsLoading: boolean;
+  settingsSaving: boolean;
+  settingsError: ProtoError | null;
 };
 
 const initialState: WorktreeState = {
@@ -44,6 +57,11 @@ const initialState: WorktreeState = {
   outcome: null,
   outcomeSource: null,
   clearError: null,
+  settings: null,
+  settingsSource: null,
+  settingsLoading: false,
+  settingsSaving: false,
+  settingsError: null,
 };
 
 type Listener = () => void;
@@ -394,6 +412,93 @@ export async function clearWorktrees(
 
 export function dismissWorktreeOutcome(): void {
   patch({ outcome: null, outcomeSource: null, clearError: null });
+}
+
+/** Reads this machine's defaults for new thread worktrees. */
+export async function loadWorktreeSettings(): Promise<void> {
+  const client = getClient();
+  patch({ settingsLoading: true, settingsError: null });
+  try {
+    const response = await client.request({ type: "get_worktree_settings" }, { timeoutMs: 15_000 });
+    // A machine switch rebuilt the client; these settings describe another
+    // host.
+    if (getClient() !== client) {
+      patch({ settingsLoading: false });
+      return;
+    }
+    if (response.type !== "worktree_settings") {
+      patch({
+        settingsLoading: false,
+        ...(state.settingsSource === client ? {} : { settings: null }),
+      });
+      return;
+    }
+    patch({
+      settings: response.settings,
+      settingsSource: client,
+      settingsLoading: false,
+      settingsError: null,
+    });
+  } catch (error) {
+    if (getClient() !== client) {
+      patch({ settingsLoading: false });
+      return;
+    }
+    patch({
+      settingsLoading: false,
+      settingsError: toProtoError(error),
+      ...(state.settingsSource === client ? {} : { settings: null }),
+    });
+  }
+}
+
+/**
+ * Saves this machine's defaults. Returns whether the daemon accepted them;
+ * a rejection is kept in `settingsError` so the page can word it.
+ */
+export async function saveWorktreeSettings(
+  settings: WorktreeSettings,
+  expectedClient?: H4rnClient,
+): Promise<boolean> {
+  const client = getClient();
+  if (
+    state.settingsSource === null ||
+    state.settingsSource !== client ||
+    (expectedClient !== undefined && expectedClient !== client)
+  ) {
+    patch({
+      settingsError: {
+        code: "conflict",
+        message: "These settings belong to another connection. Reload them first.",
+        hint: null,
+      },
+    });
+    return false;
+  }
+  patch({ settingsSaving: true, settingsError: null });
+  try {
+    const response = await client.request(
+      { type: "set_worktree_settings", settings },
+      { timeoutMs: 15_000 },
+    );
+    if (getClient() !== client) {
+      patch({ settingsSaving: false });
+      return false;
+    }
+    if (response.type !== "worktree_settings") {
+      patch({ settingsSaving: false });
+      return false;
+    }
+    patch({ settings: response.settings, settingsSaving: false, settingsError: null });
+    return true;
+  } catch (error) {
+    if (getClient() !== client) {
+      patch({ settingsSaving: false });
+      return false;
+    }
+    patch({ settingsSaving: false, settingsError: toProtoError(error) });
+    return false;
+  }
 }
 
 /**
