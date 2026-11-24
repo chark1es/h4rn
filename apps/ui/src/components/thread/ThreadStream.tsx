@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { harnessLabel } from "@/lib/entities";
 import { absoluteTime, cost, duration, tokens } from "@/lib/format";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
@@ -21,6 +22,37 @@ function PendingTurn({ message }: { message: PendingMessage }) {
       <MessageAttachments attachments={message.attachments} align="end" />
       <div className="q-you-meta">
         <span>{message.sending ? "Sending…" : "Sent"}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The line under a quiet thread: how it finished, or where it came from.
+ *
+ * An imported conversation was written elsewhere, so claiming a duration and
+ * token count for it would be invented: it says where it came from instead.
+ */
+export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turns: StreamTurn[] }) {
+  if (summary.tab !== "done" || summary.agent_state !== "done") return null;
+  const imported = turns.length > 0 && turns.every((turn) => turn.imported);
+  return (
+    <div className="q-col q-receipt">
+      <div className="q-live-line">
+        <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+        <span>
+          {imported ? (
+            <>
+              Imported from {harnessLabel(summary.harness)} · {absoluteTime(summary.last_activity)}
+            </>
+          ) : (
+            <>
+              Finished {absoluteTime(summary.last_activity)} · {duration(summary.usage.duration_ms)}{" "}
+              · {tokens(summary.usage.input_tokens + summary.usage.output_tokens)} tokens ·{" "}
+              {cost(summary.usage.cost_micros)} est.
+            </>
+          )}
+        </span>
       </div>
     </div>
   );
@@ -148,18 +180,7 @@ export function ThreadStream({
           );
         })}
       </div>
-      {summary.tab === "done" && summary.agent_state === "done" ? (
-        <div className="q-col q-receipt">
-          <div className="q-live-line">
-            <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            <span>
-              Finished {absoluteTime(summary.last_activity)} · {duration(summary.usage.duration_ms)}{" "}
-              · {tokens(summary.usage.input_tokens + summary.usage.output_tokens)} tokens ·{" "}
-              {cost(summary.usage.cost_micros)} est.
-            </span>
-          </div>
-        </div>
-      ) : null}
+      <ThreadReceipt summary={summary} turns={turns} />
     </div>
   );
 }

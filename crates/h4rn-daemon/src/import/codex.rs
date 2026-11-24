@@ -1,0 +1,1388 @@
+//! Codex rollouts: `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl`.
+//!
+//! Records are a mix of `session_meta`, `turn_context`, canonical `event_msg`
+//! user turns and `response_item` messages. Codex writes the same user turn
+//! more than once: a canonical event, a response copy, and generated setup
+//! context such as the environment block or the project's private AGENTS.md
+//! instructions. Canonical events usually carry no turn id, so the turn id on
+//! the response copies is what ties them together.
+//!
+//! Dedupe follows t3code's two-pass rule. Within one turn:
+//!
+//! 1. When a canonical event's text matches a response copy that names a valid
+//!    turn id, that turn is canonical: every response user record with that id
+//!    is dropped, setup context included.
+//! 2. Any remaining response copy whose text exactly matches the canonical
+//!    event is dropped.
+//!
+//! A turn with no canonical event is response-only, so its context stays. A
+//! response copy whose turn id names another turn is kept, so a repeated prompt
+//! after an aborted turn loses neither turn's text.
+//!
+//! The persisted turn boundaries (`turn_context`, `turn_aborted`, and the
+//! `task_*` events) end the pending window: a canonical prompt and its copy
+//! belong to the turn they were written in, never to a later one. A boundary
+//! that names the turn already open is not a boundary, because Codex writes
+//! the turn's generated context between `task_started` and `turn_context` with
+//! the same turn id.
+//!
+//! A canonical prompt is stored exactly as written; only the comparison key is
+//! trimmed. A rewound rollout (`session_meta.payload.history_base`) inherits a
+//! byte prefix of the rollout it replaced, streamed before its own records so
+//! the original request and reply stay in the imported conversation.
+
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use h4rn_protocol::{ImportSource, MessageRole};
+use serde::Deserialize;
+
+use super::record::{Content, Record, RecordReader, maybe_text};
+use super::{
+    History, KeptMessage, MAX_FILE_BYTES, ParsedConversation, Peek, SkipReason, derive_title,
+    open_reader, parse_time,
+};
+
+/// How many rollouts back a rewind chain may go.
+///
+/// A chain is one record per rewind; a corrupt `history_base` must not walk the
+/// whole sessions tree.
+const MAX_HISTORY_CHAIN: usize = 32;
+
+/// A rewound rollout's inherited prefix.
+#[derive(Clone, Debug)]
+struct HistoryBase {
+    thread_id: String,
+    /// Bytes of the replaced rollout, from its start, to stream first.
+    end_byte_offset: u64,
+}
+
+/// Reads just enough of a rollout to group it by folder.
+///
+/// Uses the same streaming record reader as the import, so a record with a
+/// multi-megabyte attachment beside a short prompt still shows its prompt.
+pub(crate) fn peek(path: &Path) -> Option<Peek> {
+    let mut records = RecordReader::new(open_reader(path).ok()?);
+    let mut count = 0;
+    let mut cwd: Option<PathBuf> = None;
+    let mut session_id: Option<String> = None;
+    let mut has_visible = false;
+    loop {
+        let outcome = records.next::<TranscriptRecord>();
+        count += 1;
+        if count > 200 {
+            break;
+        }
+        let record = match outcome {
+            Ok(Record::Parsed(record)) => record,
+            Ok(Record::End) => break,
+            Ok(Record::Blank | Record::Malformed | Record::OverLimit) => continue,
+            Err(_) => break,
+        };
+        if cwd.is_none()
+            && let Some(value) = record.cwd()
+        {
+            cwd = Some(PathBuf::from(value));
+        }
+        if session_id.is_none() {
+            session_id = record.session_id();
+        }
+        if !has_visible && record.is_visible_message() {
+            has_visible = true;
+        }
+    }
+    let cwd = cwd?;
+    Some(Peek {
+        cwd,
+        session_id,
+        has_visible,
+    })
+}
+
+/// One JSONL record, with only the fields the import reads.
+#[derive(Debug, Default, Deserialize)]
+struct TranscriptRecord {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    timestamp: Option<String>,
+    cwd: Option<String>,
+    payload: Option<Payload>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Payload {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    id: Option<String>,
+    #[serde(rename = "session_id")]
+    session_id: Option<String>,
+    #[serde(default, deserialize_with = "maybe_text")]
+    message: Option<String>,
+    model: Option<String>,
+    cwd: Option<String>,
+    role: Option<String>,
+    turn_id: Option<String>,
+    #[serde(default, deserialize_with = "Content::deserialize")]
+    content: Option<Content>,
+    /// Codex's per-message metadata, read leniently: a shape other than an
+    /// object (an array, a string) must not make the whole record malformed,
+    /// because the user text beside it would be lost.
+    #[serde(rename = "internal_chat_message_metadata_passthrough")]
+    metadata: Option<serde_json::Value>,
+    /// A rewound rollout names the prefix it inherits. Read leniently for the
+    /// same reason as `metadata`.
+    #[serde(rename = "history_base")]
+    history_base: Option<serde_json::Value>,
+}
+
+impl Payload {
+    /// The turn id this message's own metadata names, when it names a valid one.
+    fn metadata_turn_id(&self) -> Option<String> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("turn_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// The prefix a rewound rollout inherits, when the record declares one.
+    fn history_base(&self) -> Option<HistoryBase> {
+        let base = self.history_base.as_ref()?.as_object()?;
+        let thread_id = base
+            .get("thread_id")?
+            .as_str()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())?
+            .to_owned();
+        let end_byte_offset = base.get("end_byte_offset")?.as_u64()?;
+        Some(HistoryBase {
+            thread_id,
+            end_byte_offset,
+        })
+    }
+}
+
+impl TranscriptRecord {
+    fn cwd(&self) -> Option<&str> {
+        self.cwd
+            .as_deref()
+            .or_else(|| {
+                self.payload
+                    .as_ref()
+                    .and_then(|payload| payload.cwd.as_deref())
+            })
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+    }
+
+    /// The harness-native session id, from a `session_meta` record only.
+    fn session_id(&self) -> Option<String> {
+        if self.kind.as_deref() != Some("session_meta") {
+            return None;
+        }
+        let payload = self.payload.as_ref()?;
+        payload
+            .id
+            .as_deref()
+            .or(payload.session_id.as_deref())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    }
+
+    fn is_visible_message(&self) -> bool {
+        let Some(payload) = self.payload.as_ref() else {
+            return false;
+        };
+        match self.kind.as_deref() {
+            Some("event_msg") if payload.kind.as_deref() == Some("user_message") => payload
+                .message
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty()),
+            Some("response_item") if payload.kind.as_deref() == Some("message") => {
+                payload.role.as_deref() == Some("user")
+                    || payload.role.as_deref() == Some("assistant")
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Parses one rollout, streaming its records one at a time.
+///
+/// A rewound rollout declares a byte prefix of the rollout it replaced in its
+/// own `session_meta`. Those inherited records stream first, so the original
+/// request and reply are part of the conversation; when the prefix cannot be
+/// read the rollout is imported on its own, as before.
+pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
+    let fallback = file_time(path);
+    let mut parser = RolloutParser::new(fallback);
+    let prefixes = inherited_rollouts(path)?;
+    for prefix in prefixes.iter().rev() {
+        // An inherited record counts toward the same record and text limits as
+        // the rollout's own records.
+        match read_prefix(prefix, &mut parser) {
+            Ok(()) => {}
+            // The prefix is gone or unreadable: import this rollout on its own
+            // rather than inventing or dropping its own turns.
+            Err(SkipReason::Unreadable | SkipReason::NoWorkingDirectory) => {
+                parser = RolloutParser::new(fallback);
+                break;
+            }
+            Err(reason) => return Err(reason),
+        }
+    }
+    let reader = open_reader(path)?;
+    stream_records(reader, &mut parser, true)?;
+    parser.finish(path)
+}
+
+/// The number of bytes of a transcript read in one bounded line.
+fn read_prefix(prefix: &InheritedRollout, parser: &mut RolloutParser) -> Result<(), SkipReason> {
+    if prefix.end_byte_offset > MAX_FILE_BYTES {
+        return Err(SkipReason::TooMuchText);
+    }
+    let reader = open_reader(&prefix.path)?;
+    stream_records(reader.take(prefix.end_byte_offset), parser, false)
+}
+
+/// Streams every record of one rollout (or its inherited prefix) in order.
+fn stream_records(
+    reader: impl std::io::BufRead,
+    parser: &mut RolloutParser,
+    take_session_id: bool,
+) -> Result<(), SkipReason> {
+    let mut records = RecordReader::new(reader);
+    loop {
+        match records.next::<TranscriptRecord>() {
+            Ok(Record::Parsed(record)) => parser.consume(record, take_session_id)?,
+            Ok(Record::End) => return Ok(()),
+            Ok(Record::Blank | Record::Malformed) => continue,
+            // A record too long to read cannot be kept whole; skipping the
+            // conversation with a warning beats silently dropping its turn.
+            Ok(Record::OverLimit) => return Err(SkipReason::TooMuchText),
+            Err(_) => return Err(SkipReason::Unreadable),
+        }
+    }
+}
+
+/// One rollout file whose first bytes a rewound rollout inherits.
+#[derive(Clone, Debug)]
+struct InheritedRollout {
+    path: PathBuf,
+    end_byte_offset: u64,
+}
+
+/// The `history_base` chain a rewound rollout declares, newest first.
+///
+/// A missing or malformed link ends the chain: the caller then reads whatever
+/// prefixes it could resolve, which is the rollout's own history.
+fn inherited_rollouts(path: &Path) -> Result<Vec<InheritedRollout>, SkipReason> {
+    let mut prefixes = Vec::new();
+    let mut visited = HashSet::new();
+    let mut base = match rollout_history_base(path)? {
+        Some(base) => base,
+        None => return Ok(prefixes),
+    };
+    while prefixes.len() < MAX_HISTORY_CHAIN {
+        if !visited.insert(base.thread_id.clone()) {
+            break;
+        }
+        let Some(predecessor) = find_rollout(path, &base.thread_id) else {
+            break;
+        };
+        let next = rollout_history_base(&predecessor)?;
+        prefixes.push(InheritedRollout {
+            path: predecessor,
+            end_byte_offset: base.end_byte_offset,
+        });
+        let Some(next) = next else {
+            break;
+        };
+        base = next;
+    }
+    Ok(prefixes)
+}
+
+/// Reads a rollout's own `history_base` from the `session_meta` near its start.
+fn rollout_history_base(path: &Path) -> Result<Option<HistoryBase>, SkipReason> {
+    let reader = match open_reader(path) {
+        Ok(reader) => reader,
+        // A missing predecessor is not this rollout's failure.
+        Err(_) => return Ok(None),
+    };
+    let mut records = RecordReader::new(reader);
+    for _ in 0..8 {
+        match records.next::<TranscriptRecord>() {
+            Ok(Record::Parsed(record)) => {
+                if record.kind.as_deref() == Some("session_meta") {
+                    return Ok(record.payload.as_ref().and_then(Payload::history_base));
+                }
+            }
+            Ok(Record::End) => return Ok(None),
+            Ok(Record::Blank | Record::Malformed) => continue,
+            Ok(Record::OverLimit) => return Err(SkipReason::TooMuchText),
+            Err(_) => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// Finds the newest rollout file that names `id` in its file name.
+///
+/// Codex writes an original rollout as `rollout-<time>-<thread id>` and a
+/// rewound one as `<thread id>_<rollout id>`; either way the declared base is
+/// the trailing id.
+fn find_rollout(path: &Path, id: &str) -> Option<PathBuf> {
+    // sessions/YYYY/MM/DD/rollout-….jsonl: the walk starts at sessions.
+    let root = path.parent()?.parent()?.parent()?.parent()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    find_rollout_in(root, id, 0, &mut best);
+    best.map(|(_, path)| path)
+}
+
+fn find_rollout_in(
+    directory: &Path,
+    id: &str,
+    depth: usize,
+    best: &mut Option<(std::time::SystemTime, PathBuf)>,
+) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten().take(2000) {
+        let path = entry.path();
+        if path.is_dir() {
+            find_rollout_in(&path, id, depth + 1, best);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        if !(stem.ends_with(&format!("-{id}")) || stem.ends_with(&format!("_{id}")) || stem == id) {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(seen, _)| modified > *seen) {
+            *best = Some((modified, path));
+        }
+    }
+}
+
+/// The streaming state of one rollout read.
+struct RolloutParser {
+    fallback: DateTime<Utc>,
+    count: usize,
+    cwd: Option<PathBuf>,
+    session_id: Option<String>,
+    model: Option<String>,
+    last_seen: Option<DateTime<Utc>>,
+    history: History,
+    turn: TurnState,
+}
+
+impl RolloutParser {
+    fn new(fallback: DateTime<Utc>) -> Self {
+        Self {
+            fallback,
+            count: 0,
+            cwd: None,
+            session_id: None,
+            model: None,
+            last_seen: None,
+            history: History::new(),
+            turn: TurnState::default(),
+        }
+    }
+
+    /// Folds one parsed record into the conversation.
+    fn consume(
+        &mut self,
+        record: TranscriptRecord,
+        take_session_id: bool,
+    ) -> Result<(), SkipReason> {
+        self.count += 1;
+        super::record_limit(self.count)?;
+        if let Some(at) = parse_time(record.timestamp.as_deref()) {
+            self.last_seen = Some(self.last_seen.map_or(at, |seen| seen.max(at)));
+        }
+        if let Some(value) = record.cwd() {
+            self.cwd = Some(PathBuf::from(value));
+        }
+        // A fork rollout repeats `session_meta`; the first id names the
+        // conversation, exactly as `peek` and the discovery scan read it. An
+        // inherited prefix's `session_meta` names the rollout it came from, so
+        // it never provides this rollout's id.
+        if take_session_id
+            && self.session_id.is_none()
+            && let Some(value) = record.session_id()
+        {
+            self.session_id = Some(value);
+        }
+        let kind = record.kind.as_deref().unwrap_or_default();
+        let Some(payload) = record.payload.as_ref() else {
+            return Ok(());
+        };
+        let at = parse_time(record.timestamp.as_deref()).unwrap_or(self.fallback);
+        match kind {
+            "session_meta" => {}
+            "turn_context" => {
+                if let Some(value) = payload.model.as_deref() {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        self.model = Some(value.to_owned());
+                    }
+                }
+                let turn_id = payload
+                    .turn_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty());
+                // A boundary that names the turn already open marks no new
+                // turn: Codex writes `task_started`, the turn's generated
+                // context, and then `turn_context` with the same id, and
+                // flushing there would commit that context as response-only
+                // before the prompt's canonical event arrives.
+                if !self.turn.names_current(turn_id) {
+                    flush_turn(&mut self.history, &mut self.turn);
+                    self.turn.current_id = turn_id.map(str::to_owned);
+                }
+            }
+            "event_msg" => match payload.kind.as_deref() {
+                Some("user_message") => {
+                    // A canonical prompt is stored exactly as written; the
+                    // trimmed form is only the comparison key.
+                    let text = payload.message.clone().unwrap_or_default();
+                    if text.trim().is_empty() {
+                        return Ok(());
+                    }
+                    let turn_id = payload
+                        .turn_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| self.turn.current_id.clone());
+                    self.turn.push(
+                        PendingUser {
+                            text,
+                            at,
+                            canonical: true,
+                            turn_id,
+                        },
+                        &mut self.history,
+                    );
+                }
+                // Codex writes these boundaries, and a turn ends where it says.
+                Some("task_started") => {
+                    let turn_id = payload
+                        .turn_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty());
+                    if !self.turn.names_current(turn_id) {
+                        flush_turn(&mut self.history, &mut self.turn);
+                        if let Some(id) = turn_id {
+                            self.turn.current_id = Some(id.to_owned());
+                        }
+                    }
+                }
+                Some("task_complete" | "turn_aborted") => {
+                    flush_turn(&mut self.history, &mut self.turn);
+                    self.turn.current_id = None;
+                }
+                _ => {}
+            },
+            "response_item" => {
+                if payload.kind.as_deref() != Some("message") {
+                    return Ok(());
+                }
+                let role = payload.role.as_deref().unwrap_or_default();
+                let Some(content) = payload.content.as_ref() else {
+                    return Ok(());
+                };
+                let text = content.visible_text();
+                if text.is_empty() {
+                    return Ok(());
+                }
+                match role {
+                    "user" => {
+                        // Only the response copy's own metadata may tie it to
+                        // a canonical event; guessing the current turn would
+                        // drop text an interrupted turn never duplicated.
+                        let turn_id = payload.metadata_turn_id();
+                        self.turn.push(
+                            PendingUser {
+                                text,
+                                at,
+                                canonical: false,
+                                turn_id,
+                            },
+                            &mut self.history,
+                        );
+                    }
+                    "assistant" => {
+                        flush_turn(&mut self.history, &mut self.turn);
+                        self.history.push(KeptMessage {
+                            role: MessageRole::Assistant,
+                            text,
+                            at,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Ends the last turn and builds the conversation.
+    fn finish(mut self, path: &Path) -> Result<ParsedConversation, SkipReason> {
+        flush_turn(&mut self.history, &mut self.turn);
+        let fallback = self.fallback;
+        let Some(cwd) = self.cwd else {
+            return Err(SkipReason::NoWorkingDirectory);
+        };
+        let first_message_at = self.history.first_at();
+        let first_user = self.history.first_text();
+        let title = first_user
+            .as_deref()
+            .map(derive_codex_title)
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Imported thread".to_owned());
+        let messages = self.history.finish()?;
+        if messages.is_empty() {
+            return Err(SkipReason::Empty);
+        }
+        let created_at = first_message_at.unwrap_or(fallback);
+        let last_active = messages
+            .last()
+            .map(|message| message.at)
+            .or(self.last_seen)
+            .unwrap_or(fallback);
+        Ok(ParsedConversation {
+            source: ImportSource::Codex,
+            path: path.to_path_buf(),
+            cwd,
+            session_id: self.session_id,
+            title,
+            model: self.model,
+            created_at,
+            last_active,
+            messages,
+        })
+    }
+}
+
+/// The persisted state of the turn currently being read.
+#[derive(Default)]
+struct TurnState {
+    /// Turn id the rollout last named.
+    current_id: Option<String>,
+    /// User records seen since the last boundary.
+    pending: Vec<PendingUser>,
+    /// Kept-text bytes waiting in `pending`.
+    pending_bytes: usize,
+    /// Set when this turn cannot be kept whole.
+    ///
+    /// Once set, nothing more is queued: the conversation is skipped with a
+    /// warning, so holding the rest of the turn would only grow memory toward
+    /// the file size.
+    overflow: bool,
+}
+
+impl TurnState {
+    /// Whether a boundary record names the turn already open.
+    ///
+    /// The real rollout order writes `task_started` with the turn id, then that
+    /// turn's generated context, then `turn_context` with the same id, then the
+    /// prompt. A boundary that repeats the open turn's id therefore marks no
+    /// new turn, and flushing on it would keep the setup context.
+    fn names_current(&self, turn_id: Option<&str>) -> bool {
+        match (self.current_id.as_deref(), turn_id) {
+            (Some(current), Some(named)) => current == named,
+            _ => false,
+        }
+    }
+
+    /// Queues one user record, bounding the pending window as it grows.
+    fn push(&mut self, user: PendingUser, history: &mut History) {
+        if self.overflow {
+            return;
+        }
+        self.pending_bytes = self
+            .pending_bytes
+            .saturating_add(user.text.len().saturating_add(16));
+        self.pending.push(user);
+        if self.pending_bytes > crate::import::MAX_KEPT_BYTES
+            || self.pending.len() > crate::import::MAX_KEPT_MESSAGES
+        {
+            // A turn this large cannot be kept whole; skipping the conversation
+            // with a warning is better than silently dropping its prompt. The
+            // queued text is released now rather than kept until the turn ends.
+            self.overflow = true;
+            self.pending.clear();
+            self.pending_bytes = 0;
+            history.note_overflow();
+        }
+    }
+}
+
+/// One user turn waiting for its turn to end.
+struct PendingUser {
+    text: String,
+    at: DateTime<Utc>,
+    /// Whether it came from the canonical `event_msg` record.
+    canonical: bool,
+    /// Turn id the record names, when it names a valid one.
+    turn_id: Option<String>,
+}
+
+/// Adds a turn's users to the history once its turn ends.
+///
+/// Two rules, in t3code's order. A canonical event's text that matches a
+/// response copy with a valid turn id makes that whole turn canonical: every
+/// response user record with the id is dropped, so generated setup context never
+/// reaches the import. Then any response copy left that exactly repeats the
+/// canonical text is dropped. A turn with no canonical event is response-only,
+/// so its context stays; and a copy whose turn id names another turn is kept, so
+/// a repeated prompt after an aborted turn loses neither turn's text.
+///
+/// The comparison key is the trimmed text: a response copy is trimmed when it
+/// is parsed, while a canonical event is kept exactly as written.
+fn flush_turn(history: &mut History, turn: &mut TurnState) {
+    let pending = std::mem::take(&mut turn.pending);
+    turn.pending_bytes = 0;
+    // Canonical turn ids: a response copy whose text matches a canonical event,
+    // tied by the id its own metadata carries.
+    let canonical_ids: std::collections::HashSet<String> = pending
+        .iter()
+        .filter(|user| !user.canonical)
+        .filter(|user| {
+            user.turn_id.as_deref().is_some_and(|turn_id| {
+                pending
+                    .iter()
+                    .any(|other| other.canonical && other.text.trim() == user.text.trim())
+                    && !turn_id.is_empty()
+            })
+        })
+        .filter_map(|user| user.turn_id.clone())
+        .collect();
+    // How many response copies each canonical event may still claim by text.
+    let mut canonical_texts: HashMap<String, usize> = HashMap::new();
+    for user in pending.iter().filter(|user| user.canonical) {
+        *canonical_texts
+            .entry(user.text.trim().to_owned())
+            .or_default() += 1;
+    }
+    for user in pending {
+        if user.canonical {
+            history.push(KeptMessage {
+                role: MessageRole::User,
+                text: user.text,
+                at: user.at,
+            });
+            continue;
+        }
+        if user
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| canonical_ids.contains(turn_id))
+        {
+            continue;
+        }
+        if let Some(left) = canonical_texts.get_mut(user.text.trim())
+            && *left > 0
+        {
+            *left -= 1;
+            continue;
+        }
+        history.push(KeptMessage {
+            role: MessageRole::User,
+            text: user.text,
+            at: user.at,
+        });
+    }
+}
+
+/// Drops leading generated setup context before deriving a title.
+///
+/// The messages themselves keep it: only the list title reads the request.
+fn derive_codex_title(text: &str) -> String {
+    let mut rest = text.trim_start();
+    loop {
+        if let Some(after) = strip_setup_block(rest) {
+            rest = after.trim_start();
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("# AGENTS.md instructions") {
+            rest = after
+                .split_once('\n')
+                .map(|(_, remainder)| remainder)
+                .unwrap_or_default();
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("## My request for Codex:") {
+            rest = after;
+            continue;
+        }
+        break;
+    }
+    derive_title(rest)
+}
+
+fn strip_setup_block(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('<')?;
+    let name_end = rest
+        .find(|character: char| character.is_whitespace() || character == '>')
+        .unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    if !matches!(
+        name,
+        "recommended_plugins"
+            | "environment_context"
+            | "user_instructions"
+            | "INSTRUCTIONS"
+            | "in-app-browser-context"
+            | "external_codex_apps_open_page"
+    ) {
+        return None;
+    }
+    let close = format!("</{name}>");
+    let end = rest.find(&close)?;
+    Some(&rest[end + close.len()..])
+}
+
+fn file_time(path: &Path) -> DateTime<Utc> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(|_| Utc::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn write_rollout(lines: &[serde_json::Value]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let directory = dir.path().join("sessions/2026/11/20");
+        std::fs::create_dir_all(&directory).expect("sessions dir");
+        let path = directory.join("rollout-2026-11-20T10-00-00-session.jsonl");
+        std::fs::write(&path, body_of(lines)).expect("rollout");
+        (dir, path)
+    }
+
+    /// Writes one rollout under `sessions/2026/08/24` and returns its path and
+    /// exact byte length.
+    fn write_named_rollout(dir: &Path, name: &str, lines: &[serde_json::Value]) -> (PathBuf, u64) {
+        let directory = dir.join("sessions/2026/08/24");
+        std::fs::create_dir_all(&directory).expect("sessions dir");
+        let path = directory.join(name);
+        let body = body_of(lines);
+        std::fs::write(&path, &body).expect("rollout");
+        (path, body.len() as u64)
+    }
+
+    fn body_of(lines: &[serde_json::Value]) -> String {
+        let mut body = String::new();
+        for line in lines {
+            body.push_str(&line.to_string());
+            body.push('\n');
+        }
+        body
+    }
+
+    fn meta() -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-session-1", "cwd": "/home/user/code/api"},
+        })
+    }
+
+    fn event_user(text: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": text},
+        })
+    }
+
+    fn event_user_with_id(text: &str, turn_id: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": text, "turn_id": turn_id},
+        })
+    }
+
+    fn task_started(turn_id: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": turn_id},
+        })
+    }
+
+    fn response_user(text: &str, turn_id: Option<&str>) -> serde_json::Value {
+        let mut payload = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        });
+        if let Some(turn_id) = turn_id {
+            payload["internal_chat_message_metadata_passthrough"] = json!({"turn_id": turn_id});
+        }
+        json!({
+            "timestamp": "2026-11-20T10:00:01Z",
+            "type": "response_item",
+            "payload": payload,
+        })
+    }
+
+    fn assistant(text: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            },
+        })
+    }
+
+    fn turn_context(turn_id: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:00Z",
+            "type": "turn_context",
+            "payload": {"turn_id": turn_id, "model": "gpt-5.1-codex"},
+        })
+    }
+
+    fn aborted(turn_id: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:03Z",
+            "type": "event_msg",
+            "payload": {"type": "turn_aborted", "turn_id": turn_id, "reason": "interrupted"},
+        })
+    }
+
+    fn user_texts(parsed: &ParsedConversation) -> Vec<&str> {
+        parsed
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .map(|message| message.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_real_rollout_order_drops_the_context_written_before_turn_context() {
+        // This machine's rollouts: `task_started` names the turn, the generated
+        // environment and AGENTS.md context follow with that turn id, then
+        // `turn_context` with the same id, then the prompt. The boundary
+        // repeats the open turn, so it must not flush the context into a
+        // response-only turn of its own.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            task_started("turn-1"),
+            response_user(
+                "<environment_context>\n<cwd>/tmp/project</cwd>\n<shell>zsh</shell>\n</environment_context>",
+                Some("turn-1"),
+            ),
+            response_user(
+                "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nPrivate project rules\n</INSTRUCTIONS>",
+                Some("turn-1"),
+            ),
+            turn_context("turn-1"),
+            event_user_with_id("Do it", "turn-1"),
+            response_user("Do it", Some("turn-1")),
+            assistant("done"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(texts, ["Do it", "done"]);
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("Private project rules")),
+            "the private instructions never reach the import"
+        );
+    }
+
+    #[test]
+    fn a_canonical_event_drops_its_matching_response_copy() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            event_user("do the thing"),
+            response_user("do the thing", Some("turn-1")),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(texts, ["do the thing", "did it"]);
+        assert_eq!(parsed.session_id.as_deref(), Some("codex-session-1"));
+    }
+
+    #[test]
+    fn a_canonical_prompt_keeps_its_original_whitespace() {
+        // t3code's whitespace fixture: the canonical event is stored exactly as
+        // written, with its leading indentation and trailing newline, while its
+        // response copy is recognised by the trimmed comparison key.
+        let canonical = "\n  Keep the canonical prompt  \n";
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            event_user(canonical),
+            response_user("Keep the canonical prompt", Some("turn-1")),
+            assistant("kept"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), [canonical]);
+        assert_eq!(parsed.title, "Keep the canonical prompt");
+    }
+
+    #[test]
+    fn a_rewound_rollout_keeps_the_history_it_inherits() {
+        // t3code's rewind fixture: the new rollout declares a byte prefix of the
+        // rollout it replaced. Both the original request and its reply stay.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let thread = "019a0000-0000-7000-8000-000000000001";
+        let rollout = "019a0000-0000-7000-8000-000000000002";
+        let kept_history = [
+            json!({
+                "timestamp": "2026-08-24T09:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": thread, "cwd": "/home/user/code/api", "history_mode": "paginated"},
+            }),
+            event_user("Keep the first request"),
+            assistant("First reply"),
+        ];
+        let (_, end_byte_offset) = write_named_rollout(
+            dir.path(),
+            &format!("rollout-2026-08-24T10-00-00-{thread}.jsonl"),
+            &kept_history,
+        );
+        let (rewound, _) = write_named_rollout(
+            dir.path(),
+            &format!("rollout-2026-08-24T11-00-00-{thread}_{rollout}.jsonl"),
+            &[
+                json!({
+                    "timestamp": "2026-08-24T11:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": thread,
+                        "cwd": "/home/user/code/api",
+                        "history_mode": "paginated",
+                        "history_base": {
+                            "thread_id": thread,
+                            "end_ordinal_exclusive": 3,
+                            "end_byte_offset": end_byte_offset,
+                        },
+                    },
+                }),
+                event_user("Ask again"),
+                assistant("Final reply"),
+            ],
+        );
+        let parsed = parse(&rewound).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Keep the first request",
+                "First reply",
+                "Ask again",
+                "Final reply"
+            ]
+        );
+        assert_eq!(parsed.session_id.as_deref(), Some(thread));
+        assert_eq!(parsed.title, "Keep the first request");
+    }
+
+    #[test]
+    fn a_repeated_prompt_after_an_aborted_turn_keeps_the_aborted_turn() {
+        // Turn 1 was interrupted after only its response copy was written; turn
+        // 2 repeats the prompt canonically. The copies belong to different
+        // turns, so neither turn's text may be dropped.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            response_user("do the thing", Some("turn-1")),
+            aborted("turn-1"),
+            turn_context("turn-2"),
+            event_user("do the thing"),
+            response_user("do the thing", Some("turn-2")),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["do the thing", "do the thing"]);
+        assert_eq!(parsed.messages.last().expect("last").text, "did it");
+    }
+
+    #[test]
+    fn a_response_copy_without_a_turn_id_is_dropped_by_its_text() {
+        // The legacy shape: the copy names no turn, so only the canonical
+        // event's text can identify it.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            event_user("do the thing"),
+            response_user("do the thing", None),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["do the thing"]);
+    }
+
+    #[test]
+    fn a_legacy_metadata_less_copy_before_the_event_is_dropped() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user("do the thing", None),
+            event_user("do the thing"),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["do the thing"]);
+    }
+
+    #[test]
+    fn the_canonical_event_wins_over_its_generated_context() {
+        // t3code's fixture: the environment block, the project's private
+        // AGENTS.md instructions and the prompt are all copies of one turn.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user(
+                "<environment_context>\n<cwd>/tmp/project</cwd>\n<shell>zsh</shell>\n</environment_context>",
+                Some("turn-1"),
+            ),
+            response_user(
+                "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nPrivate project rules\n</INSTRUCTIONS>",
+                Some("turn-1"),
+            ),
+            event_user("Do something here so it looks like a real project."),
+            response_user(
+                "Do something here so it looks like a real project.",
+                Some("turn-1"),
+            ),
+            assistant("Created the project."),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Do something here so it looks like a real project.",
+                "Created the project."
+            ]
+        );
+        assert_eq!(
+            parsed.title,
+            "Do something here so it looks like a real project."
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("Private project rules")),
+            "the private instructions never reach the import"
+        );
+    }
+
+    #[test]
+    fn ambiguous_metadata_keeps_the_response_users_text() {
+        // t3code's fixture, plus the collision it guards: an array must not be
+        // read as a turn id. Read strictly, serde would turn ["turn-1"] into
+        // `turn_id: "turn-1"`, and the later canonical turn would drop this
+        // unrelated prompt along with its own copy.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            json!({
+                "timestamp": "2026-11-20T10:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "internal_chat_message_metadata_passthrough": ["turn-1"],
+                    "content": [{"type": "input_text", "text": "Keep this legacy prompt"}],
+                },
+            }),
+            event_user("Do the thing"),
+            response_user("Do the thing", Some("turn-1")),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(
+            user_texts(&parsed),
+            ["Keep this legacy prompt", "Do the thing"]
+        );
+
+        // A blank turn id names no turn either.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user("Keep this blank-id prompt", Some("   ")),
+            assistant("kept"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["Keep this blank-id prompt"]);
+    }
+
+    #[test]
+    fn response_only_turns_keep_their_generated_context() {
+        let context = "<environment_context>\n<cwd>/tmp/project</cwd>\n</environment_context>";
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user(context, None),
+            response_user("Initialize Git and add a README.", None),
+            assistant("done"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(
+            user_texts(&parsed),
+            [context, "Initialize Git and add a README."]
+        );
+    }
+
+    #[test]
+    fn mixed_formats_keep_turns_whose_ids_repeat_after_an_assistant() {
+        // t3code's fixture: the older turn and the repeated prompt after the
+        // reply are separate turns, so neither is dropped.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user("Keep this older prompt", Some("turn-older")),
+            event_user("Keep this newer prompt"),
+            response_user("Keep this newer prompt", Some("turn-newer")),
+            assistant("Ask again when needed"),
+            response_user("Keep this newer prompt", Some("turn-newer")),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Keep this older prompt",
+                "Keep this newer prompt",
+                "Ask again when needed",
+                "Keep this newer prompt"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_copy_with_another_turns_id_is_kept() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            response_user("do the thing", Some("turn-1")),
+            assistant("stale reply"),
+            turn_context("turn-2"),
+            event_user("do the thing"),
+            response_user("do the thing", Some("turn-2")),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["do the thing", "do the thing"]);
+    }
+
+    #[test]
+    fn setup_context_is_kept_in_messages_but_not_in_the_title() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            event_user(
+                "<environment_context>\nlinux\n</environment_context>\n## My request for Codex:\nFix the flaky test",
+            ),
+            assistant("fixed"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(parsed.title, "Fix the flaky test");
+        assert!(parsed.messages[0].text.contains("<environment_context>"));
+    }
+
+    #[test]
+    fn malformed_lines_are_ignored_and_empty_conversations_are_skipped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let directory = dir.path().join("sessions/2026/11/20");
+        std::fs::create_dir_all(&directory).expect("dir");
+        let empty = directory.join("rollout-empty.jsonl");
+        std::fs::write(&empty, format!("{}\nnot json\n", meta())).expect("empty");
+        assert_eq!(parse(&empty).err(), Some(SkipReason::Empty));
+
+        let mixed = directory.join("rollout-mixed.jsonl");
+        let body = format!(
+            "{}\n{}\nbroken\n{}\n",
+            meta(),
+            event_user("real"),
+            assistant("reply")
+        );
+        std::fs::write(&mixed, body).expect("mixed");
+        let parsed = parse(&mixed).expect("parse");
+        assert_eq!(parsed.messages.len(), 2);
+    }
+
+    #[test]
+    fn a_streamed_turn_keeps_its_role_order() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            event_user("first"),
+            assistant("answer one"),
+            turn_context("turn-2"),
+            event_user("second"),
+            assistant("answer two"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(parsed.model.as_deref(), Some("gpt-5.1-codex"));
+        let roles: Vec<MessageRole> = parsed.messages.iter().map(|message| message.role).collect();
+        assert_eq!(
+            roles,
+            [
+                MessageRole::User,
+                MessageRole::Assistant,
+                MessageRole::User,
+                MessageRole::Assistant
+            ]
+        );
+    }
+
+    #[test]
+    fn a_forked_rollout_resumes_the_first_session() {
+        // Only the first `session_meta` names the conversation; a fork repeats
+        // the record with another id.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            json!({
+                "timestamp": "2026-11-20T10:05:00Z",
+                "type": "session_meta",
+                "payload": {"id": "codex-fork-2", "cwd": "/home/user/code/api"},
+            }),
+            event_user("carry on"),
+            assistant("carried on"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(parsed.session_id.as_deref(), Some("codex-session-1"));
+        let peek = peek(&path).expect("peek");
+        assert_eq!(peek.session_id.as_deref(), Some("codex-session-1"));
+    }
+
+    #[test]
+    fn the_first_message_names_the_start_whether_user_or_assistant() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            json!({
+                "timestamp": "2026-11-20T10:00:00Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.1-codex"},
+            }),
+            json!({
+                "timestamp": "2026-11-20T10:00:07Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "only a prompt"},
+            }),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(parsed.created_at.to_rfc3339(), "2026-11-20T10:00:07+00:00");
+    }
+
+    #[test]
+    fn a_prompt_sharing_a_record_with_a_large_omitted_field_is_kept() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            turn_context("turn-1"),
+            event_user("summarise this output"),
+            json!({
+                "timestamp": "2026-11-20T10:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "summarise this output"}],
+                    "attachments": [{"data": "A".repeat(5 * 1024 * 1024)}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+                },
+            }),
+            assistant("summarised"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["summarise this output"]);
+    }
+
+    #[test]
+    fn a_pending_turn_over_the_kept_text_limit_skips_the_conversation() {
+        let mut lines = vec![meta(), turn_context("turn-1")];
+        // Many canonical user records in one turn, none answered.
+        for _ in 0..3 {
+            lines.push(event_user(&"y".repeat(12 * 1024 * 1024)));
+        }
+        let (_dir, path) = write_rollout(&lines);
+        assert_eq!(parse(&path).err(), Some(SkipReason::TooMuchText));
+    }
+
+    #[test]
+    fn an_overflowing_pending_turn_releases_its_text_at_once() {
+        let mut history = History::new();
+        let mut turn = TurnState::default();
+        for _ in 0..3 {
+            turn.push(
+                PendingUser {
+                    text: "y".repeat(12 * 1024 * 1024),
+                    at: Utc::now(),
+                    canonical: true,
+                    turn_id: None,
+                },
+                &mut history,
+            );
+        }
+        assert!(turn.pending.is_empty(), "the pending window was released");
+        assert_eq!(turn.pending_bytes, 0);
+        assert_eq!(history.retained_bytes(), 0);
+        // Anything queued after the overflow is not retained either.
+        turn.push(
+            PendingUser {
+                text: "z".repeat(12 * 1024 * 1024),
+                at: Utc::now(),
+                canonical: true,
+                turn_id: None,
+            },
+            &mut history,
+        );
+        assert!(turn.pending.is_empty());
+        assert_eq!(history.finish().err(), Some(SkipReason::TooMuchText));
+    }
+}

@@ -1542,6 +1542,33 @@ pub enum ClientRequest {
         /// New setting. Turning it off disables every live link at once.
         enabled: bool,
     },
+    /// Find conversations that Claude Code and Codex already saved on a host.
+    ///
+    /// Discovery is read-only; nothing is imported until
+    /// [`Self::ImportSessions`] names a project.
+    ScanSessionImports {
+        /// Host to scan.
+        host: HostId,
+    },
+    /// Import every not-yet-imported conversation in the named projects.
+    ///
+    /// The daemon scans again so a conversation written since the scan is
+    /// picked up, registers projects it does not have, and creates one thread
+    /// per conversation. It answers as soon as the run starts; progress
+    /// arrives as [`crate::ImportEvent`] frames.
+    ImportSessions {
+        /// Host to import on.
+        host: HostId,
+        /// `ImportProject::key` values the person checked.
+        #[serde(default)]
+        projects: Vec<String>,
+    },
+    /// The current or most recent import run, so a client that reconnects can
+    /// show its progress.
+    SessionImportStatus {
+        /// Host to ask.
+        host: HostId,
+    },
 }
 
 impl ClientRequest {
@@ -1593,6 +1620,8 @@ impl ClientRequest {
             | Self::LinearGetIssue { .. }
             | Self::ListThreadIssues { .. }
             | Self::ListProjects { .. }
+            | Self::ScanSessionImports { .. }
+            | Self::SessionImportStatus { .. }
             | Self::GetNetworkAccess
             | Self::ListDirectDevices
             | Self::ListTextGenerators
@@ -1642,7 +1671,8 @@ impl ClientRequest {
             | Self::RenameProject { .. }
             | Self::RemoveProject { .. }
             | Self::SendGuestRequest { .. }
-            | Self::DismissGuestRequest { .. } => Approve,
+            | Self::DismissGuestRequest { .. }
+            | Self::ImportSessions { .. } => Approve,
             Self::TerminalOpen { .. }
             | Self::TerminalAttach { .. }
             | Self::TerminalList { .. }

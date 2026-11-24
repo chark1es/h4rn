@@ -2287,6 +2287,7 @@ class MockDaemon {
           summary: entry.summary,
           events: entry.wire.filter((record) => record.seq > body.since_seq),
           next_seq: entry.wire.at(-1)?.seq ?? body.since_seq,
+          more: false,
         });
         if (body.thread_id === "thr_b") this.startLiveStream(body.thread_id);
         return;

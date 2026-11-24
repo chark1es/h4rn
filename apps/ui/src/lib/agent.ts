@@ -48,6 +48,26 @@ export function agentStateLabel(state: AgentState): string {
   }
 }
 
+/**
+ * Whether the agent is doing something right now.
+ *
+ * A turn can still be recorded as running after its work settled — an imported
+ * turn has no completion event at all — so "live" also has to be something the
+ * agent state actually says.
+ */
+export function agentStateIsActive(state: AgentState): boolean {
+  switch (state) {
+    case "thinking":
+    case "searching":
+    case "reading":
+    case "editing":
+    case "running_tool":
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function glyphForAgentState(state: AgentState, toolName?: string): AgentGlyphSpec {
   switch (state) {
     case "queued":

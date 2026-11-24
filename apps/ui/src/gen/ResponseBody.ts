@@ -46,6 +46,8 @@ import type { GuestSharing } from "./GuestSharing";
 import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
+import type { ImportProgress } from "./ImportProgress";
+import type { ImportScan } from "./ImportScan";
 import type { LimitsReport } from "./LimitsReport";
 import type { LinearAccount } from "./LinearAccount";
 import type { LinearIssue } from "./LinearIssue";
@@ -162,7 +164,15 @@ events: Array<SeqEvent>,
 /**
  * Next sequence the client should ask for.
  */
-next_seq: number, } | { "type": "thread_created", 
+next_seq: number, 
+/**
+ * Whether more events follow this page.
+ *
+ * A paired client's answer must fit one transport frame, so a long
+ * replay arrives in pages; ask again from `next_seq` while this is
+ * true. Older daemons never set it, and an unset value means no more.
+ */
+more: boolean, } | { "type": "thread_created", 
 /**
  * New thread id.
  */
@@ -696,7 +706,15 @@ project: Project, } | { "type": "directories",
 /**
  * The listing.
  */
-listing: DirectoryListing, } | { "type": "text_generators", 
+listing: DirectoryListing, } | { "type": "session_imports", 
+/**
+ * What was found.
+ */
+scan: ImportScan, } | { "type": "session_import_status", 
+/**
+ * The run, or `None` when no import has run on this daemon.
+ */
+progress: ImportProgress | null, } | { "type": "text_generators", 
 /**
  * Generators, oldest first.
  */
