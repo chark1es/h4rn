@@ -1085,6 +1085,8 @@ fn fake_guest_answer(
     request: h4rn_protocol::GuestHttpRequest,
     token: &str,
     binding: &str,
+    page_state: &str,
+    link_bound: bool,
 ) -> h4rn_protocol::GuestHttpResponse {
     let request_id = request.request_id.clone();
     let cookie = request
@@ -1101,17 +1103,36 @@ fn fake_guest_answer(
         .unwrap_or_else(|| format!("/guest/{token}"));
     let set_cookie =
         format!("h4rn_guest={binding}; Path={prefix}; HttpOnly; Secure; SameSite=Strict");
+    let page = |state: &str| {
+        format!("<html><body data-state=\"{state}\">daemon page</body></html>").into_bytes()
+    };
     let (status, headers, body) = if request.path == format!("/guest/{token}") {
-        // The daemon's page is only asked for its page-load cookie; Connect
-        // must never return this HTML.
-        (
-            200,
-            vec![
-                ("content-type".to_string(), "text/html".to_string()),
-                ("set-cookie".to_string(), set_cookie.clone()),
-            ],
-            b"<html>daemon page</html>".to_vec(),
-        )
+        // The daemon's page is asked for its page-load cookie and rendered
+        // state; Connect must never return this HTML. A bound link renders
+        // "unbound" for a browser that presents no cookie, and a stopped token
+        // answers 410 with a plain sentence rather than the page.
+        if page_state == "revoked" {
+            (
+                410,
+                vec![("content-type".to_string(), "text/plain".to_string())],
+                b"This link was stopped or replaced by the owner.".to_vec(),
+            )
+        } else if link_bound && !bound {
+            (
+                200,
+                vec![("content-type".to_string(), "text/html".to_string())],
+                page("unbound"),
+            )
+        } else {
+            (
+                200,
+                vec![
+                    ("content-type".to_string(), "text/html".to_string()),
+                    ("set-cookie".to_string(), set_cookie.clone()),
+                ],
+                page(page_state),
+            )
+        }
     } else if request.path.ends_with("/state") {
         if bound {
             (
@@ -1180,11 +1201,15 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
         .await;
 
     let pages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let page_state = std::sync::Arc::new(std::sync::Mutex::new("active".to_string()));
+    let link_bound = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let task_state = state.clone();
     let task_device = daemon.device.id;
     let task_pages = pages.clone();
     let task_token = token.to_string();
     let task_binding = binding.to_string();
+    let task_page_state = page_state.clone();
+    let task_link_bound = link_bound.clone();
     let fake = tokio::spawn(async move {
         let mut bodies: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
@@ -1206,7 +1231,10 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
                         bodies.insert(request.request_id.clone(), Vec::new());
                         continue;
                     }
-                    let response = fake_guest_answer(request, &task_token, &task_binding);
+                    let state = task_page_state.lock().expect("page state").clone();
+                    let bound = task_link_bound.load(std::sync::atomic::Ordering::Relaxed);
+                    let response =
+                        fake_guest_answer(request, &task_token, &task_binding, &state, bound);
                     task_state.relay.complete_guest(task_device, response).await;
                 }
                 h4rn_protocol::RelayFrameKind::GuestHttpChunk => {
@@ -1292,6 +1320,28 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
         "the daemon was asked for its page-load cookie exactly once"
     );
 
+    // A dead link's page opens on its notice, because Connect passes the state
+    // the daemon rendered instead of always serving the active page.
+    *page_state.lock().expect("page state") = "expired".to_string();
+    let dead = client
+        .get(format!("{base}/guest/{machine_id}/{token}"))
+        .send()
+        .await
+        .expect("expired page");
+    assert_eq!(dead.status(), StatusCode::OK);
+    let dead_html = dead.text().await.expect("expired html");
+    assert!(
+        dead_html.contains(r#"data-state="expired""#),
+        "Connect served the active state for an expired link"
+    );
+    assert!(
+        !dead_html.contains("daemon page"),
+        "Connect returned the daemon's HTML"
+    );
+    // The rest of the live flow still works: the page's state only changes
+    // what the browser starts on, not the relayed routes.
+    *page_state.lock().expect("page state") = "active".to_string();
+
     // The page-load cookie must reach the browser on the public path and come
     // back on both state reads. Before the cookie-path fix the jar dropped it,
     // so the daemon answered "unbound" every time.
@@ -1319,6 +1369,55 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
         second["state"], "active",
         "the browser did not present its binding cookie"
     );
+
+    // The link is bound to this browser now.
+    link_bound.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // A reload forwards the browser's binding cookie to the daemon's page, so
+    // the bound browser starts on its own state instead of "unbound".
+    let reload = client
+        .get(format!("{base}/guest/{machine_id}/{token}"))
+        .send()
+        .await
+        .expect("reload page");
+    assert_eq!(reload.status(), StatusCode::OK);
+    let reload_html = reload.text().await.expect("reload html");
+    assert!(
+        reload_html.contains(r#"data-state="active""#),
+        "a bound browser reloaded to: {reload_html}"
+    );
+
+    // A fresh browser on a bound link is not the browser it was claimed by.
+    let fresh = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("fresh browser");
+    let fresh_page = fresh
+        .get(format!("{base}/guest/{machine_id}/{token}"))
+        .send()
+        .await
+        .expect("fresh page");
+    assert_eq!(fresh_page.status(), StatusCode::OK);
+    let fresh_html = fresh_page.text().await.expect("fresh html");
+    assert!(
+        fresh_html.contains(r#"data-state="unbound""#),
+        "a fresh browser on a bound link saw: {fresh_html}"
+    );
+
+    // A stopped or replaced link answers 410 and opens on its revoked notice.
+    *page_state.lock().expect("page state") = "revoked".to_string();
+    let stopped = client
+        .get(format!("{base}/guest/{machine_id}/{token}"))
+        .send()
+        .await
+        .expect("stopped page");
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let stopped_html = stopped.text().await.expect("stopped html");
+    assert!(
+        stopped_html.contains(r#"data-state="revoked""#),
+        "a stopped link did not open revoked: {stopped_html}"
+    );
+    *page_state.lock().expect("page state") = "active".to_string();
 
     // A full 10 MB upload crosses in bounded frames and arrives whole.
     let big = vec![b'a'; 10 * 1024 * 1024];

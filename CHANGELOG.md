@@ -23,13 +23,14 @@ All notable changes to h4rn are recorded here. The format follows
   each other's checkout or branch: a create that finds the folder taken refuses
   (or moves to the next suffix), and cleanup after a failure removes only the
   folder, registration and branch that attempt created. A location that would
-  put the checkout inside the project's main checkout — even the project's
-  parent folder — is refused both when the setting is saved and when a
-  checkout is made, a tag that shares a branch's
-  name no longer hides the branch, and an ACP agent configured with a fixed
-  directory refuses a worktree request instead of silently ignoring the new
-  checkout. A hand-edited settings file that no longer validates no longer stops
-  the daemon from starting. See [docs/worktrees.md](docs/worktrees.md).
+  put new checkouts inside the workspace's checkout or its main checkout — even
+  the project's parent folder, and from a linked worktree or a bare
+  repository's worktree — is refused both when the setting is saved and when a
+  checkout is made. A tag that shares a branch's name never hides the branch,
+  and an ACP agent configured with a fixed directory refuses a worktree request
+  instead of silently ignoring the new checkout. A settings file that fails
+  validation falls back to defaults, so a bad preference never stops the daemon
+  from starting. See [docs/worktrees.md](docs/worktrees.md).
 - **Agents can link pull requests from inside a thread, and outside agents can work with h4rn
   over MCP.** Every harness session now gets h4rn's own tools through its existing per-session
   token: `link_pull_request`, `unlink_pull_request`, `list_thread_pull_requests`,
@@ -626,6 +627,22 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
+  now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
+  `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,
+  and a daemon with only concrete network binds says why it cannot share instead of handing out a
+  dead link (an existing link reports that it has no serving listener). Every address in
+  `127.0.0.0/8` counts as loopback for both the listener and the link's URL, so a `127.0.0.2` bind
+  shares normally, and an IPv4-mapped bind such as `[::ffff:127.0.0.2]` names the IPv4 address it
+  really listens on instead of `[::1]`, where nothing would answer. A connection from `127.0.0.1`
+  to a dual-stack `[::]` bind counts as this machine
+  for the guest routes and `/ws`. Connect copies the link state the daemon rendered, opens a 410 on
+  the revoked notice, and sends the browser's binding cookie with the page so a bound browser
+  reloads to its own state while a fresh one sees "unbound". A Send or Dismiss that already claimed
+  its row carries on to `sent`/`dismissed` and deletes its files when the owner's connection drops,
+  as long as the daemon keeps running, writes its audit line from inside that work, and each
+  connection still runs its handlers to
+  completion so no accepted mutation is cancelled; the same holds for a dropped guest upload.
 - **An outside agent's grant can no longer be widened, replayed or read from the
   store.** A supervised ceiling now holds for the whole turn it was attached to:
   raising the thread's mode partway through that turn no longer switches the live

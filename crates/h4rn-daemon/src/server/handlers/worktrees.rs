@@ -91,21 +91,32 @@ async fn validate_for_save(
         .collect();
     // Checkouts go to `<location>/<project>/<branch>`, so the location may be
     // outside the repository while the folder it holds for a project is the
-    // repository itself (Location `~/code` for the project `~/code/api`).
-    // Resolving the project folder shells out to git, so it runs off the
-    // runtime.
+    // repository itself (Location `~/code` for the project `~/code/api`). The
+    // destination must be outside the project's own checkout *and* its main
+    // checkout: a project registered as a linked worktree (or a linked worktree
+    // of a bare repository) is named after the main checkout, so the folder the
+    // location holds for it can be the main checkout even though it is nowhere
+    // near the registered path. Resolving the project folders shells out to
+    // git, so it runs off the runtime.
     let refused = tokio::task::spawn_blocking(move || {
         for path in projects {
-            let checkout = Path::new(&path).to_path_buf();
-            let repo = crate::worktrees::git::repo_of(&checkout).unwrap_or_else(|| checkout.clone());
-            let destination =
-                expanded.join(crate::worktrees::create::project_folder(&repo));
-            if location_inside_repo(&repo, &destination) {
+            let registered = Path::new(&path).to_path_buf();
+            let repo = crate::worktrees::git::toplevel(&registered).unwrap_or(registered);
+            let main = crate::worktrees::git::repo_of(&repo).unwrap_or_else(|| repo.clone());
+            let destination = expanded.join(crate::worktrees::create::project_folder(&main));
+            let inside = if location_inside_repo(&repo, &destination) {
+                Some(&repo)
+            } else if location_inside_repo(&main, &destination) {
+                Some(&main)
+            } else {
+                None
+            };
+            if let Some(checkout) = inside {
                 return Some(format!(
                     "the worktree location {} would put new checkouts (under {}) inside the project checkout {}; choose a folder outside it",
                     expanded.display(),
                     destination.display(),
-                    repo.display()
+                    checkout.display()
                 ));
             }
         }

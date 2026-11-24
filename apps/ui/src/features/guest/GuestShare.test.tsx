@@ -14,7 +14,7 @@ const harness = vi.hoisted(() => ({
     creating: {} as Record<string, boolean>,
     stopping: {} as Record<string, boolean>,
     answering: {} as Record<string, boolean>,
-    error: null,
+    error: null as string | null,
   },
   send: vi.fn(),
   dismiss: vi.fn(),
@@ -65,8 +65,13 @@ import { GuestShareDialog } from "./GuestShareDialog";
 
 beforeEach(() => {
   harness.state.sharing = {};
+  harness.state.sharingLoading = {};
+  harness.state.creating = {};
+  harness.state.stopping = {};
+  harness.state.answering = {};
   harness.state.settingsEnabled = true;
   harness.state.dialogThreadId = "th_1";
+  harness.state.error = null;
   harness.send.mockReset();
   harness.dismiss.mockReset();
   harness.share.mockReset();
@@ -125,6 +130,32 @@ describe("GuestShareDialog", () => {
     expect(screen.getByText(/bound to the first browser/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /stop sharing/i }));
     expect(harness.stop).toHaveBeenCalledWith("th_1");
+  });
+
+  it("explains when no listener can serve the link", () => {
+    harness.state.sharing = {
+      th_1: {
+        thread_id: "th_1",
+        links_enabled: true,
+        link: {
+          url: null,
+          expires_at: "2099-11-24T10:00:00Z",
+          bound: false,
+          no_serving_listener: true,
+        },
+      },
+    };
+    render(<GuestShareDialog />);
+    expect(screen.getByText(/add a loopback listener/i)).toBeTruthy();
+    expect(screen.getByText(/link this machine to Connect/i)).toBeTruthy();
+    // A link nobody can open has no first browser to promise.
+    expect(screen.queryByText(/first browser/i)).toBeNull();
+  });
+
+  it("shows the error the store holds in an alert", () => {
+    harness.state.error = "Sharing is unavailable right now.";
+    render(<GuestShareDialog />);
+    expect(screen.getByRole("alert").textContent).toContain("Sharing is unavailable right now.");
   });
 
   it("says only an admin device may show the URL", () => {

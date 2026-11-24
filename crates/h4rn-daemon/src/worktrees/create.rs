@@ -332,16 +332,29 @@ pub fn create_blocking(
     };
     // A checkout inside the main checkout would make the main worktree dirty,
     // and `git worktree add` may refuse it outright; refuse before claiming.
+    //
+    // `repo` is the workspace's own checkout, which for a linked worktree (or
+    // a bare repository's worktree) is not the main one, while `project` is
+    // named after the main checkout. The destination must be outside both, or
+    // a location that holds the main checkout leaks new checkouts into it.
+    let main = git::repo_of(&repo).unwrap_or_else(|| repo.clone());
     let project = project_name(&repo);
     // Checkouts go to `<location>/<project>/<branch>`, so the location itself
     // may be outside the repository while the folder it holds for this project
     // is the repository (Location `~/code` for the project `~/code/api`).
     let destination_root = location.join(&project);
-    if location_inside_repo(&repo, &destination_root) {
+    let destination_in = if location_inside_repo(&repo, &destination_root) {
+        Some(&repo)
+    } else if location_inside_repo(&main, &destination_root) {
+        Some(&main)
+    } else {
+        None
+    };
+    if let Some(checkout) = destination_in {
         return Err(format!(
             "the worktree location {} would put new checkouts inside the repository {}, so they would sit in the main checkout; choose a folder outside it",
             location.display(),
-            repo.display()
+            checkout.display()
         ));
     }
 
@@ -2258,6 +2271,126 @@ mod tests {
         assert!(
             !root.path().join("api").join("parent-x").exists(),
             "nothing was created inside the main checkout"
+        );
+    }
+
+    /// A thread can start from a linked worktree, whose main checkout lives
+    /// elsewhere. The project folder is named after the main checkout, so a
+    /// location holding the main checkout's parent would land the new checkout
+    /// in it even though it is nowhere near the workspace.
+    #[test]
+    fn a_linked_worktree_refuses_a_location_inside_the_main_checkout() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        init_repo(&main);
+        let linked = root.path().join("linked");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &linked,
+            &WorktreeRequest::Named("linked/x".into()),
+            "linked",
+            &settings(Some(root.path())),
+            data.path(),
+            None,
+        )
+        .expect_err("the destination is the main checkout, not the linked one");
+        assert!(error.contains("inside the repository"), "{error}");
+        assert!(
+            error.contains(&main.to_string_lossy().into_owned()),
+            "{error}"
+        );
+        let dest = main.join(folder_name("linked/x"));
+        assert!(
+            !dest.exists(),
+            "nothing was created inside the main checkout"
+        );
+        assert!(
+            git::run_with_timeout(
+                &main,
+                ["rev-parse", "--verify", "refs/heads/linked/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
+        );
+        assert_eq!(
+            git::list_worktrees(&main).expect("list").len(),
+            1,
+            "the checkout that was already there is still the only one"
+        );
+    }
+
+    /// A bare repository's worktree has its git directory (the common dir, and
+    /// the folder the project is named after) elsewhere. A location holding
+    /// that directory would put the new checkout inside it, so it is refused.
+    #[test]
+    fn a_bare_repository_worktree_refuses_a_location_inside_its_git_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+        init_repo(&source);
+        let bare = root.path().join("repo.git");
+        run(
+            root.path(),
+            &["clone", "-q", "--bare", "source", "repo.git"],
+        );
+        let linked = root.path().join("linked");
+        run(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &linked,
+            &WorktreeRequest::Named("bare/x".into()),
+            "bare",
+            &settings(Some(root.path())),
+            data.path(),
+            None,
+        )
+        .expect_err("the destination is the bare repository's git directory");
+        assert!(error.contains("inside the repository"), "{error}");
+        assert!(
+            error.contains(&bare.to_string_lossy().into_owned()),
+            "{error}"
+        );
+        let dest = bare.join(folder_name("bare/x"));
+        assert!(
+            !dest.exists(),
+            "nothing was created inside the git directory"
+        );
+        assert!(
+            git::run_with_timeout(
+                &bare,
+                ["rev-parse", "--verify", "refs/heads/bare/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
+        );
+        assert_eq!(
+            git::list_worktrees(&bare).expect("list").len(),
+            1,
+            "the checkout that was already there is still the only one"
         );
     }
 

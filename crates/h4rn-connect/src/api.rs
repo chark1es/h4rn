@@ -1918,6 +1918,7 @@ async fn guest_page(
     State(state): State<AppState>,
     client: ClientIp,
     Path((machine_id, token)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let Ok(machine_id) = Uuid::parse_str(&machine_id) else {
         return Ok((StatusCode::NOT_FOUND, "Not found.").into_response());
@@ -1936,34 +1937,99 @@ async fn guest_page(
         state.config.rate_limits.per_ip_per_minute,
         Duration::from_secs(60),
     )?;
-    // Ask the daemon for the short-lived page-load cookie and discard its
-    // HTML. A crawler that fetches the page only creates an unclaimed cookie;
-    // it never binds the link.
-    let cookie = pending_binding_cookie(&state, machine_id, &token).await;
-    Ok(guest_page_response(cookie))
+    // Ask the daemon for the short-lived page-load cookie and the link state
+    // it rendered. A crawler that fetches the page only creates an unclaimed
+    // cookie; it never binds the link. The browser's own binding cookie goes
+    // along, so a reload renders this browser's state rather than "unbound";
+    // a page GET never claims the link either way.
+    let cookie = guest_binding_cookie(&headers);
+    let (cookie, state) = pending_page_load(&state, machine_id, &token, cookie.as_deref()).await;
+    Ok(guest_page_response(cookie, state))
 }
 
-/// Fetches the page-load binding cookie from a machine's daemon.
+/// The value of the browser's `h4rn_guest` cookie, if it has one.
 ///
-/// Only the daemon knows which cookie is pending; Connect keeps the Set-Cookie
-/// value and rebuilds it for its own path, never returning the daemon's HTML.
-async fn pending_binding_cookie(state: &AppState, machine_id: Uuid, token: &str) -> Option<String> {
+/// Only the guest cookie is forwarded to the daemon; every other cookie in the
+/// request stays on Connect's origin. One parser serves both the page request
+/// and the relayed requests, so the cookie's name has a single source.
+///
+/// The first pair wins: browsers send the cookie with the longest matching
+/// path first (RFC 6265 §5.4), and Connect scopes the binding cookie to the
+/// link's own path, so a broader duplicate never replaces it.
+fn guest_cookie_value(headers: &HeaderMap) -> Option<String> {
+    for header in headers.get_all(axum::http::header::COOKIE) {
+        let Ok(header) = header.to_str() else {
+            continue;
+        };
+        for pair in header.split(';') {
+            let Some((name, binding)) = pair.trim().split_once('=') else {
+                continue;
+            };
+            if name == h4rn_protocol::GUEST_COOKIE {
+                return Some(binding.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// The browser's guest binding cookie, if it has a value.
+fn guest_binding_cookie(headers: &HeaderMap) -> Option<String> {
+    guest_cookie_value(headers).filter(|binding| !binding.is_empty())
+}
+
+/// Fetches the page-load binding cookie and rendered state from a machine's
+/// daemon.
+///
+/// Only the daemon knows which cookie is pending and what state the link is
+/// in; Connect keeps the Set-Cookie value and rebuilds it for its own path, and
+/// passes the state through so an expired link opens on its notice instead of
+/// briefly showing a composer that cannot submit. Connect never returns the
+/// daemon's HTML.
+async fn pending_page_load(
+    state: &AppState,
+    machine_id: Uuid,
+    token: &str,
+    binding: Option<&str>,
+) -> (Option<String>, &'static str) {
+    let Some(answer) = ask_daemon_for_page(state, machine_id, token, binding).await else {
+        return (None, "active");
+    };
+    let page_state = page_state_from_answer(&answer);
+    let cookie = answer.set_cookie.clone().or_else(|| {
+        answer
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, value)| value.clone())
+    });
+    let cookie = cookie.and_then(|cookie| {
+        rebuild_guest_cookie(
+            &cookie,
+            &format!("/guest/{machine_id}/{token}"),
+            state.config.public_base_url.starts_with("https://"),
+        )
+    });
+    (cookie, page_state)
+}
+
+/// Asks one machine's daemon for its guest page.
+///
+/// The answer's HTML is only read for its rendered state; the cookie is
+/// rebuilt for Connect's own path and the HTML itself is discarded.
+async fn ask_daemon_for_page(
+    state: &AppState,
+    machine_id: Uuid,
+    token: &str,
+    binding: Option<&str>,
+) -> Option<h4rn_protocol::GuestHttpResponse> {
     let machine = state.store.machine(machine_id).await.ok()?;
     let daemon = machine.daemon_device_id?;
     if !state.relay.online(daemon).await {
         return None;
     }
     let request_id = Uuid::now_v7().to_string();
-    let public_prefix = format!("/guest/{machine_id}/{token}");
-    let request = GuestHttpRequest {
-        request_id: request_id.clone(),
-        method: "GET".to_string(),
-        path: format!("/guest/{token}"),
-        public_prefix: Some(public_prefix.clone()),
-        chunked: false,
-        headers: vec![("accept".to_string(), "text/html".to_string())],
-        body: Vec::new(),
-    };
+    let request = page_request(&request_id, machine_id, token, binding);
     let payload = serde_json::to_vec(&request).ok()?;
     let waiter = state.relay.expect_guest(&request_id, daemon).await;
     let frame = RelayFrame {
@@ -1984,31 +2050,83 @@ async fn pending_binding_cookie(state: &AppState, machine_id: Uuid, token: &str)
         state.relay.forget_guest(&request_id).await;
         return None;
     }
-    let answer = match tokio::time::timeout(Duration::from_secs(10), waiter).await {
-        Ok(Ok(answer)) => answer,
+    match tokio::time::timeout(Duration::from_secs(10), waiter).await {
+        Ok(Ok(answer)) => Some(answer),
         _ => {
             state.relay.forget_guest(&request_id).await;
-            return None;
+            None
         }
-    };
-    let cookie = answer.set_cookie.clone().or_else(|| {
-        answer
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
-            .map(|(_, value)| value.clone())
-    })?;
-    rebuild_guest_cookie(
-        &cookie,
-        &public_prefix,
-        state.config.public_base_url.starts_with("https://"),
-    )
+    }
+}
+
+/// The page request Connect sends one daemon.
+///
+/// The browser's own binding cookie travels with it when the browser has one,
+/// so the daemon renders the state that browser is in; without one it renders
+/// the unclaimed page it always did.
+fn page_request(
+    request_id: &str,
+    machine_id: Uuid,
+    token: &str,
+    binding: Option<&str>,
+) -> GuestHttpRequest {
+    let mut headers = vec![("accept".to_string(), "text/html".to_string())];
+    if let Some(binding) = binding {
+        headers.push((
+            "cookie".to_string(),
+            format!("{}={binding}", h4rn_protocol::GUEST_COOKIE),
+        ));
+    }
+    GuestHttpRequest {
+        request_id: request_id.to_string(),
+        method: "GET".to_string(),
+        path: format!("/guest/{token}"),
+        public_prefix: Some(format!("/guest/{machine_id}/{token}")),
+        chunked: false,
+        headers,
+        body: Vec::new(),
+    }
+}
+
+/// The link state one daemon page answer names.
+///
+/// A 410 means the daemon no longer knows the token: the link was stopped or
+/// replaced. That answer's body is a plain sentence, not the page, so the
+/// state comes from the status code.
+fn page_state_from_answer(answer: &h4rn_protocol::GuestHttpResponse) -> &'static str {
+    if answer.status == StatusCode::GONE.as_u16() {
+        return "revoked";
+    }
+    guest_page_state(&answer.body).unwrap_or("active")
+}
+
+/// The link state the daemon rendered into its page.
+///
+/// Connect copies only a known state token, never the daemon's HTML: an
+/// unknown or injected value falls back to the active page and is then
+/// corrected by the first `/state` answer.
+fn guest_page_state(html: &[u8]) -> Option<&'static str> {
+    let html = std::str::from_utf8(html).ok()?;
+    // Only the body element's own attribute counts: the page's script also
+    // reads `dataset.state`, and a stray string elsewhere must not name it.
+    let (_, body) = html.split_once("<body")?;
+    let marker = "data-state=\"";
+    let start = body.find(marker)? + marker.len();
+    let end = start + body[start..].find('"')?;
+    match &body[start..end] {
+        "active" => Some("active"),
+        "expired" => Some("expired"),
+        "revoked" => Some("revoked"),
+        "disabled" => Some("disabled"),
+        "unbound" => Some("unbound"),
+        _ => None,
+    }
 }
 
 /// The fixed page response, with its hash-based CSP.
-fn guest_page_response(cookie: Option<String>) -> Response {
+fn guest_page_response(cookie: Option<String>, state: &str) -> Response {
     let mut response = Response::new(axum::body::Body::from(h4rn_protocol::guest_page_html(
-        "active",
+        state,
     )));
     let headers = response.headers_mut();
     headers.insert(
@@ -2556,14 +2674,7 @@ fn forwarded_guest_headers(
 
 /// The `h4rn_guest` cookie from a request, ignoring every other cookie.
 fn guest_only_cookie(headers: &HeaderMap) -> Option<String> {
-    let header = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())?;
-    let value = header.split(';').find_map(|pair| {
-        let (name, value) = pair.trim().split_once('=')?;
-        (name == h4rn_protocol::GUEST_COOKIE).then_some(value)
-    })?;
-    Some(format!("{}={value}", h4rn_protocol::GUEST_COOKIE))
+    guest_cookie_value(headers).map(|value| format!("{}={value}", h4rn_protocol::GUEST_COOKIE))
 }
 
 /// Requires a guest submission to be a same-origin JSON POST.
@@ -2946,7 +3057,7 @@ mod tests {
 
     #[test]
     fn the_guest_page_is_connect_s_own_static_page() {
-        let response = guest_page_response(None);
+        let response = guest_page_response(None, "active");
         let csp = response
             .headers()
             .get("content-security-policy")
@@ -2959,5 +3070,129 @@ mod tests {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
         assert_eq!(content_type, Some("text/html; charset=utf-8"));
+    }
+
+    #[tokio::test]
+    async fn connect_serves_the_state_the_daemon_rendered() {
+        // A daemon page for an expired link says so in its body; Connect reads
+        // only that state and never the HTML around it.
+        let daemon_page = h4rn_protocol::guest_page_html("expired");
+        assert_eq!(guest_page_state(daemon_page.as_bytes()), Some("expired"));
+
+        let response = guest_page_response(None, "expired");
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 256 * 1024)
+            .await
+            .expect("page body");
+        let html = String::from_utf8(body.to_vec()).expect("utf-8 page");
+        assert!(html.contains(r#"data-state="expired""#), "{html}");
+        assert!(parts.headers.contains_key(CONTENT_TYPE));
+    }
+
+    #[test]
+    fn an_unknown_daemon_state_never_reaches_connect_s_page() {
+        assert_eq!(guest_page_state(b"<body>no state here</body>"), None);
+        assert_eq!(
+            guest_page_state(br#"<body data-state="active&quot;onload=alert(1)">"#),
+            None,
+            "Connect copied an injected state"
+        );
+        assert_eq!(
+            guest_page_state(br#"<body data-state="totally-made-up">"#),
+            None
+        );
+    }
+
+    /// One daemon answer with the fields this test needs.
+    fn guest_answer(status: u16, body: &[u8]) -> h4rn_protocol::GuestHttpResponse {
+        h4rn_protocol::GuestHttpResponse {
+            request_id: "req_1".into(),
+            status,
+            chunked: false,
+            headers: Vec::new(),
+            body: body.to_vec(),
+            set_cookie: None,
+        }
+    }
+
+    #[test]
+    fn a_stopped_or_replaced_link_opens_revoked() {
+        // The daemon answers 410 for a token it no longer knows, with a plain
+        // sentence rather than the page.
+        let gone = guest_answer(410, b"This link was stopped or replaced by the owner.");
+        assert_eq!(page_state_from_answer(&gone), "revoked");
+        // A live page still carries its own state.
+        let page = h4rn_protocol::guest_page_html("active");
+        assert_eq!(
+            page_state_from_answer(&guest_answer(200, page.as_bytes())),
+            "active"
+        );
+        // A bound-link page for a browser presenting no cookie is unbound.
+        let unbound = h4rn_protocol::guest_page_html("unbound");
+        assert_eq!(
+            page_state_from_answer(&guest_answer(200, unbound.as_bytes())),
+            "unbound"
+        );
+    }
+
+    #[test]
+    fn the_page_request_carries_the_browser_s_binding_cookie() {
+        let bound = page_request("req_1", Uuid::nil(), "token_abc", Some("binding_value"));
+        assert_eq!(bound.path, "/guest/token_abc");
+        assert_eq!(
+            bound
+                .headers
+                .iter()
+                .find(|(name, _)| name == "cookie")
+                .map(|(_, value)| value.as_str()),
+            Some("h4rn_guest=binding_value"),
+            "a bound browser's cookie was not forwarded with the page request"
+        );
+        let fresh = page_request("req_2", Uuid::nil(), "token_abc", None);
+        assert!(
+            fresh.headers.iter().all(|(name, _)| name != "cookie"),
+            "a fresh browser sent a cookie to the daemon"
+        );
+    }
+
+    #[test]
+    fn only_the_guest_cookie_is_forwarded_to_the_daemon() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("session=secret; h4rn_guest=binding_value"),
+        );
+        assert_eq!(
+            guest_binding_cookie(&headers).as_deref(),
+            Some("binding_value")
+        );
+        let empty = HeaderMap::new();
+        assert_eq!(guest_binding_cookie(&empty), None);
+        // A request without the guest cookie forwards nothing.
+        let mut other = HeaderMap::new();
+        other.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("session=secret"),
+        );
+        assert_eq!(guest_binding_cookie(&other), None);
+    }
+
+    #[test]
+    fn the_link_scoped_guest_cookie_wins_over_a_broader_duplicate() {
+        // Browsers list the longest matching path first, so the link's own
+        // binding comes before any broader `h4rn_guest` cookie.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("h4rn_guest=link_binding; session=x; h4rn_guest=broader"),
+        );
+        assert_eq!(
+            guest_binding_cookie(&headers).as_deref(),
+            Some("link_binding")
+        );
+        assert_eq!(
+            guest_only_cookie(&headers).as_deref(),
+            Some("h4rn_guest=link_binding")
+        );
     }
 }

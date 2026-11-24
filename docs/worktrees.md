@@ -39,14 +39,17 @@ already exists is refused: a branch you name reports that the folder is taken,
 while a generated name moves to the next suffix (`...-2`). h4rn never reuses an
 existing folder, because it may hold another thread's checkout.
 
-The location must be outside the project's own checkout, and so must the folder
-h4rn puts a project's checkouts in. Checkouts go to
+The location must be outside the project's own checkout and its main checkout,
+and so must the folder h4rn puts a project's checkouts in. Checkouts go to
 `<location>/<project>/<branch>`, so an inside path (including the project folder
-itself) is refused, and so is the project's parent folder (`~/code` for the
-project `~/code/api`): that would put the new checkout in the main checkout.
-Both are refused when the setting is saved and when a worktree is created,
-because a checkout inside the main checkout would make it dirty and confuse
-every command run there.
+itself) is refused, and so is the main checkout's parent folder (`~/code` for
+the project `~/code/api`): that would put the new checkout in the main checkout.
+The same holds when the thread starts in a linked worktree or in a worktree of a
+bare repository: the project folder is named after the main checkout (or the
+bare repository's git directory), wherever that is, and the destination is
+refused inside either it or the workspace. Both are refused when the setting is
+saved and when a worktree is created, because a checkout inside the main
+checkout would make it dirty and confuse every command run there.
 
 **Settings → Worktrees → New worktrees → Location** sets another directory:
 

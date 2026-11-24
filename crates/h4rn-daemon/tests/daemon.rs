@@ -2012,6 +2012,87 @@ async fn worktree_settings_refuse_a_location_that_holds_the_project_itself() {
     daemon.stop().await;
 }
 
+/// A project registered at a linked worktree is named after the main checkout,
+/// so a location holding that name can put new checkouts in the registered
+/// checkout itself even though the path is nowhere near it. Creation refuses
+/// that; saving the setting must refuse it too.
+#[tokio::test]
+async fn worktree_settings_refuse_a_location_that_holds_a_linked_worktrees_checkout() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let main = root.path().join("api");
+    std::fs::create_dir(&main).expect("api");
+    git_in(&main, &["init", "-b", "main"]);
+    git_in(&main, &["config", "user.name", "h4rn test"]);
+    git_in(&main, &["config", "user.email", "test@example.invalid"]);
+    git_in(&main, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(main.join("a.txt"), "one\n").expect("write");
+    git_in(&main, &["add", "a.txt"]);
+    git_in(&main, &["commit", "-m", "Initial commit"]);
+
+    // A linked worktree that happens to carry the main checkout's folder name:
+    // the project is named after `api`, so a location of `<root>/wt` holds the
+    // checkout destination `<root>/wt/api`, which is this workspace itself.
+    let container = root.path().join("wt");
+    std::fs::create_dir(&container).expect("wt");
+    let linked = container.join("api");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: linked.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the linked worktree as the project");
+
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(container.to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the destination is the registered checkout itself");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error.message.contains("inside the project checkout"),
+        "{error:?}"
+    );
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(
+                settings.location, None,
+                "the refused location was not saved"
+            );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn a_bad_saved_worktree_setting_does_not_stop_the_daemon() {
     let data_dir = tempfile::tempdir().expect("data");
