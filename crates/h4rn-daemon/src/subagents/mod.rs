@@ -144,6 +144,7 @@ impl From<ManagerError> for SubagentError {
             ManagerError::Unsupported(message) => Self::Unsupported(message),
             ManagerError::NotImplemented(message) => Self::Unsupported(message),
             ManagerError::Internal(message) => Self::Internal(message),
+            ManagerError::DeliveryUnclear(message) => Self::Internal(message),
         }
     }
 }

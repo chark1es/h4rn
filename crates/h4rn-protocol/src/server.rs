@@ -983,6 +983,11 @@ pub enum ProtoErrorCode {
     NotImplemented,
     /// The daemon or an upstream is rate limited.
     RateLimited,
+    /// A write may have reached its destination before the connection failed.
+    ///
+    /// The daemon cannot tell whether a prompt or steer landed, so the client
+    /// must not resend it: the text may already be in the turn.
+    DeliveryUnclear,
     /// An internal failure; retryable at the client's discretion.
     Internal,
 }
