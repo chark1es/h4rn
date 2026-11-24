@@ -77,7 +77,11 @@ function issueErrorMessage(issue: ThreadIssue): string {
   const error = issue.error ?? "";
   if (issue.scope.tracker !== "linear" || !issue.issue_id) return error;
   const name = issue.identifier ?? "Linear issue";
-  return error.split(`Linear issue ${issue.issue_id}`).join(name).split(issue.issue_id).join(name);
+  // An older daemon may have echoed the id in either case.
+  const id = issue.issue_id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return error
+    .replace(new RegExp(`Linear issue ${id}`, "gi"), () => name)
+    .replace(new RegExp(id, "gi"), () => name);
 }
 
 function issueUrl(issue: ThreadIssue): string {

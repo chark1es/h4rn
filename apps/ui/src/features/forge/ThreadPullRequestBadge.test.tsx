@@ -389,6 +389,31 @@ describe("linked pull request badge and panel", () => {
     expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
   });
 
+  it("hides an uppercase UUID an older daemon echoed", () => {
+    const linked: ThreadIssue = {
+      scope: { tracker: "linear", team_id: "team_uuid_1" },
+      issue_id: "issue_uuid_1",
+      account_id: "lin_1",
+      state: null,
+      error: "Linear issue ISSUE_UUID_1 was not found",
+      identifier: "ENG-1",
+      title: "Rate limit the import",
+      linked_at: "2026-01-01T00:00:00Z",
+    };
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[linked]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    openBadge();
+    expect(screen.getByText("ENG-1 was not found")).toBeTruthy();
+    expect(screen.queryByText(/ISSUE_UUID_1/i)).toBeNull();
+  });
+
   it("labels a Linear link made before the identifier was stored", () => {
     const linked: ThreadIssue = {
       scope: { tracker: "linear", team_id: "team_uuid_1" },
