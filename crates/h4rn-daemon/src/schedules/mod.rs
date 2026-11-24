@@ -83,6 +83,12 @@ const RETRY_CAP_SECS: i64 = 3600;
 /// The prefix of a webhook task's public path.
 pub const WEBHOOK_PREFIX: &str = "/webhooks/";
 
+/// How a disarm failure starts its detail in a task's history.
+///
+/// `open()` uses it to recognize the row an older daemon disarmed, so the
+/// pause is only restored for a task that really failed to name its next slot.
+const DISARM_DETAIL_PREFIX: &str = "Its schedule has no next run:";
+
 /// Why a schedule request failed.
 #[derive(Debug)]
 pub enum ScheduleServiceError {
@@ -233,6 +239,16 @@ impl ScheduleService {
         clock: Arc<dyn Clock>,
     ) -> Result<Self, ScheduleServiceError> {
         let mut stored = journal.list_schedules().await?;
+        // The histories are read once: the upgrade check below needs the run a
+        // task was disarmed by, and the overlap check needs the last thread that
+        // actually ran, even when a later skip is the newest entry.
+        let mut histories = HashMap::new();
+        for task in &stored {
+            histories.insert(
+                task.task_id.clone(),
+                journal.schedule_runs(&task.task_id, HISTORY_LIMIT).await?,
+            );
+        }
         // A once slot that is already spent must not stay armed, even if a
         // daemon stopped between admitting it and recording its run. A marker
         // written before the zone joined the slot identity names only the
@@ -251,15 +267,46 @@ impl ScheduleService {
             {
                 task.next_run_at = None;
             }
+            // A task an older daemon disarmed kept `enabled`, so it opened with
+            // Pause offered for a task that could never run and kept holding its
+            // thread's checkout. A webhook task has no clock slot by design and
+            // a spent Once task already shows as spent: only a clock task that
+            // lost its slot was disarmed.
+            let spent_once =
+                task.once_consumed && matches!(task.schedule, ScheduleSpec::Once { .. });
+            let runs = histories.get(&task.task_id);
+            if task.enabled
+                && task.next_run_at.is_none()
+                && !task.schedule.is_webhook()
+                && !spent_once
+                // Only a task whose last *clock* run is the disarm failure was
+                // disarmed by an older daemon. A manual **Run now** after the
+                // disarm is a newer history entry but never armed a slot, so it
+                // does not hide the disarm. An enabled row whose stored slot
+                // merely failed to decode never failed to run: pausing it would
+                // drop the timestamp the person's task still owns and free its
+                // checkout for no reason, so it is left exactly as stored.
+                && runs.is_some_and(|runs| last_clock_run_disarmed(runs))
+            {
+                // Only the pause changes; every other stored field stays.
+                task.enabled = false;
+                if let Err(error) = journal.upsert_schedule(task).await {
+                    tracing::warn!(
+                        task = %task.task_id,
+                        %error,
+                        "could not save the pause of a task that has no next run"
+                    );
+                }
+            }
         }
-        // The overlap check needs the last thread that actually ran, even when
-        // a later skip is the newest history entry.
         let mut started_threads = HashMap::new();
         for task in &stored {
-            let runs = journal.schedule_runs(&task.task_id, HISTORY_LIMIT).await?;
-            if let Some(thread_id) = runs
-                .iter()
-                .find(|run| run.outcome == ScheduleRunOutcome::Started)
+            if let Some(thread_id) = histories
+                .get(&task.task_id)
+                .and_then(|runs| {
+                    runs.iter()
+                        .find(|run| run.outcome == ScheduleRunOutcome::Started)
+                })
                 .and_then(|run| run.thread_id.clone())
             {
                 started_threads.insert(task.task_id.clone(), thread_id);
@@ -912,9 +959,10 @@ impl ScheduleService {
                 .await
                 .insert(task_id.clone(), task.clone());
             if let Err(error) = self.persist_task(&task).await {
-                // The spent marker is not durable, so the run must not start:
+                // The spent marker is not durable, so the run cannot start:
                 // a crash before the run's own write would arm the slot again.
-                // Keep the slot blocked in memory and retry on the backoff.
+                // Keep the slot blocked in memory and re-arm it only after
+                // this backoff; the run starts once the marker write succeeds.
                 let failures = {
                     let mut retries = lock(&self.inner.retries);
                     let failures = retries.entry(task_id.clone()).or_insert(0);
@@ -977,7 +1025,14 @@ impl ScheduleService {
                 detail: Some("The previous run is still working.".into()),
             };
             return self
-                .record(&task.task_id, &task, run, trigger, started_at)
+                .record(
+                    &task.task_id,
+                    &task,
+                    run,
+                    trigger,
+                    started_at,
+                    AfterRun::Advance,
+                )
                 .await;
         }
         let result = self.start_thread(&task, prompt).await;
@@ -1002,7 +1057,14 @@ impl ScheduleService {
             detail,
         };
         let recorded = self
-            .record(&task.task_id, &task, run, trigger, started_at)
+            .record(
+                &task.task_id,
+                &task,
+                run,
+                trigger,
+                started_at,
+                AfterRun::Advance,
+            )
             .await?;
         if outcome == ScheduleRunOutcome::Failed {
             return Err(ScheduleServiceError::Internal(
@@ -1134,12 +1196,21 @@ impl ScheduleService {
         task.thread_id.clone()
     }
 
-    /// Disarms a task whose schedule cannot name its next slot, and says why.
+    /// Disarms and pauses a task whose schedule cannot name its next slot, and
+    /// says why.
     ///
     /// The due run is not dispatched: its thread could never be recorded, and
-    /// each backoff of the unrecorded run would start another. The task keeps
-    /// its history and shows the failure until the schedule is fixed and the
-    /// task is resumed.
+    /// each backoff of the unrecorded run would start another. Pausing it too
+    /// keeps the list honest: a task that will never run again is not one the
+    /// toggle can offer to pause, and it stops holding its thread's checkout
+    /// against worktree cleanup. The task keeps its history and shows the
+    /// failure until the schedule is fixed and the task is resumed.
+    ///
+    /// The pause and the **Failed** run that explains it are one write,
+    /// committed under the task's write lock: the failure is never lost while
+    /// the pause survives. The write also rechecks the task's current settings,
+    /// so an edit the person makes first wins and the slot runs once instead of
+    /// being paused by the refusal that was produced before the edit.
     async fn record_uncomputable(
         &self,
         task_id: &ScheduleTaskId,
@@ -1147,39 +1218,29 @@ impl ScheduleService {
         reason: String,
     ) {
         let now = self.inner.clock.now();
-        let (task, run) = {
-            let _write = self.write_lock(task_id).await;
-            let Some(mut task) = self.inner.tasks.lock().await.get(task_id).cloned() else {
-                return;
-            };
-            if task.next_run_at != Some(slot) {
-                return;
-            }
-            task.next_run_at = None;
-            task.updated_at = now;
-            self.inner
-                .tasks
-                .lock()
-                .await
-                .insert(task_id.clone(), task.clone());
-            let run = ScheduleRun {
-                run_id: 0,
-                task_id: task_id.clone(),
-                scheduled_for: Some(slot),
-                started_at: now,
-                thread_id: None,
-                outcome: ScheduleRunOutcome::Failed,
-                detail: Some(format!(
-                    "Its schedule has no next run: {reason} Fix the schedule to run it again."
-                )),
-            };
-            (task, run)
+        let Some(task) = self.task(task_id).await else {
+            return;
         };
-        // The task is already disarmed in memory, so `record` keeps it that way
-        // and commits the visible failure; a failed write is retried on its own
-        // backoff without admitting the slot again.
+        let run = ScheduleRun {
+            run_id: 0,
+            task_id: task_id.clone(),
+            scheduled_for: Some(slot),
+            started_at: now,
+            thread_id: None,
+            outcome: ScheduleRunOutcome::Failed,
+            detail: Some(format!(
+                "{DISARM_DETAIL_PREFIX} {reason} Fix the schedule to run it again."
+            )),
+        };
         if let Err(error) = self
-            .record(task_id, &task, run, Trigger::Scheduled, now)
+            .record(
+                task_id,
+                &task,
+                run,
+                Trigger::Scheduled,
+                now,
+                AfterRun::Pause,
+            )
             .await
         {
             tracing::warn!(%task_id, error = %error, "could not record a disarmed schedule");
@@ -1205,7 +1266,14 @@ impl ScheduleService {
             detail: Some(detail),
         };
         match self
-            .record(task_id, &task, run, trigger, self.inner.clock.now())
+            .record(
+                task_id,
+                &task,
+                run,
+                trigger,
+                self.inner.clock.now(),
+                AfterRun::Advance,
+            )
             .await
         {
             Ok(run) => Some(run),
@@ -1220,7 +1288,9 @@ impl ScheduleService {
     ///
     /// The task's post-run state goes live before the journal write: if the
     /// write fails, the runner still sees the real next slot and the run waits
-    /// for its own retry, so the slot is never admitted again.
+    /// for its own retry, so the slot is never admitted again. An automatic
+    /// pause is the exception: it is published only once the write that carries
+    /// the failure explaining it has landed.
     ///
     /// The current row is re-read under the per-task lock, so only bookkeeping
     /// fields are written: an edit or rotation that happened while the run was
@@ -1232,6 +1302,7 @@ impl ScheduleService {
         mut run: ScheduleRun,
         trigger: Trigger,
         now: DateTime<Utc>,
+        after: AfterRun,
     ) -> Result<ScheduleRun, ScheduleServiceError> {
         let _write = self.write_lock(task_id).await;
         // A task deleted while its run was starting must not be resurrected by
@@ -1255,34 +1326,64 @@ impl ScheduleService {
         {
             task.thread_id = run.thread_id.clone();
         }
+        let mut pausing = false;
         if matches!(trigger, Trigger::Scheduled)
             && run.scheduled_for.is_some()
             && task.next_run_at == run.scheduled_for
         {
-            if matches!(task.schedule, ScheduleSpec::Once { .. }) {
-                task.once_consumed_slot = task.schedule.once_slot(&task.timezone);
-                task.once_consumed = task.once_consumed_slot.is_some();
-                task.next_run_at = None;
-            } else {
-                match self.advance(&task, now) {
-                    Ok(next) => task.next_run_at = next,
-                    Err(error) => return Err(self.defer(task, now, error.to_string()).await),
+            match after {
+                AfterRun::Advance => {
+                    if matches!(task.schedule, ScheduleSpec::Once { .. }) {
+                        task.once_consumed_slot = task.schedule.once_slot(&task.timezone);
+                        task.once_consumed = task.once_consumed_slot.is_some();
+                        task.next_run_at = None;
+                    } else {
+                        match self.advance(&task, now) {
+                            Ok(next) => task.next_run_at = next,
+                            Err(error) => {
+                                return Err(self.defer(task, now, error.to_string()).await);
+                            }
+                        }
+                    }
+                }
+                AfterRun::Pause => {
+                    // The pause is part of the same write as the failure that
+                    // explains it, and only lands while the task still holds
+                    // the slot that could not be advanced and its current
+                    // settings still cannot name a slot after it. The settings
+                    // are checked here, under the same write, because the
+                    // refusal was produced from an older read: a person who
+                    // corrected the schedule in between owns the task, so the
+                    // pause is dropped, the failure stays as history, and the
+                    // slot stays armed to run once.
+                    if self.pause_still_applies(&task, &run, now) {
+                        task.next_run_at = None;
+                        task.enabled = false;
+                        task.updated_at = now;
+                        pausing = true;
+                    }
                 }
             }
         }
         // Publish the advanced clock first: even if the journal write fails,
-        // the runner must not see the old slot and admit it again.
-        self.inner
-            .tasks
-            .lock()
-            .await
-            .insert(task.task_id.clone(), task.clone());
+        // the runner must not see the old slot and admit it again. A pause is
+        // not published on its own, so an edit made while its write is still
+        // retrying cannot save the pause without the failure behind it.
+        if !pausing {
+            self.inner
+                .tasks
+                .lock()
+                .await
+                .insert(task.task_id.clone(), task.clone());
+        }
         if let Err(error) = self.commit(&mut run, &task).await {
             let reason = format!("The run could not be saved: {error}");
-            self.enqueue_retry(task_id.clone(), run, now, &reason);
-            let _ = self.inner.events.send(ScheduleEvent::Upserted {
-                task: Box::new(task),
-            });
+            self.enqueue_retry(task_id.clone(), run, now, &reason, pausing);
+            if !pausing {
+                let _ = self.inner.events.send(ScheduleEvent::Upserted {
+                    task: Box::new(task),
+                });
+            }
             return Err(ScheduleServiceError::Internal(reason));
         }
         lock(&self.inner.retries).remove(task_id);
@@ -1308,12 +1409,17 @@ impl ScheduleService {
     }
 
     /// Queues a run whose journal write failed for its own retry deadline.
+    ///
+    /// `pause` keeps the automatic pause staged with the run: the retry either
+    /// writes both or, when the person has moved the clock on since, only the
+    /// failure.
     fn enqueue_retry(
         &self,
         task_id: ScheduleTaskId,
         run: ScheduleRun,
         now: DateTime<Utc>,
         reason: &str,
+        pause: bool,
     ) {
         let failures = {
             let mut retries = lock(&self.inner.retries);
@@ -1331,6 +1437,7 @@ impl ScheduleService {
             task_id,
             PendingWrite {
                 run,
+                pause,
                 due_at: now + backoff_for(failures),
             },
         );
@@ -1340,8 +1447,12 @@ impl ScheduleService {
     /// Writes every pending run whose retry deadline has passed.
     ///
     /// This writes the run and the current task row only; it never re-admits
-    /// the slot, so a retry cannot start a second run. The entry stays in the
-    /// map during the attempt so admission cannot slip a new run in behind it.
+    /// the slot, so a retry cannot start a second run. A staged automatic pause
+    /// is written with its failure only while the task's current settings still
+    /// cannot name a next slot and the task still holds the failed slot; a
+    /// person who fixed the schedule first keeps the task enabled, and the same
+    /// slot then runs once. The entry stays in the map during the attempt so
+    /// admission cannot slip a new run in behind it.
     async fn flush_pending(&self, now: DateTime<Utc>) {
         let due: Vec<ScheduleTaskId> = {
             let pending = lock(&self.inner.pending);
@@ -1353,22 +1464,27 @@ impl ScheduleService {
         };
         for task_id in due {
             let _write = self.write_lock(&task_id).await;
-            let mut run = {
+            let (mut run, pause) = {
                 let mut pending = lock(&self.inner.pending);
                 match pending.get_mut(&task_id) {
                     Some(pending) if pending.due_at <= now => {
                         // Park the entry on the retry cap while this attempt
                         // runs, so a second wake cannot write it twice.
                         pending.due_at = now + chrono::Duration::seconds(RETRY_CAP_SECS);
-                        pending.run.clone()
+                        (pending.run.clone(), pending.pause)
                     }
                     _ => continue,
                 }
             };
-            let Some(task) = self.inner.tasks.lock().await.get(&task_id).cloned() else {
+            let Some(mut task) = self.inner.tasks.lock().await.get(&task_id).cloned() else {
                 lock(&self.inner.pending).remove(&task_id);
                 continue;
             };
+            if pause && self.pause_still_applies(&task, &run, now) {
+                task.next_run_at = None;
+                task.enabled = false;
+                task.updated_at = now;
+            }
             match self.commit(&mut run, &task).await {
                 Ok(()) => {
                     lock(&self.inner.pending).remove(&task_id);
@@ -1502,6 +1618,25 @@ impl ScheduleService {
         next_after(&task.schedule, tz, task.created_at, now).map_err(|error| {
             ScheduleServiceError::Internal(format!("the schedule has no next run: {error}"))
         })
+    }
+
+    /// Whether the automatic pause staged for `run` still applies.
+    ///
+    /// The pause belongs to the run that could not name a slot after its own.
+    /// It only applies while the task still holds that run's slot and the task's
+    /// *current* settings still cannot name a slot after it. Both the first
+    /// attempt and its retry ask this, so the two cannot drift apart: a person
+    /// who corrects the schedule in between keeps the task enabled, the original
+    /// failure stays as history, and that same slot runs once.
+    fn pause_still_applies(
+        &self,
+        task: &ScheduleTask,
+        run: &ScheduleRun,
+        now: DateTime<Utc>,
+    ) -> bool {
+        run.scheduled_for.is_some()
+            && task.next_run_at == run.scheduled_for
+            && !matches!(self.advance(task, now), Ok(Some(_)))
     }
 
     /// Validates a draft and builds the stored task.
@@ -1711,9 +1846,20 @@ enum Trigger {
     Webhook,
 }
 
+/// How a recorded run updates the task's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterRun {
+    /// Advance to the schedule's next slot, or spend a Once marker.
+    Advance,
+    /// Pause the task: its schedule cannot name the slot after this one.
+    Pause,
+}
+
 /// A run whose journal write failed, waiting for its own retry deadline.
 struct PendingWrite {
     run: ScheduleRun,
+    /// Whether this run also pauses the task, as one write.
+    pause: bool,
     due_at: DateTime<Utc>,
 }
 
@@ -1721,6 +1867,29 @@ struct PendingWrite {
 fn backoff_for(failures: u32) -> chrono::Duration {
     let factor = 1i64 << failures.saturating_sub(1).min(16);
     chrono::Duration::seconds(RETRY_BASE_SECS.saturating_mul(factor).min(RETRY_CAP_SECS))
+}
+
+/// Whether a run is the failure that disarmed a task: its schedule could not
+/// name the slot after this one.
+fn is_disarm_failure(run: &ScheduleRun) -> bool {
+    run.outcome == ScheduleRunOutcome::Failed
+        && run
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with(DISARM_DETAIL_PREFIX))
+}
+
+/// Whether the newest run the clock produced is the disarm failure.
+///
+/// Runs are newest first. A manual **Run now** pressed after the disarm adds a
+/// newer entry but never armed a clock slot, so the search walks back to the
+/// newest run that has one; a scheduled run after the disarm would be that run
+/// instead, and the task was not left disarmed. Webhook runs have no slot
+/// either and are skipped the same way.
+fn last_clock_run_disarmed(runs: &[ScheduleRun]) -> bool {
+    runs.iter()
+        .find(|run| run.scheduled_for.is_some())
+        .is_some_and(is_disarm_failure)
 }
 
 /// Whether two task rows name the same destination thread identity.

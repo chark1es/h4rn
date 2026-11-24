@@ -92,8 +92,19 @@ All notable changes to h4rn are recorded here. The format follows
   during the run cannot arm it again, and a spent Once task stays spent across
   edits and resumes; only a different date, time or time zone names a new slot,
   and a run is refused until that marker is durable, so a crash cannot re-arm
-  it. A schedule that cannot name its next slot is disarmed and records the
-  reason instead of starting a thread on every backoff. Daily and weekly times
+  it; a spent marker written before time zones joined that identity is migrated
+  when the daemon opens it. A schedule that cannot name its next slot is
+  disarmed and paused in the same write — it records the reason, offers
+  **Resume** instead of **Pause**, and releases its thread's checkout — instead
+  of starting a thread on every backoff; a failed write retries the pause with
+  its failure, and the pause checks the task's current settings under the same
+  write on the first attempt and on the retry, so fixing the schedule meanwhile
+  keeps the task enabled and lets that slot run once while the original failure
+  stays in the history. On open, a task is paused only when its newest
+  clock-scheduled run is that disarm failure — a **Run now** pressed after it
+  changes nothing; a row whose timestamp cannot be read and
+  that never failed to run is left as stored, keeping its checkout protected.
+  Daily and weekly times
   run only at the first occurrence in a fall-back hour, cron returns the
   earliest UTC instant among that hour's jobs, and the editor's default zone
   comes from the daemon. The editor also says why when it cannot reveal a
@@ -519,6 +530,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Issues follow through on the tracker's answers.** An Azure team project whose name has a
+  space (`Platform Team`) now reads through percent-encoded paths and links instead of a 404, and
+  Gitea/Forgejo finds a label that belongs to the organization as well as one that belongs to the
+  repository, without needing an organization-scoped token for a label already on the issue. GitHub's
+  "Opened by me" and "Mentioning me" searches stay on open issues, its timeline is read across up
+  to ten pages so a pull request cross-referenced on a later page still appears, and a timeline
+  link to another origin is never followed with the account's credentials. A Linear team attached
+  to two projects stays writable after one project is removed, Settings shows why a Linear account
+  or team list failed to load, and a project whose repository has no matching account is named on
+  the Issues page (or the failed account load is named instead). On the page itself, a failed
+  "Load more" keeps its button, a page that arrives after its project was hidden or its account
+  changed is dropped, saving an edit keeps the comment draft, the linked-items panel tells two
+  `#12` issues from different repositories apart and names a Linear team by its key, and the filter
+  strip wraps on a phone screen with 44 px targets.
 - **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
   the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
   All four sources now show the active tab's file against the source on screen, and the wider

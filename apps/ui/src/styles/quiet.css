@@ -6611,3 +6611,21 @@ fieldset.q-seg-fs {
     border-bottom: 1px solid var(--line);
   }
 }
+
+/* A phone shows five involvement tabs; let them wrap rather than run off
+   the 390 px screen, with targets tall enough for a thumb. */
+@media (max-width: 560px) {
+  .q-issues-head .q-seg {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .q-issues-head .q-seg > button {
+    flex: 1 1 auto;
+    /* DESIGN.md's phone target size, so a thumb hits it as easily as the
+       nav bar's buttons. */
+    min-height: 44px;
+  }
+  .q-issues-head .q-issues-search {
+    min-width: 0;
+  }
+}
