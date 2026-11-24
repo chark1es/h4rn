@@ -2311,6 +2311,49 @@ async fn the_pending_budget_is_held_before_any_file_is_written() {
 }
 
 #[tokio::test]
+async fn a_send_records_that_it_was_accepted_before_the_turn_starts() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "accept marker").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("send me"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The claim is the durable acceptance: a daemon that stops between it and
+    // the turn must be able to tell this message from one never sent.
+    let gate = daemon.guest.pause_next_claim();
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    let pool = journal_pool(&daemon).await;
+    let (status, accepted): (String, i64) =
+        sqlx::query_as("SELECT status, accepted FROM guest_requests WHERE request_id = ?")
+            .bind(&request_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the claimed row");
+    pool.close().await;
+    assert_eq!(status, "sending");
+    assert_eq!(accepted, 1, "the claim did not record the accepted outcome");
+
+    gate.release();
+    sending
+        .await
+        .expect("send task")
+        .expect("the accepted send failed");
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
     let daemon = boot().await;
     let base = format!("http://{}", daemon.addr);
@@ -2399,6 +2442,59 @@ async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
         .expect("count row");
     pool.close().await;
     assert_eq!(rows, 0, "an ended link kept a finished request row");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_an_accepted_send_as_sent() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "accepted recover").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("went through"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The turn started, but the daemon stopped before writing `sent`. The
+    // accepted marker was written with the claim, so recovery can tell this
+    // from a message that never left the queue.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("UPDATE guest_requests SET status = 'sending', accepted = 1 WHERE request_id = ?")
+        .bind(&request_id)
+        .execute(&pool)
+        .await
+        .expect("claim the accepted row");
+    pool.close().await;
+
+    let resume = browser.state(0).await.next_seq;
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sent"),
+        "an accepted send was recovered as never sent"
+    );
+    // The same browser's next poll carries the answer that clears its card.
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: true, .. } if id == &request_id
+        )),
+        "the guest never learned its accepted message resolved: {:?}",
+        later.events
+    );
     daemon.stop().await;
 }
 
@@ -4022,6 +4118,82 @@ async fn a_thread_settled_after_the_placement_check_gets_no_card() {
         .filter_map(Result::ok)
         .collect();
     assert!(leftovers.is_empty(), "the refused message kept files");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_refused_placement_keeps_its_cleanup_record_when_files_cannot_be_removed() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "conflict cleanup").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::BeforePublish);
+    let posting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post(
+                    "/messages",
+                    &GuestMessageInput {
+                        text: "settle under me".into(),
+                        attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                            name: "kept.txt".into(),
+                            mime: "text/plain".into(),
+                            data: base64_encode(b"keep me"),
+                        }],
+                    },
+                )
+                .await
+        })
+    };
+    gate.arrived().await;
+    let request_id = std::fs::read_dir(daemon.dir.path().join("guest"))
+        .expect("guest dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("greq_"))
+        .expect("the reserved request directory");
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    // A refused disk: the cleanup cannot remove this path as a directory.
+    std::fs::remove_dir_all(&directory).expect("clear the request directory");
+    std::fs::write(&directory, b"not a directory").expect("block the cleanup");
+
+    // The settle wins the placement decision, so the card is refused. The
+    // row must stay reachable for the sweep rather than follow the failed
+    // file removal out of the database.
+    daemon
+        .manager
+        .set_thread_tab(&thread_id, ThreadTab::Settled, false)
+        .await
+        .expect("settle the thread");
+    gate.release();
+    let (status, body) = posting.await.expect("post task");
+    assert_eq!(
+        status,
+        410,
+        "a settled thread took a guest message: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("deleting"),
+        "a refused placement dropped the row whose files are still on disk"
+    );
+    assert!(directory.exists());
+
+    std::fs::remove_file(&directory).expect("unblock the cleanup");
+    daemon.guest.sweep_expired().await.expect("sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await,
+        None,
+        "the retried cleanup never removed the row"
+    );
+    assert!(!directory.exists());
     daemon.stop().await;
 }
 

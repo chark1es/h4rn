@@ -1193,6 +1193,8 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
         .relay
         .register(h4rn_connect::relay::Peer {
             device_id: daemon.device.id,
+            connection_id: Uuid::now_v7(),
+            announces_hello: false,
             user_id: daemon.user.id,
             machine_id: Some(machine_id),
             kind: "daemon".to_string(),
@@ -1480,6 +1482,8 @@ async fn a_failed_guest_proxy_leaves_no_waiter_and_no_body() {
         .relay
         .register(h4rn_connect::relay::Peer {
             device_id: daemon.device.id,
+            connection_id: Uuid::now_v7(),
+            announces_hello: false,
             user_id: daemon.user.id,
             machine_id: Some(machine_id),
             kind: "daemon".to_string(),
@@ -1521,6 +1525,8 @@ async fn a_failed_guest_proxy_leaves_no_waiter_and_no_body() {
         .relay
         .register(h4rn_connect::relay::Peer {
             device_id: daemon.device.id,
+            connection_id: Uuid::now_v7(),
+            announces_hello: false,
             user_id: daemon.user.id,
             machine_id: Some(machine_id),
             kind: "daemon".to_string(),
@@ -1609,26 +1615,18 @@ async fn a_router_upload_waits_for_the_announced_admission() {
     let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-admission")).await;
     let machine_id = daemon.device.machine_id.expect("the daemon owns a machine");
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let connection = Uuid::now_v7();
     state
         .relay
         .register(h4rn_connect::relay::Peer {
             device_id: daemon.device.id,
+            connection_id: connection,
+            announces_hello: true,
             user_id: daemon.user.id,
             machine_id: Some(machine_id),
             kind: "daemon".to_owned(),
             tx,
         })
-        .await;
-    // The hello a real daemon sends: this peer promises to admit an upload's
-    // body before it arrives.
-    state
-        .relay
-        .announce(
-            daemon.device.id,
-            h4rn_protocol::RelayHello {
-                features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
-            },
-        )
         .await;
 
     let relay = state.relay.clone();
@@ -1751,12 +1749,25 @@ async fn a_router_upload_waits_for_the_announced_admission() {
             .unwrap()
     };
 
-    // A daemon that never admits is an error, not an invitation to upload.
+    // A connection that promised a hello but has not sent one is unknown:
+    // the handler fails closed and sends no body, rather than treating the
+    // silence as an older daemon.
     let (status, body) = send(&state, post(vec![b'a'; 64 * 1024])).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(body["code"], "guest_admission_timeout");
+    assert_eq!(body["code"], "guest_negotiating");
 
-    // The next upload is admitted and streams to the daemon.
+    // The hello arrives after the grace. The next upload is admitted and
+    // streams to the daemon; the earlier request left nothing to stream to.
+    state
+        .relay
+        .announce(
+            daemon.device.id,
+            connection,
+            h4rn_protocol::RelayHello {
+                features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
+            },
+        )
+        .await;
     let upload = vec![b'a'; 128 * 1024];
     let (status, body) = send(&state, post(upload.clone())).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
@@ -1767,4 +1778,102 @@ async fn a_router_upload_waits_for_the_announced_admission() {
     assert!(cancelled, "Connect never cancelled the timed-out admission");
     assert_eq!(received, upload.len());
     fake.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_cancelled_guest_request_leaves_no_waiter_or_body() {
+    use h4rn_protocol::{
+        GuestHttpChunk, GuestHttpRequest, GuestHttpResponse, RelayFrameKind, RelayServerEvent,
+    };
+
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-cancel")).await;
+    let machine_id = daemon.device.machine_id.expect("the daemon owns a machine");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            connection_id: Uuid::now_v7(),
+            announces_hello: false,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_owned(),
+            tx,
+        })
+        .await;
+
+    // Start the real handler future and cancel it, as a browser disconnect
+    // does mid-answer.
+    let app = router(state.clone());
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/guest/{machine_id}/guest_cancel_token/state"))
+        .body(Body::empty())
+        .unwrap();
+    let handler = tokio::spawn(async move {
+        let _ = app.oneshot(request).await;
+    });
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the daemon never received the exchange")
+        .expect("relay queue closed");
+    let RelayServerEvent::Frame { frame } = event else {
+        panic!("unexpected relay event");
+    };
+    assert_eq!(frame.kind, RelayFrameKind::GuestHttp);
+    let request: GuestHttpRequest = serde_json::from_slice(&frame.payload).expect("guest request");
+    assert_eq!(state.relay.pending_guests().await, 1);
+
+    // A chunked answer that has started but not finished is the partial body
+    // that used to outlive its browser.
+    assert!(
+        state
+            .relay
+            .complete_guest(
+                daemon.device.id,
+                GuestHttpResponse {
+                    request_id: request.request_id.clone(),
+                    status: 200,
+                    chunked: true,
+                    headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+                    body: Vec::new(),
+                    set_cookie: None,
+                },
+            )
+            .await
+    );
+    assert!(
+        state
+            .relay
+            .complete_guest_chunk(
+                daemon.device.id,
+                GuestHttpChunk {
+                    request_id: request.request_id,
+                    seq: 0,
+                    last: false,
+                    body: b"{\"state\":".to_vec(),
+                },
+            )
+            .await
+    );
+    assert_eq!(state.relay.pending_guest_bodies().await, 1);
+
+    handler.abort();
+    let _ = handler.await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if state.relay.pending_guests().await == 0
+                && state.relay.pending_guest_bodies().await == 0
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a cancelled request kept its waiter or partial body");
 }

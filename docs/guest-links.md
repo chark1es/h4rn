@@ -129,22 +129,23 @@ The guest's text and files run with the thread's current permission mode once
 you send them. Check them first, as you would anything pasted from a chat.
 
 Over Connect a message's files are never uploaded before the daemon agrees to
-the exchange. The daemon says on its relay hello that it admits uploads, and a
-guest request that arrives before the hello waits for it; a hello wakes every
-waiting request, so two uploads at once both learn what the daemon speaks.
-Connect asks first, and it streams no body until that answer arrives; a refused
-message is answered without reading a byte of its body. A current daemon that
-goes quiet is an error, never treated as an older build, so a slow machine
-cannot receive an upload it has not accepted; Connect then tells the daemon to
-drop the exchange, so a slot held for a body that will never come is released
-at once rather than at the idle timeout. The daemon holds a separate upload slot
-from the moment it admits the body until the body is complete, so a browser that
-trickles an upload never takes the slot a state read or a snapshot needs, and a
-browser that disappears gives its slot back at the next ping. A completed body
-keeps its slot until its answer actually holds a work slot, so uploads cannot
-pile up past the cap while every work slot is busy. A guest page from an older
-daemon that does not announce admission keeps the short pre-authorization buffer
-that build implements.
+the exchange. A current daemon marks its relay socket as one that sends a hello,
+then says on that hello that it admits uploads. Until that hello arrives the
+socket is unknown, and Connect never streams to an unknown socket: the guest
+gets a retryable busy answer and the exchange is cancelled, so a hello that
+arrives late costs a retry, never an unaccepted body. A hello wakes every
+request waiting for it, so two uploads at once both learn what the daemon
+speaks. Once the hello names admission, Connect asks first and streams no body
+until that answer arrives; a refused message is answered without reading a byte
+of its body, and a current daemon that goes quiet is an error whose slot is
+released by a cancel rather than at the idle timeout. A socket opened by a build
+that predates hellos, or a hello that omits admission, keeps the bounded legacy
+path and that build's short pre-authorization buffer. The daemon holds a
+separate upload slot from the moment it admits the body until the body is
+complete, so a browser that trickles an upload never takes the slot a state read
+or a snapshot needs, and a browser that disappears gives its slot back at the
+next ping. A completed body keeps its slot until its answer actually holds a
+work slot, so uploads cannot pile up past the cap while every work slot is busy.
 
 ## What the daemon enforces
 
@@ -159,9 +160,12 @@ writes any file, and publishes the request only after the files are written. A
 request is written in two steps: a row that holds the quota and its files, then
 the card above your composer. Startup finishes or discards a request interrupted
 between them, so there is never a row that uses quota without a card. A Send or
-reservation interrupted by a shutdown is answered as dismissed: its files go,
-its resolution is raised and the row stays while the link lives, so the guest's
-next poll clears its card. If the
+reservation interrupted by a shutdown is answered from what it recorded: an
+accepted Send resolves as sent, one that never reached a turn as dismissed. In
+both cases its files go, its resolution is raised and the row stays while the
+link lives, so the same browser's next poll clears its card. A refused
+submission whose files cannot be removed keeps a cleanup record until the sweep
+retries, rather than losing the only row that names those files. If the
 link ended, expired, the Labs switch turned off or the thread settled while the
 files were being written, publication is refused and the files and row are
 deleted. The last placement check and the card's append happen under the same

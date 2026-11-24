@@ -641,11 +641,17 @@ All notable changes to h4rn are recorded here. The format follows
   that admission arrives; a current daemon that stays quiet is an error, never mistaken for an
   older build, while a daemon that does not announce it keeps the older bounded wait. Uploads
   hold a separate capped slot from state and attachment reads, and an abandoned upload gives it
-  back at the next ping. A restart no longer loses the guest's answer: an interrupted Send or
-  reservation is answered as dismissed and its row stays while the link lives, so the guest's card
-  clears too. A completed upload keeps its slot until its answer holds a work slot, so finished
-  bodies cannot pile up past the cap, and a timed-out admission is cancelled so the daemon
-  releases its slot at once. Two guest requests waiting for the same daemon's hello both see it.
+  back at the next ping. A restart no longer loses the guest's answer: a Send records its
+  acceptance with its claim, an interrupted Send or reservation is answered from that record, and
+  its row stays while the link lives, so the same browser's next poll clears its card. A refused
+  submission keeps a cleanup record when its files cannot be removed yet. A completed upload keeps
+  its slot until its answer holds a work slot, so finished bodies cannot pile up past the cap, and
+  a timed-out admission is cancelled so the daemon releases its slot at once. A current daemon's
+  relay socket is marked as one that sends a hello, and while that hello is unknown Connect never
+  streams a body: the guest gets a retryable answer instead. Capability follows the socket, so a
+  reconnect starts unknown and a hello from a replaced socket is ignored; two guest requests
+  waiting for the same hello both see it. A browser that disconnects while its chunked answer is
+  arriving takes its waiter and partial body with it.
   The attach control's keyboard focus ring uses the design system's focus
   colour in both themes.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link

@@ -195,6 +195,10 @@ struct RequestRow {
     attachments: Vec<StoredAttachment>,
     created_at: DateTime<Utc>,
     status: String,
+    /// Whether the owner's Send reached the turn. It is written with the
+    /// claim, before the turn starts, so a crash between the turn and its
+    /// `sent` row still lets recovery answer the guest honestly.
+    accepted: bool,
     /// `sent` or `dismissed` once the card has an answer; `None` while it is
     /// still waiting.
     resolution: Option<String>,
@@ -698,6 +702,9 @@ impl GuestService {
         for statement in [
             "ALTER TABLE guest_requests ADD COLUMN resolution TEXT",
             "ALTER TABLE guest_requests ADD COLUMN resolution_emitted INTEGER NOT NULL DEFAULT 0",
+            // Whether a Send reached the turn. A row from before this column
+            // was never accepted, so recovery treats it as never sent.
+            "ALTER TABLE guest_requests ADD COLUMN accepted INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = sqlx::query(statement).execute(&self.pool).await;
         }
@@ -784,7 +791,7 @@ impl GuestService {
     /// row and its files alone.
     async fn sweep_finished_requests(&self, recover_in_flight: bool) -> Result<(), GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
              FROM guest_requests",
         )
         .fetch_all(&self.pool)
@@ -894,13 +901,15 @@ impl GuestService {
 
     /// Recovers a submission or Send interrupted by the last shutdown.
     ///
-    /// No writer is left, so the row's answer is decided here. While its link
-    /// still lives the guest can poll again, and the snapshot only mentions a
-    /// `GuestRequestResolved` whose request id is still a row for that link.
-    /// The row therefore becomes a dismissed provenance record: its files go,
-    /// its resolution is raised, and the row stays so the guest's next poll
-    /// clears the card. Ending the link, or the sweep after it is gone, drops
-    /// the row exactly as it does for any other finished request.
+    /// No writer is left, so the row's answer is decided here. A `sending` row
+    /// carries whether its turn was accepted; a `reserving` row never reached
+    /// one. While the link still lives the guest can poll again, and the
+    /// snapshot only mentions a `GuestRequestResolved` whose request id is
+    /// still a row for that link. The row therefore stays as the provenance
+    /// record of that answer: its files go, its resolution is raised, and the
+    /// same browser's next poll clears the card. Ending the link, or the sweep
+    /// after it is gone, drops the row exactly as it does for any other
+    /// finished request.
     async fn recover_interrupted_submission(&self, request: &RequestRow) -> Result<(), GuestError> {
         let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_links WHERE link_id = ?")
             .bind(&request.link_id)
@@ -909,11 +918,18 @@ impl GuestService {
         if linked == 0 {
             return self.claim_and_discard(request).await;
         }
+        let resolution = if request.accepted {
+            "sent"
+        } else {
+            "dismissed"
+        };
         let claimed = sqlx::query(
             "UPDATE guest_requests
-             SET status = 'dismissed', resolution = 'dismissed', resolution_emitted = 0
+             SET status = ?, resolution = ?, resolution_emitted = 0
              WHERE request_id = ? AND status = ?",
         )
+        .bind(resolution)
+        .bind(resolution)
         .bind(&request.request_id)
         .bind(&request.status)
         .execute(&self.pool)
@@ -923,8 +939,8 @@ impl GuestService {
         }
         self.delete_request_files_best_effort(request);
         let mut recovered = request.clone();
-        recovered.status = "dismissed".into();
-        recovered.resolution = Some("dismissed".into());
+        recovered.status = resolution.into();
+        recovered.resolution = Some(resolution.into());
         recovered.resolution_emitted = false;
         if let Err(error) = self.emit_resolution(&recovered).await {
             tracing::warn!(
@@ -2084,6 +2100,7 @@ impl GuestService {
             attachments: stored,
             created_at,
             status: "publishing".into(),
+            accepted: false,
             resolution: None,
             resolution_emitted: false,
         };
@@ -2122,9 +2139,33 @@ impl GuestService {
         Ok(row.to_proto())
     }
 
-    /// Drops a reserved request and its files after a failed submission.
+    /// Drops a rejected request and its files after a failed submission.
+    ///
+    /// The row is removed last: if its files cannot be removed now, it stays
+    /// as a `deleting` cleanup record and the sweep retries. Deleting the row
+    /// while its directory survives would leave files on disk with nothing
+    /// that names them, so no later pass could ever reach them.
     async fn remove_request(&self, request_id: &str, directory: &Path) {
-        let _ = std::fs::remove_dir_all(directory);
+        match std::fs::remove_dir_all(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    request = %request_id,
+                    %error,
+                    "a rejected guest request keeps its cleanup record"
+                );
+                let _ = sqlx::query(
+                    "UPDATE guest_requests
+                     SET status = 'deleting', resolution = COALESCE(resolution, 'dismissed')
+                     WHERE request_id = ?",
+                )
+                .bind(request_id)
+                .execute(&self.pool)
+                .await;
+                return;
+            }
+        }
         let _ = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
             .bind(request_id)
             .execute(&self.pool)
@@ -2185,7 +2226,7 @@ impl GuestService {
 
     async fn pending_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
              FROM guest_requests WHERE link_id = ? AND status = 'pending'
              ORDER BY created_at ASC",
         )
@@ -2198,7 +2239,7 @@ impl GuestService {
     /// Finished rows whose link has ended, including ones already claimed.
     async fn finished_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
              FROM guest_requests
              WHERE link_id = ? AND status IN ('sent', 'dismissed', 'deleting')",
         )
@@ -2210,7 +2251,7 @@ impl GuestService {
 
     async fn request_by_id(&self, request_id: &str) -> Result<Option<RequestRow>, GuestError> {
         let row = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, accepted, resolution, resolution_emitted
              FROM guest_requests WHERE request_id = ?",
         )
         .bind(request_id)
@@ -2242,8 +2283,12 @@ impl GuestService {
                 "That request no longer exists.".into(),
             ));
         };
+        // The accepted outcome is written with the claim, before the turn
+        // starts. A crash after the turn but before `sent` is written therefore
+        // still tells recovery what the guest was owed, and a Send that fails
+        // clears it again below.
         let claimed = sqlx::query(
-            "UPDATE guest_requests SET status = 'sending'
+            "UPDATE guest_requests SET status = 'sending', accepted = 1
              WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
         )
         .bind(request_id)
@@ -2305,7 +2350,8 @@ impl GuestService {
             Err(error) => {
                 // The turn did not start: give the owner the chance to retry.
                 let _ = sqlx::query(
-                    "UPDATE guest_requests SET status = 'pending' WHERE request_id = ?",
+                    "UPDATE guest_requests SET status = 'pending', accepted = 0
+                     WHERE request_id = ?",
                 )
                 .bind(&request.request_id)
                 .execute(&self.pool)
@@ -2463,6 +2509,7 @@ fn row_to_request(row: sqlx::sqlite::SqliteRow) -> Result<RequestRow, GuestError
             .map(|value| value.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
         status: row.try_get("status")?,
+        accepted: row.try_get::<i64, _>("accepted").unwrap_or(0) != 0,
         resolution: row.try_get("resolution").unwrap_or(None),
         resolution_emitted: row
             .try_get::<i64, _>("resolution_emitted")

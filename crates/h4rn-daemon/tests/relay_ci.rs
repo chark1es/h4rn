@@ -1336,6 +1336,7 @@ async fn a_connect_guest_link_binds_the_first_browser_and_refuses_the_second() {
 }
 
 #[tokio::test]
+#[allow(clippy::result_large_err)] // tungstenite's handshake callback type
 async fn a_daemon_says_which_guest_protocol_it_speaks_before_anything_else() {
     // The relay learns that this daemon admits an upload before a guest
     // exchange can start. A daemon that stays silent would be treated as an
@@ -1355,7 +1356,19 @@ async fn a_daemon_says_which_guest_protocol_it_speaks_before_anything_else() {
             tokio::spawn(async move {
                 // The daemon also posts presence to this base URL; only a
                 // real WebSocket handshake is its relay connection.
-                let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                let query = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let seen = std::sync::Arc::clone(&query);
+                let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                          response| {
+                        *seen.lock().expect("query lock") =
+                            request.uri().query().map(ToOwned::to_owned);
+                        Ok(response)
+                    },
+                )
+                .await
+                else {
                     return;
                 };
                 let tx = first_tx.lock().await.take();
@@ -1363,7 +1376,8 @@ async fn a_daemon_says_which_guest_protocol_it_speaks_before_anything_else() {
                     loop {
                         match socket.next().await {
                             Some(Ok(Message::Text(text))) => {
-                                let _ = tx.send(text.to_string());
+                                let query = query.lock().expect("query lock").clone();
+                                let _ = tx.send((query, text.to_string()));
                                 break;
                             }
                             Some(Ok(_)) => continue,
@@ -1396,10 +1410,16 @@ async fn a_daemon_says_which_guest_protocol_it_speaks_before_anything_else() {
     let service = Arc::new(SecureService::new(SecureOptions::new(identity)));
     let daemon = boot_with_host(dir.path(), service, None).await;
 
-    let first = tokio::time::timeout(Duration::from_secs(20), first_rx)
+    let (query, first) = tokio::time::timeout(Duration::from_secs(20), first_rx)
         .await
         .expect("the daemon never connected to the relay")
         .expect("the daemon sent no first frame");
+    let query = query.expect("the relay socket had no query");
+    assert!(
+        url::form_urlencoded::parse(query.as_bytes())
+            .any(|(key, value)| key == "hello" && value == "1"),
+        "the socket did not mark itself as one that sends a hello: {query}"
+    );
     let frame: h4rn_protocol::RelayFrame =
         serde_json::from_str(&first).expect("the first relay frame is not JSON");
     assert_eq!(
