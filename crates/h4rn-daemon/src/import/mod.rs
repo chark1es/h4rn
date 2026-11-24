@@ -1037,8 +1037,9 @@ impl ImportedSources {
     ///
     /// Used when a project's quota is spent and no head is read. A claim that
     /// names the conversation still counts the transcript for its project. A
-    /// path-keyed claim pins the file's size, so a transcript that grew after
-    /// it was imported is not counted as the same file.
+    /// path-keyed claim pins the file's size and content fingerprint, so a
+    /// transcript that grew or was rewritten in place is a new conversation and
+    /// is not counted as the imported file.
     fn covers_file(&self, path: &Path, size: u64) -> bool {
         let Some(key) = self.key_for_path(path) else {
             return false;
@@ -1046,7 +1047,11 @@ impl ImportedSources {
         if !h4rn_protocol::path_keyed_source_key(key) {
             return true;
         }
-        h4rn_protocol::path_keyed_source_size(key) == Some(size)
+        if h4rn_protocol::path_keyed_source_size(key) != Some(size) {
+            return false;
+        }
+        let fingerprint = content_fingerprint(path, size);
+        h4rn_protocol::path_keyed_source_fingerprint(key) == Some(fingerprint.as_str())
     }
 }
 
@@ -1554,23 +1559,53 @@ mod tests {
 
     #[test]
     fn a_grown_path_claim_does_not_count_for_a_full_folder() {
-        let path = PathBuf::from("/home/me/.codex/sessions/2026/11/21/rollout.jsonl");
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("rollout.jsonl");
+        std::fs::write(&path, "first body\n").expect("transcript");
+        let size = std::fs::metadata(&path).expect("metadata").len();
         let key = h4rn_protocol::path_source_key(
             ImportSource::Codex,
             &path.display().to_string(),
-            100,
-            "fingerprint",
+            size,
+            &content_fingerprint(&path, size),
         );
         let imported = imported_claim(&path, &key);
 
-        assert!(imported.covers_file(&path, 100), "the same file counts");
+        assert!(imported.covers_file(&path, size), "the same file counts");
         assert!(
-            !imported.covers_file(&path, 120),
+            !imported.covers_file(&path, size + 1),
             "a grown rollout is a new conversation, not the imported file"
         );
         assert!(
             !imported.contains_transcript(&path, "codex:path", false),
             "a path claim is not a session claim"
+        );
+    }
+
+    #[test]
+    fn a_path_claim_counts_only_content_it_pinned() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("rollout.jsonl");
+        std::fs::write(&path, "first body\n").expect("transcript");
+        let size = std::fs::metadata(&path).expect("metadata").len();
+        let key = h4rn_protocol::path_source_key(
+            ImportSource::Codex,
+            &path.display().to_string(),
+            size,
+            &content_fingerprint(&path, size),
+        );
+        let imported = imported_claim(&path, &key);
+
+        // Same size, different content: a transcript rewritten in place.
+        std::fs::write(&path, "other body\n").expect("rewritten transcript");
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            size,
+            "the rewrite keeps the size"
+        );
+        assert!(
+            !imported.covers_file(&path, size),
+            "a same-size rewrite is a new conversation, not the imported file"
         );
     }
 
@@ -1717,18 +1752,20 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("workspace");
         let project = home_path.join(".claude/projects/-code-api");
         std::fs::create_dir_all(&project).expect("project dir");
-        for index in 0..(MAX_CONVERSATIONS_PER_PROJECT + 2) {
+        for index in 0..MAX_CONVERSATIONS_PER_PROJECT + 1 {
             let session = format!("session-{index:03}");
-            let body = if index == 0 {
-                // The oldest transcript names no session id, so its claim is
-                // its file name rather than a session.
-                claude_transcript_with_session(&workspace, None, "oldest")
-            } else {
-                claude_transcript(&workspace, &session, &format!("conversation {index}"))
-            };
+            let body = claude_transcript(&workspace, &session, &format!("conversation {index}"));
             std::fs::write(project.join(format!("{session}.jsonl")), body).expect("transcript");
         }
-        let old = project.join("session-000.jsonl");
+        // The oldest transcript names no session id, and its file stem trims
+        // to nothing, so even the file-name fallback is empty: its identity is
+        // the path, size and fingerprint, never a session.
+        let old = project.join(" .jsonl");
+        std::fs::write(
+            &old,
+            claude_transcript_with_session(&workspace, None, "oldest"),
+        )
+        .expect("oldest transcript");
         // Make it the oldest transcript, so the quota fills before the scan
         // reaches it and it is only recognised by its stored claim.
         std::fs::File::options()
@@ -1739,7 +1776,18 @@ mod tests {
                 std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
             )
             .expect("old mtime");
-        let imported = imported_claim(&old, "claude_code:session-000");
+        let old_size = std::fs::metadata(&old).expect("old metadata").len();
+        let old_key = h4rn_protocol::path_source_key(
+            ImportSource::ClaudeCode,
+            &old.display().to_string(),
+            old_size,
+            &content_fingerprint(&old, old_size),
+        );
+        assert!(
+            h4rn_protocol::path_keyed_source_key(&old_key),
+            "the oldest transcript is claimed by its path"
+        );
+        let imported = imported_claim(&old, &old_key);
 
         let outcome = scan_blocking(
             home_path,

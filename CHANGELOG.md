@@ -634,6 +634,11 @@ All notable changes to h4rn are recorded here. The format follows
   scan offers it instead of hiding it behind the old path claim. The stored claim
   still hides the transcript when its head names no session of its own, or names
   the same id.
+- **A stored import claim is matched for what it really is.** A session id that
+  merely looks like a path key (`path:vendor:42:nightly`) stays a session id, so
+  a transcript whose id appears only late in the file is not offered again. When
+  a full project recognises a transcript by path, the file must still match the
+  size and content fingerprint stored with it.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

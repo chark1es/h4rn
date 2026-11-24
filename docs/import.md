@@ -81,7 +81,10 @@ conversations and 4 GiB per project, newest first, and only counts conversations
 that are not already imported and whose head showed a visible message. Once a
 project's quota is full, the rest of that project's Claude Code transcripts are
 not read at all; one already imported is still recognised and keeps its place in
-the project's count, including one that names no session id. That shortcut is per
+the project's count, including one that names no session id. A path-keyed
+transcript counts only while its size and content fingerprint still match what
+was imported, so one that grew or was rewritten is not counted as the old file.
+That shortcut is per
 Claude Code folder, because its folder names the working directory. Codex
 rollouts live in date folders shared by every project, so each rollout is still
 peeked at its head to learn which project it belongs to, and its full transcript

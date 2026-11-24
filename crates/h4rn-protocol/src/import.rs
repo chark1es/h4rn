@@ -184,20 +184,44 @@ pub fn path_source_key(source: ImportSource, path: &str, size: u64, fingerprint:
     format!("{}:path:{path}:{size}:{fingerprint}", source.as_str())
 }
 
-/// The file size a path key pins, when it has the full path-key shape.
+/// Length of the content fingerprint a path key carries: a BLAKE3 digest in
+/// lowercase hex.
+const PATH_KEY_FINGERPRINT_HEX_LEN: usize = 64;
+
+/// The parts a path key pins, when it has the exact shape
+/// [`path_source_key`] writes.
 ///
 /// A path key is `source:path:<path>:<size>:<fingerprint>`. The path may itself
-/// contain colons, so the size is read from the right. Keys without that suffix,
-/// including one written by an older daemon, are not path keys.
-pub fn path_keyed_source_size(key: &str) -> Option<u64> {
+/// contain colons, so the size and fingerprint are read from the right. The
+/// fingerprint is a BLAKE3 digest written in lowercase hex, so a session id
+/// that happens to contain colons and numbers is not mistaken for a path key.
+fn path_key_parts(key: &str) -> Option<(u64, &str)> {
     let (_, rest) = key.split_once(':')?;
     let tail = rest.strip_prefix("path:")?;
     let (path_and_size, fingerprint) = tail.rsplit_once(':')?;
-    let (_path, size) = path_and_size.rsplit_once(':')?;
-    if fingerprint.is_empty() {
+    let (path, size) = path_and_size.rsplit_once(':')?;
+    if path.is_empty()
+        || fingerprint.len() != PATH_KEY_FINGERPRINT_HEX_LEN
+        || !fingerprint
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return None;
     }
-    size.parse().ok()
+    Some((size.parse().ok()?, fingerprint))
+}
+
+/// The file size a path key pins, when it has the full path-key shape.
+///
+/// Keys without that exact suffix are not path keys: no daemon ever wrote a
+/// shorter one, and a session id can spell anything.
+pub fn path_keyed_source_size(key: &str) -> Option<u64> {
+    path_key_parts(key).map(|(size, _)| size)
+}
+
+/// The content fingerprint a path key pins, when it has the full path-key shape.
+pub fn path_keyed_source_fingerprint(key: &str) -> Option<&str> {
+    path_key_parts(key).map(|(_, fingerprint)| fingerprint)
 }
 
 /// Whether a stored source key names its transcript by path.
@@ -209,7 +233,7 @@ pub fn path_keyed_source_size(key: &str) -> Option<u64> {
 /// `:path:<path>:<size>:<fingerprint>` shape counts, so a session id that itself
 /// begins with `path:` is still a session id.
 pub fn path_keyed_source_key(key: &str) -> bool {
-    path_keyed_source_size(key).is_some()
+    path_key_parts(key).is_some()
 }
 
 #[cfg(test)]
@@ -228,13 +252,18 @@ mod tests {
         );
     }
 
+    /// A fingerprint shaped like the BLAKE3 digest a real path key writes.
+    fn fingerprint() -> String {
+        "a".repeat(PATH_KEY_FINGERPRINT_HEX_LEN)
+    }
+
     #[test]
     fn a_path_key_is_told_apart_from_a_session_key() {
         assert!(path_keyed_source_key(&path_source_key(
             ImportSource::Codex,
             "/tmp/a.jsonl",
             12,
-            "fingerprint"
+            &fingerprint()
         )));
         assert!(!path_keyed_source_key(&source_key(
             ImportSource::ClaudeCode,
@@ -269,10 +298,38 @@ mod tests {
     }
 
     #[test]
+    fn a_session_id_shaped_like_a_path_key_is_still_a_session_id() {
+        // `path:vendor:42:nightly` has a `path:` prefix, a number and a final
+        // word, but the word is not the 64-character hex digest a path key
+        // writes. Treating it as a path key would let a late id be offered
+        // again, so only the exact written shape counts.
+        let session = source_key(
+            ImportSource::ClaudeCode,
+            Some("path:vendor:42:nightly"),
+            "/tmp/a.jsonl",
+        );
+        assert!(!path_keyed_source_key(&session));
+        assert_eq!(path_keyed_source_size(&session), None);
+        assert_eq!(path_keyed_source_fingerprint(&session), None);
+
+        // A digest-shaped suffix of the wrong length is not one either.
+        let short = format!("codex:path:/tmp/a.jsonl:42:{}", "f".repeat(32));
+        assert!(!path_keyed_source_key(&short));
+        // Nor is one with characters outside lowercase hex.
+        let not_hex = format!("codex:path:/tmp/a.jsonl:42:{}", "g".repeat(64));
+        assert!(!path_keyed_source_key(&not_hex));
+    }
+
+    #[test]
     fn a_path_key_reads_its_size_even_when_the_path_has_colons() {
-        let key = path_source_key(ImportSource::Codex, "/tmp/a:b/c.jsonl", 4096, "fp");
+        let fingerprint = fingerprint();
+        let key = path_source_key(ImportSource::Codex, "/tmp/a:b/c.jsonl", 4096, &fingerprint);
         assert!(path_keyed_source_key(&key));
         assert_eq!(path_keyed_source_size(&key), Some(4096));
+        assert_eq!(
+            path_keyed_source_fingerprint(&key),
+            Some(fingerprint.as_str())
+        );
     }
 
     #[test]

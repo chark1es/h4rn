@@ -1238,76 +1238,82 @@ async fn an_imported_session_with_a_late_id_is_not_offered_again() {
     // conversation under the full-parse identity. A later scan has to recognise
     // the transcript anyway, or the session is offered a second time and only
     // skipped after the person selects it again.
-    let home = tempfile::tempdir().expect("home");
-    let home_path = home.path().to_path_buf();
-    let workspace = home_path.join("code/api");
-    std::fs::create_dir_all(&workspace).expect("workspace");
-    let (_, manager, import) = services(
-        &home_path,
-        FakeHarness::new(),
-        FakeHarness::new().with_kind(HarnessKind::Codex),
-    )
-    .await;
-    let cwd = workspace.display().to_string();
-    let mut records = Vec::new();
-    for index in 0..250 {
-        let kind = if index % 2 == 0 { "user" } else { "assistant" };
-        let mut record = json!({
-            "type": kind,
-            "cwd": cwd,
-            "timestamp": "2026-11-18T09:00:00Z",
-            "message": {
-                "role": kind,
-                "content": [{"type": "text", "text": format!("message {index}")}],
-            },
-        });
-        if kind == "assistant" {
-            record["message"]["model"] = json!("claude-sonnet-5");
+    //
+    // The second id is shaped like a path key (`path:vendor:42:nightly`) but
+    // is not one: its suffix is not a fingerprint. Treating it as a path key
+    // would make the stored claim invisible to the path fallback.
+    for session in ["late-session", "path:vendor:42:nightly"] {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = home.path().to_path_buf();
+        let workspace = home_path.join("code/api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let (_, manager, import) = services(
+            &home_path,
+            FakeHarness::new(),
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+        )
+        .await;
+        let cwd = workspace.display().to_string();
+        let mut records = Vec::new();
+        for index in 0..250 {
+            let kind = if index % 2 == 0 { "user" } else { "assistant" };
+            let mut record = json!({
+                "type": kind,
+                "cwd": cwd,
+                "timestamp": "2026-11-18T09:00:00Z",
+                "message": {
+                    "role": kind,
+                    "content": [{"type": "text", "text": format!("message {index}")}],
+                },
+            });
+            if kind == "assistant" {
+                record["message"]["model"] = json!("claude-sonnet-5");
+            }
+            if index == 249 {
+                record["sessionId"] = json!(session);
+            }
+            records.push(record);
         }
-        if index == 249 {
-            record["sessionId"] = json!("late-session");
-        }
-        records.push(record);
-    }
-    write_jsonl(
-        &home_path
-            .join(".claude/projects/-code-api")
-            .join("late-id.jsonl"),
-        &records,
-    );
+        write_jsonl(
+            &home_path
+                .join(".claude/projects/-code-api")
+                .join("late-id.jsonl"),
+            &records,
+        );
 
-    let scan = import.scan().await;
-    assert_eq!(scan.projects.len(), 1, "{:?}", scan.warnings);
-    assert_eq!(
-        scan.projects[0].importable, 1,
-        "the conversation is offered once"
-    );
-    let mut events = import.subscribe();
-    import
-        .start(vec![scan.projects[0].key.clone()])
-        .await
-        .expect("start");
-    wait_finished(&mut events).await;
-    assert_eq!(
-        manager
-            .list_threads(&ThreadFilter::default())
+        let scan = import.scan().await;
+        assert_eq!(scan.projects.len(), 1, "{:?}", scan.warnings);
+        assert_eq!(
+            scan.projects[0].importable, 1,
+            "{session}: the conversation is offered once"
+        );
+        let mut events = import.subscribe();
+        import
+            .start(vec![scan.projects[0].key.clone()])
             .await
-            .into_iter()
-            .filter(|thread| thread.harness == HarnessKind::ClaudeCode)
-            .count(),
-        1,
-        "the conversation became one thread"
-    );
+            .expect("start");
+        wait_finished(&mut events).await;
+        assert_eq!(
+            manager
+                .list_threads(&ThreadFilter::default())
+                .await
+                .into_iter()
+                .filter(|thread| thread.harness == HarnessKind::ClaudeCode)
+                .count(),
+            1,
+            "{session}: the conversation became one thread"
+        );
 
-    let scan = import.scan().await;
-    assert_eq!(
-        scan.projects[0].importable, 0,
-        "an imported session is not offered again"
-    );
-    assert_eq!(
-        scan.projects[0].conversations, 1,
-        "the transcript still counts for its project"
-    );
+        let scan = import.scan().await;
+        assert_eq!(
+            scan.projects[0].importable, 0,
+            "{session}: an imported session is not offered again"
+        );
+        assert_eq!(
+            scan.projects[0].conversations, 1,
+            "{session}: the transcript still counts for its project"
+        );
+    }
 }
 
 #[tokio::test]
