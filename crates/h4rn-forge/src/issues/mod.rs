@@ -340,9 +340,10 @@ impl LinearClient {
             )
             .await?;
         let issue = &data["issue"];
-        let summary = map_issue_summary(issue).ok_or_else(|| {
-            ForgeError::NotFound(format!("Linear issue {issue_id} was not found"))
-        })?;
+        // The id is Linear's internal UUID, which nobody recognises. The
+        // caller that knows the human identifier names the issue itself.
+        let summary = map_issue_summary(issue)
+            .ok_or_else(|| ForgeError::NotFound("Linear issue was not found".into()))?;
         let comments = issue["comments"]["nodes"]
             .as_array()
             .map(|nodes| nodes.iter().filter_map(map_comment).collect())
@@ -375,7 +376,7 @@ impl LinearClient {
             .query(LINEAR_ISSUE_TEAM_QUERY, json!({ "id": issue_id }))
             .await?;
         optional_text(&data["issue"]["team"], "id")
-            .ok_or_else(|| ForgeError::NotFound(format!("Linear issue {issue_id} was not found")))
+            .ok_or_else(|| ForgeError::NotFound("Linear issue was not found".into()))
     }
 
     /// Posts a comment and returns what Linear stored.
@@ -651,6 +652,28 @@ mod tests {
         assert_eq!(state_type("started"), LinearStateType::Started);
         assert_eq!(state_type("completed"), LinearStateType::Completed);
         assert_eq!(state_type("something"), LinearStateType::Unstarted);
+    }
+
+    #[tokio::test]
+    async fn a_missing_linear_issue_is_not_named_by_its_internal_id() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"issue": null}
+            })))
+            .mount(&server)
+            .await;
+        let client = LinearClient::with_endpoint("test-key", &server.uri()).unwrap();
+        let error = client.get_issue("issue_uuid_1", None).await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Linear issue was not found"));
+        assert!(
+            !message.contains("issue_uuid_1"),
+            "the provider UUID must never reach the person: {message}"
+        );
     }
 
     #[test]

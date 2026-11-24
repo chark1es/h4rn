@@ -68,6 +68,18 @@ function issueTitle(issue: ThreadIssue): string {
   return issue.state?.issue.title ?? issue.title ?? "Issue unavailable";
 }
 
+/**
+ * A refresh error is the daemon's own words, but an older daemon names the
+ * issue by the provider's internal id. Replace it with the name the person
+ * knows, so the UUID never appears on screen.
+ */
+function issueErrorMessage(issue: ThreadIssue): string {
+  const error = issue.error ?? "";
+  if (issue.scope.tracker !== "linear" || !issue.issue_id) return error;
+  const name = issue.identifier ?? "Linear issue";
+  return error.split(`Linear issue ${issue.issue_id}`).join(name).split(issue.issue_id).join(name);
+}
+
 function issueUrl(issue: ThreadIssue): string {
   const state = issue.state;
   if (!state) return "";
@@ -247,7 +259,9 @@ export function LinkedPullRequestsMenu({
                 <span className="q-pr-link-name">{issueTitle(issue)}</span>
                 <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               </DropdownMenuItem>
-              {issue.error ? <p className="q-pr-note q-danger">{issue.error}</p> : null}
+              {issue.error ? (
+                <p className="q-pr-note q-danger">{issueErrorMessage(issue)}</p>
+              ) : null}
               {onUnlinkIssue ? (
                 <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlinkIssue(issue)}>
                   <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />

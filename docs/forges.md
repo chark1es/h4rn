@@ -468,7 +468,9 @@ needs an organization-scoped token. When that organization catalogue answers
 left out of the lookup; if a requested name is one of them, the edit is
 refused before any replacement is sent, and the error names the label so the
 person can create it on the repository or connect an account with organization
-access. The daemon
+access. The refusal comes after the issue PATCH, though, so the other fields
+in the same update (title, body, state, assignees) were already sent and may
+already be saved. The daemon
 only sends the fields the caller
 named, so an edit never clears the others. GitHub closes with a
 `state_reason`, and a duplicate close also sends `duplicate_issue_id`; the UI
@@ -518,8 +520,9 @@ connected".
 `LinkIssue` stores the tracker scope and provider issue id in the journal, so
 a link survives a restart. It also stores the issue's human identifier
 (`ENG-123` for Linear) and its title at link time, so a failed refresh still
-names the issue instead of falling back to the provider's internal id; a link
-made before those were stored is labelled "Linear issue". `ThreadIssues` reads
+names the issue instead of falling back to the provider's internal id, whether
+the tracker is unreachable or reports the issue missing; a link made before
+those were stored is labelled "Linear issue". `ThreadIssues` reads
 each linked issue live and reports a failed read as an error rather than a
 stale row. The thread header's linked-items panel shows issues beside pull
 requests with open and unlink, and names each issue by its scope

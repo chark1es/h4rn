@@ -48,6 +48,9 @@ pub enum IssueLinkError {
     /// The issue id is not valid for its tracker.
     #[error("{0}")]
     InvalidIssue(String),
+    /// The tracker says the issue no longer exists (or is no longer visible).
+    #[error("{0}")]
+    IssueNotFound(String),
     /// The tracker failed.
     #[error("{0}")]
     Tracker(String),
@@ -69,6 +72,11 @@ impl IssueLinkError {
                 ProtoErrorCode::InvalidRequest,
                 message,
                 "Pick the issue from the Issues page",
+            ),
+            Self::IssueNotFound(message) => ProtoError::new(
+                ProtoErrorCode::NotFound,
+                message,
+                "Pick the issue again from the Issues page, or unlink it",
             ),
             Self::Tracker(message) => ProtoError::new(
                 ProtoErrorCode::Internal,
@@ -92,13 +100,19 @@ impl From<JournalError> for IssueLinkError {
 
 impl From<ForgeServiceError> for IssueLinkError {
     fn from(error: ForgeServiceError) -> Self {
-        Self::Tracker(error.to_string())
+        match error {
+            ForgeServiceError::Forge(error) => Self::from(error),
+            other => Self::Tracker(other.to_string()),
+        }
     }
 }
 
 impl From<ForgeError> for IssueLinkError {
     fn from(error: ForgeError) -> Self {
-        Self::Tracker(error.to_string())
+        match error {
+            ForgeError::NotFound(message) => Self::IssueNotFound(message),
+            other => Self::Tracker(other.to_string()),
+        }
     }
 }
 
@@ -267,16 +281,19 @@ impl IssueLinkService {
                     title: record.title,
                     linked_at: record.linked_at,
                 }),
-                Err(error) => issues.push(ThreadIssue {
-                    scope: record.scope,
-                    issue_id: record.issue_id,
-                    account_id: record.account_id,
-                    state: None,
-                    error: Some(error.to_string()),
-                    identifier: record.identifier,
-                    title: record.title,
-                    linked_at: record.linked_at,
-                }),
+                Err(error) => {
+                    let error = refresh_error(&record, &error);
+                    issues.push(ThreadIssue {
+                        scope: record.scope,
+                        issue_id: record.issue_id,
+                        account_id: record.account_id,
+                        state: None,
+                        error: Some(error),
+                        identifier: record.identifier,
+                        title: record.title,
+                        linked_at: record.linked_at,
+                    });
+                }
             }
         }
         Ok(issues)
@@ -304,6 +321,24 @@ impl IssueLinkService {
                 Ok(LinkedIssueState::Linear { issue })
             }
         }
+    }
+}
+
+/// The message a failed refresh shows.
+///
+/// A missing issue is named from what the link stored (`ENG-123`), never by
+/// the provider id the refresh asked with; a link made before the identifier
+/// was stored falls back to a plain label.
+fn refresh_error(record: &IssueLinkRecord, error: &IssueLinkError) -> String {
+    if !matches!(error, IssueLinkError::IssueNotFound(_)) {
+        return error.to_string();
+    }
+    match &record.scope {
+        IssueScope::Linear { .. } => match record.identifier.as_deref() {
+            Some(identifier) => format!("{identifier} was not found in Linear"),
+            None => "the Linear issue was not found".into(),
+        },
+        IssueScope::Forge { .. } => format!("issue #{} was not found", record.issue_id),
     }
 }
 
@@ -387,6 +422,7 @@ mod tests {
         repo: ForgeRepoRef,
         calls: Mutex<Vec<String>>,
         fail: Mutex<bool>,
+        missing: Mutex<bool>,
     }
 
     impl MockSource {
@@ -400,6 +436,7 @@ mod tests {
                 },
                 calls: Mutex::new(Vec::new()),
                 fail: Mutex::new(false),
+                missing: Mutex::new(false),
             }
         }
     }
@@ -448,6 +485,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("linear:{issue_id}"));
+            if *self.missing.lock().unwrap() {
+                return Err(IssueLinkError::IssueNotFound(
+                    "Linear issue was not found".into(),
+                ));
+            }
             if *self.fail.lock().unwrap() {
                 return Err(IssueLinkError::Tracker("linear is down".into()));
             }
@@ -593,6 +635,56 @@ mod tests {
         assert!(listed[0].state.is_none());
         assert_eq!(listed[0].identifier, None);
         assert_eq!(listed[0].title, None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_linear_issue_is_named_by_its_stored_identifier() {
+        let (service, source, _journal) = service().await;
+        let thread = ThreadId::new("th_1");
+        let scope = IssueScope::Linear {
+            team_id: "team_1".into(),
+        };
+        service
+            .link(&thread, None, &scope, "issue_uuid_1")
+            .await
+            .unwrap();
+
+        // Linear no longer returns the issue. The refresh can only name it
+        // from what the link stored: never the internal id it asked with.
+        *source.missing.lock().unwrap() = true;
+        let listed = service.list(&thread).await.unwrap();
+        let error = listed[0].error.as_deref().expect("the refresh reports why");
+        assert_eq!(error, "ENG-1 was not found in Linear");
+        assert!(
+            !error.contains("issue_uuid_1"),
+            "the provider UUID must never reach the person: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_legacy_linear_link_is_named_without_its_id() {
+        let (service, source, journal) = service().await;
+        let thread = ThreadId::new("th_1");
+        let scope = IssueScope::Linear {
+            team_id: "team_1".into(),
+        };
+        journal
+            .upsert_issue_link(&IssueLinkRecord {
+                thread_id: thread.clone(),
+                account_id: "lin_1".into(),
+                scope: scope.clone(),
+                issue_id: "issue_uuid_1".into(),
+                identifier: None,
+                title: None,
+                linked_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        *source.missing.lock().unwrap() = true;
+        let listed = service.list(&thread).await.unwrap();
+        let error = listed[0].error.as_deref().expect("the refresh reports why");
+        assert_eq!(error, "the Linear issue was not found");
+        assert!(!error.contains("issue_uuid_1"));
     }
 
     #[tokio::test]

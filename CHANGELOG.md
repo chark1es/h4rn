@@ -639,8 +639,13 @@ All notable changes to h4rn are recorded here. The format follows
   again as a new conversation.
 - **A linked Linear issue keeps its name when the tracker cannot be reached.**
   The link now stores the issue's human identifier (`ENG-123`) and title, so a
-  failed refresh shows those instead of the provider's internal UUID. Links
-  made before this change show "Linear issue".
+  failed refresh shows those instead of the provider's internal UUID, including
+  when Linear reports the issue missing. Links made before this change show
+  "Linear issue".
+- **Two daemons can open the same old journal at once.** Each column the
+  startup upgrade adds now has its check and its change inside one SQLite write
+  transaction, so a second daemon waits for the first and sees the column
+  instead of aborting startup with a duplicate-column error.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,

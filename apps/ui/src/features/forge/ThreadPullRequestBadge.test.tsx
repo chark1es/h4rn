@@ -349,6 +349,46 @@ describe("linked pull request badge and panel", () => {
     expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
   });
 
+  it("names a missing Linear issue without its internal id", () => {
+    const linked: ThreadIssue = {
+      scope: { tracker: "linear", team_id: "team_uuid_1" },
+      issue_id: "issue_uuid_1",
+      account_id: "lin_1",
+      state: null,
+      // An older daemon named the provider's UUID in its not-found message.
+      error: "Linear issue issue_uuid_1 was not found",
+      identifier: "ENG-1",
+      title: "Rate limit the import",
+      linked_at: "2026-01-01T00:00:00Z",
+    };
+    const { rerender } = render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[linked]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    openBadge();
+    expect(screen.getByText("ENG-1 was not found")).toBeTruthy();
+    expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
+
+    // A link made before the identifier was stored still gets plain words,
+    // never the provider's internal id.
+    rerender(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[{ ...linked, identifier: null, title: null }]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    expect(screen.getByText("Linear issue was not found")).toBeTruthy();
+    expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
+  });
+
   it("labels a Linear link made before the identifier was stored", () => {
     const linked: ThreadIssue = {
       scope: { tracker: "linear", team_id: "team_uuid_1" },
