@@ -407,6 +407,180 @@ async fn a_native_resume_is_preferred_when_the_harness_accepts_it() {
     assert!(echo.ends_with(request));
 }
 
+#[tokio::test]
+async fn a_later_startup_death_keeps_the_resume_id_and_fails_normally() {
+    // The imported thread's one native resume succeeds and a turn runs on it.
+    let fixture = fixture(
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let scan = fixture.import.scan().await;
+    fixture
+        .import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    let threads = wait_for_threads(&fixture, 2).await;
+    let claude = threads
+        .iter()
+        .find(|thread| thread.harness == HarnessKind::ClaudeCode)
+        .expect("claude thread")
+        .clone();
+
+    let mut events = fixture.manager.subscribe();
+    let first = fixture
+        .manager
+        .send_message(&claude.thread_id, "carry on".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, reply) = wait_for_turn(&mut events, &first.turn_id).await;
+    assert_eq!(status, h4rn_protocol::TurnStatus::Completed);
+    assert!(
+        !reply.contains("Earlier conversation history"),
+        "the native resume already holds the history: {reply}"
+    );
+
+    let resume = stored_meta(&fixture, &claude.thread_id)
+        .await
+        .resume_id
+        .expect("the resumed session id");
+    let imported = stored_meta(&fixture, &claude.thread_id)
+        .await
+        .imported
+        .expect("imported origin");
+    assert!(
+        !imported.native_resume,
+        "the thread spent its one native resume when the session started"
+    );
+
+    // A restart whose startup dies before it reports a session must fail that
+    // turn as any other thread would: the stale imported messages are not a
+    // fallback that could lose the turns made here.
+    let restarted = restarted_manager(
+        &fixture,
+        FakeHarness::new().with_resume_death("No conversation found with session ID"),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let mut events = restarted.subscribe();
+    let second = restarted
+        .send_message(&claude.thread_id, "and then the tests".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, reply) = wait_for_turn(&mut events, &second.turn_id).await;
+    assert_eq!(
+        status,
+        h4rn_protocol::TurnStatus::Failed,
+        "the turn fails normally instead of replaying the imported history"
+    );
+    assert!(
+        !reply.contains("Earlier conversation history"),
+        "no handoff was built from the stale import: {reply}"
+    );
+    assert_eq!(
+        stored_meta(&fixture, &claude.thread_id).await.resume_id,
+        Some(resume),
+        "the live session id is kept for the next attempt"
+    );
+    restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_import_keeps_the_transcript_only_in_its_journaled_items() {
+    let fixture = fixture(
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let scan = fixture.import.scan().await;
+    fixture
+        .import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    let threads = wait_for_threads(&fixture, 2).await;
+    let claude = threads
+        .iter()
+        .find(|thread| thread.harness == HarnessKind::ClaudeCode)
+        .expect("claude thread")
+        .clone();
+
+    let imported = stored_meta(&fixture, &claude.thread_id)
+        .await
+        .imported
+        .expect("imported origin");
+    let stored = serde_json::to_string(&imported).expect("serialised origin");
+    assert!(
+        !stored.contains("Implement the feature and keep it quiet"),
+        "the imported origin is not a second copy of the transcript: {stored}"
+    );
+    assert!(
+        stored.len() < 1_000,
+        "the origin holds only what a handoff needs: {} bytes",
+        stored.len()
+    );
+
+    // An unrelated upsert (a rename) does not rewrite a transcript either.
+    fixture
+        .manager
+        .rename_thread(&claude.thread_id, "Renamed import")
+        .await
+        .expect("rename");
+    let again = stored_meta(&fixture, &claude.thread_id)
+        .await
+        .imported
+        .expect("imported origin");
+    assert_eq!(
+        serde_json::to_string(&again).expect("serialised origin"),
+        stored
+    );
+}
+
+#[tokio::test]
+async fn a_restarted_imported_thread_still_hands_off_its_history() {
+    let fixture = fixture(
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let scan = fixture.import.scan().await;
+    fixture
+        .import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    let threads = wait_for_threads(&fixture, 2).await;
+    let claude = threads
+        .iter()
+        .find(|thread| thread.harness == HarnessKind::ClaudeCode)
+        .expect("claude thread")
+        .clone();
+
+    // The history the handoff needs lives in the journaled messages, so a
+    // restart loses nothing.
+    let restarted = restarted_manager(
+        &fixture,
+        FakeHarness::new().with_resume_failure("no such session"),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let mut events = restarted.subscribe();
+    let turn = restarted
+        .send_message(&claude.thread_id, "please continue".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, reply) = wait_for_turn(&mut events, &turn.turn_id).await;
+    assert_eq!(status, h4rn_protocol::TurnStatus::Completed);
+    assert!(
+        reply.contains("Earlier conversation history"),
+        "the restart's handoff carries the saved conversation: {reply}"
+    );
+    assert!(reply.contains("Implement the feature and keep it quiet"));
+    assert!(reply.ends_with("please continue"), "{reply}");
+    restarted.shutdown().await;
+}
+
 async fn wait_for_threads(fixture: &Fixture, count: usize) -> Vec<h4rn_protocol::ThreadSummary> {
     tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
@@ -419,6 +593,76 @@ async fn wait_for_threads(fixture: &Fixture, count: usize) -> Vec<h4rn_protocol:
     })
     .await
     .expect("threads")
+}
+
+/// Opens a fresh manager over the fixture's journal, as a daemon restart does.
+async fn restarted_manager(
+    fixture: &Fixture,
+    claude: FakeHarness,
+    codex: FakeHarness,
+) -> Arc<ThreadManager> {
+    let catalog = Arc::new(
+        h4rn_daemon::harnesses::StaticHarnessCatalog::with(Arc::new(claude)).and(Arc::new(codex)),
+    );
+    Arc::new(
+        ThreadManager::open(
+            Arc::clone(&fixture.journal),
+            catalog,
+            HostId::new("host_import"),
+            ThreadManagerOptions {
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("restarted manager"),
+    )
+}
+
+/// The stored metadata of one thread.
+async fn stored_meta(
+    fixture: &Fixture,
+    thread: &h4rn_protocol::ThreadId,
+) -> h4rn_daemon::journal::ThreadMeta {
+    fixture
+        .journal
+        .list_threads()
+        .await
+        .expect("stored threads")
+        .into_iter()
+        .find(|meta| &meta.thread_id == thread)
+        .expect("stored thread")
+}
+
+/// Waits for one turn to settle, returning its status and assistant text.
+async fn wait_for_turn(
+    events: &mut tokio::sync::broadcast::Receiver<h4rn_daemon::journal::WireEvent>,
+    turn: &h4rn_protocol::TurnId,
+) -> (h4rn_protocol::TurnStatus, String) {
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        let mut text = String::new();
+        loop {
+            let event = events.recv().await.expect("thread event");
+            match event.event {
+                Event::ItemCompleted {
+                    item:
+                        h4rn_protocol::Item::Message {
+                            role: MessageRole::Assistant,
+                            text: body,
+                            ..
+                        },
+                    ..
+                } => text.push_str(&body),
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } if &turn_id == turn => return (status, text),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the turn settled")
 }
 
 /// The fake harness echoes the prompt it was sent in its reply.

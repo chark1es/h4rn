@@ -28,6 +28,12 @@ pub(crate) enum Record<T> {
     Blank,
     /// The line could not be parsed and was skipped.
     Malformed,
+    /// The line was longer than [`MAX_RECORD_BYTES`] and was skipped.
+    ///
+    /// This is reported apart from [`Record::Malformed`]: the line may well
+    /// have been valid, and the conversation it belongs to cannot be kept
+    /// whole, so the importer warns instead of dropping it silently.
+    OverLimit,
     /// The file ended.
     End,
 }
@@ -84,6 +90,7 @@ impl<R: BufRead> RecordReader<R> {
         Ok(match content {
             Line::End => Record::End,
             Line::Blank => Record::Blank,
+            Line::OverLimit => Record::OverLimit,
             Line::Malformed => Record::Malformed,
             Line::Readable => match parsed {
                 Ok(value) => Record::Parsed(value),
@@ -119,6 +126,7 @@ impl<R: BufRead> RecordReader<R> {
             }
         }
         let readable = self.started && !self.over_limit;
+        let over_limit = self.over_limit;
         let blank = !self.started;
         self.line_ended = false;
         self.started = false;
@@ -129,6 +137,8 @@ impl<R: BufRead> RecordReader<R> {
             Line::End
         } else if blank {
             Line::Blank
+        } else if over_limit {
+            Line::OverLimit
         } else if !readable {
             Line::Malformed
         } else {
@@ -200,6 +210,7 @@ enum Line {
     Readable,
     Blank,
     Malformed,
+    OverLimit,
     End,
 }
 
@@ -449,10 +460,37 @@ mod tests {
         loop {
             match reader.next::<Line>().expect("read") {
                 Record::Parsed(line) => out.push(line),
-                Record::Blank | Record::Malformed => continue,
+                Record::Blank | Record::Malformed | Record::OverLimit => continue,
                 Record::End => return out,
             }
         }
+    }
+
+    #[test]
+    fn an_over_limit_line_is_reported_apart_from_a_malformed_one() {
+        let mut body = String::from("{\"text\":\"fine\"}\n");
+        body.push_str("{\"text\":\"");
+        body.push_str(&"x".repeat(MAX_RECORD_BYTES as usize + 1));
+        body.push_str("\"}\n{\"text\":\"after\"}\n");
+        let mut reader = RecordReader::new(BufReader::new(body.as_bytes()));
+        let mut seen = Vec::new();
+        loop {
+            match reader.next::<Line>().expect("read") {
+                Record::Parsed(line) => seen.push(format!("parsed:{:?}", line.text)),
+                Record::Blank => seen.push("blank".into()),
+                Record::Malformed => seen.push("malformed".into()),
+                Record::OverLimit => seen.push("over-limit".into()),
+                Record::End => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                "parsed:Some(\"fine\")".to_owned(),
+                "over-limit".to_owned(),
+                "parsed:Some(\"after\")".to_owned()
+            ]
+        );
     }
 
     #[test]

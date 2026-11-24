@@ -108,6 +108,6 @@ describe("ImportPanel", () => {
 
     render(<ImportPanel />);
 
-    expect(screen.getByText("Importing 30 of 60…")).toBeDefined();
+    expect(screen.getByText("Importing 37 of 60…")).toBeDefined();
   });
 });

@@ -148,7 +148,7 @@ export function ImportPanel() {
         {progress ? (
           <span className="q-imp-status" aria-live="polite">
             {progress.running
-              ? `Importing ${progress.imported} of ${progress.conversations_total}…`
+              ? `Importing ${progress.conversations_done} of ${progress.conversations_total}…`
               : progress.imported > 0
                 ? `Imported ${progress.imported} ${progress.imported === 1 ? "conversation" : "conversations"}.`
                 : "Nothing new to import."}

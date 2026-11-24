@@ -112,7 +112,9 @@ impl SkipReason {
             Self::Empty => "an empty conversation was skipped",
             Self::OnlyCommands => "a conversation with only commands was skipped",
             Self::TooManyRecords => "a transcript had more than 100,000 records",
-            Self::TooMuchText => "a conversation needed more than 32 MiB of kept text",
+            Self::TooMuchText => {
+                "a conversation needed more text than an import keeps (32 MiB kept, 48 MiB per record)"
+            }
         }
     }
 }
@@ -175,7 +177,14 @@ impl History {
     }
 
     /// Adds one visible message, keeping the first request and the newest rest.
+    ///
+    /// Once the limit is crossed nothing more is retained: the kept window is
+    /// released and later messages are ignored, so one oversized conversation
+    /// cannot grow memory toward the size of its file.
     pub(crate) fn push(&mut self, message: KeptMessage) {
+        if self.overflow {
+            return;
+        }
         if self.first_at.is_none() {
             self.first_at = Some(message.at);
         }
@@ -198,8 +207,25 @@ impl History {
     ///
     /// Used when the pending window or a single message outgrows the kept-text
     /// limit, so the importer skips it with a warning instead of dropping text.
+    /// The text kept so far is released at once: the conversation is skipped,
+    /// so holding it would only grow memory.
     pub(crate) fn note_overflow(&mut self) {
         self.overflow = true;
+        self.first_user = None;
+        self.tail.clear();
+        self.retained_bytes = 0;
+    }
+
+    /// Bytes this window still holds, for a bounded-memory test.
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Messages this window still holds, for a bounded-memory test.
+    #[cfg(test)]
+    pub(crate) fn retained_len(&self) -> usize {
+        self.tail.len()
     }
 
     /// When the first message kept was written, whether user or assistant.
@@ -553,6 +579,9 @@ impl Group {
 struct ScanOutcome {
     scan: ImportScan,
     groups: BTreeMap<String, Group>,
+    /// Transcript heads read, so a test can prove the scan stops early.
+    #[cfg(test)]
+    peeks: u64,
 }
 
 /// Imports saved conversations into real threads.
@@ -658,13 +687,10 @@ impl ImportService {
 
     async fn scan_outcome(&self) -> ScanOutcome {
         let imported = match self.journal.list_imported_sources().await {
-            Ok(records) => records
-                .into_iter()
-                .map(|record| record.key)
-                .collect::<HashSet<_>>(),
+            Ok(records) => ImportedSources::from_records(records),
             Err(error) => {
                 tracing::warn!(%error, "could not read the imported-source list");
-                HashSet::new()
+                ImportedSources::default()
             }
         };
         let registered: HashSet<PathBuf> = self
@@ -696,6 +722,8 @@ impl ImportService {
                         scanned_at: Utc::now(),
                     },
                     groups: BTreeMap::new(),
+                    #[cfg(test)]
+                    peeks: 0,
                 }
             }
         }
@@ -948,11 +976,44 @@ fn canonical(path: &str) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
 }
 
+/// The source conversations this daemon already imported.
+#[derive(Default)]
+pub(crate) struct ImportedSources {
+    /// Every claimed source key.
+    keys: HashSet<String>,
+    /// The claim key for each transcript path.
+    ///
+    /// A file's path is enough to recognise an already-imported source without
+    /// reading its head again, which is what lets a full project stop early.
+    by_path: HashMap<String, String>,
+}
+
+impl ImportedSources {
+    fn from_records(records: Vec<crate::journal::ImportedSourceRecord>) -> Self {
+        let mut sources = Self::default();
+        for record in records {
+            sources.by_path.insert(record.path, record.key.clone());
+            sources.keys.insert(record.key);
+        }
+        sources
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.keys.contains(key)
+    }
+
+    fn key_for_path(&self, path: &Path) -> Option<&str> {
+        self.by_path
+            .get(path.to_string_lossy().as_ref())
+            .map(String::as_str)
+    }
+}
+
 fn scan_blocking(
     home: &Path,
     claude_home: &Path,
     codex_home: &Path,
-    imported: &HashSet<String>,
+    imported: &ImportedSources,
     registered: &HashSet<PathBuf>,
 ) -> ScanOutcome {
     let mut warnings = Vec::new();
@@ -977,6 +1038,13 @@ fn scan_blocking(
     });
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     let mut identities: HashMap<PathBuf, Option<GitGroup>> = HashMap::new();
+    // Claude keeps one folder per working directory, so once a project's quota
+    // is full its other transcripts are not read at all. The folder maps to the
+    // group whose quota filled, so an already-imported transcript in it is
+    // still recorded.
+    let mut full_folders: HashMap<PathBuf, String> = HashMap::new();
+    #[cfg(test)]
+    let mut peeks = 0u64;
     for candidate in candidates {
         if candidate.size == 0 {
             continue;
@@ -984,6 +1052,32 @@ fn scan_blocking(
         if candidate.size > MAX_FILE_BYTES {
             warnings.push("A transcript larger than 4 GiB was skipped.".to_owned());
             continue;
+        }
+        let folder = candidate
+            .path
+            .parent()
+            .filter(|_| candidate.source == ImportSource::ClaudeCode)
+            .map(Path::to_path_buf);
+        if let Some(key) = folder.as_ref().and_then(|folder| full_folders.get(folder)) {
+            // The quota is spent: no head is read. An already-imported source
+            // still counts for its project, so older conversations are not
+            // hidden behind it on a later attempt.
+            if let Some(imported_key) = imported.key_for_path(&candidate.path)
+                && let Some(group) = groups.get_mut(key)
+            {
+                group.files.push(ConversationFile {
+                    source: candidate.source,
+                    path: candidate.path,
+                    imported_key: imported_key.to_owned(),
+                    already_imported: true,
+                    project_path: None,
+                });
+            }
+            continue;
+        }
+        #[cfg(test)]
+        {
+            peeks += 1;
         }
         let peek = match candidate.source {
             ImportSource::ClaudeCode => claude::peek(&candidate.path),
@@ -1030,8 +1124,9 @@ fn scan_blocking(
         };
         let imported_key = imported_key(candidate.source, peek.session_id.as_deref(), &candidate);
         let already_imported = imported.contains(&imported_key);
-        let group = groups.entry(key.clone()).or_insert_with(|| Group {
-            key,
+        let group_key = key.clone();
+        let group = groups.entry(key).or_insert_with(|| Group {
+            key: group_key.clone(),
             path,
             name,
             git,
@@ -1056,6 +1151,9 @@ fn scan_blocking(
                             group.name
                         ));
                     }
+                    if let Some(folder) = folder {
+                        full_folders.insert(folder, group_key.clone());
+                    }
                     continue;
                 }
                 Admission::TooLarge => {
@@ -1065,6 +1163,9 @@ fn scan_blocking(
                             "{} holds more than 4 GiB of transcripts; older conversations were not scanned.",
                             group.name
                         ));
+                    }
+                    if let Some(folder) = folder {
+                        full_folders.insert(folder, group_key.clone());
                     }
                     continue;
                 }
@@ -1119,6 +1220,8 @@ fn scan_blocking(
             scanned_at: now,
         },
         groups,
+        #[cfg(test)]
+        peeks,
     }
 }
 
@@ -1314,6 +1417,113 @@ mod tests {
             at: Utc::now(),
         });
         assert_eq!(history.finish().err(), Some(SkipReason::TooMuchText));
+    }
+
+    #[test]
+    fn an_overflowing_conversation_stops_holding_text_at_once() {
+        let mut history = History::new();
+        let chunk = "x".repeat(12 * 1024 * 1024);
+        for _ in 0..3 {
+            history.push(KeptMessage {
+                role: MessageRole::User,
+                text: chunk.clone(),
+                at: Utc::now(),
+            });
+        }
+        assert_eq!(
+            history.retained_bytes(),
+            0,
+            "the window was released instead of growing toward the file size"
+        );
+        assert_eq!(history.retained_len(), 0);
+        // Later messages are not retained either.
+        history.push(KeptMessage {
+            role: MessageRole::Assistant,
+            text: chunk,
+            at: Utc::now(),
+        });
+        assert_eq!(history.retained_len(), 0);
+        assert_eq!(history.finish().err(), Some(SkipReason::TooMuchText));
+    }
+
+    fn claude_transcript(cwd: &Path, session: &str, prompt: &str) -> String {
+        let user = serde_json::json!({
+            "type": "user",
+            "sessionId": session,
+            "cwd": cwd.display().to_string(),
+            "timestamp": "2026-11-20T10:00:00Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+        });
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "sessionId": session,
+            "cwd": cwd.display().to_string(),
+            "timestamp": "2026-11-20T10:00:01Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-5",
+                "content": [{"type": "text", "text": "done"}],
+            },
+        });
+        format!("{user}\n{assistant}\n")
+    }
+
+    #[test]
+    fn a_full_project_stops_reading_heads_and_keeps_already_imported_sources() {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = home.path();
+        let workspace = home_path.join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home_path.join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        for index in 0..(MAX_CONVERSATIONS_PER_PROJECT + 2) {
+            let session = format!("session-{index:03}");
+            std::fs::write(
+                project.join(format!("{session}.jsonl")),
+                claude_transcript(&workspace, &session, &format!("conversation {index}")),
+            )
+            .expect("transcript");
+        }
+
+        let outcome = scan_blocking(
+            home_path,
+            &home_path.join(".claude"),
+            &home_path.join(".codex"),
+            &ImportedSources::default(),
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects.len(), 1);
+        assert_eq!(
+            outcome.scan.projects[0].conversations, MAX_CONVERSATIONS_PER_PROJECT,
+            "the project offers its newest conversations only"
+        );
+        assert_eq!(
+            outcome.peeks,
+            u64::from(MAX_CONVERSATIONS_PER_PROJECT) + 1,
+            "once the quota is full, later heads are not read"
+        );
+
+        // An already-imported source in the full folder is still recognised,
+        // so it keeps its place rather than vanishing from the list.
+        let old = project.join("session-000.jsonl");
+        let mut imported = ImportedSources::default();
+        imported.keys.insert(h4rn_protocol::source_key(
+            ImportSource::ClaudeCode,
+            Some("session-000"),
+            &old.display().to_string(),
+        ));
+        imported
+            .by_path
+            .insert(old.display().to_string(), "claude_code:session-000".into());
+        let outcome = scan_blocking(
+            home_path,
+            &home_path.join(".claude"),
+            &home_path.join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects[0].conversations, 101);
+        assert_eq!(outcome.scan.projects[0].importable, 100);
     }
 
     fn group() -> Group {

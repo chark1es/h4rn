@@ -136,13 +136,18 @@ pub struct ImportedOrigin {
     /// the sidebar's grouping, saved so it survives a restart.
     #[serde(default)]
     pub project_path: Option<String>,
-    /// Whether a native resume has not failed yet.
+    /// Whether the thread's one native resume has not been spent yet.
+    ///
+    /// Cleared when the first session starts: after that the thread has a live
+    /// conversation of its own, and its handoff must not replay the imported
+    /// messages over the turns made in h4rn.
     pub native_resume: bool,
-    /// The kept messages, oldest first, each with its original timestamp.
-    pub messages: Vec<ImportedMessage>,
 }
 
-/// One message kept from an imported conversation.
+/// One message of a thread's visible history.
+///
+/// Read back from the journaled items when a handoff needs it, so the imported
+/// origin does not hold a second copy of the transcript.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImportedMessage {
     /// Who authored it.

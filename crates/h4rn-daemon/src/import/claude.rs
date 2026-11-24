@@ -130,7 +130,9 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
     let mut records = RecordReader::new(reader);
     let mut count = 0usize;
     let mut cwd: Option<PathBuf> = None;
-    let mut session_id = file_session(path);
+    // The transcript's own records name the conversation; the file name is only
+    // a fallback for one that records no id.
+    let mut session_id: Option<String> = None;
     let mut model: Option<String> = None;
     let mut custom_title: Option<Option<String>> = None;
     let mut ai_title: Option<String> = None;
@@ -144,6 +146,9 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
             Ok(Record::Parsed(record)) => record,
             Ok(Record::End) => break,
             Ok(Record::Blank | Record::Malformed) => continue,
+            // A record too long to read cannot be kept whole; skipping the
+            // conversation with a warning beats silently dropping its turn.
+            Ok(Record::OverLimit) => return Err(SkipReason::TooMuchText),
             Err(_) => return Err(SkipReason::Unreadable),
         };
         count += 1;
@@ -254,7 +259,7 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
         source: ImportSource::ClaudeCode,
         path: path.to_path_buf(),
         cwd,
-        session_id,
+        session_id: session_id.or_else(|| file_session(path)),
         title,
         model,
         created_at,
@@ -598,6 +603,42 @@ mod tests {
         ]);
         let parsed = parse(&path).expect("parse");
         assert_eq!(parsed.messages[0].text, "what is in this screenshot?");
+    }
+
+    #[test]
+    fn the_record_session_id_wins_over_the_file_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir
+            .path()
+            .join("projects/p")
+            .join("renamed-from-elsewhere.jsonl");
+        std::fs::create_dir_all(path.parent().expect("dir")).expect("project dir");
+        let mut user = record("user", "Resume this conversation", None);
+        user["sessionId"] = json!("session-from-the-record");
+        let mut reply = record("assistant", "done", Some("claude-sonnet-5"));
+        reply["sessionId"] = json!("session-from-the-record");
+        std::fs::write(&path, format!("{user}\n{reply}\n")).expect("transcript");
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("session-from-the-record"),
+            "the record's own id names the session, not the file"
+        );
+    }
+
+    #[test]
+    fn a_record_over_the_line_limit_skips_the_conversation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("projects/p").join("huge.jsonl");
+        std::fs::create_dir_all(path.parent().expect("dir")).expect("project dir");
+        let text = "x".repeat(49 * 1024 * 1024);
+        let body = format!(
+            "{{\"type\":\"user\",\"sessionId\":\"session-1\",\"cwd\":\"/home/user/code/api\",\
+             \"timestamp\":\"2026-11-20T10:00:00Z\",\"message\":{{\"role\":\"user\",\
+             \"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+        );
+        std::fs::write(&path, body).expect("transcript");
+        assert_eq!(parse(&path).err(), Some(SkipReason::TooMuchText));
     }
 
     #[test]

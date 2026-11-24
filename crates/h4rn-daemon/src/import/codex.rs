@@ -1,16 +1,29 @@
 //! Codex rollouts: `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 //!
 //! Records are a mix of `session_meta`, `turn_context`, canonical `event_msg`
-//! user turns and `response_item` messages. Codex can write the same user turn
-//! twice: once as the canonical event and once as a response item that may also
-//! carry generated setup context. A response copy is dropped only when it names
-//! the same valid turn id as a canonical event with the same text, so a
-//! repeated prompt after an aborted turn keeps both turns' text.
+//! user turns and `response_item` messages. Codex writes the same user turn
+//! more than once: a canonical event, a response copy, and generated setup
+//! context such as the environment block or the project's private AGENTS.md
+//! instructions. Canonical events usually carry no turn id, so the turn id on
+//! the response copies is what ties them together.
+//!
+//! Dedupe follows t3code's two-pass rule. Within one turn:
+//!
+//! 1. When a canonical event's text matches a response copy that names a valid
+//!    turn id, that turn is canonical: every response user record with that id
+//!    is dropped, setup context included.
+//! 2. Any remaining response copy whose text exactly matches the canonical
+//!    event is dropped.
+//!
+//! A turn with no canonical event is response-only, so its context stays. A
+//! response copy whose turn id names another turn is kept, so a repeated prompt
+//! after an aborted turn loses neither turn's text.
 //!
 //! The persisted turn boundaries (`turn_context`, `turn_aborted`, and the
 //! `task_*` events) end the pending window: a canonical prompt and its copy
 //! belong to the turn they were written in, never to a later one.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -160,6 +173,9 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
             Ok(Record::Parsed(record)) => record,
             Ok(Record::End) => break,
             Ok(Record::Blank | Record::Malformed) => continue,
+            // A record too long to read cannot be kept whole; skipping the
+            // conversation with a warning beats silently dropping its turn.
+            Ok(Record::OverLimit) => return Err(SkipReason::TooMuchText),
             Err(_) => return Err(SkipReason::Unreadable),
         };
         count += 1;
@@ -333,11 +349,20 @@ struct TurnState {
     pending: Vec<PendingUser>,
     /// Kept-text bytes waiting in `pending`.
     pending_bytes: usize,
+    /// Set when this turn cannot be kept whole.
+    ///
+    /// Once set, nothing more is queued: the conversation is skipped with a
+    /// warning, so holding the rest of the turn would only grow memory toward
+    /// the file size.
+    overflow: bool,
 }
 
 impl TurnState {
     /// Queues one user record, bounding the pending window as it grows.
     fn push(&mut self, user: PendingUser, history: &mut History) {
+        if self.overflow {
+            return;
+        }
         self.pending_bytes = self
             .pending_bytes
             .saturating_add(user.text.len().saturating_add(16));
@@ -346,7 +371,11 @@ impl TurnState {
             || self.pending.len() > crate::import::MAX_KEPT_MESSAGES
         {
             // A turn this large cannot be kept whole; skipping the conversation
-            // with a warning is better than silently dropping its prompt.
+            // with a warning is better than silently dropping its prompt. The
+            // queued text is released now rather than kept until the turn ends.
+            self.overflow = true;
+            self.pending.clear();
+            self.pending_bytes = 0;
             history.note_overflow();
         }
     }
@@ -364,32 +393,56 @@ struct PendingUser {
 
 /// Adds a turn's users to the history once its turn ends.
 ///
-/// A response copy is dropped only when a canonical event in the same turn has
-/// the same text and the same valid turn id. Everything ambiguous stays, so no
-/// user text is lost.
+/// Two rules, in t3code's order. A canonical event's text that matches a
+/// response copy with a valid turn id makes that whole turn canonical: every
+/// response user record with the id is dropped, so generated setup context never
+/// reaches the import. Then any response copy left that exactly repeats the
+/// canonical text is dropped. A turn with no canonical event is response-only,
+/// so its context stays; and a copy whose turn id names another turn is kept, so
+/// a repeated prompt after an aborted turn loses neither turn's text.
 fn flush_turn(history: &mut History, turn: &mut TurnState) {
     let pending = std::mem::take(&mut turn.pending);
     turn.pending_bytes = 0;
-    let mut keep = vec![true; pending.len()];
-    for (index, user) in pending.iter().enumerate() {
-        if user.canonical {
-            continue;
-        }
-        let Some(turn_id) = user.turn_id.as_deref() else {
-            continue;
-        };
-        let matched = pending.iter().enumerate().any(|(other_index, other)| {
-            other_index != index
-                && other.canonical
-                && other.turn_id.as_deref() == Some(turn_id)
-                && other.text == user.text
-        });
-        if matched {
-            keep[index] = false;
-        }
+    // Canonical turn ids: a response copy whose text matches a canonical event,
+    // tied by the id its own metadata carries.
+    let canonical_ids: std::collections::HashSet<String> = pending
+        .iter()
+        .filter(|user| !user.canonical)
+        .filter(|user| {
+            user.turn_id.as_deref().is_some_and(|turn_id| {
+                pending
+                    .iter()
+                    .any(|other| other.canonical && other.text == user.text)
+                    && !turn_id.is_empty()
+            })
+        })
+        .filter_map(|user| user.turn_id.clone())
+        .collect();
+    // How many response copies each canonical event may still claim by text.
+    let mut canonical_texts: HashMap<String, usize> = HashMap::new();
+    for user in pending.iter().filter(|user| user.canonical) {
+        *canonical_texts.entry(user.text.clone()).or_default() += 1;
     }
-    for (index, user) in pending.into_iter().enumerate() {
-        if !keep[index] {
+    for user in pending {
+        if user.canonical {
+            history.push(KeptMessage {
+                role: MessageRole::User,
+                text: user.text,
+                at: user.at,
+            });
+            continue;
+        }
+        if user
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| canonical_ids.contains(turn_id))
+        {
+            continue;
+        }
+        if let Some(left) = canonical_texts.get_mut(&user.text)
+            && *left > 0
+        {
+            *left -= 1;
             continue;
         }
         history.push(KeptMessage {
@@ -583,7 +636,9 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_context_stays_when_no_turn_id_matches() {
+    fn a_response_copy_without_a_turn_id_is_dropped_by_its_text() {
+        // The legacy shape: the copy names no turn, so only the canonical
+        // event's text can identify it.
         let (_dir, path) = write_rollout(&[
             meta(),
             turn_context("turn-1"),
@@ -592,7 +647,110 @@ mod tests {
             assistant("did it"),
         ]);
         let parsed = parse(&path).expect("parse");
-        assert_eq!(user_texts(&parsed), ["do the thing", "do the thing"]);
+        assert_eq!(user_texts(&parsed), ["do the thing"]);
+    }
+
+    #[test]
+    fn a_legacy_metadata_less_copy_before_the_event_is_dropped() {
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user("do the thing", None),
+            event_user("do the thing"),
+            assistant("did it"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(user_texts(&parsed), ["do the thing"]);
+    }
+
+    #[test]
+    fn the_canonical_event_wins_over_its_generated_context() {
+        // t3code's fixture: the environment block, the project's private
+        // AGENTS.md instructions and the prompt are all copies of one turn.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user(
+                "<environment_context>\n<cwd>/tmp/project</cwd>\n<shell>zsh</shell>\n</environment_context>",
+                Some("turn-1"),
+            ),
+            response_user(
+                "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nPrivate project rules\n</INSTRUCTIONS>",
+                Some("turn-1"),
+            ),
+            event_user("Do something here so it looks like a real project."),
+            response_user(
+                "Do something here so it looks like a real project.",
+                Some("turn-1"),
+            ),
+            assistant("Created the project."),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Do something here so it looks like a real project.",
+                "Created the project."
+            ]
+        );
+        assert_eq!(
+            parsed.title,
+            "Do something here so it looks like a real project."
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("Private project rules")),
+            "the private instructions never reach the import"
+        );
+    }
+
+    #[test]
+    fn response_only_turns_keep_their_generated_context() {
+        let context = "<environment_context>\n<cwd>/tmp/project</cwd>\n</environment_context>";
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user(context, None),
+            response_user("Initialize Git and add a README.", None),
+            assistant("done"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        assert_eq!(
+            user_texts(&parsed),
+            [context, "Initialize Git and add a README."]
+        );
+    }
+
+    #[test]
+    fn mixed_formats_keep_turns_whose_ids_repeat_after_an_assistant() {
+        // t3code's fixture: the older turn and the repeated prompt after the
+        // reply are separate turns, so neither is dropped.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            response_user("Keep this older prompt", Some("turn-older")),
+            event_user("Keep this newer prompt"),
+            response_user("Keep this newer prompt", Some("turn-newer")),
+            assistant("Ask again when needed"),
+            response_user("Keep this newer prompt", Some("turn-newer")),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Keep this older prompt",
+                "Keep this newer prompt",
+                "Ask again when needed",
+                "Keep this newer prompt"
+            ]
+        );
     }
 
     #[test]
@@ -742,5 +900,37 @@ mod tests {
         }
         let (_dir, path) = write_rollout(&lines);
         assert_eq!(parse(&path).err(), Some(SkipReason::TooMuchText));
+    }
+
+    #[test]
+    fn an_overflowing_pending_turn_releases_its_text_at_once() {
+        let mut history = History::new();
+        let mut turn = TurnState::default();
+        for _ in 0..3 {
+            turn.push(
+                PendingUser {
+                    text: "y".repeat(12 * 1024 * 1024),
+                    at: Utc::now(),
+                    canonical: true,
+                    turn_id: None,
+                },
+                &mut history,
+            );
+        }
+        assert!(turn.pending.is_empty(), "the pending window was released");
+        assert_eq!(turn.pending_bytes, 0);
+        assert_eq!(history.retained_bytes(), 0);
+        // Anything queued after the overflow is not retained either.
+        turn.push(
+            PendingUser {
+                text: "z".repeat(12 * 1024 * 1024),
+                at: Utc::now(),
+                canonical: true,
+                turn_id: None,
+            },
+            &mut history,
+        );
+        assert!(turn.pending.is_empty());
+        assert_eq!(history.finish().err(), Some(SkipReason::TooMuchText));
     }
 }

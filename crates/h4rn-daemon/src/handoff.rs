@@ -94,7 +94,10 @@ pub fn build(messages: &[HandoffMessage<'_>], budget: usize, request: &str) -> O
         }
         let cost = cost(messages[index]);
         if used + cost > budget {
-            continue;
+            // The newest messages fill the budget from the end. Once one does
+            // not fit, an older one is left out too: including it would import
+            // the conversation with a hole where the skipped turns were.
+            break;
         }
         used += cost;
         indices.push(index);
@@ -202,6 +205,27 @@ mod tests {
         let request = "x".repeat(MIN_HANDOFF_BYTES);
         let history = [message(MessageRole::User, "hello")];
         assert!(build(&history, MIN_HANDOFF_BYTES, &request).is_none());
+    }
+
+    #[test]
+    fn the_newest_messages_stop_at_the_first_one_that_does_not_fit() {
+        // Newest, then one too large, then an older small message. Including the
+        // older one would give the agent a confused history with a hole.
+        let large = "x".repeat(2_000);
+        let history = [
+            message(MessageRole::User, "the original request"),
+            message(MessageRole::Assistant, "an older small reply"),
+            message(MessageRole::Assistant, &large),
+            message(MessageRole::Assistant, "the newest reply"),
+        ];
+        let block = build(&history, MIN_HANDOFF_BYTES, "carry on").expect("block");
+        assert!(block.contains("the newest reply"));
+        assert!(block.contains("the original request"));
+        assert!(
+            !block.contains("an older small reply"),
+            "an older message must not leapfrog one that did not fit: {block}"
+        );
+        assert!(!block.contains(&large));
     }
 
     #[test]
