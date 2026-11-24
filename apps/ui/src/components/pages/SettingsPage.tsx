@@ -31,6 +31,12 @@ import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 import { WorktreeSettings } from "@/features/worktrees/WorktreeSettings";
 import {
+  setFollowUpBehavior,
+  setMultilineEnter,
+  useFollowUpBehavior,
+  useMultilineEnter,
+} from "@/lib/chatSettings";
+import {
   COMMAND_GROUPS,
   COMMANDS,
   type CommandId,
@@ -277,6 +283,68 @@ export function StartupSettings() {
           {error}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+function ChatForm() {
+  const followUp = useFollowUpBehavior();
+  const multiline = useMultilineEnter();
+  return (
+    <div className="q-form">
+      <h1>Chat</h1>
+      <p className="lead">
+        How a reply behaves while the agent is already working. These choices apply to this device.
+      </p>
+      <div className="q-group">
+        <h2>Follow-up behaviour</h2>
+        <div className="q-field">
+          <div className="lab">
+            <div className="t" id="follow-up-label">
+              Send while the agent is working
+            </div>
+            <div className="s">
+              Queue waits for the next turn. Steer goes into the running turn when its agent can
+              accept it.
+            </div>
+          </div>
+          <div className="ctl">
+            <fieldset className="q-seg inline q-seg-fs" aria-labelledby="follow-up-label">
+              <button
+                type="button"
+                aria-pressed={followUp === "queue"}
+                onClick={() => setFollowUpBehavior("queue")}
+              >
+                Queue
+              </button>
+              <button
+                type="button"
+                aria-pressed={followUp === "steer"}
+                onClick={() => setFollowUpBehavior("steer")}
+              >
+                Steer
+              </button>
+            </fieldset>
+          </div>
+        </div>
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Enter inserts a new line</div>
+            <div className="s">
+              {multiline
+                ? "Cmd/Ctrl+Enter sends; add Shift for the other follow-up action."
+                : "Enter sends; Cmd/Ctrl+Enter uses the other follow-up action."}
+            </div>
+          </div>
+          <div className="ctl">
+            <Toggle
+              checked={multiline}
+              label="Enter inserts a new line"
+              onChange={setMultilineEnter}
+            />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -644,6 +712,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   general: GeneralForm,
   appearance: AppearanceForm,
   notifications: NotificationsForm,
+  chat: ChatForm,
   shortcuts: ShortcutsForm,
   account: LiveAccountForm,
   labs: GuestSettingsForm,

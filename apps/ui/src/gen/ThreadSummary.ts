@@ -3,6 +3,7 @@ import type { AgentState } from "./AgentState";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { LimitBrief } from "./LimitBrief";
+import type { QueuedMessage } from "./QueuedMessage";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
@@ -155,4 +156,19 @@ resume_at: string | null,
 /**
  * The limit currently blocking the thread, when one was observed.
  */
-limit: LimitBrief | null, };
+limit: LimitBrief | null, 
+/**
+ * Messages waiting for the thread's next turn, oldest first.
+ *
+ * A queued message is durable and not yet in the transcript. It is
+ * delivered as the next turn's first message, or steered into the running
+ * turn by an explicit Send now.
+ */
+queued: Array<QueuedMessage>, 
+/**
+ * Whether the running harness can accept a message mid-turn.
+ *
+ * Capabilities are advertised per harness; a client offers Steer only when
+ * this is true and a turn is running.
+ */
+steer: boolean, };

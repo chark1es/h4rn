@@ -98,6 +98,8 @@ const thread: ThreadSummary = {
   unread: false,
   resume_at: null,
   limit: null,
+  queued: [],
+  steer: true,
 };
 
 function htmlFile(path: string, content: string): FsFileContent {

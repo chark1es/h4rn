@@ -112,6 +112,10 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// Messages waiting for the next turn, oldest first.
+    ///
+    /// Stored with the row so the queue survives a daemon restart in its order.
+    pub queued: Vec<h4rn_protocol::QueuedMessage>,
 }
 
 /// A prompt a paused thread still has to deliver, persisted with the thread.
@@ -359,7 +363,8 @@ impl SqliteJournal {
                 subagent_id    TEXT,
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
-                parked_json    TEXT
+                parked_json    TEXT,
+                queued_json    TEXT NOT NULL DEFAULT '[]' 
             )",
         )
         .execute(&self.pool)
@@ -393,6 +398,12 @@ impl SqliteJournal {
             "daemon_threads",
             "title_source",
             "TEXT NOT NULL DEFAULT 'prompt'",
+        )
+        .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "queued_json",
+            "TEXT NOT NULL DEFAULT '[]'",
         )
         .await?;
 
@@ -566,10 +577,11 @@ async fn upsert_thread_on(
     let runtime_mode = runtime_mode.trim_matches('"').to_owned();
     let worktree_json = serde_json::to_string(&meta.worktree)?;
     let parked_json = serde_json::to_string(&meta.parked)?;
+    let queued_json = serde_json::to_string(&meta.queued)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -587,7 +599,8 @@ async fn upsert_thread_on(
             subagent_id = excluded.subagent_id,
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
-            parked_json = excluded.parked_json",
+            parked_json = excluded.parked_json,
+            queued_json = excluded.queued_json",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -608,6 +621,7 @@ async fn upsert_thread_on(
     .bind(meta.agent_id.as_deref())
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
+    .bind(queued_json)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -649,7 +663,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -700,6 +714,10 @@ impl Journal for SqliteJournal {
                 parked: row
                     .try_get::<Option<String>, _>("parked_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
+                queued: row
+                    .try_get::<Option<String>, _>("queued_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
             });
         }
         Ok(metas)
@@ -1447,6 +1465,7 @@ mod tests {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            queued: Vec::new(),
         }
     }
 
@@ -1481,6 +1500,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            queued: Vec::new(),
+            steer: false,
         }
     }
 

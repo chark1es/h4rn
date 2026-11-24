@@ -1,18 +1,122 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { CircleCheckIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ChevronUpIcon,
+  CircleCheckIcon,
+  CornerDownRightIcon,
+  PencilIcon,
+  XIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
-import type { ThreadSummary } from "@/gen";
+import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { absoluteTime, cost, duration, tokens } from "@/lib/format";
+import {
+  moveQueuedMessage,
+  removeQueuedMessage,
+  sendQueuedNow,
+  useApp,
+} from "@/lib/store/appStore";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { TurnBlock } from "./TurnBlock";
 
 type Row =
   | { kind: "turn"; turn: StreamTurn; key: string }
-  | { kind: "pending"; message: PendingMessage; key: string };
+  | { kind: "pending"; message: PendingMessage; key: string }
+  | { kind: "queued"; message: QueuedMessage; key: string; index: number };
+
+export function QueuedTurn({
+  threadId,
+  summary,
+  message,
+  index,
+  editing,
+}: {
+  threadId: string;
+  summary: ThreadSummary;
+  message: QueuedMessage;
+  index: number;
+  editing: boolean;
+}) {
+  const total = summary.queued?.length ?? 0;
+  return (
+    <div className="q-queued" data-editing={editing || undefined}>
+      <div className="q-queued-h">
+        <span className="q-queued-label">Queued</span>
+        <span className="q-faint">
+          {summary.steer ? "Send now steers it into this turn" : "Waits for this turn to finish"}
+        </span>
+      </div>
+      <div className="q-queued-text">{message.text}</div>
+      {message.attachments.length > 0 ? (
+        <MessageAttachments attachments={message.attachments} align="start" />
+      ) : null}
+      <div className="q-queued-a">
+        <button
+          type="button"
+          className="q-btn ghost"
+          onClick={() => void sendQueuedNow(threadId, message.message_id)}
+          title={
+            summary.steer
+              ? "Steer this message into the running turn"
+              : "Move this message to the front of the queue"
+          }
+        >
+          <CornerDownRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          Send now
+        </button>
+        <button
+          type="button"
+          className="q-btn ghost"
+          onClick={() =>
+            window.dispatchEvent(
+              new CustomEvent("h4rn:edit-queued", {
+                detail: { threadId, message },
+              }),
+            )
+          }
+          title="Edit in the composer"
+        >
+          <PencilIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          Edit
+        </button>
+        <button
+          type="button"
+          className="q-btn ghost"
+          onClick={() => void removeQueuedMessage(threadId, message.message_id)}
+          title="Remove from the queue"
+        >
+          <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          Remove
+        </button>
+        <span className="grow" />
+        <button
+          type="button"
+          className="q-ibtn"
+          disabled={index === 0}
+          aria-label="Move up"
+          title="Move up"
+          onClick={() => void moveQueuedMessage(threadId, message.message_id, "up")}
+        >
+          <ChevronUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        </button>
+        <button
+          type="button"
+          className="q-ibtn"
+          disabled={index === total - 1}
+          aria-label="Move down"
+          title="Move down"
+          onClick={() => void moveQueuedMessage(threadId, message.message_id, "down")}
+        >
+          <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function PendingTurn({ message }: { message: PendingMessage }) {
   return (
@@ -46,6 +150,9 @@ export function ThreadStream({
   const focusTurn = useRef(0);
   const isPhone = useIsPhone();
 
+  const editingId = useApp((state) => state.ui.queuedEdit?.messageId ?? null);
+  const queuedEditThread = useApp((state) => state.ui.queuedEdit?.threadId ?? null);
+
   const rows = useMemo<Row[]>(() => {
     const next: Row[] = turns.map((turn) => ({
       kind: "turn",
@@ -55,8 +162,16 @@ export function ThreadStream({
     for (const message of pending) {
       next.push({ kind: "pending", message, key: message.id });
     }
+    (summary.queued ?? []).forEach((message, index) => {
+      next.push({
+        kind: "queued",
+        message,
+        key: `queued:${message.message_id}`,
+        index,
+      });
+    });
     return next;
-  }, [turns, pending]);
+  }, [turns, pending, summary.queued]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -80,7 +195,9 @@ export function ThreadStream({
               ? `${lastItem.toolCall.tool_call_id}:${lastItem.toolCall.status}`
               : (lastItem?.itemId ?? "")
         }`
-      : `${lastRow.key}:${lastRow.message.sending}`
+      : lastRow.kind === "pending"
+        ? `${lastRow.key}:${lastRow.message.sending}`
+        : `${lastRow.key}:${lastRow.message.text.length}`
     : "";
 
   // Follow the tail only while the reader is already at the bottom.
@@ -141,8 +258,16 @@ export function ThreadStream({
                   onReply={onReply}
                   staleAt={item.index === rows.length - 1 ? staleAt : null}
                 />
-              ) : (
+              ) : row.kind === "pending" ? (
                 <PendingTurn message={row.message} />
+              ) : (
+                <QueuedTurn
+                  threadId={threadId}
+                  summary={summary}
+                  message={row.message}
+                  index={row.index}
+                  editing={queuedEditThread === threadId && editingId === row.message.message_id}
+                />
               )}
             </div>
           );

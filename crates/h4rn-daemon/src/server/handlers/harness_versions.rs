@@ -12,7 +12,9 @@ use crate::server::forward::{
 pub(super) fn matches(request: &ClientRequest) -> bool {
     matches!(
         request,
-        ClientRequest::ListHarnessVersions | ClientRequest::UpdateHarness { .. }
+        ClientRequest::ListHarnessVersions
+            | ClientRequest::ListHarnessCapabilities
+            | ClientRequest::UpdateHarness { .. }
     )
 }
 
@@ -24,6 +26,20 @@ pub(super) async fn handle(
     match request {
         ClientRequest::ListHarnessVersions => Ok(ResponseBody::HarnessVersions {
             harnesses: conn.state.harness_versions.list().await,
+        }),
+        ClientRequest::ListHarnessCapabilities => Ok(ResponseBody::HarnessCapabilities {
+            harnesses: [
+                h4rn_protocol::HarnessKind::ClaudeCode,
+                h4rn_protocol::HarnessKind::Codex,
+                h4rn_protocol::HarnessKind::Opencode,
+                h4rn_protocol::HarnessKind::Antigravity,
+            ]
+            .into_iter()
+            .map(|harness| h4rn_protocol::HarnessCapabilityEntry {
+                harness,
+                capabilities: h4rn_harness::capabilities(harness),
+            })
+            .collect(),
         }),
         ClientRequest::UpdateHarness { harness } => conn
             .state

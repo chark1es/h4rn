@@ -42,6 +42,8 @@ const mock = vi.hoisted(() => {
     placed_by_user: false,
     resume_at: null,
     limit: null,
+    queued: [],
+    steer: true,
   };
   return {
     state: {

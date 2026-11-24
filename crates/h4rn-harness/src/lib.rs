@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
 use h4rn_protocol::{
-    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, AttachmentId, HarnessKind,
-    RuntimeMode, ToolCall, TurnStatus, Usage,
+    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, AttachmentId, HarnessCapabilities,
+    HarnessKind, RuntimeMode, ToolCall, TurnStatus, Usage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ pub use codex::{
 };
 pub use fake::{
     EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionCount,
-    SessionModels, SessionSettings, SettingChange, test_spec,
+    SessionModels, SessionSettings, SettingChange, SteerCount, test_spec,
 };
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
@@ -495,8 +495,22 @@ pub trait HarnessSession: Send {
     /// adapter when a session-level switch is not supported.
     fn kind(&self) -> HarnessKind;
 
-    /// Sends a user message to the harness.
+    /// Sends a user message to the harness, starting the thread's next turn.
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError>;
+
+    /// Delivers a message into the turn that is already running.
+    ///
+    /// Only adapters with a real mid-turn input implement this; the default
+    /// refuses, so the daemon never invents steering for a harness that cannot
+    /// do it. A successful call does not start a new turn and never queues the
+    /// message anywhere else.
+    async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        let _ = input;
+        Err(HarnessError::Unsupported {
+            harness: self.kind(),
+            feature: "steering a running turn".into(),
+        })
+    }
 
     /// Interrupts the running turn without killing the session.
     ///
@@ -670,6 +684,21 @@ impl InstanceSnapshot {
     }
 }
 
+/// What one harness adapter can do beyond the common trait.
+///
+/// This is a per-harness fact, not a per-thread one: everything h4rn spawns for
+/// a harness has the same mid-turn input. Keeping the matrix here means the
+/// daemon, the capability listing and the UI all answer from one place.
+pub fn capabilities(kind: HarnessKind) -> HarnessCapabilities {
+    HarnessCapabilities {
+        // Claude Code accepts further stream-json user frames while a turn is
+        // running and reads them between tool calls; Codex app-server has a
+        // real `turn/steer` request. OpenCode's HTTP prompt starts a queued
+        // message and ACP has one prompt at a time, so neither is advertised.
+        steer: matches!(kind, HarnessKind::ClaudeCode | HarnessKind::Codex),
+    }
+}
+
 /// A harness adapter.
 #[async_trait]
 pub trait Harness: Send + Sync {
@@ -740,5 +769,18 @@ pub trait Harness: Send + Sync {
         _snapshot: Option<InstanceSnapshot>,
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
         self.start_session(spec).await
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn only_harnesses_with_a_real_mid_turn_input_advertise_steer() {
+        assert!(capabilities(HarnessKind::ClaudeCode).steer);
+        assert!(capabilities(HarnessKind::Codex).steer);
+        assert!(!capabilities(HarnessKind::Opencode).steer);
+        assert!(!capabilities(HarnessKind::Antigravity).steer);
     }
 }

@@ -83,6 +83,8 @@ vi.mock("@/lib/store/appStore", () => ({
   openInIde: mock.openInIde,
   openThread: mock.openThread,
   sendMessage: mock.sendMessage,
+  editQueuedMessage: async () => true,
+  setUi: () => undefined,
   getClient: () => {
     throw new Error("The test never reads the workspace.");
   },

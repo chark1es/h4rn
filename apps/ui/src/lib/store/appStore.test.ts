@@ -14,7 +14,16 @@ vi.mock("@/lib/client/config", () => ({
 
 import { onManualPlacement } from "@/features/notifications/placement";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
-import { applyEvent, createThread, getState, loadThreads, setThreadTab, store } from "./appStore";
+import {
+  applyEvent,
+  createThread,
+  getState,
+  loadThreads,
+  moveQueuedMessage,
+  setThreadTab,
+  steerOldestQueued,
+  store,
+} from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
   return {
@@ -65,6 +74,8 @@ function threadSummary(input: { threadId: string; host: string }): ThreadSummary
     unread: false,
     resume_at: null,
     limit: null,
+    queued: [],
+    steer: true,
   };
 }
 
@@ -256,5 +267,82 @@ describe("manual placements", () => {
     unsubscribe();
 
     expect(seen).toEqual([]);
+  });
+});
+
+describe("queued messages", () => {
+  const queued = (id: string, text: string) => ({
+    message_id: id,
+    text,
+    attachments: [],
+    queued_at: "2026-01-01T00:00:00.000Z",
+  });
+
+  const seedQueue = () => {
+    const thread = threadSummary({ threadId: "queue_thread", host: "queue_host" });
+    thread.queued = [queued("qm_one", "first"), queued("qm_two", "second")];
+    thread.steer = true;
+    store.setState({ ...getState(), threads: { queue_thread: thread } });
+  };
+
+  beforeEach(() => {
+    fake.request.mockClear();
+    seedQueue();
+  });
+
+  it("steers the oldest queued message and leaves the rest", () => {
+    fake.response.current = {
+      type: "queue_updated",
+      thread_id: "queue_thread",
+      queued: [queued("qm_two", "second")],
+      seq: 9,
+    };
+
+    expect(steerOldestQueued("queue_thread")).toBe(true);
+    const body = fake.request.mock.calls[0]?.[0] as {
+      type: string;
+      message_id: string;
+      action: { type: string };
+    };
+    expect(body.type).toBe("queue_message");
+    expect(body.message_id).toBe("qm_one");
+    expect(body.action.type).toBe("steer");
+  });
+
+  it("does not steer when nothing is queued", () => {
+    store.setState({ ...getState(), threads: {} });
+    expect(steerOldestQueued("queue_thread")).toBe(false);
+    expect(fake.request).not.toHaveBeenCalled();
+  });
+
+  it("reorders from the daemon's answer", async () => {
+    fake.response.current = {
+      type: "queue_updated",
+      thread_id: "queue_thread",
+      queued: [queued("qm_two", "second"), queued("qm_one", "first")],
+      seq: 10,
+    };
+
+    await moveQueuedMessage("queue_thread", "qm_two", "up");
+
+    const body = fake.request.mock.calls[0]?.[0] as {
+      type: string;
+      action: { type: string; direction: string };
+    };
+    expect(body.type).toBe("queue_message");
+    expect(body.action).toEqual({ type: "move", direction: "up" });
+    expect(getState().threads.queue_thread?.queued.map((m) => m.message_id)).toEqual([
+      "qm_two",
+      "qm_one",
+    ]);
+  });
+
+  it("asks the daemon to move a message and keeps its error off the queue", async () => {
+    fake.request.mockRejectedValueOnce(new Error("no"));
+    expect(await moveQueuedMessage("queue_thread", "qm_one", "down")).toBe(false);
+    expect(getState().threads.queue_thread?.queued.map((m) => m.message_id)).toEqual([
+      "qm_one",
+      "qm_two",
+    ]);
   });
 });

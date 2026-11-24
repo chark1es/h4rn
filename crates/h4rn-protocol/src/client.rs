@@ -26,6 +26,42 @@ pub struct ClientFrame {
     pub body: ClientRequest,
 }
 
+/// What to do with one queued message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum QueueAction {
+    /// Replace its text and attachments, keeping its place in the queue.
+    Edit {
+        /// New text.
+        text: String,
+        /// Replacement attachments, uploaded before this request.
+        #[serde(default)]
+        attachments: Vec<AttachmentId>,
+    },
+    /// Drop it from the queue.
+    Remove,
+    /// Swap it with its neighbour.
+    Move {
+        /// Which way it moves.
+        direction: QueueDirection,
+    },
+    /// Deliver it now: steer into the running turn when the harness can, else
+    /// move it to the front of the queue.
+    SendNow,
+    /// Steer it into the running turn, refusing rather than queuing it.
+    Steer,
+}
+
+/// Which way a queued message moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueDirection {
+    /// Toward the front of the queue.
+    Up,
+    /// Toward the back of the queue.
+    Down,
+}
+
 /// Everything a client can ask a daemon to do.
 ///
 /// The daemon answers a request whose feature is not enabled on this host with
@@ -96,6 +132,25 @@ pub enum ClientRequest {
         text: String,
         /// Attachments uploaded before this request.
         attachments: Vec<AttachmentId>,
+        /// Deliver into the running turn instead of queuing for the next one.
+        ///
+        /// Refused when the harness has no real mid-turn input. With no turn
+        /// running this behaves like an ordinary send.
+        #[serde(default)]
+        steer: bool,
+    },
+    /// Change one message waiting in a thread's queue.
+    ///
+    /// Answered with [`crate::ResponseBody::QueueUpdated`]. A message that is
+    /// being promoted to its turn at the same moment is refused instead of
+    /// being edited, removed or moved twice.
+    QueueMessage {
+        /// Thread owning the queue.
+        thread_id: ThreadId,
+        /// Message to change.
+        message_id: crate::ids::QueuedMessageId,
+        /// What to do with it.
+        action: QueueAction,
     },
     /// Interrupt the running turn.
     Interrupt {
@@ -1332,6 +1387,11 @@ pub enum ClientRequest {
     /// The latest version comes from the npm registry and is cached for a few
     /// hours. An offline registry is reported as unknown, never as an error.
     ListHarnessVersions,
+    /// Report what each harness adapter can do beyond the common trait.
+    ///
+    /// Answered with [`crate::ResponseBody::HarnessCapabilities`]. Today this
+    /// says whether the adapter takes a message into a running turn.
+    ListHarnessCapabilities,
     /// Update one harness CLI and stream its output as events.
     ///
     /// Refused while that harness has an active turn. The command runs with no
@@ -1572,6 +1632,7 @@ impl ClientRequest {
             | Self::ListFailoverOptions { .. }
             | Self::ListHarnessVersions
             | Self::ListAcpAgents
+            | Self::ListHarnessCapabilities
             | Self::ListWorktrees
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
@@ -1604,6 +1665,7 @@ impl ClientRequest {
             | Self::GitStatus { .. } => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
+            | Self::QueueMessage { .. }
             | Self::Interrupt { .. }
             | Self::RespondApproval { .. }
             | Self::BeginUpload { .. }
@@ -1761,6 +1823,54 @@ mod tests {
         assert_eq!(value["id"], 7);
         assert_eq!(value["body"]["type"], "hello");
         assert_eq!(value["body"]["protocol_version"], 1);
+    }
+
+    #[test]
+    fn older_send_message_frames_are_ordinary_sends() {
+        let frame: ClientFrame = serde_json::from_value(serde_json::json!({
+            "id": 3,
+            "body": {
+                "type": "send_message",
+                "thread_id": "th_1",
+                "text": "hello",
+                "attachments": []
+            }
+        }))
+        .expect("an older frame still parses");
+        match frame.body {
+            ClientRequest::SendMessage { steer, text, .. } => {
+                assert!(!steer, "a frame without the flag queues");
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected send_message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_actions_round_trip() {
+        let request = ClientRequest::QueueMessage {
+            thread_id: ThreadId::new("th_1"),
+            message_id: crate::ids::QueuedMessageId::new("qm_1"),
+            action: QueueAction::Edit {
+                text: "edited".into(),
+                attachments: Vec::new(),
+            },
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], "queue_message");
+        assert_eq!(value["action"]["type"], "edit");
+        assert_eq!(value["action"]["text"], "edited");
+        let back: ClientRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(back, request);
+        assert_eq!(
+            request.required_scope(),
+            crate::connect::PairScope::Approve,
+            "changing a queue is the owner's approval"
+        );
+        assert_eq!(
+            ClientRequest::ListHarnessCapabilities.required_scope(),
+            crate::connect::PairScope::View
+        );
     }
 
     #[test]

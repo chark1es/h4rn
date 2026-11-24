@@ -43,6 +43,8 @@ const summary: ThreadSummary = {
   unread: false,
   resume_at: null,
   limit: null,
+  queued: [],
+  steer: true,
 };
 
 /** A turn whose only item is the user's prompt, as before the agent spoke. */

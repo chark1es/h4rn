@@ -39,7 +39,15 @@ const mock = vi.hoisted(() => {
   return {
     state,
     sendMessage:
-      vi.fn<(threadId: string, text: string, attachments: unknown[]) => Promise<boolean>>(),
+      vi.fn<
+        (
+          threadId: string,
+          text: string,
+          attachments: unknown[],
+          options?: { steer?: boolean },
+        ) => Promise<boolean>
+      >(),
+    editQueuedMessage: vi.fn(async () => true),
     interruptThread: vi.fn(),
     toggleTerminal: vi.fn(),
     toggleView: vi.fn(),
@@ -67,6 +75,8 @@ vi.mock("@/lib/store/appStore", () => ({
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
   getState: () => mock.state,
   sendMessage: mock.sendMessage,
+  editQueuedMessage: mock.editQueuedMessage,
+  setUi: () => undefined,
   interruptThread: mock.interruptThread,
   toggleTerminal: mock.toggleTerminal,
   toggleView: mock.toggleView,
@@ -99,6 +109,7 @@ import {
   WorkspaceFilesContext,
 } from "@/features/composer/workspaceFiles";
 import type { FileEntry, FsListing } from "@/gen";
+import { setFollowUpBehavior, setMultilineEnter } from "@/lib/chatSettings";
 import { draftStorageKey, flushDrafts, readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 import { Composer } from "./Composer";
 
@@ -140,6 +151,8 @@ const summary: ThreadSummary = {
   unread: false,
   resume_at: null,
   limit: null,
+  queued: [],
+  steer: true,
 };
 
 function message(role: MessageRole, text: string): TurnItem {
@@ -183,10 +196,10 @@ function runAnimationFrames(): void {
   });
 }
 
-function renderComposer() {
+function renderComposer(overrides: Partial<ThreadSummary> = {}) {
   return render(
     <WorkspaceFilesContext.Provider value={fileLister}>
-      <Composer summary={summary} />
+      <Composer summary={{ ...summary, ...overrides }} />
     </WorkspaceFilesContext.Provider>,
   );
 }
@@ -308,6 +321,10 @@ beforeEach(() => {
   mock.state.ui.phone = false;
   mock.state.ui.layout = { terminalOpen: false, view: "thread" };
   mock.sendMessage.mockReset();
+  mock.editQueuedMessage.mockReset();
+  mock.editQueuedMessage.mockResolvedValue(true);
+  setFollowUpBehavior("queue");
+  setMultilineEnter(false);
   mock.interruptThread.mockReset();
   mock.toggleTerminal.mockReset();
   mock.toggleView.mockReset();
@@ -407,7 +424,7 @@ describe("Composer drafts and history", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
 
     await waitFor(() => expect(input.value).toBe(""));
-    expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "send me", []);
+    expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "send me", [], { steer: false });
     expect(readThreadDraft(HOST, THREAD)).toBe("");
   });
 
@@ -505,7 +522,7 @@ describe("Composer drafts and history", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
 
     await waitFor(() =>
-      expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "earlier prompt", []),
+      expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "earlier prompt", [], { steer: false }),
     );
     await waitFor(() => expect(input.value).toBe("half typed"));
     // The recalled prompt was sent; the unsent draft it replaced was not.
@@ -530,7 +547,9 @@ describe("Composer drafts and history", () => {
     expect(input.value).toBe("newer prompt");
 
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "newer prompt", []));
+    await waitFor(() =>
+      expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "newer prompt", [], { steer: false }),
+    );
 
     // The person recalls farther back while the send waits. That text is their
     // newer intent, so the send must not put the old preserved draft back.
@@ -814,7 +833,9 @@ describe("Composer @ file picker", () => {
     expect(input.value).toBe("@comp");
 
     fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "@comp", []));
+    await waitFor(() =>
+      expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "@comp", [], { steer: false }),
+    );
   });
 
   it("opens from the @ button", async () => {
@@ -1360,5 +1381,174 @@ describe("Composer / command menu", () => {
       await Promise.resolve();
     });
     expect(screen.queryByRole("dialog", { name: "Files" })).toBeNull();
+  });
+});
+
+describe("follow-up behaviour and queued messages", () => {
+  const queuedMessage = (id: string, text: string) => ({
+    message_id: id,
+    text,
+    attachments: [],
+    queued_at: "2026-01-01T00:00:00.000Z",
+  });
+
+  const running: Partial<ThreadSummary> = {
+    agent_state: "thinking",
+    steer: true,
+    queued: [],
+  };
+
+  const showQueued = (overrides: Partial<ThreadSummary> = {}) => (
+    <WorkspaceFilesContext.Provider value={fileLister}>
+      <Composer summary={{ ...summary, ...running, ...overrides }} />
+    </WorkspaceFilesContext.Provider>
+  );
+
+  beforeEach(() => {
+    mock.sendMessage.mockResolvedValue(true);
+    mock.editQueuedMessage.mockResolvedValue(true);
+    setFollowUpBehavior("queue");
+    setMultilineEnter(false);
+  });
+
+  afterEach(() => {
+    setFollowUpBehavior("queue");
+    setMultilineEnter(false);
+  });
+
+  it("shows Queue while running and sends the opposite action with Cmd/Ctrl+Enter", async () => {
+    render(showQueued());
+    const input = textarea();
+
+    expect(screen.getByRole("button", { name: "Send reply" }).dataset.action).toBe("queue");
+
+    fireEvent.change(input, { target: { value: "follow up" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mock.sendMessage).toHaveBeenLastCalledWith(THREAD, "follow up", [], {
+      steer: false,
+    });
+    await waitFor(() => expect(input.value).toBe(""));
+
+    fireEvent.change(input, { target: { value: "steer this" } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    expect(mock.sendMessage).toHaveBeenLastCalledWith(THREAD, "steer this", [], {
+      steer: true,
+    });
+  });
+
+  it("shows Steer when the client default is Steer and the agent can take it", async () => {
+    setFollowUpBehavior("steer");
+    render(showQueued());
+    const input = textarea();
+
+    expect(screen.getByRole("button", { name: "Send reply" }).dataset.action).toBe("steer");
+    fireEvent.change(input, { target: { value: "into the turn" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mock.sendMessage).toHaveBeenLastCalledWith(THREAD, "into the turn", [], {
+      steer: true,
+    });
+    await waitFor(() => expect(input.value).toBe(""));
+
+    // Cmd/Ctrl+Enter is the opposite action, so it queues.
+    fireEvent.change(input, { target: { value: "wait a turn" } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    expect(mock.sendMessage).toHaveBeenLastCalledWith(THREAD, "wait a turn", [], {
+      steer: false,
+    });
+  });
+
+  it("never offers Steer for a harness without mid-turn input", () => {
+    setFollowUpBehavior("steer");
+    render(showQueued({ steer: false }));
+    const input = textarea();
+
+    expect(screen.getByRole("button", { name: "Send reply" }).dataset.action).toBe("queue");
+    fireEvent.change(input, { target: { value: "queued" } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    expect(mock.sendMessage).toHaveBeenLastCalledWith(THREAD, "queued", [], {
+      steer: false,
+    });
+  });
+
+  it("sends with Cmd/Ctrl+Enter and opposite with Shift when Enter is multiline", async () => {
+    setMultilineEnter(true);
+    render(showQueued());
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "one\ntwo" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mock.sendMessage).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    expect(mock.sendMessage).toHaveBeenLastCalledWith(THREAD, "one\ntwo", [], {
+      steer: false,
+    });
+    await waitFor(() => expect(input.value).toBe(""));
+
+    fireEvent.change(input, { target: { value: "one\ntwo" } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, shiftKey: true });
+    expect(mock.sendMessage).toHaveBeenLastCalledWith(THREAD, "one\ntwo", [], {
+      steer: true,
+    });
+  });
+
+  it("edits the newest queued message with Option+Up and Cancel restores the draft", () => {
+    render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    const input = textarea();
+    fireEvent.change(input, { target: { value: "my draft" } });
+    input.setSelectionRange(0, 0);
+
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+    expect(input.value).toBe("queued words");
+
+    fireEvent.change(input, { target: { value: "edited words" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(input.value).toBe("my draft");
+    expect(readThreadDraft(HOST, THREAD)).toBe("my draft");
+    expect(mock.editQueuedMessage).not.toHaveBeenCalled();
+  });
+
+  it("saves an edit in place", async () => {
+    render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    const input = textarea();
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+
+    fireEvent.change(input, { target: { value: "edited words" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mock.editQueuedMessage).toHaveBeenCalledWith(THREAD, "qm_one", "edited words", []),
+    );
+  });
+
+  it("ends an edit when the message starts and keeps the text when no draft existed", () => {
+    writeThreadDraft(HOST, THREAD, "");
+    flushDrafts();
+    const view = render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    const input = textarea();
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+    fireEvent.change(input, { target: { value: "changed while it started" } });
+
+    view.rerender(showQueued({ queued: [] }));
+
+    expect(input.value).toBe("changed while it started");
+    expect(readThreadDraft(HOST, THREAD)).toBe("changed while it started");
+  });
+
+  it("restores the draft when the message is removed mid-edit", () => {
+    const view = render(showQueued({ queued: [queuedMessage("qm_one", "queued words")] }));
+    const input = textarea();
+    fireEvent.change(input, { target: { value: "a draft" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+    fireEvent.change(input, { target: { value: "changed" } });
+
+    view.rerender(showQueued({ queued: [] }));
+
+    expect(input.value).toBe("a draft");
   });
 });

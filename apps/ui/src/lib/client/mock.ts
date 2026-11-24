@@ -531,6 +531,8 @@ function summary(input: {
             reset_at: iso(input.limitResetAtMs),
             message: "Weekly limit reached. Auto-resume is armed.",
           },
+    queued: [],
+    steer: input.harness === "claude_code" || input.harness === "codex",
   };
 }
 
@@ -2327,6 +2329,8 @@ class MockDaemon {
           ttft_ms: 0,
           context_window: 200_000,
           context_fill_percent: 0,
+          queued: [],
+          steer: body.harness === "claude_code" || body.harness === "codex",
         };
         this.threads.set(id, { summary: thread, events: [], wire: [] });
         this.ok(frame.id, {

@@ -49,6 +49,8 @@ function summary(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     unread: false,
     resume_at: null,
     limit: null,
+    queued: [],
+    steer: true,
     ...overrides,
   };
 }

@@ -544,6 +544,22 @@ impl HarnessSession for ClaudeCodeSession {
         Ok(())
     }
 
+    async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: "session is shut down".into(),
+            });
+        }
+
+        // A steer is one more user frame on the same stream-json stdin. The
+        // running turn owns the session's first-send attachments, so a steer
+        // never takes them; Claude reads the frame after the tool calls it was
+        // already running, inside the same turn.
+        let frame = build_user_frame(&input.text, &input.attachments)?;
+        self.write_frame(frame).await
+    }
+
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {

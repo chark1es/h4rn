@@ -33,9 +33,9 @@ use h4rn_meter::{LimitHit, MeterHub, TurnContext, TurnMeter};
 use h4rn_protocol::{
     AgentState, ApprovalDecision, ApprovalKind, Attachment, AttachmentId, DeviceId, Event,
     FsTurnChanges, HarnessKind, HostId, Item, LimitBrief, LimitSource, MessageRole, ProtoError,
-    ProtoErrorCode, ResumeFailover, ResumeSchedule, ResumeState, RuntimeMode, SubagentId,
-    ThreadFilter, ThreadId, ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage,
-    UsageReport, WorktreeRequest,
+    ProtoErrorCode, QueueAction, QueueDirection, QueuedMessage, QueuedMessageId, ResumeFailover,
+    ResumeSchedule, ResumeState, RuntimeMode, SubagentId, ThreadFilter, ThreadId, ThreadSummary,
+    ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, UsageReport, WorktreeRequest,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -208,6 +208,28 @@ pub struct AcceptedMessage {
     /// Turn the message belongs to.
     pub turn_id: TurnId,
     /// Last durable sequence written for the message.
+    pub seq: u64,
+    /// The queued message this send created, when it waits for a turn.
+    pub queued_message_id: Option<QueuedMessageId>,
+}
+
+/// How one send delivers its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendMode {
+    /// Wait for the thread's next turn.
+    Queue,
+    /// Deliver into the running turn when the harness can.
+    Steer,
+}
+
+/// Result of one queue change.
+#[derive(Clone, Debug)]
+pub struct QueueUpdate {
+    /// Thread whose queue changed.
+    pub thread_id: ThreadId,
+    /// The queue after the change, oldest first.
+    pub queued: Vec<QueuedMessage>,
+    /// Durable sequence of the summary event; 0 when nothing changed.
     pub seq: u64,
 }
 
@@ -519,7 +541,6 @@ struct ThreadRecord {
     session_gen: u64,
     pump: Option<JoinHandle<()>>,
     pending_approvals: BTreeMap<String, PendingApproval>,
-    queued: VecDeque<UserInput>,
     last_signature: Option<SummarySignature>,
     /// The most recent turn whose dead transport was already published as one
     /// error row.
@@ -1441,6 +1462,8 @@ impl ThreadRecord {
             unread: tab == ThreadTab::Done && !self.state.acknowledged,
             resume_at: self.resume_at,
             limit: self.limit.clone(),
+            queued: self.meta.queued.clone(),
+            steer: h4rn_harness::capabilities(self.meta.harness).steer,
         }
     }
 
@@ -2645,6 +2668,7 @@ impl ThreadManager {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            queued: Vec::new(),
         };
         let title_workspace = meta.workspace_path.clone();
 
@@ -2657,7 +2681,6 @@ impl ThreadManager {
             session_gen: 0,
             pump: None,
             pending_approvals: BTreeMap::new(),
-            queued: VecDeque::new(),
             last_signature: None,
             transport_error_reported: None,
             transport_report: None,
@@ -2780,12 +2803,112 @@ impl ThreadManager {
         text: String,
         attachments: Vec<AttachmentId>,
     ) -> Result<AcceptedMessage, ManagerError> {
+        self.send_message_with(thread_id, text, attachments, SendMode::Queue)
+            .await
+    }
+
+    /// Appends a user message with an explicit delivery mode.
+    ///
+    /// [`SendMode::Steer`] delivers into the running turn when the harness has
+    /// a real mid-turn input and refuses rather than quietly queuing. With no
+    /// turn running it is an ordinary send.
+    pub async fn send_message_with(
+        &self,
+        thread_id: &ThreadId,
+        text: String,
+        attachments: Vec<AttachmentId>,
+        mode: SendMode,
+    ) -> Result<AcceptedMessage, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let resolved_attachments = self
             .inner
             .resolve_attachments(thread_id, &attachments)
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
+
+        if mode == SendMode::Steer {
+            let active = {
+                let record = handle.lock().await;
+                if record.closed {
+                    return Err(ManagerError::NotFound(format!(
+                        "thread {thread_id} is closed"
+                    )));
+                }
+                record.active.as_ref().map(|active| {
+                    (
+                        active.turn_id.clone(),
+                        record.meta.harness,
+                        record.live_session().cloned(),
+                    )
+                })
+            };
+            if let Some((active_turn_id, harness, live)) = active {
+                if !h4rn_harness::capabilities(harness).steer {
+                    return Err(ManagerError::Unsupported(format!(
+                        "{harness:?} cannot take a message into a running turn; send it as a follow-up instead"
+                    )));
+                }
+                let Some(session) = live else {
+                    return Err(ManagerError::Conflict(
+                        "the agent is still starting; try steering again in a moment".into(),
+                    ));
+                };
+                let now = self.now();
+                let mut guard = session.lock().await;
+                // The turn may have ended, or this session may have been
+                // replaced, while the steer waited for the session lock. Lock
+                // order is session then record, the same as delivery.
+                {
+                    let record = handle.lock().await;
+                    let still_active = record
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.turn_id == active_turn_id)
+                        && record.session.is_live(&session);
+                    if !still_active {
+                        return Err(ManagerError::Conflict(
+                            "that turn ended before the message could be steered; send it again"
+                                .into(),
+                        ));
+                    }
+                }
+                guard
+                    .steer(UserInput {
+                        text: text.clone(),
+                        attachments: harness_attachments.clone(),
+                    })
+                    .await
+                    .map_err(steer_error)?;
+                drop(guard);
+
+                // The message is in the running turn: record it as a user item
+                // of that turn. It is never also queued.
+                let mut record = handle.lock().await;
+                let domain = vec![ThreadEvent::MessageReceived {
+                    source: h4rn_core::MessageSource::User,
+                    at: now,
+                }];
+                let wire = vec![Event::ItemCompleted {
+                    thread_id: thread_id.clone(),
+                    turn_id: active_turn_id.clone(),
+                    item: Item::Message {
+                        item_id: fresh_item_id("user"),
+                        role: MessageRole::User,
+                        text,
+                        attachments: resolved_attachments,
+                    },
+                }];
+                let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+                return Ok(AcceptedMessage {
+                    thread_id: thread_id.clone(),
+                    turn_id: active_turn_id,
+                    seq,
+                    queued_message_id: None,
+                });
+            }
+            // No turn running: this starts the next turn like any other send.
+        }
+
         let mut record = handle.lock().await;
         if record.closed {
             return Err(ManagerError::NotFound(format!(
@@ -2816,10 +2939,13 @@ impl ThreadManager {
             // holds no prompt to deliver at all.
             let release_pending =
                 stale_schedule && record.pending_turn() && record.parks_persisted_prompt();
-            record.queued.push_back(UserInput {
-                text: text.clone(),
-                attachments: harness_attachments,
-            });
+            let queued = QueuedMessage {
+                message_id: QueuedMessageId::new_uuid_v7(),
+                text,
+                attachments: resolved_attachments,
+                queued_at: now,
+            };
+            record.meta.queued.push(queued.clone());
             let mut domain = vec![ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
                 at: now,
@@ -2836,17 +2962,7 @@ impl ThreadManager {
                 record.meta.parked = None;
                 record.limit = None;
             }
-            let wire = vec![Event::ItemCompleted {
-                thread_id: thread_id.clone(),
-                turn_id: active_turn_id.clone(),
-                item: Item::Message {
-                    item_id: fresh_item_id("user"),
-                    role: MessageRole::User,
-                    text,
-                    attachments: resolved_attachments,
-                },
-            }];
-            let emitted = self.inner.emit(&mut record, domain, wire).await;
+            let emitted = self.inner.emit(&mut record, domain, Vec::new()).await;
             drop(record);
             if release_pending {
                 // The delivery owner must exist even when the journal write
@@ -2859,6 +2975,55 @@ impl ThreadManager {
                 thread_id: thread_id.clone(),
                 turn_id: active_turn_id,
                 seq,
+                queued_message_id: Some(queued.message_id),
+            });
+        }
+
+        // No turn is running. A queue older than this message (left by a
+        // restart) goes first, so its oldest entry becomes the turn and this
+        // one waits behind it.
+        if !record.meta.queued.is_empty() {
+            let queued = QueuedMessage {
+                message_id: QueuedMessageId::new_uuid_v7(),
+                text,
+                attachments: resolved_attachments,
+                queued_at: now,
+            };
+            record.meta.queued.push(queued.clone());
+            let front = record.meta.queued.remove(0);
+            let dispatch = record.begin_turn(now, queued_input(&front));
+            let turn_id = dispatch.turn_id.clone();
+            let domain = vec![
+                ThreadEvent::MessageReceived {
+                    source: h4rn_core::MessageSource::User,
+                    at: now,
+                },
+                ThreadEvent::TurnQueued { at: now },
+                ThreadEvent::TurnStarted { at: now },
+            ];
+            let wire = vec![
+                queued_item_event(thread_id, &turn_id, &front),
+                Event::TurnStarted {
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    started_at: now,
+                },
+            ];
+            let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+            let stale = record.detach_stale_session();
+            let live = record.live_session().cloned();
+            drop(record);
+            if let Some(stale) = stale {
+                tokio::spawn(async move {
+                    let _ = stale.lock().await.shutdown().await;
+                });
+            }
+            self.inner.deliver_or_start(handle, dispatch, live);
+            return Ok(AcceptedMessage {
+                thread_id: thread_id.clone(),
+                turn_id,
+                seq,
+                queued_message_id: Some(queued.message_id),
             });
         }
 
@@ -2912,24 +3077,264 @@ impl ThreadManager {
                 let _ = stale.lock().await.shutdown().await;
             });
         }
-        match live {
-            Some(session) => {
-                // The message and its turn are already recorded; let the
-                // adapter accept the text in the background so the connection
-                // can answer other requests (snapshots, listings, settings)
-                // meanwhile.
-                let this = Arc::clone(&self.inner);
-                tokio::spawn(async move {
-                    this.deliver(handle, dispatch, session).await;
-                });
-            }
-            // No session yet, or one is still starting: that startup claims
-            // the turn once it is live and writes this prompt then.
-            None => self.inner.spawn_session(handle),
-        }
+        self.inner.deliver_or_start(handle, dispatch, live);
         Ok(AcceptedMessage {
             thread_id: thread_id.clone(),
             turn_id,
+            seq,
+            queued_message_id: None,
+        })
+    }
+
+    /// Changes one message waiting in a thread's queue.
+    ///
+    /// Every mutation and the promotion of the next turn happen under the same
+    /// record lock, so a message that has just started is never also edited,
+    /// removed or steered: the caller gets a conflict instead of a double
+    /// delivery.
+    pub async fn queue_message(
+        &self,
+        thread_id: &ThreadId,
+        message_id: &QueuedMessageId,
+        action: QueueAction,
+    ) -> Result<QueueUpdate, ManagerError> {
+        let handle = self.inner.handle(thread_id).await?;
+
+        match action {
+            QueueAction::Edit { text, attachments } => {
+                let resolved = self
+                    .inner
+                    .resolve_attachments(thread_id, &attachments)
+                    .await?;
+                let mut record = handle.lock().await;
+                if record.closed {
+                    return Err(ManagerError::NotFound(format!(
+                        "thread {thread_id} is closed"
+                    )));
+                }
+                let index = queue_position(&record, message_id)?;
+                {
+                    let item = &mut record.meta.queued[index];
+                    item.text = text;
+                    item.attachments = resolved;
+                }
+                let (_, seq) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
+                Ok(QueueUpdate {
+                    thread_id: thread_id.clone(),
+                    queued: record.meta.queued.clone(),
+                    seq,
+                })
+            }
+            QueueAction::Remove => {
+                let mut record = handle.lock().await;
+                if record.closed {
+                    return Err(ManagerError::NotFound(format!(
+                        "thread {thread_id} is closed"
+                    )));
+                }
+                let index = queue_position(&record, message_id)?;
+                record.meta.queued.remove(index);
+                let (_, seq) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
+                Ok(QueueUpdate {
+                    thread_id: thread_id.clone(),
+                    queued: record.meta.queued.clone(),
+                    seq,
+                })
+            }
+            QueueAction::Move { direction } => {
+                let mut record = handle.lock().await;
+                if record.closed {
+                    return Err(ManagerError::NotFound(format!(
+                        "thread {thread_id} is closed"
+                    )));
+                }
+                let index = queue_position(&record, message_id)?;
+                let target = match direction {
+                    QueueDirection::Up => index.checked_sub(1),
+                    QueueDirection::Down => {
+                        (index + 1 < record.meta.queued.len()).then_some(index + 1)
+                    }
+                };
+                let Some(target) = target else {
+                    return Ok(QueueUpdate {
+                        thread_id: thread_id.clone(),
+                        queued: record.meta.queued.clone(),
+                        seq: 0,
+                    });
+                };
+                record.meta.queued.swap(index, target);
+                let (_, seq) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
+                Ok(QueueUpdate {
+                    thread_id: thread_id.clone(),
+                    queued: record.meta.queued.clone(),
+                    seq,
+                })
+            }
+            QueueAction::SendNow | QueueAction::Steer => {
+                let steer_only = matches!(action, QueueAction::Steer);
+                self.send_queued(handle, thread_id, message_id, steer_only)
+                    .await
+            }
+        }
+    }
+
+    /// Delivers one queued message now.
+    ///
+    /// With a running turn on a harness that can steer, the message goes into
+    /// that turn. Otherwise `SendNow` moves it to the front (starting a turn if
+    /// none runs); `Steer` refuses, because it promises a mid-turn delivery.
+    async fn send_queued(
+        &self,
+        handle: ThreadHandle,
+        thread_id: &ThreadId,
+        message_id: &QueuedMessageId,
+        steer_only: bool,
+    ) -> Result<QueueUpdate, ManagerError> {
+        let (index, message, active, harness, live) = {
+            let record = handle.lock().await;
+            if record.closed {
+                return Err(ManagerError::NotFound(format!(
+                    "thread {thread_id} is closed"
+                )));
+            }
+            let index = queue_position(&record, message_id)?;
+            (
+                index,
+                record.meta.queued[index].clone(),
+                record.active.as_ref().map(|active| active.turn_id.clone()),
+                record.meta.harness,
+                record.live_session().cloned(),
+            )
+        };
+
+        if let (Some(active_turn_id), true, Some(session)) = (
+            active.clone(),
+            h4rn_harness::capabilities(harness).steer,
+            live,
+        ) {
+            let now = self.now();
+            {
+                let mut record = handle.lock().await;
+                let current = queue_position(&record, message_id)?;
+                if current != index {
+                    return Err(ManagerError::Conflict(
+                        "the queue changed while that message was being sent".into(),
+                    ));
+                }
+                record.meta.queued.remove(index);
+            }
+            let steered = {
+                let mut guard = session.lock().await;
+                let still_active = {
+                    let record = handle.lock().await;
+                    record
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.turn_id == active_turn_id)
+                        && record.session.is_live(&session)
+                };
+                if !still_active {
+                    Err(ManagerError::Conflict(
+                        "that turn ended before the message could be steered; try again".into(),
+                    ))
+                } else {
+                    guard
+                        .steer(queued_input(&message))
+                        .await
+                        .map_err(steer_error)
+                }
+            };
+            if let Err(error) = steered {
+                // Put the message back where it was: a failed steer never
+                // silently drops or duplicates a queued message.
+                let mut record = handle.lock().await;
+                restore_queue_item(&mut record, index, message);
+                return Err(error);
+            }
+            let mut record = handle.lock().await;
+            let domain = vec![ThreadEvent::MessageReceived {
+                source: h4rn_core::MessageSource::User,
+                at: now,
+            }];
+            let wire = vec![Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: active_turn_id.clone(),
+                item: Item::Message {
+                    item_id: fresh_item_id("user"),
+                    role: MessageRole::User,
+                    text: message.text.clone(),
+                    attachments: message.attachments.clone(),
+                },
+            }];
+            let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+            return Ok(QueueUpdate {
+                thread_id: thread_id.clone(),
+                queued: record.meta.queued.clone(),
+                seq,
+            });
+        }
+
+        if steer_only {
+            return Err(match active {
+                None => ManagerError::Conflict("no turn is running to steer".into()),
+                Some(_) if h4rn_harness::capabilities(harness).steer => ManagerError::Conflict(
+                    "the agent is still starting; try steering again in a moment".into(),
+                ),
+                Some(_) => ManagerError::Unsupported(format!(
+                    "{harness:?} cannot take a message into a running turn"
+                )),
+            });
+        }
+
+        // Send now without a steer: first in the queue, and the turn starts at
+        // once when nothing is running.
+        let mut record = handle.lock().await;
+        let current = queue_position(&record, message_id)?;
+        if current != index {
+            return Err(ManagerError::Conflict(
+                "the queue changed while that message was being sent".into(),
+            ));
+        }
+        let item = record.meta.queued.remove(index);
+        record.meta.queued.insert(0, item);
+        let now = self.now();
+        if record.active.is_some() {
+            let (_, seq) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
+            return Ok(QueueUpdate {
+                thread_id: thread_id.clone(),
+                queued: record.meta.queued.clone(),
+                seq,
+            });
+        }
+        let promoted = record.meta.queued.remove(0);
+        let dispatch = record.begin_turn(now, queued_input(&promoted));
+        let turn_id = dispatch.turn_id.clone();
+        let domain = vec![
+            ThreadEvent::TurnQueued { at: now },
+            ThreadEvent::TurnStarted { at: now },
+        ];
+        let wire = vec![
+            queued_item_event(thread_id, &turn_id, &promoted),
+            Event::TurnStarted {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                started_at: now,
+            },
+        ];
+        let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+        let stale = record.detach_stale_session();
+        let live = record.live_session().cloned();
+        let queued = record.meta.queued.clone();
+        drop(record);
+        if let Some(stale) = stale {
+            tokio::spawn(async move {
+                let _ = stale.lock().await.shutdown().await;
+            });
+        }
+        self.inner.deliver_or_start(handle, dispatch, live);
+        Ok(QueueUpdate {
+            thread_id: thread_id.clone(),
+            queued,
             seq,
         })
     }
@@ -4728,7 +5133,6 @@ impl Inner {
                 session_gen: 0,
                 pump: None,
                 pending_approvals: BTreeMap::new(),
-                queued: VecDeque::new(),
                 last_signature: None,
                 transport_error_reported: None,
                 transport_report: None,
@@ -4926,11 +5330,9 @@ impl Inner {
 
         // Promote the next queued message under this same lock: a Send that
         // arrives now must queue behind it, not become the active turn first.
-        if !record.closed
-            && record.scheduled_limit.is_none()
-            && let Some(input) = record.queued.pop_front()
-        {
-            let next = record.begin_turn(now, input);
+        if !record.closed && record.scheduled_limit.is_none() && !record.meta.queued.is_empty() {
+            let promoted = record.meta.queued.remove(0);
+            let next = record.begin_turn(now, queued_input(&promoted));
             // This turn is the daemon's next step, not a person's Send: if the
             // transport it inherits dies before it runs, it goes back to the
             // queue instead of failing (see `requeue_promoted_turn`).
@@ -4940,6 +5342,11 @@ impl Inner {
             let next_id = next.turn_id.clone();
             domain.push(ThreadEvent::TurnQueued { at: now });
             domain.push(ThreadEvent::TurnStarted { at: now });
+            wire.push(queued_item_event(
+                &record.meta.thread_id,
+                &next_id,
+                &promoted,
+            ));
             wire.push(Event::TurnStarted {
                 thread_id: record.meta.thread_id.clone(),
                 turn_id: next_id,
@@ -4951,6 +5358,28 @@ impl Inner {
             tracing::error!(%error, "failed to record a settled turn");
         }
         true
+    }
+
+    /// Sends a recorded turn's prompt on a live session, or starts one.
+    ///
+    /// The turn and its user item are already durable when this is called.
+    fn deliver_or_start(
+        self: &Arc<Self>,
+        handle: ThreadHandle,
+        dispatch: Arc<TurnDispatch>,
+        live: Option<SharedSession>,
+    ) {
+        match live {
+            Some(session) => {
+                let this = Arc::clone(self);
+                tokio::spawn(async move {
+                    this.deliver(handle, dispatch, session).await;
+                });
+            }
+            // No session yet, or one is still starting: that startup claims
+            // the turn once it is live and writes this prompt then.
+            None => self.spawn_session(handle),
+        }
     }
 
     /// Starts a session for the thread unless it already has one.
@@ -8238,6 +8667,60 @@ fn harness_refs(attachments: &[Attachment]) -> Vec<AttachmentRef> {
             media_type: attachment.mime.clone(),
         })
         .collect()
+}
+
+/// Where a queued message sits, or the conflict that says it already started.
+fn queue_position(
+    record: &ThreadRecord,
+    message_id: &QueuedMessageId,
+) -> Result<usize, ManagerError> {
+    record
+        .meta
+        .queued
+        .iter()
+        .position(|message| &message.message_id == message_id)
+        .ok_or_else(|| {
+            ManagerError::Conflict(format!(
+                "message {message_id} is no longer queued; its turn has already started"
+            ))
+        })
+}
+
+/// Puts a message that failed to steer back where it was.
+fn restore_queue_item(record: &mut ThreadRecord, index: usize, message: QueuedMessage) {
+    let index = index.min(record.meta.queued.len());
+    record.meta.queued.insert(index, message);
+}
+
+/// The harness input for one queued message.
+fn queued_input(message: &QueuedMessage) -> UserInput {
+    UserInput {
+        text: message.text.clone(),
+        attachments: harness_refs(&message.attachments),
+    }
+}
+
+/// The transcript row a queued message gets when its turn starts.
+fn queued_item_event(thread_id: &ThreadId, turn_id: &TurnId, message: &QueuedMessage) -> Event {
+    Event::ItemCompleted {
+        thread_id: thread_id.clone(),
+        turn_id: turn_id.clone(),
+        item: Item::Message {
+            item_id: user_item_id(turn_id),
+            role: MessageRole::User,
+            text: message.text.clone(),
+            attachments: message.attachments.clone(),
+        },
+    }
+}
+
+/// Maps a failed steer onto the request's error.
+fn steer_error(error: h4rn_harness::HarnessError) -> ManagerError {
+    if matches!(&error, h4rn_harness::HarnessError::Unsupported { .. }) {
+        ManagerError::Unsupported(error.to_string())
+    } else {
+        ManagerError::Internal(format!("could not steer the running turn: {error}"))
+    }
 }
 
 impl ParkedPrompt {
@@ -19950,7 +20433,7 @@ mod tests {
             "the accepted prompt was parked for a second run"
         );
         assert!(
-            record.queued.is_empty(),
+            record.meta.queued.is_empty(),
             "the accepted prompt is still waiting in the queue"
         );
         assert!(
@@ -20732,5 +21215,302 @@ mod tests {
         assert_eq!(summary.model, "gpt-next");
         assert_eq!(summary.reasoning_effort.as_deref(), Some("xhigh"));
         assert!(summary.fast);
+    }
+
+    /// A running fake turn: the script emits text and never completes, so the
+    /// thread has an active turn to steer into.
+    fn running_script() -> Vec<HarnessEvent> {
+        vec![HarnessEvent::TextDelta {
+            text: "working".into(),
+        }]
+    }
+
+    async fn wait_for_running_turn(events: &mut broadcast::Receiver<WireEvent>) {
+        loop {
+            if matches!(next_event(events).await.event, Event::MessageDelta { .. }) {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steer_lands_in_the_running_turn_and_is_never_queued() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, steers) = FakeHarness::with_events(running_script()).with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        let steered = manager
+            .send_message_with(
+                &created.thread_id,
+                "go left".into(),
+                Vec::new(),
+                SendMode::Steer,
+            )
+            .await
+            .expect("steer");
+        assert_eq!(
+            steered.turn_id, created.turn_id,
+            "the running turn keeps its id"
+        );
+        assert_eq!(
+            steered.queued_message_id, None,
+            "a steer is never also queued"
+        );
+        steers.wait_for(1).await;
+        assert_eq!(steers.get(), 1, "the adapter received exactly one steer");
+
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        assert!(
+            snapshot.summary.queued.is_empty(),
+            "nothing waits behind it"
+        );
+        assert!(snapshot.summary.steer, "Claude Code advertises steer");
+        assert!(
+            snapshot.events.iter().any(|seq| matches!(
+                &seq.event,
+                Event::ItemCompleted {
+                    turn_id,
+                    item: Item::Message { role: MessageRole::User, text, .. },
+                    ..
+                } if turn_id == &created.turn_id && text == "go left"
+            )),
+            "the steered message is a user item inside the running turn"
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_harness_without_mid_turn_input_refuses_a_steer() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let harness = FakeHarness::with_events(running_script()).with_kind(HarnessKind::Opencode);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Opencode;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        let refused = manager
+            .send_message_with(
+                &created.thread_id,
+                "go left".into(),
+                Vec::new(),
+                SendMode::Steer,
+            )
+            .await;
+        match refused {
+            Err(ManagerError::Unsupported(message)) => {
+                assert!(message.contains("cannot take a message"), "{message}");
+            }
+            other => panic!("expected an unsupported steer, got {other:?}"),
+        }
+
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        assert!(
+            snapshot.summary.queued.is_empty(),
+            "a refused steer is not queued"
+        );
+        assert!(!snapshot.summary.steer, "OpenCode does not advertise steer");
+        assert!(
+            !snapshot.events.iter().any(|seq| matches!(
+                &seq.event,
+                Event::ItemCompleted {
+                    item: Item::Message { text, .. },
+                    ..
+                } if text == "go left"
+            )),
+            "a refused steer adds no transcript row"
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn queue_edits_removals_and_order_survive_a_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            FakeHarness::with_events(running_script()),
+            host.clone(),
+            Arc::clone(&journal),
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host.clone(), workspace.path(), "first"))
+            .await
+            .expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        let mut ids = Vec::new();
+        for text in ["alpha", "beta", "gamma"] {
+            let accepted = manager
+                .send_message(&created.thread_id, text.into(), Vec::new())
+                .await
+                .expect("queue");
+            ids.push(accepted.queued_message_id.expect("queued id"));
+        }
+        manager
+            .queue_message(
+                &created.thread_id,
+                &ids[1],
+                QueueAction::Edit {
+                    text: "beta edited".into(),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("edit");
+        manager
+            .queue_message(
+                &created.thread_id,
+                &ids[2],
+                QueueAction::Move {
+                    direction: QueueDirection::Up,
+                },
+            )
+            .await
+            .expect("move up");
+        let removed = manager
+            .queue_message(&created.thread_id, &ids[0], QueueAction::Remove)
+            .await
+            .expect("remove");
+        assert_eq!(
+            removed
+                .queued
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "beta edited"]
+        );
+
+        manager.shutdown().await;
+        let restarted = open_test_manager_with_journal(
+            FakeHarness::with_events(running_script()),
+            host,
+            journal,
+        )
+        .await;
+        let snapshot = restarted
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        assert_eq!(
+            snapshot
+                .summary
+                .queued
+                .iter()
+                .map(|m| (m.message_id.clone(), m.text.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ids[2].clone(), "gamma".to_owned()),
+                (ids[1].clone(), "beta edited".to_owned())
+            ],
+            "the edited queue keeps its order and its ids across a restart"
+        );
+        restarted.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_edit_racing_promotion_applies_once_then_is_refused() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_later_completion_gate();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The second turn is held before its completion, exactly the window in
+        // which a promotion can happen.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let queued = manager
+            .send_message(&created.thread_id, "queued later".into(), Vec::new())
+            .await
+            .expect("queue");
+        let message_id = queued.queued_message_id.expect("queued id");
+        manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Edit {
+                    text: "edited before it started".into(),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("edit applies while the message is still queued");
+
+        gate.release();
+        let mut promoted = None;
+        while promoted.is_none() {
+            if let Event::TurnStarted { turn_id, .. } = next_event(&mut events).await.event
+                && turn_id != created.turn_id
+                && turn_id != second.turn_id
+            {
+                promoted = Some(turn_id);
+            }
+        }
+        let promoted = promoted.expect("promoted turn");
+        loop {
+            if matches!(&next_event(&mut events).await.event, Event::TurnCompleted { turn_id, .. } if turn_id == &promoted)
+            {
+                break;
+            }
+        }
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        assert!(
+            snapshot.events.iter().any(|seq| matches!(
+                &seq.event,
+                Event::ItemCompleted {
+                    turn_id,
+                    item: Item::Message { text, .. },
+                    ..
+                } if turn_id == &promoted && text == "edited before it started"
+            )),
+            "the edit is what the promoted turn received"
+        );
+
+        let refused = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Edit {
+                    text: "too late".into(),
+                    attachments: Vec::new(),
+                },
+            )
+            .await;
+        match refused {
+            Err(ManagerError::Conflict(message)) => {
+                assert!(message.contains("no longer queued"), "{message}");
+            }
+            other => panic!("expected the promotion to refuse the edit, got {other:?}"),
+        }
+        manager.shutdown().await;
     }
 }

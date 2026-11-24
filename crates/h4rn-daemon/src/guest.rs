@@ -2632,6 +2632,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            queued: Vec::new(),
+            steer: true,
         };
         assert!(guest_event(Event::ThreadUpserted(summary)).is_none());
         assert!(

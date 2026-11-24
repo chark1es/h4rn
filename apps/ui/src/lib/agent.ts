@@ -84,6 +84,24 @@ export function glyphForAgentState(state: AgentState, toolName?: string): AgentG
 }
 
 /**
+ * Whether the thread has a turn in flight right now.
+ *
+ * `queued` alone is not enough: a thread with messages waiting behind a running
+ * turn stays in one of the active states below, and an approval hand holds the
+ * same turn open.
+ */
+export function isTurnRunning(summary: ThreadSummary): boolean {
+  return (
+    summary.agent_state === "thinking" ||
+    summary.agent_state === "searching" ||
+    summary.agent_state === "reading" ||
+    summary.agent_state === "editing" ||
+    summary.agent_state === "running_tool" ||
+    summary.agent_state === "awaiting_approval"
+  );
+}
+
+/**
  * Thread-level mapping. Host reachability and tab placement outrank the raw
  * agent state, because an animation must never imply liveness the host lost.
  */

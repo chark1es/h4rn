@@ -58,6 +58,8 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     ttft_ms: null,
     context_window: null,
     context_fill_percent: null,
+    queued: [],
+    steer: true,
     ...overrides,
   };
 }

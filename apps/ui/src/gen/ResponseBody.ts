@@ -43,6 +43,7 @@ import type { GitPushResult } from "./GitPushResult";
 import type { GitThreadStatus } from "./GitThreadStatus";
 import type { GuestSettings } from "./GuestSettings";
 import type { GuestSharing } from "./GuestSharing";
+import type { HarnessCapabilityEntry } from "./HarnessCapabilityEntry";
 import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
@@ -67,6 +68,8 @@ import type { ProxyLimits } from "./ProxyLimits";
 import type { ProxyModelCatalog } from "./ProxyModelCatalog";
 import type { ProxyProfile } from "./ProxyProfile";
 import type { ProxyTestReport } from "./ProxyTestReport";
+import type { QueuedMessage } from "./QueuedMessage";
+import type { QueuedMessageId } from "./QueuedMessageId";
 import type { Resets } from "./Resets";
 import type { ResumeSchedule } from "./ResumeSchedule";
 import type { ScheduleRun } from "./ScheduleRun";
@@ -186,7 +189,31 @@ turn_id: TurnId,
 /**
  * Durable daemon-global sequence of the last event written for it.
  */
-seq: number, } | { "type": "terminal_opened", 
+seq: number, 
+/**
+ * The queued message this send created, when it waits for a turn.
+ *
+ * A client removes its optimistic row and shows the durable queue row
+ * instead; a steered or immediately started message is in the
+ * transcript and has no queued id.
+ */
+queued_message_id?: QueuedMessageId, } | { "type": "queue_updated", 
+/**
+ * Thread whose queue changed.
+ */
+thread_id: ThreadId, 
+/**
+ * The queue after the change, oldest first.
+ */
+queued: Array<QueuedMessage>, 
+/**
+ * Durable daemon-global sequence of the summary event.
+ */
+seq: number, } | { "type": "harness_capabilities", 
+/**
+ * One row per harness, in stable order.
+ */
+harnesses: Array<HarnessCapabilityEntry>, } | { "type": "terminal_opened", 
 /**
  * The new terminal, including its effective size.
  */

@@ -51,6 +51,27 @@ pub enum HarnessUpdateMethod {
     Unavailable,
 }
 
+/// What one harness adapter can do beyond the common trait.
+///
+/// Advertised per harness so a client can offer an action only where the
+/// adapter really implements it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct HarnessCapabilities {
+    /// The adapter can take a user message into the turn that is already
+    /// running, without starting a new turn.
+    #[serde(default)]
+    pub steer: bool,
+}
+
+/// One harness capability row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct HarnessCapabilityEntry {
+    /// Which CLI this row describes.
+    pub harness: HarnessKind,
+    /// What the adapter can do.
+    pub capabilities: HarnessCapabilities,
+}
+
 /// One harness installation and its available update.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct HarnessVersionInfo {

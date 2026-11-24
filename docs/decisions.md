@@ -1623,3 +1623,33 @@ The guest page polls its snapshot every couple of seconds rather than opening a
 second long-lived socket. That keeps one transport (HTTP) working through both
 the direct address and the relay proxy, and the thread still follows live work
 within that interval.
+
+## ADR-045: A queued message is durable; a steer uses the harness's own mid-turn input
+
+**Status:** Accepted
+
+`SendMessage` still appends one message, but while a turn runs it now has two honest outcomes.
+**Queue** (the default) stores the message in the thread row's `queued_json` with a stable
+`QueuedMessageId`, so the queue survives a daemon restart in its order, and emits a summary instead
+of a transcript row: queued messages are not yet part of the conversation. **Steer** delivers the
+text into the turn that is already running, adds the user row to that turn, and never also queues
+it. With no turn running, a steer is an ordinary send.
+
+Steering is advertised per harness (`HarnessCapabilities.steer`) and only Claude Code and Codex say
+yes: Claude Code reads further stream-json user frames between tool calls, and Codex app-server has
+`turn/steer` with the expected turn id. OpenCode's HTTP prompt starts a queued message and ACP has
+one prompt at a time, so those adapters leave the bit off and the daemon refuses a steer with a
+typed `Unsupported` error before it invents one. A failed steer is an error, never a silent second
+delivery.
+
+Queue edits, removals, moves and Send now are one daemon request (`QueueMessage`). Every mutation
+and the promotion of the next turn take the same thread-record lock, so a message that has just
+started is refused with `Conflict` rather than edited or removed after the harness already got it.
+`Send now` steers when the running harness can, otherwise moves the message to the front (and starts
+a turn if none runs). The queue's contents are part of `ThreadSummary`, so every client renders the
+same durable order; the transcript row is written once, when the message's own turn starts.
+
+Clients choose a per-device default for follow-ups (Queue or Steer) in Settings → Chat. Enter (or
+Cmd/Ctrl+Enter when `Enter inserts a new line` is on) uses that default; Cmd/Ctrl+Enter (or adding
+Shift in multiline mode) uses the opposite action. `Cmd/Ctrl+Shift+Enter` steers the oldest queued
+message, and `Alt/Option+Up` at the start of the composer edits the newest one; both are rebindable.

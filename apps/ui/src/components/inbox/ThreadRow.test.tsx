@@ -53,6 +53,8 @@ const thread: ThreadSummary = {
   unread: false,
   resume_at: null,
   limit: null,
+  queued: [],
+  steer: true,
 };
 
 describe("ThreadRow", () => {

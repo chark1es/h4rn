@@ -907,6 +907,7 @@ async fn send_message_starts_a_new_turn_and_clears_a_pin() {
             thread_id: thread_id.clone(),
             text: "second".into(),
             attachments: Vec::new(),
+            steer: false,
         })
         .await
         .expect("send");
@@ -1470,6 +1471,7 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
             thread_id: thread_id.clone(),
             text: "second turn".into(),
             attachments: Vec::new(),
+            steer: false,
         })
         .await
         .expect("send message");
@@ -1478,6 +1480,7 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
             thread_id: accepted_thread,
             turn_id: accepted_turn,
             seq,
+            queued_message_id: _,
         } => {
             assert_eq!(accepted_thread, thread_id);
             assert_ne!(accepted_turn, first_turn_id, "the next turn gets a new id");
@@ -2014,6 +2017,7 @@ async fn send_message_acknowledges_before_a_slow_harness_write() {
             thread_id: thread_id.clone(),
             text: "second".into(),
             attachments: Vec::new(),
+            steer: false,
         })
         .await
         .expect("send");
@@ -2975,6 +2979,7 @@ async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
             thread_id: summary.thread_id.clone(),
             text: "new instructions".into(),
             attachments: Vec::new(),
+            steer: false,
         })
         .await
         .expect("send message");

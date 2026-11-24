@@ -101,6 +101,8 @@ const thread: ThreadSummary = {
   unread: false,
   resume_at: null,
   limit: null,
+  queued: [],
+  steer: true,
 };
 
 let roots: Root[] = [];

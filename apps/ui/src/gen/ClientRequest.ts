@@ -27,6 +27,8 @@ import type { ProxyFailoverPolicy } from "./ProxyFailoverPolicy";
 import type { ProxyProfileDraft } from "./ProxyProfileDraft";
 import type { ProxyProfileId } from "./ProxyProfileId";
 import type { ProxyProfilePatch } from "./ProxyProfilePatch";
+import type { QueueAction } from "./QueueAction";
+import type { QueuedMessageId } from "./QueuedMessageId";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { ScheduleDraft } from "./ScheduleDraft";
 import type { ScheduleTaskId } from "./ScheduleTaskId";
@@ -134,7 +136,26 @@ text: string,
 /**
  * Attachments uploaded before this request.
  */
-attachments: Array<AttachmentId>, } | { "type": "interrupt", 
+attachments: Array<AttachmentId>, 
+/**
+ * Deliver into the running turn instead of queuing for the next one.
+ *
+ * Refused when the harness has no real mid-turn input. With no turn
+ * running this behaves like an ordinary send.
+ */
+steer: boolean, } | { "type": "queue_message", 
+/**
+ * Thread owning the queue.
+ */
+thread_id: ThreadId, 
+/**
+ * Message to change.
+ */
+message_id: QueuedMessageId, 
+/**
+ * What to do with it.
+ */
+action: QueueAction, } | { "type": "interrupt", 
 /**
  * Thread whose turn should stop.
  */
@@ -1397,7 +1418,7 @@ number: number, } | { "type": "subagent",
 /**
  * Operation to perform.
  */
-request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "update_harness", 
+request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "list_harness_capabilities" } | { "type": "update_harness", 
 /**
  * Harness to update.
  */

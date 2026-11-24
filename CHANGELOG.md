@@ -462,6 +462,16 @@ All notable changes to h4rn are recorded here. The format follows
   IME composition never opens or drives it. On a phone the same list is a sheet above the keyboard.
   Harness-native slash commands and skills are not listed: no harness publishes commands through
   h4rn and h4rn defines no skill invocation of its own.
+- **Steer a running turn, and edit or reorder the queue.** Settings → Chat chooses whether a reply
+  sent while the agent works waits in the queue or goes into the running turn; Cmd/Ctrl+Enter (or
+  adding Shift when Enter inserts a new line) uses the other action, and the send button shows which
+  one it will take. Steer is offered only for Claude Code and Codex, which have a real mid-turn
+  input; the daemon refuses it with a clear error for any other harness rather than pretending.
+  Queued messages are durable across a restart, appear at the end of the thread as dashed rows, and
+  can be sent now, edited in the composer, removed or moved up and down without a promotion racing
+  the edit. `Cmd/Ctrl+Shift+Enter` steers the oldest queued message and `Alt/Option+Up` at the start
+  of the composer edits the newest; both appear in Settings → Shortcuts.
+
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
   thread's draft; for the same thread the most recent edit wins, including when both tabs type

@@ -765,6 +765,33 @@ impl HarnessSession for CodexSession {
         Ok(())
     }
 
+    async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: "session is shut down".into(),
+            });
+        }
+        let thread_id = self.session_id().ok_or_else(|| HarnessError::Transport {
+            harness: self.kind,
+            message: "codex session has no thread id".into(),
+        })?;
+        let expected =
+            lock(&self.shared)
+                .turn_id
+                .clone()
+                .ok_or_else(|| HarnessError::Unsupported {
+                    harness: self.kind,
+                    feature: "steering without a running turn".into(),
+                })?;
+        self.request(
+            "turn/steer",
+            steer_params(&thread_id, &expected, &input.text, &input.attachments),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::Transport {
@@ -1383,6 +1410,23 @@ fn provider_arguments(env: &BTreeMap<String, String>) -> Vec<String> {
 ///
 /// Images become `localImage` items (Codex reads the path itself); every other
 /// attachment becomes a `mention` item, and the prompt also states the absolute
+/// The `turn/steer` parameters for one message.
+///
+/// Kept separate so the wire shape (thread, expected turn and normalized input)
+/// is testable without a live app-server.
+pub fn steer_params(
+    thread_id: &str,
+    expected_turn_id: &str,
+    text: &str,
+    attachments: &[AttachmentRef],
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "expectedTurnId": expected_turn_id,
+        "input": build_turn_input(text, attachments),
+    })
+}
+
 /// path so the model can refer to the file even if the mention is ignored.
 pub fn build_turn_input(text: &str, attachments: &[AttachmentRef]) -> Vec<Value> {
     let mut input = Vec::new();
@@ -1677,6 +1721,15 @@ mod tests {
         assert_eq!(input[2]["type"], "mention");
         assert_eq!(input[2]["name"], "report.csv");
         assert_eq!(input[2]["path"], "/tmp/report.csv");
+    }
+
+    #[test]
+    fn steer_parameters_name_the_expected_turn_and_normalized_input() {
+        let params = steer_params("thread_native", "turn_running", "turn left", &[]);
+        assert_eq!(params["threadId"], "thread_native");
+        assert_eq!(params["expectedTurnId"], "turn_running");
+        assert_eq!(params["input"][0]["type"], "text");
+        assert_eq!(params["input"][0]["text"], "turn left");
     }
 
     #[test]

@@ -10,7 +10,7 @@ import { useSyncExternalStore } from "react";
  * Shortcuts; overrides live in localStorage on this device.
  */
 
-export type Chord = { mod: true; shift: boolean; alt: boolean; key: string };
+export type Chord = { mod: boolean; shift: boolean; alt: boolean; key: string };
 
 export type CommandGroup = "General" | "Navigate" | "Thread" | "Panels";
 
@@ -50,7 +50,9 @@ export type CommandId =
   | "panel.changes"
   | "panel.subagents"
   | "panel.files"
-  | "composer.attach";
+  | "composer.attach"
+  | "thread.steerQueuedMessage"
+  | "thread.editQueuedMessage";
 
 export type CommandSpec = {
   id: CommandId;
@@ -59,6 +61,14 @@ export type CommandSpec = {
   binding: string;
   /** Fires while focus is in a text field or editor. */
   inInputs: boolean;
+  /**
+   * Allows a chord without Cmd/Ctrl, as long as Option/Alt is held.
+   *
+   * `Alt+Up` is a text-editing key in most fields, so it is only offered by a
+   * command whose own handler decides when it applies (the composer's cursor is
+   * at the start).
+   */
+  allowBareAlt?: boolean;
 };
 
 export const COMMANDS: readonly CommandSpec[] = [
@@ -236,6 +246,21 @@ export const COMMANDS: readonly CommandSpec[] = [
     inInputs: true,
   },
   {
+    id: "thread.steerQueuedMessage",
+    label: "Steer the oldest queued message",
+    group: "Thread",
+    binding: "mod+shift+enter",
+    inInputs: true,
+  },
+  {
+    id: "thread.editQueuedMessage",
+    label: "Edit the newest queued message",
+    group: "Thread",
+    binding: "alt+arrowup",
+    inInputs: true,
+    allowBareAlt: true,
+  },
+  {
     id: "sidebar.toggle",
     label: "Toggle sidebar",
     group: "Panels",
@@ -340,14 +365,24 @@ export function eventKey(event: Pick<KeyboardEvent, "code" | "key">): string | n
 export function chordFromEvent(
   event: Pick<KeyboardEvent, "code" | "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">,
 ): Chord | null {
-  if (!(event.metaKey || event.ctrlKey)) return null;
   const key = eventKey(event);
   if (!key) return null;
+  // Option/Alt alone is only meaningful for a command that opted in; no other
+  // command binds such a chord, so matching stays unambiguous.
+  if (!(event.metaKey || event.ctrlKey)) {
+    if (!event.altKey) return null;
+    return { mod: false, shift: event.shiftKey, alt: true, key };
+  }
   return { mod: true, shift: event.shiftKey, alt: event.altKey, key };
 }
 
 export function formatChord(chord: Chord): string {
-  return ["mod", chord.shift ? "shift" : null, chord.alt ? "alt" : null, chord.key]
+  return [
+    chord.mod ? "mod" : null,
+    chord.shift ? "shift" : null,
+    chord.alt ? "alt" : null,
+    chord.key,
+  ]
     .filter(Boolean)
     .join("+");
 }
@@ -359,9 +394,16 @@ export function parseChord(value: string): Chord | null {
   const key = parts.pop();
   if (!key) return null;
   const mods = new Set(parts);
-  if (!mods.has("mod")) return null;
   for (const mod of mods) if (mod !== "mod" && mod !== "shift" && mod !== "alt") return null;
-  return { mod: true, shift: mods.has("shift"), alt: mods.has("alt"), key };
+  // A chord with no Cmd/Ctrl must still be an Option chord; `rebind` further
+  // limits it to the one command that opted in.
+  if (!mods.has("mod") && !mods.has("alt")) return null;
+  return {
+    mod: mods.has("mod"),
+    shift: mods.has("shift"),
+    alt: mods.has("alt"),
+    key,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +466,12 @@ export type RebindResult = { ok: true } | { ok: false; reason: string };
 export function rebind(id: CommandId, binding: string): RebindResult {
   const chord = parseChord(binding);
   if (!chord) return { ok: false, reason: "Shortcuts need Cmd or Ctrl plus a key." };
+  if (!chord.mod && !commandSpec(id).allowBareAlt) {
+    return { ok: false, reason: "Shortcuts need Cmd or Ctrl plus a key." };
+  }
+  if (!chord.mod && !chord.alt) {
+    return { ok: false, reason: "Shortcuts need Cmd or Ctrl plus a key." };
+  }
   const normalized = formatChord(chord);
   const taken = commandForBinding(normalized, id);
   if (taken) {
@@ -486,7 +534,8 @@ const KEY_DISPLAY: Record<string, string> = {
 export function chordKeys(binding: string, apple = isApplePlatform): string[] {
   const chord = parseChord(binding);
   if (!chord) return [];
-  const keys = [apple ? "⌘" : "Ctrl"];
+  const keys = [];
+  if (chord.mod) keys.push(apple ? "⌘" : "Ctrl");
   if (chord.alt) keys.push(apple ? "⌥" : "Alt");
   if (chord.shift) keys.push(apple ? "⇧" : "Shift");
   keys.push(

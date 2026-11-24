@@ -9,6 +9,8 @@ import type {
   HostSummary,
   LimitStatus,
   ProtoError,
+  QueueAction,
+  QueuedMessage,
   ResumeSchedule,
   RuntimeMode,
   ThreadId,
@@ -71,6 +73,8 @@ export type UiState = {
   newThreadPreset: { host: string; workspace: string } | null;
   /** The Add project dialog is open. */
   addProjectOpen: boolean;
+  /** The queued message currently open in the composer for editing. */
+  queuedEdit: { threadId: ThreadId; messageId: string } | null;
   focusSearchNonce: number;
   focusComposerNonce: number;
   focusFilesNonce: number;
@@ -250,6 +254,7 @@ function createInitialState(): AppState {
       recordingShortcut: false,
       newThreadPreset: null,
       addProjectOpen: false,
+      queuedEdit: null,
       focusSearchNonce: 0,
       focusComposerNonce: 0,
       focusFilesNonce: 0,
@@ -1405,10 +1410,16 @@ export async function respondApproval(
 
 let localCounter = 0;
 
+export type SendOptions = {
+  /** Deliver into the running turn instead of queuing for the next one. */
+  steer?: boolean;
+};
+
 export async function sendMessage(
   threadId: ThreadId,
   text: string,
   attachments: Attachment[] = [],
+  options: SendOptions = {},
 ): Promise<boolean> {
   const body = text.trim();
   if (!body && attachments.length === 0) return false;
@@ -1428,12 +1439,16 @@ export async function sendMessage(
   });
 
   try {
-    await getClient().request({
+    const response = await getClient().request({
       type: "send_message",
       thread_id: threadId,
       text: body,
       attachments: attachments.map((attachment) => attachment.id),
+      steer: options.steer ?? false,
     });
+    // A queued message has no transcript item yet: the durable queue row from
+    // `thread_upserted` replaces the optimistic one, so drop the local row.
+    const queuedId = response.type === "message_accepted" ? response.queued_message_id : null;
     const current = getState();
     const currentLog = current.logs[threadId];
     if (currentLog) {
@@ -1443,9 +1458,11 @@ export async function sendMessage(
           ...current.logs,
           [threadId]: {
             ...currentLog,
-            pending: currentLog.pending.map((message) =>
-              message.id === localId ? { ...message, sending: false } : message,
-            ),
+            pending: queuedId
+              ? currentLog.pending.filter((message) => message.id !== localId)
+              : currentLog.pending.map((message) =>
+                  message.id === localId ? { ...message, sending: false } : message,
+                ),
           },
         },
       });
@@ -1474,6 +1491,104 @@ export async function sendMessage(
     });
     return false;
   }
+}
+
+/**
+ * Applies one queue change and reflects the daemon's answer immediately.
+ *
+ * The daemon also broadcasts a new summary; using the response keeps the row
+ * from flickering while that event travels.
+ */
+async function runQueueAction(
+  threadId: ThreadId,
+  messageId: string,
+  action: QueueAction,
+  label: string,
+): Promise<boolean> {
+  try {
+    const response = await getClient().request({
+      type: "queue_message",
+      thread_id: threadId,
+      message_id: messageId,
+      action,
+    });
+    if (response.type === "queue_updated") {
+      const state = getState();
+      const summary = state.threads[threadId];
+      if (summary) {
+        setState({
+          ...state,
+          threads: {
+            ...state.threads,
+            [threadId]: { ...summary, queued: response.queued },
+          },
+        });
+      }
+    }
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    pushToast({
+      variant: "error",
+      title: `Couldn't ${label} the queued message.`,
+      description: proto.message,
+    });
+    return false;
+  }
+}
+
+export function editQueuedMessage(
+  threadId: ThreadId,
+  messageId: string,
+  text: string,
+  attachments: Attachment[],
+): Promise<boolean> {
+  return runQueueAction(
+    threadId,
+    messageId,
+    { type: "edit", text, attachments: attachments.map((attachment) => attachment.id) },
+    "edit",
+  );
+}
+
+export function removeQueuedMessage(threadId: ThreadId, messageId: string): Promise<boolean> {
+  return runQueueAction(threadId, messageId, { type: "remove" }, "remove");
+}
+
+export function moveQueuedMessage(
+  threadId: ThreadId,
+  messageId: string,
+  direction: "up" | "down",
+): Promise<boolean> {
+  return runQueueAction(threadId, messageId, { type: "move", direction }, "move");
+}
+
+/** Sends a queued message now: steer it in, or move it to the front. */
+export function sendQueuedNow(threadId: ThreadId, messageId: string): Promise<boolean> {
+  return runQueueAction(threadId, messageId, { type: "send_now" }, "send");
+}
+
+/** Steers one queued message, refusing rather than queuing it again. */
+export function steerQueuedMessage(threadId: ThreadId, messageId: string): Promise<boolean> {
+  return runQueueAction(threadId, messageId, { type: "steer" }, "steer");
+}
+
+/**
+ * Steers the oldest queued message into the running turn.
+ *
+ * The shortcut leaves the composer's draft alone; an empty queue or a harness
+ * without mid-turn input is a quiet no-op here, with no row to act on.
+ */
+export function steerOldestQueued(threadId: ThreadId): boolean {
+  const queued = getState().threads[threadId]?.queued ?? [];
+  const oldest = queued[0];
+  if (!oldest) return false;
+  void steerQueuedMessage(threadId, oldest.message_id);
+  return true;
+}
+
+export function queuedFor(threadId: ThreadId): QueuedMessage[] {
+  return getState().threads[threadId]?.queued ?? [];
 }
 
 export type CreateThreadInput = {
@@ -1576,6 +1691,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     ttft_ms: null,
     context_window: null,
     context_fill_percent: null,
+    queued: [],
+    steer: false,
   };
 
   setState({

@@ -1418,17 +1418,61 @@ impl Connection {
                     thread_id,
                     text,
                     attachments,
+                    steer,
                 } => self
                     .state
                     .manager
-                    .send_message(&thread_id, text, attachments)
+                    .send_message_with(
+                        &thread_id,
+                        text,
+                        attachments,
+                        if steer {
+                            crate::threads::SendMode::Steer
+                        } else {
+                            crate::threads::SendMode::Queue
+                        },
+                    )
                     .await
                     .map(|accepted| ResponseBody::MessageAccepted {
                         thread_id: accepted.thread_id,
                         turn_id: accepted.turn_id,
                         seq: accepted.seq,
+                        queued_message_id: accepted.queued_message_id,
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::QueueMessage {
+                    thread_id,
+                    message_id,
+                    action,
+                } => {
+                    let audit_action = match &action {
+                        h4rn_protocol::QueueAction::Edit { .. } => "thread.queue.edited",
+                        h4rn_protocol::QueueAction::Remove => "thread.queue.removed",
+                        h4rn_protocol::QueueAction::Move { .. } => "thread.queue.moved",
+                        h4rn_protocol::QueueAction::SendNow => "thread.queue.sent_now",
+                        h4rn_protocol::QueueAction::Steer => "thread.queue.steered",
+                    };
+                    let result = self
+                        .state
+                        .manager
+                        .queue_message(&thread_id, &message_id, action)
+                        .await;
+                    if result.is_ok() {
+                        self.audit(
+                            audit_action,
+                            Some("thread"),
+                            Some(thread_id.as_str()),
+                            json!({}),
+                        );
+                    }
+                    result
+                        .map(|update| ResponseBody::QueueUpdated {
+                            thread_id: update.thread_id,
+                            queued: update.queued,
+                            seq: update.seq,
+                        })
+                        .map_err(crate::threads::ManagerError::into_proto)
+                }
                 ClientRequest::Interrupt { thread_id } => self
                     .state
                     .manager
@@ -2552,6 +2596,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            queued: Vec::new(),
+            steer: true,
         }
     }
 

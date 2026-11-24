@@ -183,6 +183,29 @@ pub enum ResponseBody {
         /// Durable daemon-global sequence of the last event written for it.
         #[ts(type = "number")]
         seq: u64,
+        /// The queued message this send created, when it waits for a turn.
+        ///
+        /// A client removes its optimistic row and shows the durable queue row
+        /// instead; a steered or immediately started message is in the
+        /// transcript and has no queued id.
+        #[serde(default)]
+        #[ts(optional)]
+        queued_message_id: Option<crate::ids::QueuedMessageId>,
+    },
+    /// A thread's queue changed.
+    QueueUpdated {
+        /// Thread whose queue changed.
+        thread_id: ThreadId,
+        /// The queue after the change, oldest first.
+        queued: Vec<crate::common::QueuedMessage>,
+        /// Durable daemon-global sequence of the summary event.
+        #[ts(type = "number")]
+        seq: u64,
+    },
+    /// What each harness adapter can do beyond the common trait.
+    HarnessCapabilities {
+        /// One row per harness, in stable order.
+        harnesses: Vec<crate::HarnessCapabilityEntry>,
     },
     /// A terminal was opened.
     TerminalOpened {

@@ -450,6 +450,33 @@ pub struct ThreadSummary {
     /// The limit currently blocking the thread, when one was observed.
     #[serde(default)]
     pub limit: Option<crate::usage::LimitBrief>,
+    /// Messages waiting for the thread's next turn, oldest first.
+    ///
+    /// A queued message is durable and not yet in the transcript. It is
+    /// delivered as the next turn's first message, or steered into the running
+    /// turn by an explicit Send now.
+    #[serde(default)]
+    pub queued: Vec<QueuedMessage>,
+    /// Whether the running harness can accept a message mid-turn.
+    ///
+    /// Capabilities are advertised per harness; a client offers Steer only when
+    /// this is true and a turn is running.
+    #[serde(default)]
+    pub steer: bool,
+}
+
+/// One message waiting for a thread's next turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct QueuedMessage {
+    /// Stable id used to edit, remove, move or steer this message.
+    pub message_id: crate::ids::QueuedMessageId,
+    /// Message text.
+    pub text: String,
+    /// Attachments delivered with the message, in the order they were added.
+    #[serde(default)]
+    pub attachments: Vec<crate::blob::Attachment>,
+    /// When the message was queued.
+    pub queued_at: DateTime<Utc>,
 }
 
 /// One completed stream item.
@@ -760,6 +787,8 @@ mod tests {
             unread: false,
             resume_at,
             limit,
+            queued: Vec::new(),
+            steer: false,
         }
     }
 
