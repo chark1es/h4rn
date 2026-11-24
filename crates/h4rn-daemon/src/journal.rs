@@ -217,6 +217,23 @@ pub struct WireEvent {
     pub event: Event,
 }
 
+/// At most one bounded page of a thread's projected events.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WirePage {
+    /// The page, in sequence order.
+    pub events: Vec<WireEvent>,
+    /// Whether a later event exists beyond the page.
+    pub more: bool,
+}
+
+// Rows a test reader actually fetched, for the one-page assertion.
+//
+// Thread-local so tests running in parallel cannot add to each other's count.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static WIRE_PAGE_ROWS_FETCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Journal failures.
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -268,6 +285,21 @@ pub trait Journal: Send + Sync {
         thread_id: &ThreadId,
         after: u64,
     ) -> Result<Vec<WireEvent>, JournalError>;
+
+    /// At most one page of a thread's projected events with `seq > after`.
+    ///
+    /// The database stops after `max_events` rows or as soon as the page's
+    /// serialized text would pass `max_bytes`, so a long replay never loads
+    /// the whole thread to hand back its first page. The first event is always
+    /// included even when it alone is larger than the budget: an oversized
+    /// event is carried whole in its own page rather than dropped or cut.
+    async fn read_wire_page(
+        &self,
+        thread_id: &ThreadId,
+        after: u64,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> Result<WirePage, JournalError>;
 
     /// Projected events across every thread with `seq > after`, in order.
     ///
@@ -885,6 +917,73 @@ impl Journal for SqliteJournal {
             });
         }
         Ok(events)
+    }
+
+    async fn read_wire_page(
+        &self,
+        thread_id: &ThreadId,
+        after: u64,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> Result<WirePage, JournalError> {
+        // The recursive walk takes one row at a time over the (thread_id, seq)
+        // index and stops as soon as the page's text would pass the budget, so
+        // the database reads one page instead of the whole replay. The first
+        // row is taken unconditionally, which keeps an oversized event whole.
+        let rows = sqlx::query(
+            "WITH RECURSIVE page(seq, event_json, used) AS (
+                 SELECT seq, event_json, length(CAST(event_json AS BLOB))
+                   FROM daemon_wire_events
+                  WHERE thread_id = ?1
+                    AND seq = (SELECT MIN(seq) FROM daemon_wire_events
+                                WHERE thread_id = ?1 AND seq > ?2)
+                 UNION ALL
+                 SELECT next.seq, next.event_json,
+                        page.used + length(CAST(next.event_json AS BLOB))
+                   FROM page
+                   JOIN daemon_wire_events AS next
+                     ON next.thread_id = ?1
+                    AND next.seq = (SELECT MIN(seq) FROM daemon_wire_events
+                                     WHERE thread_id = ?1 AND seq > page.seq)
+                  WHERE page.used + length(CAST(next.event_json AS BLOB)) <= ?3
+             )
+             SELECT seq, event_json FROM page ORDER BY seq LIMIT ?4",
+        )
+        .bind(thread_id.as_str())
+        .bind(after as i64)
+        .bind(max_bytes as i64)
+        .bind(max_events as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        #[cfg(test)]
+        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(fetched.get() + rows.len()));
+
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let seq: i64 = row.try_get("seq")?;
+            let event_json: String = row.try_get("event_json")?;
+            events.push(WireEvent {
+                seq: seq as u64,
+                thread_id: thread_id.clone(),
+                event: serde_json::from_str(&event_json)?,
+            });
+        }
+        // One indexed probe says whether anything follows the page; this keeps
+        // the `more` flag exact even when the row cap ended the page.
+        let last = events.last().map(|event| event.seq).unwrap_or(after);
+        let more: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM daemon_wire_events
+                            WHERE thread_id = ? AND seq > ?)",
+        )
+        .bind(thread_id.as_str())
+        .bind(last as i64)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(WirePage {
+            events,
+            more: more != 0,
+        })
     }
 
     async fn read_wire_since_global(&self, after: u64) -> Result<Vec<WireEvent>, JournalError> {
@@ -1998,6 +2097,191 @@ mod tests {
         );
         assert!(journal.list_imported_sources().await.unwrap().is_empty());
         assert!(journal.list_threads().await.unwrap().is_empty());
+    }
+
+    fn page_event(thread_id: &ThreadId, index: usize, text_bytes: usize) -> Event {
+        Event::ItemCompleted {
+            thread_id: thread_id.clone(),
+            turn_id: h4rn_protocol::TurnId::new("turn_page"),
+            item: h4rn_protocol::Item::Message {
+                item_id: format!("item-{index}"),
+                role: h4rn_protocol::MessageRole::User,
+                text: "p".repeat(text_bytes),
+                attachments: Vec::new(),
+            },
+            at: None,
+        }
+    }
+
+    /// The page boundaries the pre-SQL pager produced, for comparison.
+    fn old_pages(events: &[WireEvent], budget: usize) -> Vec<(Vec<u64>, bool)> {
+        let mut pages = Vec::new();
+        let mut after = 0;
+        loop {
+            let rest: Vec<&WireEvent> = events.iter().filter(|event| event.seq > after).collect();
+            if rest.is_empty() {
+                break;
+            }
+            let mut used: usize = 0;
+            let mut cut = rest.len();
+            for (index, event) in rest.iter().enumerate() {
+                let size = serde_json::to_string(&event.event)
+                    .map(|text| text.len())
+                    .unwrap_or_default();
+                if index > 0 && used.saturating_add(size) > budget {
+                    cut = index;
+                    break;
+                }
+                used = used.saturating_add(size);
+            }
+            let more = cut < rest.len();
+            let page: Vec<u64> = rest[..cut].iter().map(|event| event.seq).collect();
+            after = *page.last().expect("a page is never empty");
+            pages.push((page, more));
+            if !more {
+                break;
+            }
+        }
+        pages
+    }
+
+    #[tokio::test]
+    async fn a_long_thread_pages_exactly_where_it_did_before() {
+        const PAGE: usize = 64 * 1024;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_long");
+        journal.upsert_thread(&meta("th_long")).await.unwrap();
+        let mut wire = Vec::new();
+        for index in 0..60 {
+            wire.push(page_event(&thread_id, index, 4 * 1024 + index));
+        }
+        journal.append_wire(&thread_id, &wire).await.unwrap();
+
+        let all = journal.read_wire_since(&thread_id, 0).await.unwrap();
+        let expected = old_pages(&all, PAGE);
+
+        let mut after = 0;
+        let mut actual = Vec::new();
+        loop {
+            let page = journal
+                .read_wire_page(&thread_id, after, 4096, PAGE)
+                .await
+                .unwrap();
+            assert!(!page.events.is_empty(), "a non-final page is never empty");
+            let seqs: Vec<u64> = page.events.iter().map(|event| event.seq).collect();
+            after = *seqs.last().unwrap();
+            actual.push((seqs, page.more));
+            if !page.more {
+                break;
+            }
+        }
+        assert_eq!(actual, expected, "pages and cursors match the old pager");
+    }
+
+    #[tokio::test]
+    async fn a_page_stops_at_its_byte_budget() {
+        const PAGE: usize = 25 * 1024;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_budget");
+        journal.upsert_thread(&meta("th_budget")).await.unwrap();
+        journal
+            .append_wire(
+                &thread_id,
+                &[
+                    page_event(&thread_id, 0, 10 * 1024),
+                    page_event(&thread_id, 1, 10 * 1024),
+                    page_event(&thread_id, 2, 10 * 1024),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, PAGE)
+            .await
+            .unwrap();
+        let used: usize = page
+            .events
+            .iter()
+            .map(|event| serde_json::to_string(&event.event).unwrap().len())
+            .sum();
+        assert_eq!(
+            page.events.len(),
+            2,
+            "the third event would pass the budget"
+        );
+        assert!(used <= PAGE, "{used} bytes fit in {PAGE}");
+        assert!(page.more, "the rest follows in another page");
+
+        // An event larger than the whole budget still arrives whole.
+        let oversized = journal
+            .read_wire_page(&thread_id, 0, 4096, 1024)
+            .await
+            .unwrap();
+        assert_eq!(oversized.events.len(), 1);
+        assert_eq!(oversized.events[0].seq, page.events[0].seq);
+        assert!(oversized.more);
+
+        // The budget counts the serialized bytes, not characters: this event
+        // is about 25 KiB but only 6,340 characters, so a character budget
+        // would wrongly let a second one in.
+        let wide = ThreadId::new("th_wide");
+        journal.upsert_thread(&meta("th_wide")).await.unwrap();
+        journal
+            .append_wire(
+                &wide,
+                &[
+                    Event::ItemCompleted {
+                        thread_id: wide.clone(),
+                        turn_id: h4rn_protocol::TurnId::new("turn_page"),
+                        item: h4rn_protocol::Item::Message {
+                            item_id: "wide-0".into(),
+                            role: h4rn_protocol::MessageRole::User,
+                            text: "🙂".repeat(6_340),
+                            attachments: Vec::new(),
+                        },
+                        at: None,
+                    },
+                    page_event(&wide, 1, 1),
+                ],
+            )
+            .await
+            .unwrap();
+        let wide_page = journal.read_wire_page(&wide, 0, 4096, PAGE).await.unwrap();
+        assert_eq!(
+            wide_page.events.len(),
+            1,
+            "one ~25 KiB event fills the page even though it is few characters"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_page_query_reads_only_one_page() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_rows");
+        journal.upsert_thread(&meta("th_rows")).await.unwrap();
+        let mut wire = Vec::new();
+        for index in 0..200 {
+            wire.push(page_event(&thread_id, index, 1024));
+        }
+        journal.append_wire(&thread_id, &wire).await.unwrap();
+
+        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(0));
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, 8 * 1024)
+            .await
+            .unwrap();
+        let fetched = WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.get());
+        assert_eq!(
+            fetched,
+            page.events.len(),
+            "the query returned only the page"
+        );
+        assert!(
+            page.events.len() < 200,
+            "the page is a small prefix, not the whole thread"
+        );
+        assert!(page.more);
     }
 
     #[tokio::test]

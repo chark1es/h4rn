@@ -1542,34 +1542,41 @@ impl Connection {
                 ClientRequest::GetThread {
                     thread_id,
                     since_seq,
-                } => self
-                    .state
-                    .manager
-                    .get_thread(&thread_id, since_seq)
-                    .await
-                    .map(|snapshot| {
-                        // A paired transport refuses a frame over 512 KiB and
-                        // closes the session. A long replay therefore comes in
-                        // pages the client asks for again; a single event that
-                        // is itself larger is carried whole in its own page and
-                        // split into wire chunks on the way out.
-                        let (events, more) =
-                            page_thread_events(snapshot.events, self.frame_limit().is_some());
-                        let next_seq = events.last().map(|event| event.seq).unwrap_or(since_seq);
-                        ResponseBody::Thread {
-                            summary: snapshot.summary,
-                            events: events
-                                .into_iter()
-                                .map(|event| SeqEvent {
-                                    seq: event.seq,
-                                    event: event.event,
-                                })
-                                .collect(),
-                            next_seq,
-                            more,
-                        }
+                } => {
+                    // A paired transport refuses a frame over 512 KiB and
+                    // closes the session. A long replay therefore comes in
+                    // pages the client asks for again; the journal query stops
+                    // at one page, so each ask reads only that page. A single
+                    // event that is itself larger is carried whole in its own
+                    // page and split into wire chunks on the way out.
+                    let page = if self.frame_limit().is_some() {
+                        self.state
+                            .manager
+                            .get_thread_page(
+                                &thread_id,
+                                since_seq,
+                                THREAD_PAGE_EVENTS,
+                                THREAD_PAGE_BYTES,
+                            )
+                            .await
+                    } else {
+                        self.state.manager.get_thread(&thread_id, since_seq).await
+                    };
+                    page.map(|snapshot| ResponseBody::Thread {
+                        summary: snapshot.summary,
+                        events: snapshot
+                            .events
+                            .into_iter()
+                            .map(|event| SeqEvent {
+                                seq: event.seq,
+                                event: event.event,
+                            })
+                            .collect(),
+                        next_seq: snapshot.next_seq,
+                        more: snapshot.more,
                     })
-                    .map_err(crate::threads::ManagerError::into_proto),
+                    .map_err(crate::threads::ManagerError::into_proto)
+                }
                 ClientRequest::CreateThread {
                     host,
                     harness,
@@ -2575,6 +2582,12 @@ where
 /// the deliberate headroom stay well inside the rest.
 const THREAD_PAGE_BYTES: usize = 256 * 1024;
 
+/// Most events a framed page carries.
+///
+/// A hard cap for pathological tiny events; the byte budget normally stops the
+/// page first, so ordinary threads page exactly where they did before.
+const THREAD_PAGE_EVENTS: usize = 4096;
+
 /// Bytes of one serialized frame sent as a chunk on a framed session.
 ///
 /// A chunk's `data` is JSON-escaped into the chunk frame, which can double its
@@ -2625,35 +2638,6 @@ fn parse_chunk_frame(text: &str) -> Option<ChunkFrame> {
         return None;
     }
     serde_json::from_str(text).ok()
-}
-
-/// One page of a thread replay, and whether another page follows.
-///
-/// A single oversized event is never dropped or cut: it is included whole even
-/// when it alone passes the budget, and the writer splits its wire frame.
-fn page_thread_events(
-    events: Vec<crate::journal::WireEvent>,
-    framed: bool,
-) -> (Vec<crate::journal::WireEvent>, bool) {
-    if !framed {
-        return (events, false);
-    }
-    let mut used: usize = 0;
-    let mut cut = events.len();
-    for (index, event) in events.iter().enumerate() {
-        let size = serde_json::to_string(&event.event)
-            .map(|text| text.len())
-            .unwrap_or_default();
-        if index > 0 && used.saturating_add(size) > THREAD_PAGE_BYTES {
-            cut = index;
-            break;
-        }
-        used = used.saturating_add(size);
-    }
-    let more = cut < events.len();
-    let mut events = events;
-    events.truncate(cut);
-    (events, more)
 }
 
 /// Splits one serialized frame into the pieces a framed transport may carry.
@@ -3006,47 +2990,6 @@ mod tests {
             resume_at: None,
             limit: None,
         }
-    }
-
-    #[test]
-    fn a_thread_replay_is_paged_on_a_framed_session() {
-        use h4rn_protocol::{MessageRole, ThreadId, TurnId};
-
-        let thread_id = ThreadId::new("th_page");
-        let event = |seq: u64| crate::journal::WireEvent {
-            seq,
-            thread_id: thread_id.clone(),
-            event: Event::ItemCompleted {
-                thread_id: thread_id.clone(),
-                turn_id: TurnId::new("turn_page"),
-                item: h4rn_protocol::Item::Message {
-                    item_id: format!("item-{seq}"),
-                    role: MessageRole::User,
-                    text: "p".repeat(200 * 1024),
-                    attachments: Vec::new(),
-                },
-                at: None,
-            },
-        };
-
-        let (first, more) = page_thread_events(vec![event(1), event(2), event(3)], true);
-        assert_eq!(first.len(), 1, "one 200 KiB event fits a 256 KiB page");
-        assert_eq!(first[0].seq, 1);
-        assert!(more, "the rest follows in another page");
-
-        let (rest, more) = page_thread_events(vec![event(2), event(3)], true);
-        assert_eq!(rest.len(), 1);
-        assert!(more);
-
-        // A single event over the budget is sent whole, never cut.
-        let (one, more) = page_thread_events(vec![event(4)], true);
-        assert_eq!(one.len(), 1);
-        assert!(!more);
-
-        // The plain loopback path keeps delivering the whole replay at once.
-        let (all, more) = page_thread_events(vec![event(5), event(6)], false);
-        assert_eq!(all.len(), 2);
-        assert!(!more);
     }
 
     #[test]
