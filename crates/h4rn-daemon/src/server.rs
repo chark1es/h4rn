@@ -68,6 +68,8 @@ pub struct AppState {
     pub subagents: Arc<crate::subagents::SubagentManager>,
     /// Tracked git worktrees: subagent, thread and harness-made.
     pub worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    /// This machine's defaults for new thread worktrees.
+    pub worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
     /// Host inventory.
     pub hosts: Arc<HostInventory>,
     /// Daemon-owned PTY terminals.
@@ -1065,6 +1067,9 @@ impl Connection {
                     fast,
                     worktree,
                 } => {
+                    let requested_worktree = worktree
+                        .as_ref()
+                        .is_some_and(h4rn_protocol::WorktreeRequest::is_requested);
                     let request = crate::threads::NewThread {
                         thread_id: None,
                         parent_thread_id: None,
@@ -1091,6 +1096,18 @@ impl Connection {
                             let workspace_path = created.summary.workspace_path.clone();
                             if let Err(error) = self.state.fs.allow_root(&workspace_path) {
                                 tracing::warn!(%workspace_path, %error, "IDE root not authorised");
+                            }
+                            // A thread worktree outlives its thread, so it is
+                            // also persisted: deleting the thread must leave a
+                            // row Settings can still clear.
+                            if requested_worktree {
+                                self.state
+                                    .worktrees
+                                    .register_thread_worktree(
+                                        &created.thread_id,
+                                        &created.summary.workspace_path,
+                                    )
+                                    .await;
                             }
                             self.audit(
                                 "thread.created",

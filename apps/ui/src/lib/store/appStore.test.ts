@@ -233,6 +233,36 @@ describe("createThread draft handoff", () => {
   });
 });
 
+describe("createThread worktrees", () => {
+  beforeEach(() => {
+    fake.request.mockClear();
+    fake.response.current = null;
+    seedHosts(["worktree_host"]);
+  });
+
+  it("sends the request and keeps the daemon's refusal in the toast", async () => {
+    fake.request.mockRejectedValueOnce(
+      new Error("the branch `busy` is already checked out at /tmp/busy"),
+    );
+
+    const created = await createThread({
+      host: "worktree_host",
+      harness: "claude_code",
+      workspacePath: "/tmp/project",
+      model: "claude-sonnet-4-5",
+      prompt: "use my branch",
+      worktree: "busy",
+    });
+
+    expect(created).toBe(false);
+    const sent = fake.request.mock.calls[0]?.[0] as { worktree?: unknown } | undefined;
+    expect(sent?.worktree).toBe("busy");
+    const toast = getState().toasts.at(-1);
+    expect(toast?.variant).toBe("error");
+    expect(toast?.description).toContain("already checked out");
+  });
+});
+
 describe("manual placements", () => {
   it("notes a placement after the daemon accepts the move", async () => {
     fake.response.current = { type: "ack" };

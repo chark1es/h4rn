@@ -286,6 +286,17 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open thread manager: {error}"))?,
         );
 
+        // Thread worktrees use this machine's location and branch prefix, and
+        // are created by the daemon that owns the project.
+        let worktree_settings = Arc::new(
+            crate::worktrees::settings::WorktreeSettingsStore::open(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open worktree settings: {error}"))?,
+        );
+        manager.set_worktree_creator(Arc::new(crate::worktrees::create::WorktreeCreator::new(
+            self.config.data_dir.clone(),
+            Arc::clone(&worktree_settings),
+        )));
+
         // Scheduled tasks share the journal so the timer, secrets and run
         // history survive a restart. The runner starts once the worktree
         // tracker exists, so a task that protects a checkout is wired before
@@ -565,6 +576,7 @@ impl DaemonBuilder {
             manager,
             subagents,
             worktrees,
+            worktree_settings,
             hosts,
             terminals,
             blobs,
@@ -596,6 +608,7 @@ pub struct Daemon {
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     blobs: Arc<BlobStore>,
@@ -762,6 +775,7 @@ impl Daemon {
             manager: Arc::clone(&self.manager),
             subagents: Arc::clone(&self.subagents),
             worktrees: Arc::clone(&self.worktrees),
+            worktree_settings: Arc::clone(&self.worktree_settings),
             hosts,
             terminals: Arc::clone(&self.terminals),
             blobs: Arc::clone(&self.blobs),

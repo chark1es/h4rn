@@ -12,7 +12,10 @@ use crate::server::Connection;
 pub(super) fn matches(request: &ClientRequest) -> bool {
     matches!(
         request,
-        ClientRequest::ListWorktrees | ClientRequest::ClearWorktrees { .. }
+        ClientRequest::ListWorktrees
+            | ClientRequest::ClearWorktrees { .. }
+            | ClientRequest::GetWorktreeSettings
+            | ClientRequest::SetWorktreeSettings { .. }
     )
 }
 
@@ -33,6 +36,21 @@ pub(super) async fn handle(
                 worktrees: outcome.worktrees,
             })
         }
+        ClientRequest::GetWorktreeSettings => Ok(ResponseBody::WorktreeSettings {
+            settings: conn.state.worktree_settings.get(),
+        }),
+        ClientRequest::SetWorktreeSettings { settings } => conn
+            .state
+            .worktree_settings
+            .set(settings)
+            .map(|settings| ResponseBody::WorktreeSettings { settings })
+            .map_err(|message| {
+                h4rn_protocol::ProtoError::new(
+                    h4rn_protocol::ProtoErrorCode::InvalidRequest,
+                    message,
+                    "Use an absolute path or one starting with `~/`",
+                )
+            }),
         other => Err(crate::server::not_implemented(&other)),
     }
 }

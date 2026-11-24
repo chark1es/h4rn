@@ -1409,6 +1409,17 @@ pub enum ClientRequest {
         #[serde(default)]
         bulk: bool,
     },
+    /// This machine's settings for new thread worktrees.
+    ///
+    /// Answered with [`crate::ResponseBody::WorktreeSettings`].
+    GetWorktreeSettings,
+    /// Change where new thread worktrees go and how their branches are named.
+    ///
+    /// Answered with the saved [`crate::ResponseBody::WorktreeSettings`].
+    SetWorktreeSettings {
+        /// New settings for this machine.
+        settings: crate::WorktreeSettings,
+    },
     // ------------------------------------------------------------------
     // Text generation: thread titles written by a model.
     // ------------------------------------------------------------------
@@ -1534,6 +1545,7 @@ impl ClientRequest {
             | Self::ListHarnessVersions
             | Self::ListAcpAgents
             | Self::ListWorktrees
+            | Self::GetWorktreeSettings
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
             | Self::ForgeListPrs { .. }
@@ -1661,6 +1673,7 @@ impl ClientRequest {
             | Self::ForgeImportCli { .. }
             | Self::UpdateHarness { .. }
             | Self::ClearWorktrees { .. }
+            | Self::SetWorktreeSettings { .. }
             | Self::AddTextGenerator { .. }
             | Self::UpdateTextGenerator { .. }
             | Self::RemoveTextGenerator { .. }
@@ -2051,11 +2064,18 @@ mod tests {
             ),
             // Clearing deletes checkouts from disk.
             (ClientRequest::ListWorktrees, View),
+            (ClientRequest::GetWorktreeSettings, View),
             (
                 ClientRequest::ClearWorktrees {
                     paths: None,
                     force: false,
                     bulk: false,
+                },
+                Admin,
+            ),
+            (
+                ClientRequest::SetWorktreeSettings {
+                    settings: crate::WorktreeSettings::default(),
                 },
                 Admin,
             ),

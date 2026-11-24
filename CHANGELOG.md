@@ -7,6 +7,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **A new thread can run in its own git worktree.** Choose **Run in a new
+  worktree** in the New thread dialog, with an optional branch name. The daemon
+  checks out the project's current `HEAD` on a generated `h4rn/<name>` branch
+  (or keeps the branch you name), makes that checkout the thread's workspace,
+  initialises submodules, and leaves the main checkout untouched. Settings →
+  Worktrees has a per-machine **Location** (an absolute or `~/` path) and
+  **Branch prefix** for new checkout names; an existing branch that is checked
+  out elsewhere, a non-git folder and a missing git are refused with the
+  reason. The thread header and sidebar row show the branch, Settings lists the
+  checkout as the thread's own, and clearing still refuses uncommitted work or
+  an active session. Thread deletion leaves the checkout alone. New requests:
+  `GetWorktreeSettings` and `SetWorktreeSettings`. See
+  [docs/worktrees.md](docs/worktrees.md).
 - **Issues from every forge and Linear sit beside your projects, and can be linked to a
   thread.** The new Issues page reads each visible project's tracker, grouped per account, with
   open/closed, assigned/opened/mentioning filters, a per-project visibility toggle and search that

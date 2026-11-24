@@ -30,9 +30,11 @@ import {
   forceRemoveDescription,
   getWorktreeState,
   inUseWorktrees,
+  loadWorktreeSettings,
   loadWorktrees,
   removeDescription,
   resetWorktreeStoreForTests,
+  saveWorktreeSettings,
   settledWorktrees,
   shouldReloadWorktrees,
   splitMiddlePath,
@@ -89,6 +91,45 @@ describe("worktree store", () => {
     expect(inUseWorktrees(rows).map((r) => r.path)).toEqual(["/a"]);
     expect(settledWorktrees(rows).map((r) => r.path)).toEqual(["/b", "/c"]);
     expect(request).toHaveBeenCalledWith({ type: "list_worktrees" }, { timeoutMs: 60_000 });
+  });
+
+  it("loads and saves this machine's worktree settings", async () => {
+    request.mockResolvedValueOnce({
+      type: "worktree_settings",
+      settings: { location: "~/worktrees", branch_prefix: "h4rn/" },
+    });
+    await loadWorktreeSettings();
+    expect(getWorktreeState().settings).toEqual({
+      location: "~/worktrees",
+      branch_prefix: "h4rn/",
+    });
+    expect(getWorktreeState().settingsSource).toBe(clientA);
+    expect(request).toHaveBeenLastCalledWith(
+      { type: "get_worktree_settings" },
+      { timeoutMs: 15_000 },
+    );
+
+    request.mockResolvedValueOnce({
+      type: "worktree_settings",
+      settings: { location: null, branch_prefix: "feat/" },
+    });
+    const saved = await saveWorktreeSettings({ location: null, branch_prefix: "feat/" }, clientA);
+    expect(saved).toBe(true);
+    expect(getWorktreeState().settings).toEqual({ location: null, branch_prefix: "feat/" });
+  });
+
+  it("refuses to save settings through a replaced client", async () => {
+    request.mockResolvedValueOnce({
+      type: "worktree_settings",
+      settings: { location: null, branch_prefix: "h4rn/" },
+    });
+    await loadWorktreeSettings();
+    harness.current.value = harness.clientB;
+
+    const saved = await saveWorktreeSettings({ location: null, branch_prefix: "feat/" });
+    expect(saved).toBe(false);
+    expect(harness.clientB.request).not.toHaveBeenCalled();
+    expect(getWorktreeState().settingsError?.message).toContain("another connection");
   });
 
   it("reports a failed read as an error, not a rejection", async () => {

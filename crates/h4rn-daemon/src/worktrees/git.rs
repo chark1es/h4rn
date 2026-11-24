@@ -341,6 +341,25 @@ fn command(dir: &Path) -> Command {
     command
 }
 
+/// A `git` command that ignores inherited repository-location variables, for
+/// callers outside this module (thread and subagent worktrees).
+pub(crate) fn git_command() -> Command {
+    let mut command = Command::new(program());
+    sanitize(&mut command);
+    command
+}
+
+/// Whether `path` is inside a git work tree.
+pub(crate) fn is_git_repo(path: &Path) -> bool {
+    git_command()
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 /// `ETXTBSY`: the program file is still open for writing somewhere.
 ///
 /// Another thread that forks while a freshly written executable is open (a

@@ -167,6 +167,29 @@ pub struct NewThread {
     pub worktree: Option<WorktreeRequest>,
 }
 
+/// Removes a just-created thread worktree unless the thread was created.
+///
+/// Creation can still fail after the checkout exists (a journal write, a
+/// title job); leaving a checkout nobody owns would show up in Settings as an
+/// orphan. A named branch that was already in the repository is kept, because
+/// only the checkout is new.
+struct WorktreeRollback(Option<crate::worktrees::create::CreatedWorktree>);
+
+impl WorktreeRollback {
+    /// The thread now owns the worktree.
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for WorktreeRollback {
+    fn drop(&mut self) {
+        if let Some(created) = self.0.take() {
+            created.rollback();
+        }
+    }
+}
+
 /// What [`ThreadManager::restart_sessions`] did.
 #[derive(Clone, Debug, Default)]
 pub struct RestartedSessions {
@@ -297,6 +320,8 @@ struct Inner {
     meter: std::sync::OnceLock<Arc<MeterHub>>,
     /// Title generation, installed once by the daemon assembly.
     text_generation: std::sync::OnceLock<Arc<dyn TextGeneration>>,
+    /// Thread worktrees, installed once by the daemon assembly.
+    worktrees: std::sync::OnceLock<Arc<crate::worktrees::create::WorktreeCreator>>,
     /// Threads with a title generation attempt in flight, so a duplicate
     /// never starts a second model call.
     ///
@@ -2025,6 +2050,7 @@ impl ThreadManager {
                 mcp: std::sync::OnceLock::new(),
                 meter: std::sync::OnceLock::new(),
                 text_generation: std::sync::OnceLock::new(),
+                worktrees: std::sync::OnceLock::new(),
                 title_jobs: std::sync::Mutex::new(HashSet::new()),
                 title_settled: tokio::sync::Notify::new(),
                 last_schedule_check: std::sync::Mutex::new(None),
@@ -2093,6 +2119,13 @@ impl ThreadManager {
     /// harness want.
     pub fn set_text_generation(&self, service: Arc<dyn TextGeneration>) {
         let _ = self.inner.text_generation.set(service);
+    }
+
+    /// Attaches thread worktree creation. Called once by daemon assembly; a
+    /// builder that never attaches it refuses worktree requests instead of
+    /// silently running in the main checkout.
+    pub fn set_worktree_creator(&self, creator: Arc<crate::worktrees::create::WorktreeCreator>) {
+        let _ = self.inner.worktrees.set(creator);
     }
 
     /// The metering hub, when one has been attached.
@@ -2407,17 +2440,6 @@ impl ThreadManager {
                 "workspace_path must be an absolute path on the host".into(),
             ));
         }
-        if request
-            .worktree
-            .as_ref()
-            .is_some_and(WorktreeRequest::is_requested)
-        {
-            // The intent is recorded on the CreateThread request so the wire
-            // contract is stable, but this phase does not create worktrees.
-            return Err(ManagerError::NotImplemented(
-                "worktree creation is not implemented in this daemon".into(),
-            ));
-        }
         request.reasoning_effort = normalize_effort(request.reasoning_effort);
         check_thread_controls(
             request.harness,
@@ -2436,6 +2458,33 @@ impl ThreadManager {
             .resolve_attachments(&thread_id, &request.attachments)
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
+        // Worktree creation is the last fallible setup: once the checkout
+        // exists, the thread runs there. A failure after this point rolls the
+        // new branch back, while a named branch that was already there stays.
+        let mut created_worktree = None;
+        if let Some(worktree) = request
+            .worktree
+            .as_ref()
+            .filter(|worktree| worktree.is_requested())
+        {
+            let Some(creator) = self.inner.worktrees.get() else {
+                return Err(ManagerError::Internal(
+                    "this daemon build has no worktree support".into(),
+                ));
+            };
+            let created = creator
+                .create_for_thread(&request.workspace_path, worktree, &request.prompt)
+                .await
+                .map_err(ManagerError::InvalidRequest)?;
+            // Guard it before anything else can fail, so the checkout is
+            // rolled back rather than leaked.
+            let workspace = created.path.to_str().map(str::to_owned);
+            created_worktree = Some(created);
+            request.workspace_path = workspace.ok_or_else(|| {
+                ManagerError::Internal("the new worktree path is not valid UTF-8".into())
+            })?;
+        }
+        let worktree_guard = WorktreeRollback(created_worktree);
         let title_eligible = request.parent_thread_id.is_none() && request.subagent_id.is_none();
         let title_prompt = request.prompt.clone();
         // The default title mode uses this thread's own harness, so a prompt is
@@ -2550,6 +2599,7 @@ impl ThreadManager {
                 .await;
         }
 
+        worktree_guard.keep();
         self.inner.spawn_session(handle);
         Ok(CreatedThread {
             thread_id,

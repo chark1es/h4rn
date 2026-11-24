@@ -1410,18 +1410,19 @@ async fn restored_threads_replay_after_a_daemon_restart() {
 }
 
 #[tokio::test]
-async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() {
+async fn create_and_send_report_durable_ids_and_a_non_git_workspace_is_refused_for_a_worktree() {
     let daemon = boot().await;
     let host = host_id_for(&daemon).await;
     let mut client = Client::connect(&daemon).await;
     client.hello().await;
 
+    let plain = tempfile::tempdir().expect("plain folder");
     let error = client
         .request(ClientRequest::CreateThread {
             host: host.clone(),
             harness: HarnessKind::ClaudeCode,
             agent_id: None,
-            workspace_path: "/tmp/h4rn-workspace".into(),
+            workspace_path: plain.path().to_string_lossy().into_owned(),
             model: "fake-model".into(),
             prompt: "needs a worktree".into(),
             attachments: Vec::new(),
@@ -1431,9 +1432,9 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
             worktree: Some(h4rn_protocol::WorktreeRequest::Generated(true)),
         })
         .await
-        .expect_err("worktree creation is phase 2");
-    assert_eq!(error.code, ProtoErrorCode::NotImplemented);
-    assert!(error.message.contains("worktree"));
+        .expect_err("a folder that is not a repository has no worktree");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(error.message.contains("not a git repository"), "{error:?}");
 
     let created = client
         .request(ClientRequest::CreateThread {
@@ -1485,6 +1486,296 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
         }
         other => panic!("unexpected send response: {other:?}"),
     }
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_thread_runs_in_its_new_worktree_and_the_tracker_shows_the_thread() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let repo = git_repo();
+    let location = tempfile::tempdir().expect("worktree location");
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    // The location and prefix are this machine's, read by the daemon that
+    // would create the checkout.
+    match client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(location.path().to_string_lossy().into_owned()),
+                branch_prefix: "feat".into(),
+            },
+        })
+        .await
+        .expect("save worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(settings.branch_prefix, "feat");
+            assert_eq!(
+                settings.location.as_deref(),
+                Some(location.path().to_string_lossy().as_ref())
+            );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(settings.branch_prefix, "feat");
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    let created = match client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: repo.path().to_string_lossy().into_owned(),
+            model: "fake-model".into(),
+            prompt: "Add the marker file [[write:marker.txt]]hello\n".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+            reasoning_effort: None,
+            fast: false,
+            worktree: Some(h4rn_protocol::WorktreeRequest::Generated(true)),
+        })
+        .await
+        .expect("create a thread in a worktree")
+    {
+        ResponseBody::ThreadCreated {
+            thread_id, summary, ..
+        } => (thread_id, summary),
+        other => panic!("unexpected create response: {other:?}"),
+    };
+    let (thread_id, summary) = created;
+    let workspace = Path::new(&summary.workspace_path).to_path_buf();
+    assert!(
+        workspace.starts_with(location.path()),
+        "{} is not under {}",
+        workspace.display(),
+        location.path().display()
+    );
+    let branch = summary.branch.clone().expect("the worktree's branch");
+    assert!(branch.starts_with("feat/"), "{branch}");
+    assert_eq!(
+        git_in(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        branch
+    );
+    assert!(
+        !repo.path().join("marker.txt").exists(),
+        "the main checkout is never written to"
+    );
+
+    client.wait_for_turn_completed().await;
+    // The fake harness writes into the workspace it was started with, so this
+    // proves the first session ran in the worktree.
+    let marker = workspace.join("marker.txt");
+    assert!(marker.is_file(), "the session wrote {}", marker.display());
+    assert!(!repo.path().join("marker.txt").exists());
+
+    // The thread list names the checkout, and Settings lists it as the
+    // thread's own worktree.
+    let tracked = match client
+        .request(ClientRequest::ListWorktrees)
+        .await
+        .expect("list worktrees")
+    {
+        ResponseBody::Worktrees { worktrees } => worktrees,
+        other => panic!("unexpected worktrees response: {other:?}"),
+    };
+    let entry = tracked
+        .iter()
+        .find(|worktree| worktree.path == summary.workspace_path)
+        .expect("the thread's worktree is tracked");
+    assert_eq!(entry.branch.as_deref(), Some(branch.as_str()));
+    assert_eq!(entry.origin, h4rn_protocol::WorktreeOrigin::Thread);
+    assert!(
+        entry
+            .accessed_by
+            .iter()
+            .any(|access| access.thread_id == thread_id),
+        "the thread owns its worktree: {entry:?}"
+    );
+
+    // An untracked marker is uncommitted work: a plain clear keeps it.
+    let outcome = match client
+        .request(ClientRequest::ClearWorktrees {
+            paths: Some(vec![summary.workspace_path.clone()]),
+            force: false,
+            bulk: false,
+        })
+        .await
+        .expect("clear the worktree")
+    {
+        ResponseBody::WorktreesCleared {
+            removed, skipped, ..
+        } => (removed, skipped),
+        other => panic!("unexpected clear response: {other:?}"),
+    };
+    assert!(outcome.0.is_empty());
+    assert!(
+        outcome
+            .1
+            .iter()
+            .any(|skip| skip.path == summary.workspace_path
+                && skip.reason.to_lowercase().contains("uncommitted")),
+        "a dirty worktree is refused: {outcome:?}"
+    );
+    assert!(marker.is_file());
+
+    std::fs::remove_file(&marker).expect("remove the marker");
+    let outcome = match client
+        .request(ClientRequest::ClearWorktrees {
+            paths: Some(vec![summary.workspace_path.clone()]),
+            force: false,
+            bulk: false,
+        })
+        .await
+        .expect("clear the clean worktree")
+    {
+        ResponseBody::WorktreesCleared {
+            removed, skipped, ..
+        } => (removed, skipped),
+        other => panic!("unexpected clear response: {other:?}"),
+    };
+    assert_eq!(outcome.0, vec![summary.workspace_path.clone()]);
+    assert!(outcome.1.is_empty(), "{:?}", outcome.1);
+    assert!(!workspace.exists());
+    match client
+        .request(ClientRequest::ListWorktrees)
+        .await
+        .expect("list after clearing")
+    {
+        ResponseBody::Worktrees { worktrees } => assert!(
+            worktrees
+                .iter()
+                .all(|worktree| worktree.path != summary.workspace_path),
+            "the cleared row is forgotten: {worktrees:?}"
+        ),
+        other => panic!("unexpected worktrees response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_named_branch_checked_out_elsewhere_is_refused() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let repo = git_repo();
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let other = elsewhere.path().join("busy");
+    git_in(repo.path(), &["branch", "busy"]);
+    git_in(
+        repo.path(),
+        &["worktree", "add", other.to_str().unwrap(), "busy"],
+    );
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let error = client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: repo.path().to_string_lossy().into_owned(),
+            model: "fake-model".into(),
+            prompt: "use a busy branch".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+            reasoning_effort: None,
+            fast: false,
+            worktree: Some(h4rn_protocol::WorktreeRequest::Named("busy".into())),
+        })
+        .await
+        .expect_err("a branch already checked out cannot be reused");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(error.message.contains("already checked out"), "{error:?}");
+
+    // Nothing was created for the refused request.
+    match client
+        .request(ClientRequest::ListThreads {
+            filter: ThreadFilter::default(),
+        })
+        .await
+        .expect("list threads")
+    {
+        ResponseBody::Threads { threads } => assert!(threads.is_empty()),
+        other => panic!("unexpected list response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_worktree_for_another_host_is_refused_before_anything_is_created() {
+    let daemon = boot().await;
+    let repo = git_repo();
+    let location = tempfile::tempdir().expect("location");
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(location.path().to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect("save worktree settings");
+
+    // This daemon only creates threads for its own host; the other host's
+    // daemon is the one that would resolve the workspace and make the
+    // checkout there.
+    let error = client
+        .request(ClientRequest::CreateThread {
+            host: HostId::new("host_elsewhere"),
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: repo.path().to_string_lossy().into_owned(),
+            model: "fake-model".into(),
+            prompt: "elsewhere".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+            reasoning_effort: None,
+            fast: false,
+            worktree: Some(h4rn_protocol::WorktreeRequest::Generated(true)),
+        })
+        .await
+        .expect_err("another host's thread is not this daemon's");
+    assert_eq!(error.code, ProtoErrorCode::Unsupported);
+    assert_eq!(
+        std::fs::read_dir(location.path()).expect("list").count(),
+        0,
+        "nothing was created on this machine"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn worktree_settings_refuse_a_relative_location() {
+    let daemon = boot().await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some("relative/path".into()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("a relative location is not a path on the machine");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(error.message.contains("absolute path"), "{error:?}");
 
     daemon.stop().await;
 }

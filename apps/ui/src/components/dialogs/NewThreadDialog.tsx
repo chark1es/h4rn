@@ -1,4 +1,4 @@
-import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
+import { ArrowRightIcon, CheckIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
@@ -24,6 +24,7 @@ import {
   useHarnesses,
   useHarnessVersions,
 } from "@/features/harnesses/harnessStore";
+import { useProjects } from "@/features/projects/store";
 import {
   proxyDefaultModel,
   proxyModelsFor,
@@ -54,6 +55,11 @@ const DEFAULT_MODELS = Object.fromEntries(
 ) as Record<HarnessKind, string>;
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
+
+/** A path without trailing separators, for comparing a project with a folder. */
+function folderKey(path: string): string {
+  return path.trim().replace(/[\\/]+$/, "");
+}
 
 function FieldLabel({
   children,
@@ -114,6 +120,10 @@ export function NewThreadDialog() {
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(threadSettings.defaultPermissionMode);
   const [reasoningEffort, setReasoningEffort] = useState<string>("default");
   const [fast, setFast] = useState(false);
+  /** Run in a new checkout instead of the project's main folder. */
+  const [worktreeEnabled, setWorktreeEnabled] = useState(false);
+  /** Optional branch name; empty lets the daemon generate one. */
+  const [worktreeBranch, setWorktreeBranch] = useState("");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   /** Host + folder slot the prompt box is showing; one per dialog open. */
@@ -162,6 +172,8 @@ export function NewThreadDialog() {
       setBoundHost("");
       setWorkspace(DEFAULT_NEW_THREAD_WORKSPACE);
       setPrompt("");
+      setWorktreeEnabled(false);
+      setWorktreeBranch("");
       return;
     }
     if (sessionRef.current === null) {
@@ -347,6 +359,24 @@ export function NewThreadDialog() {
       ? selectedAgent.working_dir.path
       : null;
   const effectiveWorkspace = fixedWorkspace ?? workspace;
+  // A worktree needs a repository, so the option is offered only for a
+  // registered git project on this host. The daemon still checks again and
+  // answers honestly when a folder is not one.
+  const projects = useProjects((value) => value.projects);
+  const gitProject =
+    fixedWorkspace === null &&
+    projects.some(
+      (project) =>
+        project.git &&
+        project.host === boundHost &&
+        folderKey(project.path) === folderKey(effectiveWorkspace),
+    );
+  useEffect(() => {
+    if (!gitProject) {
+      setWorktreeEnabled(false);
+      setWorktreeBranch("");
+    }
+  }, [gitProject]);
   const offline = connection !== "online";
   const modelChoices = [
     ...new Set([
@@ -398,6 +428,12 @@ export function NewThreadDialog() {
       runtimeMode,
       reasoningEffort: reasoningEffort === "default" ? null : reasoningEffort,
       fast,
+      worktree:
+        worktreeEnabled && gitProject
+          ? worktreeBranch.trim() === ""
+            ? true
+            : worktreeBranch.trim()
+          : null,
     });
     setStarting(false);
     if (ok) {
@@ -641,10 +677,50 @@ export function NewThreadDialog() {
               <GitBranchIcon className="size-3" aria-hidden />
               {fixedWorkspace
                 ? "This agent always runs in its configured directory."
-                : "The agent works in this directory. h4rn does not create a worktree for new threads yet."}
+                : gitProject
+                  ? "The agent works here, or in its own checkout when you ask for one."
+                  : "The agent works in this directory."}
             </span>
           </div>
         </div>
+
+        {gitProject ? (
+          <div className="flex flex-col gap-1.5">
+            <label className="q-addp-check">
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={worktreeEnabled}
+                onChange={(event) => {
+                  setWorktreeEnabled(event.target.checked);
+                  if (!event.target.checked) setWorktreeBranch("");
+                }}
+              />
+              <span className={cn("q-check", worktreeEnabled && "on")} aria-hidden>
+                {worktreeEnabled ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+              </span>
+              Run in a new worktree
+            </label>
+            {worktreeEnabled ? (
+              <Input
+                id="new-thread-worktree-branch"
+                value={worktreeBranch}
+                onChange={(event) => setWorktreeBranch(event.target.value)}
+                placeholder="Branch name (optional)"
+                className="max-w-[360px] font-mono"
+                spellCheck={false}
+                aria-label="New worktree branch name"
+              />
+            ) : null}
+            <span className="text-small text-fg-3">
+              {worktreeEnabled
+                ? worktreeBranch.trim()
+                  ? `Starts on ${worktreeBranch.trim()} in a separate checkout, leaving ${effectiveWorkspace} untouched.`
+                  : "The daemon names the branch and leaves your main checkout untouched."
+                : "A separate branch and checkout keep this thread's changes out of the main folder."}
+            </span>
+          </div>
+        ) : null}
 
         <div className="flex flex-col gap-1">
           <div className="flex items-center justify-between">
