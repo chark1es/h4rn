@@ -1311,6 +1311,107 @@ async fn an_imported_session_with_a_late_id_is_not_offered_again() {
 }
 
 #[tokio::test]
+async fn a_transcript_replaced_by_another_session_is_offered() {
+    // A stored claim is about the conversation, not the file. When the same
+    // path now holds a transcript that names a different session id, that is
+    // another conversation and has to be offered, not hidden by the old claim.
+    let home = tempfile::tempdir().expect("home");
+    let home_path = home.path().to_path_buf();
+    let workspace = home_path.join("code/api");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let (_, manager, import) = services(
+        &home_path,
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let transcript = |session: &str, prompt: &str| {
+        vec![
+            json!({
+                "type": "user",
+                "sessionId": session,
+                "cwd": workspace.display().to_string(),
+                "timestamp": "2026-11-18T09:00:00Z",
+                "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": session,
+                "cwd": workspace.display().to_string(),
+                "timestamp": "2026-11-18T09:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-5",
+                    "content": [{"type": "text", "text": "done"}],
+                },
+            }),
+        ]
+    };
+    let path = home_path
+        .join(".claude/projects/-code-api")
+        .join("conversation.jsonl");
+    write_jsonl(&path, &transcript("session-first", "first question"));
+
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].importable, 1,
+        "the conversation is offered"
+    );
+    let mut events = import.subscribe();
+    import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    wait_finished(&mut events).await;
+
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].importable, 0,
+        "an unchanged transcript is not offered again"
+    );
+
+    // The same path is now another conversation.
+    write_jsonl(&path, &transcript("session-second", "replacement question"));
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].importable, 1,
+        "a different explicit session id at the same path is a new conversation"
+    );
+    assert_eq!(
+        scan.projects[0].conversations, 1,
+        "the folder still holds one transcript"
+    );
+    assert!(
+        manager
+            .list_threads(&ThreadFilter::default())
+            .await
+            .iter()
+            .any(|thread| thread.title.contains("first question")),
+        "the first conversation stayed"
+    );
+
+    let mut events = import.subscribe();
+    import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    wait_finished(&mut events).await;
+    let threads: Vec<_> = manager
+        .list_threads(&ThreadFilter::default())
+        .await
+        .into_iter()
+        .filter(|thread| thread.harness == HarnessKind::ClaudeCode)
+        .collect();
+    assert_eq!(threads.len(), 2, "the replacement became its own thread");
+    assert!(
+        threads
+            .iter()
+            .any(|thread| thread.title.contains("replacement question")),
+        "the replacement's prompt titles it"
+    );
+}
+
+#[tokio::test]
 async fn a_path_keyed_rollout_that_grows_is_offered_again() {
     // A Codex rollout with no session id is keyed by its path, size and content
     // fingerprint. Once imported, a later scan must not hide the file by path

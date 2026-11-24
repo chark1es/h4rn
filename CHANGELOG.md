@@ -629,6 +629,11 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A replaced transcript is offered as the new conversation it is.** When a
+  session's path now holds a transcript with a different explicit session id, the
+  scan offers it instead of hiding it behind the old path claim. The stored claim
+  still hides the transcript when its head names no session of its own, or names
+  the same id.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

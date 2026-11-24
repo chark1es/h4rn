@@ -184,15 +184,32 @@ pub fn path_source_key(source: ImportSource, path: &str, size: u64, fingerprint:
     format!("{}:path:{path}:{size}:{fingerprint}", source.as_str())
 }
 
+/// The file size a path key pins, when it has the full path-key shape.
+///
+/// A path key is `source:path:<path>:<size>:<fingerprint>`. The path may itself
+/// contain colons, so the size is read from the right. Keys without that suffix,
+/// including one written by an older daemon, are not path keys.
+pub fn path_keyed_source_size(key: &str) -> Option<u64> {
+    let (_, rest) = key.split_once(':')?;
+    let tail = rest.strip_prefix("path:")?;
+    let (path_and_size, fingerprint) = tail.rsplit_once(':')?;
+    let (_path, size) = path_and_size.rsplit_once(':')?;
+    if fingerprint.is_empty() {
+        return None;
+    }
+    size.parse().ok()
+}
+
 /// Whether a stored source key names its transcript by path.
 ///
 /// A path key carries the file's size and content fingerprint, so it pins one
 /// version of the file: a transcript that keeps growing is a new conversation.
 /// A session-id key names the conversation itself, so it still recognises a
-/// transcript whose head read did not reveal the id.
+/// transcript whose head read did not reveal the id. Only the full
+/// `:path:<path>:<size>:<fingerprint>` shape counts, so a session id that itself
+/// begins with `path:` is still a session id.
 pub fn path_keyed_source_key(key: &str) -> bool {
-    key.split_once(':')
-        .is_some_and(|(_, rest)| rest.starts_with("path:"))
+    path_keyed_source_size(key).is_some()
 }
 
 #[cfg(test)]
@@ -213,11 +230,6 @@ mod tests {
 
     #[test]
     fn a_path_key_is_told_apart_from_a_session_key() {
-        assert!(path_keyed_source_key(&source_key(
-            ImportSource::Codex,
-            None,
-            "/tmp/a.jsonl"
-        )));
         assert!(path_keyed_source_key(&path_source_key(
             ImportSource::Codex,
             "/tmp/a.jsonl",
@@ -230,6 +242,37 @@ mod tests {
             "/tmp/a.jsonl"
         )));
         assert!(!path_keyed_source_key("codex:path-with-a-colon"));
+    }
+
+    #[test]
+    fn a_path_key_needs_its_size_and_fingerprint_suffix() {
+        // The old unsuffixed path key is not a path key: it cannot be told
+        // apart from a session id that happens to spell `path:`.
+        assert!(!path_keyed_source_key(&source_key(
+            ImportSource::Codex,
+            None,
+            "/tmp/a.jsonl"
+        )));
+        assert_eq!(
+            path_keyed_source_size(&source_key(ImportSource::Codex, None, "/tmp/a.jsonl")),
+            None
+        );
+
+        // A session id that itself begins with `path:` is a session id.
+        let session = source_key(ImportSource::ClaudeCode, Some("path:abc"), "/tmp/a.jsonl");
+        assert!(!path_keyed_source_key(&session));
+        assert_eq!(path_keyed_source_size(&session), None);
+
+        // A path key without both parts is not one either.
+        assert!(!path_keyed_source_key("codex:path:/tmp/a.jsonl:12"));
+        assert!(!path_keyed_source_key("codex:path:/tmp/a.jsonl:abc:def"));
+    }
+
+    #[test]
+    fn a_path_key_reads_its_size_even_when_the_path_has_colons() {
+        let key = path_source_key(ImportSource::Codex, "/tmp/a:b/c.jsonl", 4096, "fp");
+        assert!(path_keyed_source_key(&key));
+        assert_eq!(path_keyed_source_size(&key), Some(4096));
     }
 
     #[test]

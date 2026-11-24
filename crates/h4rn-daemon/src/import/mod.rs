@@ -69,7 +69,16 @@ pub(crate) struct Peek {
     /// Working directory the conversation ran in.
     pub cwd: PathBuf,
     /// Harness-native session id, when the record names one.
+    ///
+    /// A harness that names a transcript by its file falls back to the file
+    /// stem here, so a scan always has a provisional identity to group by.
     pub session_id: Option<String>,
+    /// Whether a record in the head itself named the session id.
+    ///
+    /// The file-name fallback is not the conversation's own name: a late id
+    /// found by the full parse still has to be recognised by path, while an
+    /// explicit id at a path is a claim about that conversation.
+    pub named_session: bool,
     /// Whether the head already showed a visible message.
     ///
     /// A rollout that only wrote setup metadata is not a conversation and must
@@ -997,7 +1006,8 @@ impl ImportedSources {
             .map(String::as_str)
     }
 
-    /// Whether the claim stored for this path is one this daemon made.
+    /// Whether the claim stored for this path names its conversation, not its
+    /// file version.
     ///
     /// Only a session-id claim is matched by path. A path-keyed claim pins the
     /// file's size and content fingerprint, so a transcript that kept growing
@@ -1013,10 +1023,30 @@ impl ImportedSources {
     ///
     /// `head_key` is only what the cheap peek could compute. A transcript whose
     /// session id appears later in the file was claimed under its full-parse
-    /// key, which is the identity the journal stored against the path, so both
-    /// have to be checked or the session would be offered a second time.
-    fn contains_transcript(&self, path: &Path, head_key: &str) -> bool {
-        self.contains(head_key) || self.contains_path(path)
+    /// key, which is the identity the journal stored against the path; a head
+    /// that named no session of its own therefore falls back to the path claim.
+    /// A head that did name one has spoken about the conversation itself, and
+    /// the path claim only hides it when that claim is the same id: a
+    /// different id at the same path is another conversation, such as a
+    /// transcript that was replaced in place.
+    fn contains_transcript(&self, path: &Path, head_key: &str, named_session: bool) -> bool {
+        self.contains(head_key) || (!named_session && self.contains_path(path))
+    }
+
+    /// Whether the claim stored for this path already covers this exact file.
+    ///
+    /// Used when a project's quota is spent and no head is read. A claim that
+    /// names the conversation still counts the transcript for its project. A
+    /// path-keyed claim pins the file's size, so a transcript that grew after
+    /// it was imported is not counted as the same file.
+    fn covers_file(&self, path: &Path, size: u64) -> bool {
+        let Some(key) = self.key_for_path(path) else {
+            return false;
+        };
+        if !h4rn_protocol::path_keyed_source_key(key) {
+            return true;
+        }
+        h4rn_protocol::path_keyed_source_size(key) == Some(size)
     }
 }
 
@@ -1073,7 +1103,7 @@ fn scan_blocking(
             // The quota is spent: no head is read. An already-imported source
             // still counts for its project, so older conversations are not
             // hidden behind it on a later attempt.
-            if imported.contains_path(&candidate.path)
+            if imported.covers_file(&candidate.path, candidate.size)
                 && let Some(group) = groups.get_mut(key)
             {
                 group.files.push(ConversationFile {
@@ -1139,7 +1169,8 @@ fn scan_blocking(
             &candidate.path,
             candidate.size,
         );
-        let already_imported = imported.contains_transcript(&candidate.path, &head_key);
+        let already_imported =
+            imported.contains_transcript(&candidate.path, &head_key, peek.named_session);
         let group_key = key.clone();
         let group = groups.entry(key).or_insert_with(|| Group {
             key: group_key.clone(),
@@ -1463,16 +1494,19 @@ mod tests {
     }
 
     fn claude_transcript(cwd: &Path, session: &str, prompt: &str) -> String {
-        let user = serde_json::json!({
+        claude_transcript_with_session(cwd, Some(session), prompt)
+    }
+
+    /// A transcript whose records name no session id at all.
+    fn claude_transcript_with_session(cwd: &Path, session: Option<&str>, prompt: &str) -> String {
+        let mut user = serde_json::json!({
             "type": "user",
-            "sessionId": session,
             "cwd": cwd.display().to_string(),
             "timestamp": "2026-11-20T10:00:00Z",
             "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
         });
-        let assistant = serde_json::json!({
+        let mut assistant = serde_json::json!({
             "type": "assistant",
-            "sessionId": session,
             "cwd": cwd.display().to_string(),
             "timestamp": "2026-11-20T10:00:01Z",
             "message": {
@@ -1481,7 +1515,70 @@ mod tests {
                 "content": [{"type": "text", "text": "done"}],
             },
         });
+        if let Some(session) = session {
+            user["sessionId"] = serde_json::json!(session);
+            assistant["sessionId"] = serde_json::json!(session);
+        }
         format!("{user}\n{assistant}\n")
+    }
+
+    fn imported_claim(path: &Path, key: &str) -> ImportedSources {
+        let mut imported = ImportedSources::default();
+        imported.keys.insert(key.to_owned());
+        imported
+            .by_path
+            .insert(path.display().to_string(), key.to_owned());
+        imported
+    }
+
+    #[test]
+    fn a_transcript_replaced_by_another_session_is_offered() {
+        let path = PathBuf::from("/home/me/.claude/projects/-code-api/conversation.jsonl");
+        let imported = imported_claim(&path, "claude_code:session-a");
+
+        assert!(
+            imported.contains_transcript(&path, "claude_code:session-a", true),
+            "the same session is not offered again"
+        );
+        assert!(
+            !imported.contains_transcript(&path, "claude_code:session-b", true),
+            "an explicit, different session id at the same path is a new conversation"
+        );
+        // The head named no session of its own, so the path claim hides the
+        // transcript even though the peek's provisional key is the file name.
+        assert!(
+            imported.contains_transcript(&path, "claude_code:conversation", false),
+            "a late session id is still recognised by the path claim"
+        );
+    }
+
+    #[test]
+    fn a_grown_path_claim_does_not_count_for_a_full_folder() {
+        let path = PathBuf::from("/home/me/.codex/sessions/2026/11/21/rollout.jsonl");
+        let key = h4rn_protocol::path_source_key(
+            ImportSource::Codex,
+            &path.display().to_string(),
+            100,
+            "fingerprint",
+        );
+        let imported = imported_claim(&path, &key);
+
+        assert!(imported.covers_file(&path, 100), "the same file counts");
+        assert!(
+            !imported.covers_file(&path, 120),
+            "a grown rollout is a new conversation, not the imported file"
+        );
+        assert!(
+            !imported.contains_transcript(&path, "codex:path", false),
+            "a path claim is not a session claim"
+        );
+    }
+
+    #[test]
+    fn a_session_claim_counts_for_any_size_of_its_file() {
+        let path = PathBuf::from("/home/me/.claude/projects/-code-api/session.jsonl");
+        let imported = imported_claim(&path, "claude_code:session");
+        assert!(imported.covers_file(&path, 4_096));
     }
 
     /// Parsing a transcript must not hold the async runtime.
@@ -1610,6 +1707,45 @@ mod tests {
         );
         assert_eq!(outcome.scan.projects[0].conversations, 101);
         assert_eq!(outcome.scan.projects[0].importable, 100);
+    }
+
+    #[test]
+    fn a_full_folder_counts_an_imported_transcript_that_names_no_session() {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = home.path();
+        let workspace = home_path.join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home_path.join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        for index in 0..(MAX_CONVERSATIONS_PER_PROJECT + 2) {
+            let session = format!("session-{index:03}");
+            let body = if index == 0 {
+                // The oldest transcript names no session id, so its claim is
+                // its file name rather than a session.
+                claude_transcript_with_session(&workspace, None, "oldest")
+            } else {
+                claude_transcript(&workspace, &session, &format!("conversation {index}"))
+            };
+            std::fs::write(project.join(format!("{session}.jsonl")), body).expect("transcript");
+        }
+        let old = project.join("session-000.jsonl");
+        let imported = imported_claim(&old, "claude_code:session-000");
+
+        let outcome = scan_blocking(
+            home_path,
+            &home_path.join(".claude"),
+            &home_path.join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            outcome.scan.projects[0].conversations, 101,
+            "the imported, id-less transcript still counts for its project"
+        );
+        assert_eq!(
+            outcome.scan.projects[0].importable, 100,
+            "it is not offered again"
+        );
     }
 
     fn group() -> Group {
