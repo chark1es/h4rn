@@ -25,6 +25,8 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [teamErrors, setTeamErrors] = useState<Record<string, string>>({});
   const [reload, setReload] = useState(0);
 
   const load = useCallback(() => setReload((value) => value + 1), []);
@@ -38,10 +40,15 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
         if (cancelled) return;
         setAccounts(nextAccounts);
         setMappings(nextMappings);
+        setError(null);
         setLoading(false);
       })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        // Keep the reason on the page, the way the forge settings do, so a
+        // failed load never looks like "no workspace connected".
+        setError(cause instanceof Error ? cause.message : String(cause));
+        setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -51,19 +58,24 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
   useEffect(() => {
     if (accounts.length === 0) {
       setTeams({});
+      setTeamErrors({});
       return;
     }
     let cancelled = false;
+    const errors: Record<string, string> = {};
     void Promise.all(
       accounts.map(async (account) => {
         try {
           return [account.account_id, await api(request).linearTeams(account.account_id)] as const;
-        } catch {
+        } catch (cause) {
+          errors[account.account_id] = cause instanceof Error ? cause.message : String(cause);
           return [account.account_id, [] as LinearTeam[]] as const;
         }
       }),
     ).then((entries) => {
-      if (!cancelled) setTeams(Object.fromEntries(entries));
+      if (cancelled) return;
+      setTeams(Object.fromEntries(entries));
+      setTeamErrors(errors);
     });
     return () => {
       cancelled = true;
@@ -148,6 +160,11 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
         Connect with a personal API key. The key stays on this host, is never returned to a client,
         and is only used to read your team's issues and post comments.
       </p>
+      {error ? (
+        <p className="q-warn" role="alert">
+          {error}
+        </p>
+      ) : null}
       {accounts.length > 0 ? (
         <table className="q-tbl">
           <thead>
@@ -184,11 +201,18 @@ export function LinearSettings({ request }: { request?: IssueRequest } = {}) {
             ))}
           </tbody>
         </table>
-      ) : (
+      ) : error ? null : (
         <p className="q-muted" style={{ fontSize: 13, margin: "4px 0 12px" }}>
           No Linear workspace connected yet.
         </p>
       )}
+      {accounts
+        .filter((account) => teamErrors[account.account_id])
+        .map((account) => (
+          <p key={account.account_id} className="q-warn" role="alert">
+            {account.name}: {teamErrors[account.account_id]}
+          </p>
+        ))}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <input
           className="q-input"

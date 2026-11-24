@@ -1045,6 +1045,40 @@ impl Journal for SqliteJournal {
     }
 }
 
+#[cfg(test)]
+impl SqliteJournal {
+    /// Stores a raw `next_run_at` so an upgrade test can write a timestamp the
+    /// daemon cannot decode.
+    pub(crate) async fn set_raw_next_run_at(
+        &self,
+        task_id: &ScheduleTaskId,
+        raw: Option<&str>,
+    ) -> Result<(), JournalError> {
+        sqlx::query("UPDATE daemon_schedules SET next_run_at = ? WHERE task_id = ?")
+            .bind(raw)
+            .bind(task_id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The stored `next_run_at` exactly as written, undecoded.
+    pub(crate) async fn raw_next_run_at(
+        &self,
+        task_id: &ScheduleTaskId,
+    ) -> Result<Option<String>, JournalError> {
+        let row = sqlx::query("SELECT next_run_at FROM daemon_schedules WHERE task_id = ?")
+            .bind(task_id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let raw: Option<String> = row.try_get("next_run_at")?;
+        Ok(raw)
+    }
+}
+
 /// Inserts one run row inside a transaction and fills in its durable id.
 async fn insert_schedule_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

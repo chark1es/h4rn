@@ -228,12 +228,116 @@ describe("linked pull request badge and panel", () => {
         onUnlinkIssue={onUnlinkIssue}
       />,
     );
-    expect(screen.getByRole("button", { name: "Linked items" }).textContent).toContain("#12 Open");
+    expect(screen.getByRole("button", { name: "Linked items" }).textContent).toContain(
+      "h4rn/api#12 Open",
+    );
     openBadge();
     expect(screen.getByText("Dark mode flickers")).toBeTruthy();
-    expect(screen.getAllByText("#12 Open").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("h4rn/api#12 Open").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("menuitem", { name: /Unlink issue/ }));
     expect(onUnlinkIssue).toHaveBeenCalledWith(issues[0]);
+  });
+
+  it("keys and labels two issues with the same number by their repository", () => {
+    const otherRepo: ForgeRepoRef = { ...repo, owner: "other", repo: "web" };
+    const otherSummary: ForgeIssueSummary = {
+      ...issueSummary,
+      repo: otherRepo,
+      title: "Other flicker",
+      web_url: "https://github.com/other/web/issues/12",
+    };
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const onUnlinkIssue = vi.fn();
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[
+          issues[0] as ThreadIssue,
+          {
+            scope: { tracker: "forge", repo: otherRepo },
+            issue_id: "12",
+            account_id: "a1",
+            state: { tracker: "forge", issue: otherSummary },
+            error: null,
+            linked_at: "2026-01-02T00:00:00Z",
+          },
+        ]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+        onUnlinkIssue={onUnlinkIssue}
+      />,
+    );
+    openBadge();
+    expect(screen.getByText("Dark mode flickers")).toBeTruthy();
+    expect(screen.getByText("Other flicker")).toBeTruthy();
+    expect(screen.getAllByText("h4rn/api#12 Open").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("other/web#12 Open").length).toBeGreaterThan(0);
+    const duplicateKey = error.mock.calls.some((call) => String(call[0]).includes("same key"));
+    expect(duplicateKey).toBe(false);
+    fireEvent.click(screen.getAllByRole("menuitem", { name: /Unlink issue/ })[1] as HTMLElement);
+    expect(onUnlinkIssue).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scope: { tracker: "forge", repo: otherRepo } }),
+    );
+  });
+
+  it("names and keys a Linear row without its internal team id", () => {
+    const linked: ThreadIssue = {
+      scope: { tracker: "linear", team_id: "team_uuid_1" },
+      issue_id: "issue_uuid_1",
+      account_id: "lin_1",
+      state: {
+        tracker: "linear",
+        issue: {
+          id: "issue_uuid_1",
+          identifier: "ENG-1",
+          title: "Rate limit the import",
+          state_name: "In Progress",
+          state_type: "started",
+          team_id: "team_uuid_1",
+          team_key: "ENG",
+          assignees: [],
+          labels: [],
+          updated_at: "2026-01-02T00:00:00Z",
+          url: "https://linear.app/acme/issue/ENG-1",
+        },
+      },
+      error: null,
+      linked_at: "2026-01-01T00:00:00Z",
+    };
+    const { rerender } = render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[linked]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    // The team is named the way Linear names it, never by its UUID.
+    expect(screen.getAllByText(/ENG-1 \(ENG\)/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/team_uuid_1/)).toBeNull();
+
+    openBadge();
+    const row = document.querySelector(".q-pr-links");
+    expect(row).not.toBeNull();
+
+    // A failed refresh empties the live state. The row's key comes from the
+    // stored team and issue ids, so the row keeps its place instead of
+    // remounting and closing what the person had open.
+    rerender(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[{ ...linked, state: null, error: "the tracker did not answer" }]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    expect(screen.getByText("Issue unavailable")).toBeTruthy();
+    expect(screen.getByText("the tracker did not answer")).toBeTruthy();
+    expect(document.querySelector(".q-pr-links")).toBe(row);
+    expect(screen.queryByText(/team_uuid_1/)).toBeNull();
   });
 
   it("says what a watch cannot cover when the forge has no login", () => {
