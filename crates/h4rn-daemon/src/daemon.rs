@@ -1739,6 +1739,85 @@ mod tests {
         assert_eq!(mcp_serving_socket(&[bound("192.168.1.5:47800")]), None);
     }
 
+    /// Stopping the daemon waits for a worktree rollback that has already
+    /// started, instead of exiting while the checkout is still on disk.
+    #[tokio::test]
+    async fn shutdown_waits_for_a_started_worktree_rollback() {
+        let data = tempfile::tempdir().expect("data");
+        let repo = tempfile::tempdir().expect("repo");
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "wt@h4rn.invalid"]);
+        run(&["config", "user.name", "h4rn test"]);
+        std::fs::write(repo.path().join("README.md"), "hello\n").expect("readme");
+        run(&["add", "README.md"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        let config = Config {
+            data_dir: data.path().to_path_buf(),
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            extra_bind: None,
+            log_level: "off".to_owned(),
+            tailscale: TailscaleMode::Auto,
+            network_access: None,
+            network_port: 0,
+        };
+        let daemon = DaemonBuilder::new(config)
+            .without_title_agents()
+            .with_catalog(Arc::new(StaticHarnessCatalog::with(Arc::new(
+                h4rn_harness::FakeHarness::new(),
+            ))))
+            .build()
+            .await
+            .expect("daemon");
+        let creator = Arc::clone(&daemon.worktree_creator);
+        let bound = daemon.bind().await.expect("bind");
+        let (shutdown, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            bound
+                .serve(async move {
+                    let _ = rx.await;
+                })
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let created = creator
+            .create_for_thread(
+                repo.path().to_str().expect("path"),
+                &h4rn_protocol::WorktreeRequest::Named("shutdown/daemon".into()),
+                "shutdown",
+            )
+            .await
+            .expect("create");
+        let path = created.path.clone();
+        crate::worktrees::create::test_hooks::hold_rollback(
+            path.clone(),
+            std::time::Duration::from_secs(2),
+        );
+        crate::threads::rollback_worktree_for_test(created);
+        let started = std::time::Instant::now();
+        let _ = shutdown.send(());
+        task.await.expect("serve task").expect("serve");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(1),
+            "shutdown waited for the rollback it had started"
+        );
+        assert!(!path.exists(), "the checkout is gone");
+        crate::worktrees::create::test_hooks::clear_rollback();
+    }
+
     /// Only a real loopback listener serves OAuth, so only it is advertised.
     #[test]
     fn outside_agents_are_named_only_by_a_loopback_listener() {

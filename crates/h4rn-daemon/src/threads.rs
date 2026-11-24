@@ -197,6 +197,12 @@ pub struct NewThread {
 /// only the checkout is new.
 struct WorktreeRollback(Option<crate::worktrees::create::CreatedWorktree>);
 
+/// Starts the same rollback a dropped thread-create guard would start.
+#[cfg(test)]
+pub(crate) fn rollback_worktree_for_test(created: crate::worktrees::create::CreatedWorktree) {
+    drop(WorktreeRollback(Some(created)));
+}
+
 impl WorktreeRollback {
     /// The thread now owns the worktree.
     fn keep(mut self) {
