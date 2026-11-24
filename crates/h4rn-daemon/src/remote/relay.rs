@@ -98,6 +98,12 @@ struct PendingGuest {
     /// and its exchange takes over. It bounds buffered uploads only; reads use
     /// their own permits.
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// Wakes the link check when the relay cancels this upload.
+    ///
+    /// The check owns the upload permit while it runs, so a cancel must reach
+    /// it instead of waiting for the surface and the outbound queue: otherwise
+    /// an abandoned upload would pin its slot until both answered.
+    cancel: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -207,6 +213,7 @@ impl GuestRelay {
                     checking,
                     complete: false,
                     permit: None,
+                    cancel: Arc::new(tokio::sync::Notify::new()),
                 },
             );
             drop(state);
@@ -308,7 +315,12 @@ impl GuestRelay {
                 return;
             }
         };
-        self.lock().pending.remove(&cancel.request_id);
+        let mut state = self.lock();
+        if let Some(pending) = state.pending.remove(&cancel.request_id) {
+            // A check still running holds the upload permit. Wake it so the
+            // slot returns now, not when the surface and the queue answer.
+            pending.cancel.notify_one();
+        }
     }
 
     /// Checks a chunked submission's link before its body is trusted.
@@ -328,7 +340,7 @@ impl GuestRelay {
                 .acquire_owned()
                 .await
                 .expect("the guest upload semaphore is never closed");
-            let (conn_id, input) = {
+            let (conn_id, input, cancel) = {
                 let state = relay.lock();
                 let Some(pending) = state.pending.get(&request_id) else {
                     return;
@@ -342,44 +354,60 @@ impl GuestRelay {
                         &guest_headers(&pending.request),
                         Vec::new(),
                     ),
+                    Arc::clone(&pending.cancel),
                 )
             };
-            match surface.check_submission(&input).await {
+            // Both waits below are cancellable: a cancel drops this task's
+            // upload permit at once instead of pinning the slot until the
+            // surface or the outbound queue answers.
+            let cancelled = cancel.notified();
+            tokio::pin!(cancelled);
+            let checked = tokio::select! {
+                result = surface.check_submission(&input) => result,
+                _ = &mut cancelled => return,
+            };
+            match checked {
                 Ok(()) => {
-                    // An upload refused for its size, or dropped as abandoned,
-                    // is no longer here; it must not be told to send its body.
-                    if !relay.lock().pending.contains_key(&request_id) {
-                        return;
-                    }
-                    // The go-ahead goes before anything else this exchange
-                    // sends, so a browser that waits for it never races the
-                    // answer.
-                    relay.send_admission(conn_id, request_id.clone()).await;
+                    // The admitted state is committed before the go-ahead is
+                    // sent, so the pre-authorization cap covers exactly the
+                    // bytes that arrived before authorization.
+                    let mut upload = Some(permit);
                     let started = {
                         let mut state = relay.lock();
                         let Some(pending) = state.pending.get_mut(&request_id) else {
+                            // Refused for its size, or dropped as abandoned;
+                            // it must not be told to send its body.
                             return;
                         };
                         pending.checking = false;
                         if !pending.complete {
                             // The body still arrives: the upload slot stays
                             // with it, bounding what it may buffer.
-                            pending.permit = Some(permit);
-                            return;
+                            pending.permit = upload.take();
+                            None
+                        } else {
+                            let Some(pending) = state.pending.remove(&request_id) else {
+                                return;
+                            };
+                            // The body is complete, so the upload slot is done
+                            // when this task returns. The exchange takes a
+                            // work permit of its own.
+                            Some((pending.conn_id, pending.request, pending.body))
                         }
-                        let Some(pending) = state.pending.remove(&request_id) else {
-                            return;
-                        };
-                        // The body is complete, so the upload slot is done
-                        // when this task returns. The exchange takes a work
-                        // permit of its own.
-                        Some((pending.conn_id, pending.request, pending.body))
                     };
+                    // The go-ahead goes before anything else this exchange
+                    // sends, so a browser that waits for it never races the
+                    // answer. A cancel in this window means the browser has
+                    // gone: the answer is dropped with it.
+                    tokio::select! {
+                        _ = relay.send_admission(conn_id, request_id.clone()) => {}
+                        _ = &mut cancelled => return,
+                    }
                     if let Some((conn_id, request, body)) = started {
                         // The body is complete. The upload slot is handed to
                         // the exchange together with the work permit it waits
                         // for, so the slot is never free while a body waits.
-                        relay.spawn_finished_upload(conn_id, request, body, Some(permit));
+                        relay.spawn_finished_upload(conn_id, request, body, upload.take());
                     }
                 }
                 Err(output) => {
@@ -1280,6 +1308,16 @@ mod tests {
                 check_arrived: tokio::sync::Notify::new(),
                 checks_started: Arc::new(AtomicUsize::new(0)),
             })
+        }
+
+        /// An allowed surface whose check waits at `gate`.
+        fn allowing_at(gate: Arc<tokio::sync::Notify>) -> Arc<Self> {
+            let surface = Self::new(b"ok".to_vec());
+            *surface
+                .check_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate);
+            surface
         }
 
         /// An unauthorized surface whose check waits at `gate`.
@@ -2216,5 +2254,52 @@ mod tests {
         })
         .await
         .expect("the guest answer arrives after the queue drains");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_releases_the_upload_slot_before_the_admission_is_queued() {
+        // The check holds the only upload permit, and the queue is full, so a
+        // task that waited for either would pin the slot. A cancel must free it
+        // at once: the relay gave up on this body, and another upload needs the
+        // slot now.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let surface = FakeSurface::allowing_at(Arc::clone(&gate));
+        let checks = Arc::clone(&surface.checks_started);
+        let (tx, _rx) = mpsc::channel(8);
+        let mut relay = GuestRelay::new(surface, tx);
+        relay.uploads = Arc::new(tokio::sync::Semaphore::new(1));
+
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while checks.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the link check never started");
+        assert_eq!(
+            relay.uploads.available_permits(),
+            0,
+            "the check did not hold the upload slot"
+        );
+
+        // Cancelled while the surface is still deciding. No admission frame is
+        // queued for it, and the slot returns immediately.
+        handle_unblocked_frame(&cancel_frame("g1"), &relay);
+        assert!(relay.lock().pending.is_empty());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if relay.uploads.available_permits() == 1 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a cancelled upload kept its slot until the check answered");
+        assert!(
+            relay.lock().pending.is_empty(),
+            "a cancelled upload came back into the book"
+        );
     }
 }
