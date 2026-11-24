@@ -10,10 +10,11 @@
 //! request is checked against a loopback `Host` (DNS rebinding) and a same-site
 //! `Origin` (cross-site form posts).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Query, Request, State};
+use axum::extract::{ConnectInfo, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -112,35 +113,82 @@ fn fetch_site_allowed(value: &str) -> bool {
     value.eq_ignore_ascii_case("same-origin") || value.eq_ignore_ascii_case("none")
 }
 
+/// Reads one header that must appear at most once and be plain ASCII text.
+///
+/// `Err` means the request carried several copies or bytes that are not a
+/// header value. Both are refusals: treating a malformed `Origin` as absent is
+/// how a cross-site request used to look like a local one.
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, ()> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    value.to_str().map(Some).map_err(|_| ())
+}
+
+/// Whether `value` is one origin, serialized exactly as a browser sends it.
+///
+/// `null`, a path, a trailing slash, an URL with credentials or two origins in
+/// one value all fail: the Origin header grammar has no room for them, and a
+/// lenient parse would accept a string a browser never produces.
+fn origin_is_well_formed(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && origin_of(trimmed).as_deref() == Some(trimmed)
+}
+
+/// Whether the socket peer is this machine.
+///
+/// The `Host` header is the client's claim; the peer address is not. OAuth and
+/// `/mcp` carry plaintext bearer credentials, so a connection from another
+/// machine is refused even if it presents a loopback `Host`.
+fn peer_is_local(peer: SocketAddr) -> bool {
+    peer.ip().is_loopback()
+}
+
 /// Refuses a request that did not come from this machine's own page.
 ///
 /// A DNS-rebinding page reaches the loopback port with its own `Host`; any other
 /// site's page arrives with another `Origin` or a `Sec-Fetch-Site` of
-/// `cross-site` or `same-site`. All are refused before a handler runs, so a page
-/// the person happens to visit cannot register a client or spend a code.
+/// `cross-site` or `same-site`. A request whose peer is not this machine is
+/// refused too: the `Host` header is the client's claim, the socket address is
+/// not. All are refused before a handler runs, so a page the person happens to
+/// visit cannot register a client or spend a code.
 pub async fn loopback_guard(
     State(service): State<Arc<OutsideAgents>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> Response {
+    if !peer_is_local(peer) {
+        return refused("this endpoint is only reachable from this machine");
+    }
     let headers = request.headers();
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok());
-    if !host.is_some_and(host_is_loopback) {
+    let host = single_header(headers, header::HOST.as_str());
+    if !matches!(host, Ok(Some(host)) if host_is_loopback(host)) {
         return refused("this endpoint is only reachable through h4rn's loopback address");
     }
+    let origin = match single_header(headers, header::ORIGIN.as_str()) {
+        Ok(origin) => origin,
+        Err(()) => {
+            return refused("a request from another site cannot change anything in h4rn");
+        }
+    };
     let listener = service.base_url();
-    if let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        && !origin_is_listener(origin, listener.as_deref())
+    if let Some(origin) = origin
+        && (!origin_is_well_formed(origin) || !origin_is_listener(origin, listener.as_deref()))
     {
         return refused("a request from another site cannot change anything in h4rn");
     }
-    if let Some(site) = headers
-        .get("sec-fetch-site")
-        .and_then(|value| value.to_str().ok())
+    let site = match single_header(headers, "sec-fetch-site") {
+        Ok(site) => site,
+        Err(()) => {
+            return refused("a request from another site cannot change anything in h4rn");
+        }
+    };
+    if let Some(site) = site
         && !fetch_site_allowed(site)
     {
         return refused("a request from another site cannot change anything in h4rn");
@@ -307,24 +355,29 @@ struct AuthorizeQuery {
     resource: Option<String>,
 }
 
-/// Why the client's `resource` is not one this daemon serves.
+/// Resolves the audience a grant is for, or why the client's `resource` is not
+/// one this daemon serves.
+///
+/// RFC 8707 lets the client omit `resource`; an omitted one is not "any
+/// audience", it is this daemon's own MCP endpoint. Binding it here means the
+/// exchange, the refresh and every later use compare the same value.
 fn check_resource(
     service: &OutsideAgents,
     resource: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let Some(resource) = resource else {
-        return Ok(None);
-    };
     let mcp = service.mcp_url();
     if mcp.is_empty() {
+        // No listener has been bound, so there is no audience to bind to. The
+        // grant stays unbound, and a use needs no expected resource either.
         return Ok(None);
     }
-    if resource.trim() != mcp {
-        return Err(format!(
+    match resource.map(str::trim) {
+        None | Some("") => Ok(Some(mcp)),
+        Some(resource) if resource == mcp => Ok(Some(mcp)),
+        Some(_) => Err(format!(
             "`resource` must name this daemon's MCP endpoint ({mcp})"
-        ));
+        )),
     }
-    Ok(Some(mcp))
 }
 
 async fn authorize(
@@ -497,9 +550,17 @@ async fn token(State(service): State<Arc<OutsideAgents>>, Form(form): Form<Token
             )
         }
         Some("refresh_token") => match form.refresh_token.as_deref() {
-            Some(token) => service
-                .store()
-                .refresh(token, client_id, form.resource.as_deref()),
+            // A refresh names the audience it will use; omitting it means this
+            // daemon's own. The store compares that with the grant's binding.
+            Some(token) => {
+                let resource = match check_resource(&service, form.resource.as_deref()) {
+                    Ok(resource) => resource,
+                    Err(message) => return oauth_error(OAuthError::InvalidTarget(message)),
+                };
+                service
+                    .store()
+                    .refresh(token, client_id, resource.as_deref())
+            }
             None => {
                 return oauth_error(OAuthError::InvalidRequest(
                     "refresh_token grant needs refresh_token".into(),
@@ -646,7 +707,6 @@ fn page_shell(title: &str, refresh: Option<&str>, body: &str) -> String {
 * {{ box-sizing: border-box; }}
 body {{ margin:0; background:var(--paper); color:var(--graphite); font:15px/1.55 Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }}
 main {{ max-width: 34rem; margin: 8vh auto; padding: 0 1.25rem; }}
-.eyebrow {{ color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 1.25rem; }}
 h1 {{ font-size: 1.5rem; line-height: 1.25; margin: 0 0 .5rem; font-weight: 600; letter-spacing: -.01em; }}
 .lead {{ margin: 0 0 .35rem; }}
 .where {{ color: var(--muted); font-size: 13px; margin: 0 0 1.75rem; overflow-wrap: anywhere; }}
@@ -694,8 +754,7 @@ fn approval_page(
             html_escape(request.as_str())
         )),
         &format!(
-            r#"<p class="eyebrow">h4rn · Sharing &amp; access</p>
-<h1>Connect {name} to h4rn?</h1>
+            r#"<h1>Connect {name} to h4rn?</h1>
 <p class="lead"><strong>{name}</strong> is asking to work with h4rn on this machine. That name is
 unverified: the app chose it when it registered.</p>
 <p class="where">If you approve, this browser returns to <code>{origin}</code>.{scope_note}</p>
@@ -724,8 +783,7 @@ fn waiting_page(client_name: &str, redirect_uri: &str, request: &str) -> String 
             html_escape(request.as_str())
         )),
         &format!(
-            r#"<p class="eyebrow">h4rn · Sharing &amp; access</p>
-<h1>Waiting for h4rn</h1>
+            r#"<h1>Waiting for h4rn</h1>
 <p class="lead">Approve <strong>{name}</strong> in h4rn → Settings → Sharing &amp; access. The
 browser returns to <code>{origin}</code> as soon as you do, or when you deny it.</p>
 <p class="where">Still waiting… <a href="/oauth/authorize/pending?request={request}">Check again</a></p>"#
@@ -747,6 +805,66 @@ mod tests {
         );
         assert!(!page.contains("<script>alert(1)</script>"));
         assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn an_origin_must_be_exactly_one_validly_serialised_value() {
+        assert!(origin_is_well_formed("http://127.0.0.1:1455"));
+        assert!(origin_is_well_formed("https://example.com"));
+        // A browser never sends these, and a lenient parse used to accept them.
+        assert!(!origin_is_well_formed("null"));
+        assert!(!origin_is_well_formed("http://127.0.0.1:1455/"));
+        assert!(!origin_is_well_formed("http://127.0.0.1:1455/evil"));
+        assert!(!origin_is_well_formed("http://127.0.0.1:1455?x=1"));
+        assert!(!origin_is_well_formed("https://user:pass@example.com"));
+        assert!(!origin_is_well_formed("http://a.example http://b.example"));
+        assert!(!origin_is_well_formed("HTTP://EXAMPLE.COM"));
+        assert!(!origin_is_well_formed(""));
+    }
+
+    #[test]
+    fn a_header_that_is_missing_is_absent_but_a_broken_one_is_not() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert_eq!(single_header(&headers, "origin"), Ok(None));
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "http://127.0.0.1:1455".parse().unwrap(),
+        );
+        assert_eq!(
+            single_header(&headers, "origin"),
+            Ok(Some("http://127.0.0.1:1455"))
+        );
+        headers.append(
+            axum::http::header::ORIGIN,
+            "http://evil.example".parse().unwrap(),
+        );
+        assert_eq!(single_header(&headers, "origin"), Err(()));
+
+        let mut bytes = axum::http::HeaderMap::new();
+        bytes.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"http://\xff").expect("opaque value"),
+        );
+        assert_eq!(single_header(&bytes, "origin"), Err(()));
+    }
+
+    #[test]
+    fn another_machine_is_not_a_local_peer() {
+        let local: SocketAddr = "127.0.0.1:5000".parse().expect("addr");
+        let other: SocketAddr = "192.168.1.20:5000".parse().expect("addr");
+        assert!(peer_is_local(local));
+        assert!(!peer_is_local(other));
+    }
+
+    #[test]
+    fn the_approval_page_has_no_uppercase_eyebrow() {
+        for page in [
+            approval_page("Claude Code", "http://localhost:1455/cb", "req-1", None),
+            waiting_page("Claude Code", "http://localhost:1455/cb", "req-1"),
+        ] {
+            assert!(!page.contains("eyebrow"), "{page}");
+            assert!(!page.contains("text-transform: uppercase"), "{page}");
+        }
     }
 
     #[test]

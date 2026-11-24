@@ -42,9 +42,11 @@ http://127.0.0.1:<port>/mcp
 
 The URL is on Settings → Sharing & access with a **Copy MCP URL** button. It is the daemon's
 loopback listener: the OAuth redirect must finish on `https` or a localhost address, and the MCP
-endpoint carries a bearer token, so it is deliberately not exposed on the LAN or tailnet. A LAN or
-tailnet listener answers 404 for `/mcp` and every OAuth route, and the daemon refuses a request
-whose `Host` is not a loopback name.
+endpoint carries a bearer token, so it is deliberately not exposed on the LAN or tailnet. The
+decision comes from the address a socket is really bound to, not from which flag named it: a
+primary bind of `0.0.0.0` or a LAN address serves 404 for `/mcp` and every OAuth route. A request
+through a loopback socket is also refused unless its peer address is this machine and its `Host` is
+a loopback name; the header is the client's claim, the socket is not.
 
 ### Sign in
 
@@ -64,11 +66,12 @@ person answers the request inside h4rn.
 Redirect URIs are admitted only when they are `https`, or plain `http` to `localhost`,
 `127.0.0.1` or `[::1]`, with no embedded credential and no fragment. Everything else is refused at
 registration, before a browser is sent anywhere. A token request may omit `redirect_uri` (PKCE
-binds the exchange); when it sends one, it must match the authorization request exactly. A client
-that names an RFC 8707 `resource` gets a token bound to it, and `/mcp` refuses a token issued for
-anything else. The token endpoint checks the same binding: naming a different `resource`, or naming
-this daemon's endpoint for a code approved without one, is refused with `invalid_target` before the
-code is spent.
+binds the exchange); when it sends one, it must match the authorization request exactly. RFC 8707
+`resource` is one binding on every path: a client that omits it is bound to this daemon's own
+`/mcp` audience rather than to "any", the exchange must name exactly what the code was approved
+for, a refresh must name the same audience even when it omits the parameter, and `/mcp` refuses a
+token that has no audience or a different one. A mismatch is `invalid_target` before a code is
+spent.
 
 For Claude Code:
 
@@ -128,7 +131,10 @@ never spends a rate-limit hit.
   resurrect the grant. The next request gets `401`; a revocation that could not be saved reports an
   error rather than success.
 - A replayed authorization code revokes the tokens it issued, and a replayed rotated refresh token
-  revokes its whole family: either one means two parties hold the same credential.
+  revokes its whole family: either one means two parties hold the same credential. A spent code's
+  record is kept while its family is live, so a replay after the code's own ten-minute lifetime is
+  still recognised as a replay and still revokes the family; a revocation that could not be
+  written is reported, not swallowed.
 - If `outside_agents.json` cannot be read (corrupt, or written by an older build), the daemon
   quarantines it as `outside_agents.corrupt-<time>.json`, starts with no grants, and logs a
   warning. Agents reconnect by signing in again.
@@ -153,10 +159,22 @@ never spends a rate-limit hit.
 `list_providers`. It never creates a worktree. A thread it starts cannot run with more permission
 than its grant allows: a supervised grant always starts at `approval_required`, and a message it
 sends to an existing thread is clamped to that mode for the turn without changing the person's own
-thread setting. The ceiling holds for the whole turn: raising the thread's mode while that turn runs
-changes the live session only as far as the ceiling allows, and the person's next turn gets the new
-mode. A turn stopped by a provider limit resumes under the same ceiling, even across a daemon
-restart.
+thread setting. The ceiling belongs to the work, not to whichever dispatch is active: a supervised
+`start_thread` attaches it to the first prompt as well as to the thread's mode, so raising the mode
+while that first prompt runs changes the live session only as far as the ceiling allows and the
+person's next turn gets the new mode.
+
+A turn stopped by a provider limit stores the ceiling on the resume schedule itself, in the same
+write that arms it, so the resume runs under it even if the daemon stopped before anything else was
+recorded. A PR watch created inside a supervised turn keeps the grant id and the ceiling: every wake
+asks whether the grant is still live (a revoked grant starts nothing and ends the watch) and starts
+at most at the ceiling. A live mode switch and the selection of a session for a prompt share one
+per-thread gate, so a switch that has already applied full access to the session cannot be read as
+the old setting by an incoming supervised message.
+
+`thread_status`, `start_thread`, `list_threads` and `get_thread` share one redactor, applied before
+truncation and to both text and structured output. A title is the first 80 characters of the first
+prompt, so a token can be cut inside its own prefix; the redactor also removes that fragment.
 
 An outside agent never sees the person's own upstream MCP servers; it sees only this tool set.
 

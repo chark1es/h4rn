@@ -371,10 +371,20 @@ impl DaemonBuilder {
 
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
+        // Outside-agent grants are opened before the PR watch: a watch wakes
+        // through the same grant check that revocation writes, so the sink and
+        // the OAuth endpoint must read one store.
+        let oauth = Arc::new(
+            crate::mcp_server::OAuthStore::open(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open outside-agent grants: {error}"))?,
+        );
         let pr_links = crate::pr_links::PrLinkService::new(
             Arc::clone(&journal),
             Arc::new(crate::pr_links::ForgePrSource::new(Arc::clone(&forge))),
-            Arc::new(crate::pr_links::ThreadWakeSink::new(Arc::clone(&manager))),
+            Arc::new(crate::pr_links::ThreadWakeSink::new(
+                Arc::clone(&manager),
+                Arc::clone(&oauth),
+            )),
         );
         pr_links.start();
         let linear = match self.linear_endpoint.as_deref() {
@@ -525,27 +535,28 @@ impl DaemonBuilder {
             hosts.local_id().clone(),
         ));
         mcp.set_agent_tools(Arc::clone(&agent_tool_settings));
+        // One redactor for both seats: h4rn's own tools and the outside tools
+        // answer with the same redacted title, and one token store feeds it.
+        let redactor = Arc::new(crate::mcp_server::Redactor::new());
         mcp.hub()
             .register_provider(Arc::new(crate::mcp_server::AgentToolsProvider::new(
                 Arc::clone(&manager),
                 Arc::clone(&pr_links),
                 Arc::clone(&forge),
                 agent_tool_settings,
+                Arc::clone(&redactor),
                 hosts.local_id().clone(),
             )));
 
         // Outside agents connect through OAuth to `/mcp`; they never
         // see the person's own upstream servers.
-        let oauth = Arc::new(
-            crate::mcp_server::OAuthStore::open(&self.config.data_dir)
-                .map_err(|error| anyhow::anyhow!("open outside-agent grants: {error}"))?,
-        );
         let outside = Arc::new(crate::mcp_server::OutsideAgents::new(
             oauth,
             Arc::clone(&manager),
             Arc::clone(&projects),
             Arc::clone(&hosts),
             Arc::clone(&proxy),
+            Arc::clone(&redactor),
             hosts.local_id().clone(),
         ));
         mcp.set_outside_agents(Arc::clone(&outside));
@@ -728,8 +739,11 @@ impl Daemon {
         let primary = TcpListener::bind(self.config.bind)
             .await
             .map_err(|error| anyhow::anyhow!("bind {}: {error}", self.config.bind))?;
-        addrs.push(primary.local_addr()?);
-        listeners.push((primary, server::ListenerKind::Loopback));
+        let primary_addr = primary.local_addr()?;
+        addrs.push(primary_addr);
+        // Classified from the address the socket really has, not from which
+        // flag named it: a wildcard or LAN bind must not serve OAuth or `/mcp`.
+        listeners.push((primary, server::ListenerKind::for_bind(primary_addr)));
 
         if let Some(extra) = self.config.extra_bind
             && extra != self.config.bind

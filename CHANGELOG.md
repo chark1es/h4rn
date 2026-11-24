@@ -525,6 +525,27 @@ All notable changes to h4rn are recorded here. The format follows
   waiting sign-ins are capped per client and in total. The token endpoint checks
   RFC 8707 `resource` against the code's binding, and an approval keeps its
   one-time code in memory only, so the store file never holds a live code.
+- **A supervised ceiling now travels with the work it belongs to, and the OAuth
+  routes follow the real socket.** A supervised `start_thread` caps its first
+  prompt, not only the thread's mode, and the resume schedule stores the
+  reporting turn's ceiling in the same ledger write that arms it, so an exit
+  report that arrives after the capped turn settled and a daemon that stops
+  right after arming both resume at the ceiling. A PR watch created in a
+  supervised turn keeps the grant and its ceiling: a revoked grant starts
+  nothing, and a live one starts at most at the ceiling. A live mode switch and
+  the selection of a session for a prompt share one per-thread gate, so an
+  incoming supervised message cannot reuse a session the switch has already made
+  permissive. A grant approved without an RFC 8707 `resource` is bound to the
+  daemon's own `/mcp` audience; exchange, refresh and use check the same
+  binding, and a token with no audience is refused. OAuth and `/mcp` are served
+  only by a socket whose bound address is loopback, so a `0.0.0.0` or LAN bind
+  no longer exposes them, and the guard also refuses a peer that is not this
+  machine. A failed revoke keeps the grant so a retry works and reports
+  `Internal` rather than `NotFound`, a spent code is kept while its token family
+  is live so a late replay still revokes it, a failed replay revocation is
+  reported, a malformed or duplicated `Origin`/`Sec-Fetch-Site` is refused
+  instead of treated as absent, `set_harness` commits a switch only after its
+  write succeeds, and both browser sign-in screens lost their uppercase eyebrow.
 - **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
   the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
   All four sources now show the active tab's file against the source on screen, and the wider

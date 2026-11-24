@@ -135,6 +135,20 @@ pub enum ListenerKind {
 }
 
 impl ListenerKind {
+    /// The routes a primary bind may serve, from the address it really has.
+    ///
+    /// The type cannot say this on its own: `--bind 0.0.0.0:47800` is a
+    /// wildcard socket, not a loopback one, and OAuth plus `/mcp` carry
+    /// plaintext bearer credentials. Only a socket whose bound address is
+    /// loopback serves them.
+    pub fn for_bind(addr: std::net::SocketAddr) -> Self {
+        if addr.ip().is_loopback() {
+            Self::Loopback
+        } else {
+            Self::ExtraBind
+        }
+    }
+
     /// Whether this listener serves `/webhooks/{secret}`.
     ///
     /// Only the loopback bind and an explicitly configured extra bind do. The
@@ -2206,6 +2220,25 @@ pub(crate) async fn serve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_loopback_bind_serves_oauth_and_mcp() {
+        let loopback: std::net::SocketAddr = "127.0.0.1:47800".parse().expect("addr");
+        let wildcard: std::net::SocketAddr = "0.0.0.0:47800".parse().expect("addr");
+        let lan: std::net::SocketAddr = "192.168.1.20:47800".parse().expect("addr");
+        assert!(matches!(
+            ListenerKind::for_bind(loopback),
+            ListenerKind::Loopback
+        ));
+        assert!(matches!(
+            ListenerKind::for_bind(wildcard),
+            ListenerKind::ExtraBind
+        ));
+        assert!(matches!(
+            ListenerKind::for_bind(lan),
+            ListenerKind::ExtraBind
+        ));
+    }
 
     #[test]
     fn webhook_routes_are_exposed_only_on_operator_chosen_listeners() {

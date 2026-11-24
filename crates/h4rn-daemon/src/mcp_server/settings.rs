@@ -73,11 +73,15 @@ impl AgentToolSettingsStore {
         harness: HarnessKind,
         enabled: bool,
     ) -> std::io::Result<AgentToolSettings> {
-        let mut settings = self.lock();
-        settings.enabled.set_harness(harness, enabled);
-        let snapshot = settings.clone();
-        self.write(&snapshot)?;
-        Ok(snapshot)
+        let mut current = self.lock();
+        // Build the candidate, put it on disk, and only then make it the value
+        // the daemon answers with. A setting the file does not hold must not be
+        // reported as on: it would look saved until the next restart.
+        let mut candidate = current.clone();
+        candidate.enabled.set_harness(harness, enabled);
+        self.write(&candidate)?;
+        *current = candidate.clone();
+        Ok(candidate)
     }
 
     fn write(&self, settings: &AgentToolSettings) -> std::io::Result<()> {
@@ -91,5 +95,36 @@ impl AgentToolSettingsStore {
         let temp = self.path.with_extension("tmp");
         std::fs::write(&temp, bytes)?;
         std::fs::rename(&temp, &self.path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A switch the file cannot hold must not look saved in memory.
+    #[test]
+    fn a_failed_write_leaves_the_setting_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The data directory is a regular file, so the settings write fails.
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, b"x").expect("write");
+        let store = AgentToolSettingsStore::open(&blocked, HostId::new("host_test"));
+        assert!(store.is_enabled(HarnessKind::Codex));
+        store
+            .set_harness(HarnessKind::Codex, false)
+            .expect_err("the write must fail");
+        assert!(
+            store.is_enabled(HarnessKind::Codex),
+            "a failed write was reported as a saved switch"
+        );
+
+        let store = AgentToolSettingsStore::open(dir.path(), HostId::new("host_test"));
+        store
+            .set_harness(HarnessKind::Codex, false)
+            .expect("the write succeeds");
+        assert!(!store.is_enabled(HarnessKind::Codex));
+        let reopened = AgentToolSettingsStore::open(dir.path(), HostId::new("host_test"));
+        assert!(!reopened.is_enabled(HarnessKind::Codex));
     }
 }

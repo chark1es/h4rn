@@ -21,13 +21,14 @@ use h4rn_forge::ForgeError;
 use h4rn_protocol::{
     ForgeAccount, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeCommentPage, ForgeMergeable,
     ForgePrState, ForgePrSummary, ForgePullRequest, ForgeRepoRef, ForgeReviewState, PrLinkedThread,
-    ProtoError, ProtoErrorCode, ThreadId, ThreadPullRequest, ThreadTab,
+    ProtoError, ProtoErrorCode, RuntimeMode, ThreadId, ThreadPullRequest, ThreadTab,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 use crate::forge::ForgeServiceError;
 use crate::journal::{Journal, JournalError};
+use crate::mcp_server::OAuthStore;
 use crate::threads::ThreadManager;
 
 /// How often a watched PR is polled.
@@ -190,6 +191,29 @@ pub trait PrSource: Send + Sync {
     ) -> Result<ForgeChecks, PrSourceError>;
 }
 
+/// The outside grant that asked for a watched PR's turn.
+///
+/// A watch outlives the turn that created it, so it keeps both halves of the
+/// grant's authority: which grant it is (checked again at wake time) and the
+/// most autonomy that turn was allowed. Nothing secret is stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchGrant {
+    /// The grant's client id.
+    pub client_id: String,
+    /// The ceiling the creating turn ran under, when it had one.
+    pub ceiling: Option<RuntimeMode>,
+}
+
+/// Why a wake did not start a turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WakeError {
+    /// The grant that asked for the watch is gone. The watch can never deliver
+    /// anything, so it is dropped instead of retried.
+    Revoked(String),
+    /// A transient failure; the next poll retries this wake.
+    Retry(String),
+}
+
 /// What the watch needs from the thread manager.
 #[async_trait]
 pub trait PrWakeSink: Send + Sync {
@@ -200,18 +224,28 @@ pub trait PrWakeSink: Send + Sync {
     async fn is_active(&self, thread_id: &ThreadId) -> bool;
 
     /// Starts a turn in the thread like a queued prompt.
-    async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String>;
+    ///
+    /// `grant` is the outside grant the watch was created under. The sink
+    /// re-checks it at wake time and starts the turn at no more than its
+    /// ceiling.
+    async fn wake(
+        &self,
+        thread_id: &ThreadId,
+        message: String,
+        grant: Option<WatchGrant>,
+    ) -> Result<(), WakeError>;
 }
 
 /// The daemon's thread manager as a wake sink.
 pub struct ThreadWakeSink {
     manager: Arc<ThreadManager>,
+    grants: Arc<OAuthStore>,
 }
 
 impl ThreadWakeSink {
-    /// Builds the sink for one manager.
-    pub fn new(manager: Arc<ThreadManager>) -> Self {
-        Self { manager }
+    /// Builds the sink for one manager and the grant store it checks.
+    pub fn new(manager: Arc<ThreadManager>, grants: Arc<OAuthStore>) -> Self {
+        Self { manager, grants }
     }
 }
 
@@ -231,12 +265,28 @@ impl PrWakeSink for ThreadWakeSink {
             .is_some_and(|summary| summary.tab != ThreadTab::Settled)
     }
 
-    async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String> {
+    async fn wake(
+        &self,
+        thread_id: &ThreadId,
+        message: String,
+        grant: Option<WatchGrant>,
+    ) -> Result<(), WakeError> {
+        let mut ceiling = None;
+        if let Some(grant) = grant {
+            // Checked at the moment the work would start: a grant revoked after
+            // the watch was made must not start a turn.
+            if !self.grants.grant_is_live(&grant.client_id) {
+                return Err(WakeError::Revoked(
+                    "the grant that started watching this pull request was revoked".into(),
+                ));
+            }
+            ceiling = grant.ceiling;
+        }
         self.manager
-            .send_message(thread_id, message, Vec::new())
+            .send_message_at_most(thread_id, message, Vec::new(), ceiling)
             .await
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(|error| WakeError::Retry(error.to_string()))
     }
 }
 
@@ -448,6 +498,20 @@ impl PrLinkService {
         repo: &ForgeRepoRef,
         number: u32,
     ) -> Result<(), PrLinkError> {
+        self.watch_with_grant(thread_id, repo, number, None).await
+    }
+
+    /// Starts watching a linked PR for work an outside grant asked for.
+    ///
+    /// The grant and its ceiling are kept on the watcher: every wake it causes
+    /// re-checks the grant and starts its turn at no more than this ceiling.
+    pub async fn watch_with_grant(
+        &self,
+        thread_id: &ThreadId,
+        repo: &ForgeRepoRef,
+        number: u32,
+        grant: Option<WatchGrant>,
+    ) -> Result<(), PrLinkError> {
         let record = self
             .journal
             .pr_links_for_thread(thread_id)
@@ -465,14 +529,16 @@ impl PrLinkService {
             let mut watches = self.lock_watches();
             let fresh = watches.allocate_generation();
             let watched = watches.prs.entry(key.clone()).or_default();
-            watched
+            let watch = watched
                 .watchers
                 .entry(thread_id.as_str().to_owned())
                 .or_insert_with(|| ThreadWatch {
                     generation: fresh,
                     ..ThreadWatch::default()
-                })
-                .generation
+                });
+            watch.generation = fresh;
+            watch.grant = grant.clone();
+            watch.generation
         };
 
         // A rate limit belongs to the account and the PR, so the watch must
@@ -491,6 +557,7 @@ impl PrLinkService {
                 watch.comment_only_wakes = 0;
                 watch.failed_reads = 0;
                 watch.generation = fresh;
+                watch.grant = grant.clone();
             }
             tracing::debug!(
                 repo = %repo.full_name(),
@@ -766,8 +833,9 @@ impl PrLinkService {
                     previous,
                     previous_failure_seen,
                     previous_comment_only_wakes,
+                    grant,
                 } = wake;
-                match self.sink.wake(&thread_id, message).await {
+                match self.sink.wake(&thread_id, message, grant).await {
                     Ok(()) => {
                         self.note_wake_delivered(&key, &thread_id, generation);
                         if ends_watch {
@@ -778,7 +846,18 @@ impl PrLinkService {
                             self.remove_watch_if(&key, &thread_id, generation);
                         }
                     }
-                    Err(error) => {
+                    Err(WakeError::Revoked(reason)) => {
+                        // The grant is gone, so this watch can never deliver.
+                        // Retrying would keep polling a PR for an agent the
+                        // person already disconnected.
+                        tracing::info!(
+                            thread = %thread_id,
+                            %reason,
+                            "ending a PR watch whose grant was revoked"
+                        );
+                        self.remove_watch_if(&key, &thread_id, generation);
+                    }
+                    Err(WakeError::Retry(error)) => {
                         // The agent never saw these events. Keep the previous
                         // baseline so the next poll recomputes and retries
                         // them; a terminal watch stays alive for that retry.
@@ -1030,6 +1109,8 @@ struct ThreadWatch {
     /// A `watch()` read that started before the bump must not write its older
     /// snapshot over the fresher one.
     generation: u64,
+    /// The outside grant the watch was created under, when one was.
+    grant: Option<WatchGrant>,
 }
 
 struct Wake {
@@ -1045,6 +1126,8 @@ struct Wake {
     previous: PrSnapshot,
     previous_failure_seen: bool,
     previous_comment_only_wakes: u32,
+    /// The grant the watching thread holds for this work.
+    grant: Option<WatchGrant>,
 }
 
 impl WatchedPr {
@@ -1132,6 +1215,7 @@ impl WatchedPr {
                 previous,
                 previous_failure_seen,
                 previous_comment_only_wakes,
+                grant: watch.grant.clone(),
             });
         }
         for thread in ended {
@@ -1957,7 +2041,12 @@ mod tests {
                 .contains(thread_id.as_str())
         }
 
-        async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String> {
+        async fn wake(
+            &self,
+            thread_id: &ThreadId,
+            message: String,
+            _grant: Option<WatchGrant>,
+        ) -> Result<(), WakeError> {
             let gate = self
                 .gated_wake
                 .lock()
@@ -1986,10 +2075,10 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if *remaining > 0 {
                 *remaining -= 1;
-                return Err("the thread could not be woken".into());
+                return Err(WakeError::Retry("the thread could not be woken".into()));
             }
             if fail_here {
-                return Err("the thread could not be woken".into());
+                return Err(WakeError::Retry("the thread could not be woken".into()));
             }
             self.wakes
                 .lock()
@@ -2654,7 +2743,11 @@ mod tests {
             .expect("create");
 
         let source = MockSource::new();
-        let sink = Arc::new(ThreadWakeSink::new(manager));
+        let grants = Arc::new(
+            crate::mcp_server::OAuthStore::open(&tempfile::tempdir().expect("tempdir").keep())
+                .expect("grant store"),
+        );
+        let sink = Arc::new(ThreadWakeSink::new(manager, grants));
         let service = PrLinkService::new(journal, source.clone(), sink);
         service
             .link_known(&created.thread_id, "acct_1", &repo(), 7)

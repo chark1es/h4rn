@@ -23,6 +23,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ::url::Url;
@@ -257,6 +259,69 @@ pub struct ApprovalRedirect {
     pub location: String,
 }
 
+/// A test-only stop between the state lock and the durable write.
+///
+/// The revocation-race test parks a last-used write here. With the real shape
+/// (write under the one state lock) the revoker cannot finish until the parked
+/// write is released; with a snapshot taken and written outside the lock the
+/// revoker finishes first and the stale write lands after it, which is exactly
+/// the bug.
+#[cfg(test)]
+#[derive(Default)]
+struct PersistGate {
+    state: Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl PersistGate {
+    fn enter(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn wait_until_entered(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !state.0 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.1 = true;
+        self.changed.notify_all();
+    }
+}
+
+/// Test-only controls: injected write failures and the persist gate above.
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    fail_persist: AtomicUsize,
+    last_use_gate: Mutex<Option<std::sync::Arc<PersistGate>>>,
+    in_last_use: AtomicBool,
+}
+
 /// Durable OAuth state.
 pub struct OAuthStore {
     path: PathBuf,
@@ -264,6 +329,8 @@ pub struct OAuthStore {
     /// taken, released and written later: that is what used to let a revocation
     /// lose a race with a last-used update.
     state: Mutex<StoreState>,
+    #[cfg(test)]
+    hooks: TestHooks,
     /// Where an answered approval sends the browser, by request id.
     ///
     /// Memory only: the location holds the one-time code. Lock order is always
@@ -320,8 +387,39 @@ impl OAuthStore {
                 file,
                 last_use_write: Instant::now() - LAST_USE_INTERVAL,
             }),
+            #[cfg(test)]
+            hooks: TestHooks::default(),
             resolutions: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Fails the next `count` durable writes, for tests that prove a failed
+    /// write is reported and leaves the state retryable.
+    #[cfg(test)]
+    pub(crate) fn fail_next_persists_for_tests(&self, count: usize) {
+        self.hooks.fail_persist.store(count, Ordering::SeqCst);
+    }
+
+    /// Arms the gate a last-used write parks at, for the revocation race test.
+    #[cfg(test)]
+    fn arm_last_use_gate_for_tests(&self) -> std::sync::Arc<PersistGate> {
+        let gate = std::sync::Arc::new(PersistGate::default());
+        *self
+            .hooks
+            .last_use_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::sync::Arc::clone(&gate));
+        gate
+    }
+
+    /// Disarms the gate so later passes do not park.
+    #[cfg(test)]
+    fn disarm_last_use_gate_for_tests(&self) {
+        *self
+            .hooks
+            .last_use_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, StoreState> {
@@ -332,6 +430,27 @@ impl OAuthStore {
 
     /// Writes the live state atomically. Called with the state lock held.
     fn persist_locked(&self, file: &StoreFile) -> Result<(), OAuthError> {
+        #[cfg(test)]
+        {
+            let remaining = self.hooks.fail_persist.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.hooks
+                    .fail_persist
+                    .store(remaining - 1, Ordering::SeqCst);
+                return Err(OAuthError::Storage("injected write failure".into()));
+            }
+            if self.hooks.in_last_use.load(Ordering::SeqCst) {
+                let gate = self
+                    .hooks
+                    .last_use_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                if let Some(gate) = gate {
+                    gate.enter();
+                }
+            }
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| OAuthError::Storage(error.to_string()))?;
@@ -701,11 +820,15 @@ impl OAuthStore {
         let record = guard.file.codes[index].clone();
         if record.used_at.is_some() {
             // A code the client already spent came back. Whatever pair it
-            // issued is in an attacker's hands too: revoke it.
+            // issued is in an attacker's hands too: revoke it. The revocation
+            // is only real once it is on disk, so a failed write is an error
+            // rather than a silent "revoked" the restart would undo.
             if let Some(family) = record.family.as_deref() {
-                revoke_family(&mut guard.file, family, now);
+                let mut next = guard.file.clone();
+                revoke_family(&mut next, family, now);
+                self.persist_locked(&next)?;
+                guard.file = next;
             }
-            let _ = self.persist_locked(&guard.file);
             return Err(OAuthError::InvalidGrant(
                 "the authorization code was already used; its tokens were revoked".into(),
             ));
@@ -727,11 +850,13 @@ impl OAuthStore {
                 "redirect_uri does not match the authorization request".into(),
             ));
         }
-        if let Some(requested) = resource
-            && record.resource.as_deref() != Some(requested)
-        {
+        // RFC 8707: the exchange must name exactly the resource the code was
+        // approved for. A caller that omits it reaches the HTTP layer already
+        // bound to this daemon's own audience, so `None` here only matches a
+        // code issued while no listener was bound.
+        if record.resource.as_deref() != resource {
             // The code is not spent: the client can retry the exchange with the
-            // resource it was actually approved for (or none at all).
+            // resource it was actually approved for.
             return Err(OAuthError::InvalidTarget(
                 "`resource` does not match the one this code was approved for".into(),
             ));
@@ -779,10 +904,13 @@ impl OAuthStore {
         let record = guard.file.tokens[index].clone();
         if record.kind != TokenKind::Refresh || record.client_id != client_id || !record.live(now) {
             // A rotated refresh token presented again means two parties hold
-            // it: kill the family rather than let either continue.
+            // it: kill the family rather than let either continue. As with a
+            // replayed code, the revocation is only real once it is on disk.
             if record.kind == TokenKind::Refresh && record.client_id == client_id {
-                revoke_family(&mut guard.file, &record.family, now);
-                let _ = self.persist_locked(&guard.file);
+                let mut next = guard.file.clone();
+                revoke_family(&mut next, &record.family, now);
+                self.persist_locked(&next)?;
+                guard.file = next;
                 return Err(OAuthError::InvalidGrant(
                     "the refresh token was already used; its tokens were revoked".into(),
                 ));
@@ -791,12 +919,11 @@ impl OAuthStore {
                 "the refresh token is expired, revoked or belongs to another client".into(),
             ));
         }
-        if let Some(requested) = resource
-            && record
-                .resource
-                .as_deref()
-                .is_some_and(|bound| bound != requested)
-        {
+        // The same RFC 8707 binding the code was approved for: a refresh names
+        // the audience it will use, and an omitted audience is already bound to
+        // this daemon's own by the HTTP layer. A grant without a binding (made
+        // before one was recorded) cannot be widened or renewed into one.
+        if record.resource.as_deref() != resource {
             return Err(OAuthError::InvalidTarget(
                 "this grant is bound to a different resource".into(),
             ));
@@ -832,9 +959,10 @@ impl OAuthStore {
             if !record.live(now) {
                 return None;
             }
-            if let (Some(stored), Some(expected)) = (record.resource.as_deref(), expected_resource)
-                && stored != expected
-            {
+            // A token with no audience is not a token for this endpoint. Every
+            // grant the daemon issues is bound to its MCP audience, so `None`
+            // here can only be a token that cannot prove what it is for.
+            if record.resource.as_deref() != expected_resource {
                 return None;
             }
         }
@@ -847,7 +975,15 @@ impl OAuthStore {
         // from the state under this lock, never from a snapshot taken earlier.
         if guard.last_use_write.elapsed() >= LAST_USE_INTERVAL {
             guard.last_use_write = Instant::now();
-            if let Err(error) = self.persist_locked(&guard.file) {
+            // The write happens under this same lock, so a revocation cannot
+            // slip between the update and the file: the revoker waits, and the
+            // file never gets a snapshot older than the revocation.
+            #[cfg(test)]
+            self.hooks.in_last_use.store(true, Ordering::SeqCst);
+            let written = self.persist_locked(&guard.file);
+            #[cfg(test)]
+            self.hooks.in_last_use.store(false, Ordering::SeqCst);
+            if let Err(error) = written {
                 tracing::warn!(%error, "could not record an outside agent's last use");
             }
         }
@@ -876,8 +1012,11 @@ impl OAuthStore {
             // RFC 7009: an unknown token is not an error.
             return Ok(());
         };
-        revoke_family(&mut guard.file, &family, now);
-        self.persist_locked(&guard.file)
+        let mut next = guard.file.clone();
+        revoke_family(&mut next, &family, now);
+        self.persist_locked(&next)?;
+        guard.file = next;
+        Ok(())
     }
 
     /// Revokes every token for a client, and its codes and approvals.
@@ -892,30 +1031,44 @@ impl OAuthStore {
                 "no outside agent has that client id".into(),
             ));
         };
-        for entry in guard
-            .file
+        // Apply the revocation to a candidate and commit it to memory only
+        // after the file holds it. A failed write must leave the grant exactly
+        // as it was, so the retry still finds it and revokes it for real; the
+        // old order removed it from memory first, and the retry then answered
+        // "no such client" while the disk still had the live grant.
+        let mut next = guard.file.clone();
+        for entry in next
             .tokens
             .iter_mut()
             .filter(|entry| entry.client_id == client.client_id)
         {
             entry.revoked_at = Some(now);
         }
-        guard
-            .file
-            .codes
+        next.codes
             .retain(|entry| entry.client_id != client.client_id);
-        guard
-            .file
-            .pending
+        next.pending
             .retain(|entry| entry.client_id != client.client_id);
         // Revoking frees the registration slot too. The cap counts registered
         // clients, and "revoke one in h4rn" has to make room for the next
         // agent; keeping a dead record would make that advice false.
-        guard
-            .file
-            .clients
+        next.clients
             .retain(|entry| entry.client_id != client.client_id);
-        self.persist_locked(&guard.file)
+        self.persist_locked(&next)?;
+        guard.file = next;
+        Ok(())
+    }
+
+    /// Whether `client_id` names a grant that is still live.
+    ///
+    /// A durable record that may later start work for a grant (a PR watch, an
+    /// armed resume) asks this at the moment that work would start, so a
+    /// revocation made in between is honoured.
+    pub fn grant_is_live(&self, client_id: &str) -> bool {
+        let now = Utc::now();
+        let guard = self.lock();
+        guard.file.tokens.iter().any(|entry| {
+            entry.client_id == client_id && entry.kind == TokenKind::Access && entry.live(now)
+        })
     }
 
     /// Every client with a live token, newest first.
@@ -1075,7 +1228,23 @@ fn issue_pair(
     // in-flight call to see the revocation rather than a "unknown token".
     file.tokens
         .retain(|token| token.expires_at > now - TimeDelta::days(60));
-    file.codes.retain(|code| code.expires_at > now);
+    // A spent code is the only record that its family was issued from it. A
+    // replay is an attack, and the replay must revoke that family; forgetting
+    // the code at code expiry would turn a replay after ten minutes into an
+    // "unknown code" with nothing to revoke. Keep it while any token in its
+    // family is still live.
+    let tokens = &file.tokens;
+    file.codes.retain(|code| {
+        if code.expires_at > now {
+            return true;
+        }
+        let Some(family) = code.family.as_deref() else {
+            return false;
+        };
+        tokens
+            .iter()
+            .any(|token| token.family == family && token.expires_at > now)
+    });
     file.pending.retain(|pending| pending.expires_at > now);
     TokenPair {
         access_token,
@@ -1302,7 +1471,13 @@ mod tests {
             .1
             .to_string();
         let pair = store
-            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .exchange_code(
+                &code,
+                &verifier,
+                &client.client_id,
+                None,
+                Some("http://127.0.0.1:47800/mcp"),
+            )
             .expect("exchange");
         assert!(
             store
@@ -1722,85 +1897,291 @@ mod tests {
         assert_eq!(store.pending_sign_ins().len(), MAX_PENDING);
     }
 
-    /// A revocation wins a race with a last-used write.
+    /// A revocation must leave a grant the person can retry.
     ///
-    /// The store used to take a snapshot of its state and write it after
-    /// releasing the lock; a use landing in that window could put a live token
-    /// back on disk after the person revoked it. Use and revocation now share
-    /// one lock, so the token stays revoked and no older last-used value
-    /// returns with it.
+    /// The store used to remove the client from memory before the file held
+    /// the revocation. A failed write then answered the retry with "no such
+    /// client" while the disk still had the live grant.
     #[test]
-    fn a_revocation_wins_a_race_with_a_last_used_write() {
+    fn a_failed_revocation_leaves_the_grant_retryable() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = std::sync::Arc::new(OAuthStore::open(dir.path()).expect("store"));
+        let store = OAuthStore::open(dir.path()).expect("store");
         let client = store
             .register_client(None, &["http://localhost:1455/cb".into()])
             .expect("register");
         let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+
+        store.fail_next_persists_for_tests(1);
+        let error = store
+            .revoke_client(&client.client_id)
+            .expect_err("a write that fails is an error");
+        assert!(matches!(error, OAuthError::Storage(_)), "{error:?}");
+        // Nothing changed: the grant is still connected and a retry finds it.
+        assert_eq!(store.connected_agents().len(), 1);
+        assert!(store.verify_access(&pair.access_token, None).is_some());
+
         store
-            .verify_access(&pair.access_token, None)
-            .expect("the first use arms the lazy write");
+            .revoke_client(&client.client_id)
+            .expect("the retry revokes for real");
+        assert!(store.verify_access(&pair.access_token, None).is_none());
+        assert!(store.connected_agents().is_empty());
+        drop(store);
 
-        let token = pair.access_token.clone();
-        let reader = std::sync::Arc::clone(&store);
-        let reader_token = token.clone();
-        let uses = std::thread::spawn(move || {
-            for _ in 0..120 {
-                // Keep the lazy last-used write due on every pass, so a writer
-                // that snapshots and persists outside the lock has the widest
-                // window to put its stale copy back.
-                {
-                    let mut state = reader.lock();
-                    state.last_use_write =
-                        Instant::now() - LAST_USE_INTERVAL - Duration::from_secs(1);
-                }
-                let _ = reader.verify_access(&reader_token, None);
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        assert!(
+            reopened.verify_access(&pair.access_token, None).is_none(),
+            "the retry was not durable"
+        );
+        assert!(reopened.connected_agents().is_empty());
+        // A grant revoked once never comes back, and a later revoke is not a
+        // silent success for a grant that no longer exists.
+        assert!(matches!(
+            reopened.revoke_client(&client.client_id),
+            Err(OAuthError::NotFound(_))
+        ));
+    }
+
+    /// A spent code outlives the code lifetime while its family lives.
+    ///
+    /// Pruning at code expiry forgot the only record that the family was issued
+    /// from a code, so a replay ten minutes later looked like an unknown code
+    /// and revoked nothing.
+    #[test]
+    fn a_code_replay_after_code_expiry_revokes_the_family() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (verifier, _) = challenge();
+        let code = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        let first = store
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .expect("first use");
+
+        // The code is now past its lifetime; the family is still live.
+        {
+            let mut state = store.lock();
+            for entry in &mut state.file.codes {
+                entry.expires_at = Utc::now() - TimeDelta::seconds(1);
             }
-        });
-        std::thread::sleep(Duration::from_millis(2));
-        store.revoke_client(&client.client_id).expect("revoke");
-        uses.join().expect("the use loop");
+        }
+        // Another issue prunes expired records, as any later grant would.
+        let rotated = store
+            .refresh(&first.refresh_token, &client.client_id, None)
+            .expect("rotate");
+        assert!(store.verify_access(&rotated.access_token, None).is_some());
 
-        // In memory the token is dead and its last-used value is final.
-        assert!(store.verify_access(&token, None).is_none());
-        let hash = digest(&token);
-        let recorded = {
-            let state = store.lock();
+        // The replay still knows the family and kills it.
+        let error = store
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .expect_err("a replay is refused");
+        assert!(matches!(error, OAuthError::InvalidGrant(_)), "{error:?}");
+        assert!(
+            store.verify_access(&rotated.access_token, None).is_none(),
+            "the reused code did not revoke its family"
+        );
+        assert!(
+            store
+                .refresh(&rotated.refresh_token, &client.client_id, None)
+                .is_err()
+        );
+    }
+
+    /// A replay whose revocation write fails is reported, not swallowed.
+    #[test]
+    fn a_failed_replay_revocation_is_reported() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (verifier, _) = challenge();
+        let code = approved_code(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+        store
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .expect("first use");
+
+        store.fail_next_persists_for_tests(1);
+        let error = store
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .expect_err("the replay's revocation could not be saved");
+        assert!(matches!(error, OAuthError::Storage(_)), "{error:?}");
+    }
+
+    /// One audience binding on exchange, refresh and use.
+    #[test]
+    fn every_token_path_enforces_the_same_resource_binding() {
+        let (_dir, store) = store();
+        let client = store
+            .register_client(None, &["http://localhost:1455/cb".into()])
+            .expect("register");
+        let (verifier, challenge) = challenge();
+        let audience = "http://127.0.0.1:47800/mcp";
+        let pending = store
+            .begin_authorization(
+                &client.client_id,
+                "http://localhost:1455/cb",
+                None,
+                &challenge,
+                Some(audience),
+            )
+            .expect("begin");
+        let redirect = store
+            .approve(&pending.id, OutsideAgentLevel::ReadOnly)
+            .expect("approve");
+        let code = Url::parse(&redirect.location)
+            .expect("url")
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.to_string())
+            .expect("code");
+
+        // Exchange: an omitted audience is not "any audience".
+        let error = store
+            .exchange_code(&code, &verifier, &client.client_id, None, None)
+            .expect_err("an omitted resource cannot match a bound code");
+        assert!(matches!(error, OAuthError::InvalidTarget(_)), "{error:?}");
+        let pair = store
+            .exchange_code(&code, &verifier, &client.client_id, None, Some(audience))
+            .expect("the exact audience works");
+
+        // Use: no audience is not this endpoint's token.
+        assert!(
+            store
+                .verify_access(&pair.access_token, Some(audience))
+                .is_some()
+        );
+        assert!(store.verify_access(&pair.access_token, None).is_none());
+        assert!(
+            store
+                .verify_access(&pair.access_token, Some("http://127.0.0.1:1/mcp"))
+                .is_none()
+        );
+
+        // Refresh: same rule, and the rotated pair keeps the binding.
+        assert!(
+            store
+                .refresh(&pair.refresh_token, &client.client_id, None)
+                .is_err()
+        );
+        let rotated = store
+            .refresh(&pair.refresh_token, &client.client_id, Some(audience))
+            .expect("refresh with the bound audience");
+        assert!(
+            store
+                .verify_access(&rotated.access_token, Some(audience))
+                .is_some()
+        );
+    }
+
+    /// A revocation wins a race with a last-used write.
+    ///
+    /// The store once snapshotted its state, released the lock and wrote the
+    /// snapshot later; a use that landed in that window could put a live token
+    /// back on disk after the person revoked it. This test parks the use's
+    /// write at a gate: with the snapshot shape the revoker finishes first and
+    /// the stale write lands after it, which the reopen sees. With the real
+    /// shape the write happens under the one state lock, so the revoker waits
+    /// and the file never holds a copy older than the revocation.
+    #[test]
+    fn a_revocation_wins_a_race_with_a_last_used_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = std::sync::Arc::new(OAuthStore::open(dir.path()).expect("store"));
+        let mut last = None;
+        for round in 0..3 {
+            let client = store
+                .register_client(None, &["http://localhost:1455/cb".into()])
+                .expect("register");
+            let pair = pair(&store, &client.client_id, OutsideAgentLevel::ReadOnly);
+            store
+                .verify_access(&pair.access_token, None)
+                .expect("the first use arms the lazy write");
+            let token = pair.access_token.clone();
+            let gate = store.arm_last_use_gate_for_tests();
+            let revoked = std::sync::Arc::new(AtomicBool::new(false));
+
+            let use_store = std::sync::Arc::clone(&store);
+            let use_token = token.clone();
+            let use_revoked = std::sync::Arc::clone(&revoked);
+            let uses = std::thread::spawn(move || {
+                while !use_revoked.load(Ordering::SeqCst) {
+                    // Keep the lazy write due on every pass, so a writer that
+                    // persists outside the lock has a stale copy to land.
+                    {
+                        let mut state = use_store.lock();
+                        state.last_use_write =
+                            Instant::now() - LAST_USE_INTERVAL - Duration::from_secs(1);
+                    }
+                    let _ = use_store.verify_access(&use_token, None);
+                    std::thread::yield_now();
+                }
+            });
+
+            // One use write is parked inside `persist_locked`.
+            gate.wait_until_entered();
+            // Later passes must not park, or the revocation could never run.
+            store.disarm_last_use_gate_for_tests();
+            let revoking = std::sync::Arc::clone(&store);
+            let client_id = client.client_id.clone();
+            let revoke_revoked = std::sync::Arc::clone(&revoked);
+            let (done, done_rx) = std::sync::mpsc::channel();
+            let revoker = std::thread::spawn(move || {
+                let result = revoking.revoke_client(&client_id);
+                // The use loop ends only after the revoke has returned.
+                revoke_revoked.store(true, Ordering::SeqCst);
+                let _ = done.send(result);
+            });
+            // The gate is released after a bounded wait, so a shape that keeps
+            // the lock until the write finishes cannot deadlock the test.
+            let early = done_rx.recv_timeout(Duration::from_secs(1));
+            gate.release();
+            revoker.join().expect("the revoker");
+            uses.join().expect("the use loop");
+            let result = match early {
+                Ok(result) => result,
+                Err(_) => done_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("the revoke result"),
+            };
+            result.expect("the revoke succeeded");
+            assert!(store.verify_access(&token, None).is_none());
+            let hash = digest(&token);
+            let recorded = {
+                let state = store.lock();
+                let row = state
+                    .file
+                    .tokens
+                    .iter()
+                    .find(|entry| entry.hash == hash)
+                    .expect("the token row");
+                assert!(
+                    row.revoked_at.is_some(),
+                    "round {round}: the revocation was lost in memory"
+                );
+                row.last_used_at
+            };
+            last = Some((hash, recorded));
+        }
+
+        let (hash, recorded) = last.expect("one round ran");
+        drop(store);
+        let reopened = OAuthStore::open(dir.path()).expect("reopen");
+        {
+            let state = reopened.lock();
             let row = state
                 .file
                 .tokens
                 .iter()
                 .find(|entry| entry.hash == hash)
-                .expect("the token row");
+                .expect("the revoked token row survived");
             assert!(
                 row.revoked_at.is_some(),
-                "the revocation was lost in memory"
+                "a use that raced the revocation resurrected the token"
             );
-            row.last_used_at
-        };
-        drop(store);
-
-        let reopened = OAuthStore::open(dir.path()).expect("reopen");
-        assert!(
-            reopened.verify_access(&token, None).is_none(),
-            "a use that raced the revocation resurrected the token"
-        );
-        assert_eq!(reopened.client_count(), 0, "the revoked client came back");
-        let state = reopened.lock();
-        let row = state
-            .file
-            .tokens
-            .iter()
-            .find(|entry| entry.hash == hash)
-            .expect("the token row survived");
-        assert!(
-            row.revoked_at.is_some(),
-            "the reopened store saved a live copy of a revoked token"
-        );
-        assert!(
-            row.last_used_at >= recorded,
-            "a stale last-used value came back: {:?} < {recorded:?}",
-            row.last_used_at
-        );
+            assert_eq!(
+                row.last_used_at, recorded,
+                "the reopened store carries a different last-used value"
+            );
+        }
+        assert_eq!(reopened.client_count(), 0, "a revoked client came back");
     }
 }

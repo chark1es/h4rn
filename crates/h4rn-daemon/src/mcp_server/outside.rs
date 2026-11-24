@@ -22,10 +22,14 @@ use serde_json::{Value, json};
 
 use super::oauth::{Grant, OAuthStore};
 use super::rate::{EndpointLimits, RateLimiter};
+use super::redact::Redactor;
 use crate::auth::TokenStore;
 use crate::hosts::HostInventory;
 use crate::projects::ProjectService;
 use crate::threads::{NewThread, ThreadManager};
+
+/// How much of one message `get_thread` returns, after redaction.
+const MESSAGE_TEXT_CHARS: usize = 2_000;
 
 /// What an outside agent may call.
 const READ_TOOLS: &[&str] = &[
@@ -48,9 +52,9 @@ pub struct OutsideAgents {
     /// Request rate limits. One aggregate bucket covers the unauthenticated
     /// OAuth mutations; per-key buckets are keyed by validated identifiers.
     limits: RwLock<EndpointLimits>,
-    /// The owner's access-token store. A thread may quote the token; tool
-    /// output must never repeat it.
-    owner_token: RwLock<Option<TokenStore>>,
+    /// Redacts every value this server returns. Shared with h4rn's own agent
+    /// tools, so both seats answer with the same redacted title.
+    redactor: Arc<Redactor>,
 }
 
 impl OutsideAgents {
@@ -61,6 +65,7 @@ impl OutsideAgents {
         projects: Arc<ProjectService>,
         hosts: Arc<HostInventory>,
         proxy: Arc<h4rn_proxy::ProxyService>,
+        redactor: Arc<Redactor>,
         host: HostId,
     ) -> Self {
         Self {
@@ -72,7 +77,7 @@ impl OutsideAgents {
             host,
             base_url: RwLock::new(None),
             limits: RwLock::new(EndpointLimits::default()),
-            owner_token: RwLock::new(None),
+            redactor,
         }
     }
 
@@ -108,10 +113,7 @@ impl OutsideAgents {
     /// The local access token is the owner's own credential: a thread may quote
     /// it, and an outside agent must never read it back.
     pub fn set_owner_token(&self, tokens: &TokenStore) {
-        *self
-            .owner_token
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tokens.clone());
+        self.redactor.set_owner_token(tokens);
     }
 
     /// The base URL of this daemon's loopback listener.
@@ -496,7 +498,7 @@ impl OutsideAgents {
                                 format!(
                                     "{} — {} [{:?}] {:?} · {}",
                                     thread.thread_id,
-                                    self.redact(&thread.title),
+                                    self.redactor.title(&thread.title),
                                     thread.agent_state,
                                     thread.harness,
                                     thread.workspace_path
@@ -530,12 +532,12 @@ impl OutsideAgents {
                     .collect::<Vec<_>>();
                 let messages = recent_messages(&events, limit);
                 let mut summary = snapshot.summary.clone();
-                summary.title = self.redact(&summary.title);
+                summary.title = self.redactor.title(&summary.title);
                 let messages: Vec<MessageRow> = messages
                     .into_iter()
                     .map(|message| MessageRow {
                         role: message.role,
-                        text: self.redact(&message.text),
+                        text: self.redactor.text_to(&message.text, MESSAGE_TEXT_CHARS),
                     })
                     .collect();
                 let text = format!(
@@ -664,33 +666,42 @@ impl OutsideAgents {
                     })?,
                 };
                 let mode = clamp_mode(grant.level, requested);
+                // The first turn carries the grant's ceiling as well as the
+                // clamped mode: a person raising the thread's mode while that
+                // prompt runs must not lift it, and a resume after a usage
+                // limit keeps it.
+                let ceiling = ceiling_for(grant.level);
                 let created = self
                     .manager
-                    .create_thread(NewThread {
-                        thread_id: None,
-                        parent_thread_id: None,
-                        subagent_id: None,
-                        host: self.host.clone(),
-                        harness,
-                        agent_id: arguments
-                            .get("agent_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        workspace_path: workspace,
-                        model,
-                        prompt,
-                        attachments: Vec::new(),
-                        runtime_mode: mode,
-                        reasoning_effort: arguments
-                            .get("reasoning_effort")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        fast: arguments
-                            .get("fast")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                        worktree: None,
-                    })
+                    .create_thread_for_work(
+                        NewThread {
+                            thread_id: None,
+                            parent_thread_id: None,
+                            subagent_id: None,
+                            host: self.host.clone(),
+                            harness,
+                            agent_id: arguments
+                                .get("agent_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            workspace_path: workspace,
+                            model,
+                            prompt,
+                            attachments: Vec::new(),
+                            runtime_mode: mode,
+                            reasoning_effort: arguments
+                                .get("reasoning_effort")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            fast: arguments
+                                .get("fast")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            worktree: None,
+                        },
+                        ceiling,
+                        Some(grant.client_id.clone()),
+                    )
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(structured(
@@ -722,11 +733,16 @@ impl OutsideAgents {
                 // thread's own mode is the person's and is never rewritten: the
                 // turn this message starts is clamped while it runs, and raising
                 // the mode afterwards cannot lift a ceiling already queued.
-                let ceiling = (grant.level == OutsideAgentLevel::Supervised)
-                    .then_some(RuntimeMode::ApprovalRequired);
+                let ceiling = ceiling_for(grant.level);
                 let accepted = self
                     .manager
-                    .send_message_at_most(&thread_id, text, Vec::new(), ceiling)
+                    .send_message_for_work(
+                        &thread_id,
+                        text,
+                        Vec::new(),
+                        ceiling,
+                        Some(grant.client_id.clone()),
+                    )
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(structured(
@@ -756,30 +772,6 @@ impl OutsideAgents {
         }
     }
 
-    /// Removes credential-shaped values from text an outside agent may read.
-    ///
-    /// Two layers: the daemon's own secret values (its access token), and the
-    /// shapes h4rn and forge clients use, so a token pasted into a thread never
-    /// comes back out of `get_thread`.
-    fn redact(&self, value: &str) -> String {
-        let mut output = value.to_owned();
-        // Read the token file rather than a copy: `h4rnd token --rotate` must
-        // not leave the new value unredacted.
-        let owner = self
-            .owner_token
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .and_then(|store| store.load().ok().flatten());
-        if let Some(token) = owner.filter(|token| !token.is_empty())
-            && output.contains(token.as_str())
-        {
-            output = output.replace(token.as_str(), "[redacted]");
-        }
-        let output = redact_h4rn_tokens(&output);
-        h4rn_forge::redact(&output)
-    }
-
     /// One thread as an outside tool returns it.
     ///
     /// The title is the first characters of the person's first prompt, so it can
@@ -789,7 +781,7 @@ impl OutsideAgents {
     fn thread_brief(&self, summary: &ThreadSummary) -> Value {
         json!({
             "thread_id": summary.thread_id,
-            "title": self.redact(&summary.title),
+            "title": self.redactor.title(&summary.title),
             "state": summary.agent_state,
             "tab": summary.tab,
             "harness": summary.harness,
@@ -801,46 +793,6 @@ impl OutsideAgents {
             "unread": summary.unread,
         })
     }
-}
-
-/// Prefixes of every credential h4rn itself mints.
-const H4RN_TOKEN_PREFIXES: [&str; 5] = [
-    "h4rn_at_",
-    "h4rn_rt_",
-    "h4rn_code_",
-    "h4rn_auth_",
-    "h4rn_mcp_",
-];
-
-/// Replaces every h4rn-shaped credential in `value`.
-fn redact_h4rn_tokens(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut rest = value;
-    loop {
-        let next = H4RN_TOKEN_PREFIXES
-            .iter()
-            .filter_map(|prefix| rest.find(prefix).map(|index| (index, *prefix)))
-            .min_by_key(|(index, _)| *index);
-        let Some((index, prefix)) = next else {
-            output.push_str(rest);
-            return output;
-        };
-        output.push_str(&rest[..index]);
-        output.push_str("[redacted]");
-        let after = &rest[index + prefix.len()..];
-        rest = &after[token_run(after)..];
-    }
-}
-
-/// Length of the credential characters at the start of `value`.
-fn token_run(value: &str) -> usize {
-    value
-        .char_indices()
-        .find(|(_, ch)| {
-            !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '~' | '+' | '/' | '='))
-        })
-        .map(|(index, _)| index)
-        .unwrap_or(value.len())
 }
 
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value {
@@ -900,6 +852,14 @@ fn clamp_mode(level: OutsideAgentLevel, requested: RuntimeMode) -> RuntimeMode {
     }
 }
 
+/// The autonomy ceiling a grant puts on any turn it starts.
+///
+/// A supervised grant caps every turn at approval-required; a full-access one
+/// caps nothing beyond the thread's own mode. Read-only cannot start work.
+fn ceiling_for(level: OutsideAgentLevel) -> Option<RuntimeMode> {
+    matches!(level, OutsideAgentLevel::Supervised).then_some(RuntimeMode::ApprovalRequired)
+}
+
 #[derive(Clone, serde::Serialize)]
 struct MessageRow {
     role: &'static str,
@@ -916,14 +876,13 @@ fn recent_messages(events: &[h4rn_protocol::Event], limit: usize) -> Vec<Message
         else {
             continue;
         };
-        let text = text.chars().take(2_000).collect::<String>();
         messages.push(MessageRow {
             role: match role {
                 h4rn_protocol::MessageRole::User => "user",
                 h4rn_protocol::MessageRole::Assistant => "assistant",
                 h4rn_protocol::MessageRole::System => "system",
             },
-            text,
+            text: text.clone(),
         });
     }
     let drop = messages.len().saturating_sub(limit);

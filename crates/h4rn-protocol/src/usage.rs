@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::common::{HarnessKind, Usage};
+use crate::common::{HarnessKind, RuntimeMode, Usage};
 use crate::ids::ThreadId;
 
 /// What a usage query is aggregated over.
@@ -342,6 +342,13 @@ pub struct ResumeSchedule {
     pub reason: String,
     /// Prompt sent on resume.
     pub prompt: String,
+    /// The most autonomy the turn that reported the limit was allowed.
+    ///
+    /// It lives on the schedule itself, in the same write that arms it, so a
+    /// resume can never run at a wider mode than the work it continues -- even
+    /// when the daemon stops before any other record is updated.
+    #[serde(default)]
+    pub mode_ceiling: Option<RuntimeMode>,
     /// Failover choice, when one was made.
     pub failover: Option<ResumeFailover>,
     /// Last resume error, when a previous attempt failed.

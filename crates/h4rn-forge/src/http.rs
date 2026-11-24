@@ -652,6 +652,14 @@ const TOKEN_PREFIXES: [&str; 7] = [
     "lin_api_",
 ];
 
+/// Every credential prefix this crate recognises by shape.
+///
+/// Callers that cut text after redaction (a thread title, a truncated message)
+/// use this to recognise a prefix fragment a cut left behind.
+pub fn token_prefixes() -> &'static [&'static str] {
+    &TOKEN_PREFIXES
+}
+
 /// Removes anything that looks like a token from a forge message.
 ///
 /// The prefix is found anywhere in the text, not just at the start of a

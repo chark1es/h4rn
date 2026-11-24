@@ -17,6 +17,7 @@ pub mod http;
 pub mod oauth;
 pub mod outside;
 pub mod rate;
+pub mod redact;
 pub mod settings;
 pub mod url;
 
@@ -24,4 +25,5 @@ pub use agent_tools::AgentToolsProvider;
 pub use http::router;
 pub use oauth::OAuthStore;
 pub use outside::OutsideAgents;
+pub use redact::Redactor;
 pub use settings::AgentToolSettingsStore;

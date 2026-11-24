@@ -18,9 +18,10 @@ use h4rn_protocol::{
 };
 use serde_json::{Value, json};
 
+use super::redact::Redactor;
 use super::settings::AgentToolSettingsStore;
 use crate::forge::{ForgeService, ForgeServiceError};
-use crate::pr_links::{PrLinkError, PrLinkService};
+use crate::pr_links::{PrLinkError, PrLinkService, WatchGrant};
 use crate::threads::ThreadManager;
 
 /// Tools every harness session can use against its own thread.
@@ -40,6 +41,8 @@ pub struct AgentToolsProvider {
     pr_links: Arc<PrLinkService>,
     forge: Arc<ForgeService>,
     settings: Arc<AgentToolSettingsStore>,
+    /// The daemon-wide redactor, shared with the outside-agent seat.
+    redactor: Arc<Redactor>,
     host: HostId,
 }
 
@@ -50,6 +53,7 @@ impl AgentToolsProvider {
         pr_links: Arc<PrLinkService>,
         forge: Arc<ForgeService>,
         settings: Arc<AgentToolSettingsStore>,
+        redactor: Arc<Redactor>,
         host: HostId,
     ) -> Self {
         Self {
@@ -57,6 +61,7 @@ impl AgentToolsProvider {
             pr_links,
             forge,
             settings,
+            redactor,
             host,
         }
     }
@@ -324,8 +329,16 @@ impl ToolProvider for AgentToolsProvider {
                 let number = Self::number(&arguments)?;
                 let repository = arguments.get("repository").and_then(Value::as_str);
                 let repo = self.linked_repo(&thread_id, number, repository).await?;
+                // The watch can wake this thread long after this turn ends, so
+                // it keeps the outside grant that asked for the turn and that
+                // turn's ceiling. A person's own turn has neither.
+                let grant = self
+                    .manager
+                    .active_turn_grant(&thread_id)
+                    .await
+                    .map(|(client_id, ceiling)| WatchGrant { client_id, ceiling });
                 self.pr_links
-                    .watch(&thread_id, &repo, number)
+                    .watch_with_grant(&thread_id, &repo, number, grant)
                     .await
                     .map_err(Self::pr_error)?;
                 Ok(structured(
@@ -359,9 +372,11 @@ impl ToolProvider for AgentToolsProvider {
                     })?;
                 let running = self.manager.turn_in_flight(&thread_id).await;
                 let queued = self.manager.thread_queue_len(&thread_id).await.unwrap_or(0);
+                // The title is the person's first prompt and can hold anything
+                // they pasted. Redact it before either form is built.
+                let title = self.redactor.title(&summary.title);
                 let text = format!(
-                    "\"{}\" is {:?}{}{}.",
-                    summary.title,
+                    "\"{title}\" is {:?}{}{}.",
                     summary.agent_state,
                     if running { "; a turn is running" } else { "" },
                     match queued {
@@ -374,7 +389,7 @@ impl ToolProvider for AgentToolsProvider {
                     text,
                     json!({
                         "thread_id": summary.thread_id,
-                        "title": summary.title,
+                        "title": title,
                         "state": summary.agent_state,
                         "tab": summary.tab,
                         "harness": summary.harness,

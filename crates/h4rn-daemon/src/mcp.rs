@@ -46,11 +46,30 @@ use tokio::task::JoinHandle;
 
 use crate::config::Config;
 use crate::mcp_peers::{GRANTS_HANDSHAKE, PeerDirectory, PeerLinks, serve_grants};
+use crate::mcp_server::oauth::OAuthError;
 use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::threads::{McpSession, McpSessionProvider};
 
 /// Version marker for the internal tunnel handshake.
 const TUNNEL_HANDSHAKE: &str = "h4rn-mcp-tunnel-1";
+
+/// Maps a failed outside-agent revocation to the protocol.
+///
+/// Only a genuinely unknown client is `NotFound`. A grant whose revocation
+/// could not be saved is an internal failure: reporting it as "not found" hid
+/// the fact that the agent is still connected and made a retry look pointless.
+fn revoke_error(error: OAuthError) -> ProtoError {
+    let code = match error {
+        OAuthError::NotFound(_) => h4rn_protocol::ProtoErrorCode::NotFound,
+        OAuthError::Storage(_) => h4rn_protocol::ProtoErrorCode::Internal,
+        OAuthError::InvalidClient
+        | OAuthError::InvalidRedirect(_)
+        | OAuthError::InvalidGrant(_)
+        | OAuthError::InvalidRequest(_)
+        | OAuthError::InvalidTarget(_) => h4rn_protocol::ProtoErrorCode::InvalidRequest,
+    };
+    ProtoError::plain(code, error.description())
+}
 
 /// How long `/secure-mcp` waits for the tunnel handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -332,9 +351,10 @@ impl McpService {
                         "this daemon does not offer outside-agent access",
                     )
                 })?;
-                outside.store().revoke_client(&client_id).map_err(|error| {
-                    ProtoError::plain(h4rn_protocol::ProtoErrorCode::NotFound, error.description())
-                })?;
+                outside
+                    .store()
+                    .revoke_client(&client_id)
+                    .map_err(revoke_error)?;
                 Ok(ResponseBody::Ack)
             }
             McpRequest::ListOutsideAgentSignIns => {
@@ -1246,5 +1266,13 @@ mod tests {
     fn conflict_resolution_is_reachable() {
         // A compile-time check that the protocol enum stays wired here.
         let _ = h4rn_protocol::McpConflictResolution::KeepMine;
+    }
+
+    #[test]
+    fn a_failed_revocation_is_an_internal_failure_not_not_found() {
+        let storage = revoke_error(OAuthError::Storage("disk is full".into()));
+        assert_eq!(storage.code, h4rn_protocol::ProtoErrorCode::Internal);
+        let missing = revoke_error(OAuthError::NotFound("no such client".into()));
+        assert_eq!(missing.code, h4rn_protocol::ProtoErrorCode::NotFound);
     }
 }

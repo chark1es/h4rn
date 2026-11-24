@@ -77,10 +77,25 @@ async fn boot_with(
     rate_limit: Option<usize>,
     extra_bind: Option<std::net::SocketAddr>,
 ) -> TestDaemon {
+    boot_on(
+        "127.0.0.1:0".parse().expect("bind"),
+        fake,
+        rate_limit,
+        extra_bind,
+    )
+    .await
+}
+
+async fn boot_on(
+    bind: std::net::SocketAddr,
+    fake: FakeHarness,
+    rate_limit: Option<usize>,
+    extra_bind: Option<std::net::SocketAddr>,
+) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
-        bind: "127.0.0.1:0".parse().expect("bind"),
+        bind,
         extra_bind,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
@@ -971,7 +986,8 @@ impl h4rn_daemon::pr_links::PrWakeSink for MockSink {
         &self,
         _thread_id: &h4rn_protocol::ThreadId,
         _message: String,
-    ) -> Result<(), String> {
+        _grant: Option<h4rn_daemon::pr_links::WatchGrant>,
+    ) -> Result<(), h4rn_daemon::pr_links::WakeError> {
         Ok(())
     }
 }
@@ -1010,6 +1026,7 @@ async fn pr_link_tools_use_the_thread_and_its_forge_remote() {
         links,
         forge,
         settings,
+        Arc::new(h4rn_daemon::mcp_server::Redactor::new()),
         daemon.host.clone(),
     );
     let scope = McpScope::harness(
@@ -1139,6 +1156,7 @@ async fn agent_tools_are_hidden_when_their_harness_switch_is_off() {
         links,
         forge,
         Arc::clone(&settings),
+        Arc::new(h4rn_daemon::mcp_server::Redactor::new()),
         daemon.host.clone(),
     );
     let context = h4rn_mcp::provider::ToolCallContext::new(
@@ -1554,6 +1572,24 @@ async fn refresh_rotation_works_over_http_and_a_replay_kills_the_family() {
         .as_str()
         .expect("refresh")
         .to_owned();
+    let mcp = format!("{}/mcp", daemon.base());
+
+    // A refresh must name the audience the grant is bound to; omitting it
+    // names this daemon's own endpoint, so another audience is refused.
+    let other = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", first_refresh.as_str()),
+            ("client_id", client_id),
+            ("resource", "https://elsewhere.example/mcp"),
+        ])
+        .send()
+        .await
+        .expect("refresh");
+    assert_eq!(other.status(), StatusCode::BAD_REQUEST);
+    let body: Value = other.json().await.expect("error json");
+    assert_eq!(body["error"], "invalid_target");
 
     let rotated: Value = client
         .post(format!("{}/oauth/token", daemon.base()))
@@ -1561,6 +1597,7 @@ async fn refresh_rotation_works_over_http_and_a_replay_kills_the_family() {
             ("grant_type", "refresh_token"),
             ("refresh_token", first_refresh.as_str()),
             ("client_id", client_id),
+            ("resource", mcp.as_str()),
         ])
         .send()
         .await
@@ -2189,8 +2226,8 @@ async fn a_token_exchange_must_use_the_resource_its_code_was_approved_for() {
     let body: Value = accepted.json().await.expect("token json");
     assert_eq!(body["resource"], mcp);
 
-    // A grant approved without a resource cannot be widened by naming this
-    // daemon's own endpoint at the token endpoint.
+    // A grant approved without a resource is bound to this daemon's own
+    // endpoint, so it cannot be pointed at another audience.
     let page = client
         .get(format!("{}/oauth/authorize", daemon.base()))
         .query(&[
@@ -2228,7 +2265,7 @@ async fn a_token_exchange_must_use_the_resource_its_code_was_approved_for() {
             ("code", code.as_str()),
             ("client_id", client_id),
             ("code_verifier", verifier.as_str()),
-            ("resource", mcp.as_str()),
+            ("resource", "https://elsewhere.example/mcp"),
         ])
         .send()
         .await
@@ -2236,5 +2273,673 @@ async fn a_token_exchange_must_use_the_resource_its_code_was_approved_for() {
     assert_eq!(widened.status(), StatusCode::BAD_REQUEST);
     let body: Value = widened.json().await.expect("error json");
     assert_eq!(body["error"], "invalid_target");
+
+    // The bound audience itself is what the approval named implicitly.
+    let accepted = client
+        .post(format!("{}/oauth/token", daemon.base()))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", client_id),
+            ("code_verifier", verifier.as_str()),
+            ("resource", mcp.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(accepted.status(), StatusCode::OK, "{accepted:?}");
+    daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Round 3: the ceiling belongs to the work, not to the active dispatch
+// ---------------------------------------------------------------------------
+
+fn started_modes(settings: &h4rn_harness::SessionSettings) -> Vec<RuntimeMode> {
+    settings
+        .get()
+        .into_iter()
+        .filter_map(|change| match change {
+            h4rn_harness::SettingChange::Started { runtime_mode, .. } => Some(runtime_mode),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn wait_for_started(settings: &h4rn_harness::SessionSettings, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while started_modes(settings).len() < count {
+        assert!(
+            Instant::now() < deadline,
+            "the fake started {} sessions, wanted {count}: {:?}",
+            started_modes(settings).len(),
+            settings.get()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_turn_end(daemon: &TestDaemon, thread_id: &h4rn_protocol::ThreadId) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let summary = daemon
+            .manager
+            .thread_summary(thread_id)
+            .await
+            .expect("summary");
+        let busy = daemon.manager.turn_in_flight(thread_id).await;
+        if (!busy && summary.agent_state == h4rn_protocol::AgentState::Done)
+            || Instant::now() > deadline
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A supervised `start_thread` caps its first turn and the resume after a limit.
+#[tokio::test]
+async fn a_supervised_start_thread_caps_the_first_turn_and_its_resume() {
+    let (fake, start) = FakeHarness::new().with_start_gate();
+    let (fake, completion) = fake.with_later_completion_gate();
+    let (fake, injector) = fake.with_event_injector();
+    let (fake, sends) = fake.with_send_count();
+    let daemon = boot_with(fake, None, None).await;
+    let settings = daemon.settings.clone();
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
+    let repo = git_repo_with_remote();
+    let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+
+    let started = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "start_thread",
+        json!({
+            "harness": "claude_code",
+            "model": "default",
+            "prompt": "do the thing",
+            "workspace_path": repo.path().display().to_string(),
+            "runtime_mode": "full_access"
+        }),
+    )
+    .await;
+    assert!(started.get("error").is_none(), "{started}");
+    assert_eq!(
+        started["result"]["structuredContent"]["runtime_mode"],
+        "approval_required"
+    );
+    let thread_id = h4rn_protocol::ThreadId::new(
+        started["result"]["structuredContent"]["thread_id"]
+            .as_str()
+            .expect("thread id"),
+    );
+
+    // The first prompt is still waiting for its session. The person raises the
+    // thread's own mode now; the dispatch's ceiling must still apply.
+    daemon
+        .manager
+        .set_thread_runtime_mode(&thread_id, RuntimeMode::FullAccess)
+        .await
+        .expect("raise the mode");
+    start.release();
+    wait_for_started(&settings, 1).await;
+    assert_eq!(
+        started_modes(&settings),
+        vec![RuntimeMode::ApprovalRequired],
+        "the first turn ran on a full-access session: {:?}",
+        settings.get()
+    );
+
+    // The capped turn reports a usage limit while it is still running.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while sends.get() < 1 {
+        assert!(Instant::now() < deadline, "the prompt was never written");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    injector.emit(h4rn_harness::HarnessEvent::LimitHit {
+        reset_at: Some(reset_at),
+        auto_resume: true,
+    });
+    completion.release();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let summary = daemon
+            .manager
+            .thread_summary(&thread_id)
+            .await
+            .expect("summary");
+        if summary.resume_at.is_some() || Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let summary = daemon
+        .manager
+        .thread_summary(&thread_id)
+        .await
+        .expect("summary");
+    assert!(summary.resume_at.is_some(), "the limit armed no resume");
+    wait_for_turn_end(&daemon, &thread_id).await;
+
+    // The person's mode is full access, and the paused session has taken it.
+    daemon
+        .manager
+        .set_thread_runtime_mode(&thread_id, RuntimeMode::FullAccess)
+        .await
+        .expect("raise the mode during the pause");
+    daemon
+        .manager
+        .resume_now(&thread_id)
+        .await
+        .expect("resume now");
+    wait_for_started(&settings, 2).await;
+    assert_eq!(
+        started_modes(&settings).last().copied(),
+        Some(RuntimeMode::ApprovalRequired),
+        "the resume ran above the first turn's ceiling: {:?}",
+        settings.get()
+    );
+    daemon.stop().await;
+}
+
+/// A PR watch keeps the outside grant and its ceiling.
+mod watch_grant {
+    use super::*;
+    use h4rn_daemon::pr_links::{PrSource, PrSourceError, ThreadWakeSink};
+    use h4rn_mcp::provider::ToolProvider;
+
+    #[derive(Default)]
+    struct WatchSource {
+        failing: std::sync::Mutex<bool>,
+    }
+
+    impl WatchSource {
+        /// The PR's only check starts failing, which the watch reports.
+        fn bump(&self) {
+            *self.failing.lock().expect("failing") = true;
+        }
+
+        fn checks(
+            &self,
+            repo: &h4rn_protocol::ForgeRepoRef,
+            number: u32,
+        ) -> h4rn_protocol::ForgeChecks {
+            let failing = *self.failing.lock().expect("failing");
+            h4rn_protocol::ForgeChecks {
+                repo: repo.clone(),
+                number,
+                head_sha: "sha-1".into(),
+                state: if failing {
+                    h4rn_protocol::ForgeChecksState::Failing
+                } else {
+                    h4rn_protocol::ForgeChecksState::Passing
+                },
+                total: 1,
+                passed: u32::from(!failing),
+                failed: u32::from(failing),
+                pending: 0,
+                checks: vec![h4rn_protocol::ForgeCheck {
+                    name: "ci".into(),
+                    status: if failing {
+                        h4rn_protocol::ForgeCheckStatus::Failure
+                    } else {
+                        h4rn_protocol::ForgeCheckStatus::Success
+                    },
+                    details_url: None,
+                    description: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                    required: Some(true),
+                }],
+                rerun: h4rn_protocol::ForgeRerunSupport {
+                    supported: false,
+                    reason: Some("scripted forge".into()),
+                },
+                updated_at: chrono::Utc::now(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PrSource for WatchSource {
+        async fn resolve_account(
+            &self,
+            _account_id: Option<&str>,
+            _repo: &h4rn_protocol::ForgeRepoRef,
+        ) -> Result<String, PrSourceError> {
+            Ok("account-1".into())
+        }
+
+        fn account_login(&self, _account_id: &str) -> Option<String> {
+            Some("me".into())
+        }
+
+        async fn get_pr(
+            &self,
+            _account_id: &str,
+            repo: &h4rn_protocol::ForgeRepoRef,
+            number: u32,
+        ) -> Result<h4rn_protocol::ForgePullRequest, PrSourceError> {
+            let failing = *self.failing.lock().expect("failing");
+            let head_sha = if failing { "sha-2" } else { "sha-1" }.to_owned();
+            Ok(h4rn_protocol::ForgePullRequest {
+                summary: h4rn_protocol::ForgePrSummary {
+                    repo: repo.clone(),
+                    number,
+                    title: "Add the widget".into(),
+                    state: h4rn_protocol::ForgePrState::Open,
+                    author: "octo".into(),
+                    head_branch: "feature".into(),
+                    base_branch: "main".into(),
+                    head_sha: Some(head_sha),
+                    updated_at: chrono::Utc::now(),
+                    web_url: format!("{}/pull/{number}", repo.web_url()),
+                    checks: if failing {
+                        h4rn_protocol::ForgeChecksState::Failing
+                    } else {
+                        h4rn_protocol::ForgeChecksState::Passing
+                    },
+                    review: h4rn_protocol::ForgeReviewState::Pending,
+                    draft: false,
+                },
+                body: String::new(),
+                labels: Vec::new(),
+                mergeable: h4rn_protocol::ForgeMergeable::Mergeable,
+                base_sha: None,
+                additions: 1,
+                deletions: 0,
+                changed_files: 1,
+                changed_files_known: true,
+                line_counts_known: true,
+                commits: 1,
+                created_at: chrono::Utc::now(),
+                reviewers: Vec::new(),
+                merge_commit_sha: None,
+            })
+        }
+
+        async fn list_comments(
+            &self,
+            _account_id: &str,
+            repo: &h4rn_protocol::ForgeRepoRef,
+            number: u32,
+        ) -> Result<h4rn_protocol::ForgeCommentPage, PrSourceError> {
+            Ok(h4rn_protocol::ForgeCommentPage {
+                repo: repo.clone(),
+                number,
+                comments: Vec::new(),
+                threads: Vec::new(),
+                reviews: Vec::new(),
+                has_more: false,
+            })
+        }
+
+        async fn list_checks(
+            &self,
+            _account_id: &str,
+            repo: &h4rn_protocol::ForgeRepoRef,
+            number: u32,
+        ) -> Result<h4rn_protocol::ForgeChecks, PrSourceError> {
+            Ok(self.checks(repo, number))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wake_after_revocation_starts_nothing_and_a_live_grant_is_capped() {
+        let (fake, start) = FakeHarness::new().with_start_gate();
+        let (fake, sends) = fake.with_send_count();
+        let daemon = boot_with(fake, None, None).await;
+        let settings = daemon.settings.clone();
+        let client = http();
+        let redirect = "http://localhost:1455/callback";
+        let (_, registered) = register(&client, &daemon.base(), redirect).await;
+        let client_id = registered["client_id"]
+            .as_str()
+            .expect("client id")
+            .to_owned();
+        let token = begin_and_approve(
+            &daemon,
+            &client,
+            &daemon.base(),
+            &client_id,
+            redirect,
+            "supervised",
+        )
+        .await;
+        let repo = git_repo_with_remote();
+
+        let started = call_tool(
+            &client,
+            &daemon.outside_url(),
+            &token,
+            "start_thread",
+            json!({
+                "harness": "claude_code",
+                "model": "default",
+                "prompt": "open a pull request",
+                "workspace_path": repo.path().display().to_string(),
+                "runtime_mode": "full_access"
+            }),
+        )
+        .await;
+        assert!(started.get("error").is_none(), "{started}");
+        let thread_id = h4rn_protocol::ThreadId::new(
+            started["result"]["structuredContent"]["thread_id"]
+                .as_str()
+                .expect("thread id"),
+        );
+
+        // The first turn is still active (its session start is held), so this
+        // is the tool call the agent makes inside the grant's turn.
+        let source = Arc::new(WatchSource::default());
+        let links = h4rn_daemon::pr_links::PrLinkService::new(
+            Arc::new(
+                h4rn_daemon::journal::SqliteJournal::in_memory()
+                    .await
+                    .expect("journal"),
+            ),
+            source.clone(),
+            Arc::new(ThreadWakeSink::new(
+                Arc::clone(&daemon.manager),
+                daemon.outside.store(),
+            )),
+        );
+        let provider = h4rn_daemon::mcp_server::AgentToolsProvider::new(
+            Arc::clone(&daemon.manager),
+            Arc::clone(&links),
+            h4rn_daemon::forge::ForgeService::open(daemon.data_dir()).expect("forge"),
+            Arc::new(h4rn_daemon::mcp_server::AgentToolSettingsStore::open(
+                daemon.data_dir(),
+                daemon.host.clone(),
+            )),
+            Arc::new(h4rn_daemon::mcp_server::Redactor::new()),
+            daemon.host.clone(),
+        );
+        let scope = h4rn_mcp::session::McpScope::harness(
+            HarnessKind::ClaudeCode,
+            daemon.host.clone(),
+            Some(thread_id.clone()),
+        );
+        let context =
+            h4rn_mcp::provider::ToolCallContext::new(scope, "h4rn", Duration::from_secs(5));
+        provider
+            .call_tool("link_pull_request", json!({"number": 7}), &context)
+            .await
+            .expect("link");
+        provider
+            .call_tool("watch_pull_request", json!({"number": 7}), &context)
+            .await
+            .expect("watch");
+
+        start.release();
+        wait_for_started(&settings, 1).await;
+        wait_for_turn_end(&daemon, &thread_id).await;
+
+        // The person's mode is full access; a wake still may not run above the
+        // supervised turn's approval-required ceiling.
+        daemon
+            .manager
+            .set_thread_runtime_mode(&thread_id, RuntimeMode::FullAccess)
+            .await
+            .expect("raise the mode");
+        source.bump();
+        links.poll_once().await;
+        wait_for_started(&settings, 2).await;
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired),
+            "the watch wake ran above the grant's ceiling: {:?}",
+            settings.get()
+        );
+        let sends_after_wake = sends.get();
+        wait_for_turn_end(&daemon, &thread_id).await;
+
+        // Revoking the grant ends the watch: the next change starts nothing.
+        daemon
+            .outside
+            .store()
+            .revoke_client(&client_id)
+            .expect("revoke");
+        source.bump();
+        links.poll_once().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            sends.get(),
+            sends_after_wake,
+            "a revoked grant still started a turn"
+        );
+        assert_eq!(
+            started_modes(&settings).len(),
+            2,
+            "a revoked grant started a session"
+        );
+        assert!(
+            !daemon.manager.turn_in_flight(&thread_id).await,
+            "a revoked grant left a turn running"
+        );
+        daemon.stop().await;
+    }
+}
+
+/// A wildcard primary bind is not a loopback listener.
+#[tokio::test]
+async fn a_wildcard_primary_bind_serves_no_oauth_or_mcp() {
+    let daemon = boot_on(
+        "0.0.0.0:0".parse().expect("bind"),
+        FakeHarness::new(),
+        None,
+        None,
+    )
+    .await;
+    let base = format!("http://127.0.0.1:{}", daemon.addr.port());
+    let client = http();
+    // The socket is alive; it serves liveness and the typed socket.
+    let health = client
+        .get(format!("{base}/healthz"))
+        .send()
+        .await
+        .expect("health");
+    assert_eq!(health.status(), StatusCode::OK);
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/oauth/authorize",
+    ] {
+        let response = client
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} was served on a wildcard bind"
+        );
+    }
+    for (path, form) in [
+        ("/oauth/register", false),
+        ("/oauth/token", true),
+        ("/oauth/revoke", true),
+    ] {
+        let request = client.post(format!("{base}{path}"));
+        let response = if form {
+            request.form(&[("token", "x")])
+        } else {
+            request
+                .json(&json!({"client_name": "x", "redirect_uris": ["http://localhost:1455/cb"]}))
+        }
+        .send()
+        .await
+        .expect("post");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} was served on a wildcard bind"
+        );
+    }
+    for path in ["/mcp", "/mcp/outside"] {
+        let response = client
+            .post(format!("{base}{path}"))
+            .bearer_auth("h4rn_at_unknown")
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}))
+            .send()
+            .await
+            .expect("post");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} was served on a wildcard bind"
+        );
+    }
+    daemon.stop().await;
+
+    // The same daemon on a loopback bind does serve them.
+    let loopback = boot(None).await;
+    let response = http()
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            loopback.base()
+        ))
+        .send()
+        .await
+        .expect("metadata");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = http()
+        .post(loopback.mcp_url())
+        .bearer_auth("h4rn_at_unknown")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}))
+        .send()
+        .await
+        .expect("mcp");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    loopback.stop().await;
+}
+
+/// A token fragment left by the 80-character title cut never comes back out.
+#[tokio::test]
+async fn a_title_cut_inside_a_token_returns_no_fragment() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"].as_str().expect("client id");
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
+    let repo = git_repo_with_remote();
+    // 76 characters, a space and `ghp` make the 80-character title end in the
+    // first three characters of the token's prefix.
+    let planted = format!("{}{}", "ghp", "_").to_owned() + &"x".repeat(36);
+    let prompt = format!("{} {planted}", "a".repeat(76));
+    assert_eq!(prompt.chars().take(80).collect::<String>().len(), 80);
+    assert!(prompt.chars().take(80).collect::<String>().ends_with("ghp"));
+
+    let started = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "start_thread",
+        json!({
+            "harness": "claude_code",
+            "model": "default",
+            "prompt": prompt,
+            "workspace_path": repo.path().display().to_string(),
+        }),
+    )
+    .await;
+    assert!(started.get("error").is_none(), "{started}");
+    let thread_id = h4rn_protocol::ThreadId::new(
+        started["result"]["structuredContent"]["thread_id"]
+            .as_str()
+            .expect("thread id"),
+    );
+    assert!(
+        !started.to_string().contains("ghp"),
+        "start_thread returned the title's fragment: {started}"
+    );
+    assert!(
+        started.to_string().contains("[redacted]"),
+        "start_thread did not redact the title: {started}"
+    );
+
+    let listed = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "list_threads",
+        json!({}),
+    )
+    .await;
+    assert!(
+        !listed.to_string().contains("ghp"),
+        "list_threads returned the title's fragment: {listed}"
+    );
+    let read = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "get_thread",
+        json!({"thread_id": thread_id}),
+    )
+    .await;
+    assert!(
+        !read.to_string().contains("ghp"),
+        "get_thread returned the title's fragment: {read}"
+    );
+
+    // h4rn's own agent tools use the same redactor.
+    let provider = h4rn_daemon::mcp_server::AgentToolsProvider::new(
+        Arc::clone(&daemon.manager),
+        h4rn_daemon::pr_links::PrLinkService::new(
+            Arc::new(
+                h4rn_daemon::journal::SqliteJournal::in_memory()
+                    .await
+                    .expect("journal"),
+            ),
+            Arc::new(MockSource),
+            Arc::new(h4rn_daemon::pr_links::ThreadWakeSink::new(
+                Arc::clone(&daemon.manager),
+                daemon.outside.store(),
+            )),
+        ),
+        h4rn_daemon::forge::ForgeService::open(daemon.data_dir()).expect("forge"),
+        Arc::new(h4rn_daemon::mcp_server::AgentToolSettingsStore::open(
+            daemon.data_dir(),
+            daemon.host.clone(),
+        )),
+        Arc::new(h4rn_daemon::mcp_server::Redactor::new()),
+        daemon.host.clone(),
+    );
+    let scope = h4rn_mcp::session::McpScope::harness(
+        HarnessKind::ClaudeCode,
+        daemon.host.clone(),
+        Some(thread_id.clone()),
+    );
+    let context = h4rn_mcp::provider::ToolCallContext::new(scope, "h4rn", Duration::from_secs(5));
+    use h4rn_mcp::provider::ToolProvider;
+    let status = provider
+        .call_tool("thread_status", json!({}), &context)
+        .await
+        .expect("thread_status");
+    assert!(
+        !status.text_output().contains("ghp"),
+        "thread_status returned the title's fragment: {}",
+        status.text_output()
+    );
+    assert!(
+        !serde_json::to_string(&status.structured_content)
+            .expect("json")
+            .contains("ghp"),
+        "thread_status' structured form carries the fragment"
+    );
     daemon.stop().await;
 }

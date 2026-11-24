@@ -488,6 +488,8 @@ struct QueuedTurn {
     /// The sender's permission ceiling, carried with the message so a later
     /// mode change cannot lift it.
     ceiling: Option<RuntimeMode>,
+    /// The outside grant whose work this message does, when one sent it.
+    grant: Option<String>,
 }
 
 struct ThreadRecord {
@@ -581,6 +583,15 @@ struct ThreadRecord {
     /// record read to after the record write; never taken while the record lock
     /// is held, so it cannot deadlock with a path that only takes that.
     settings_lock: Arc<Mutex<()>>,
+    /// Serialises a live switch with the selection of a session for a prompt.
+    ///
+    /// A settings request reads the record, then switches the live session,
+    /// then records the value. Session selection must not run between the
+    /// switch and the record: it would see the old setting, trust the session
+    /// that already switched, and write a supervised prompt into it. Held by a
+    /// switch from before the live call to after the record write, and by a
+    /// send or queue advance only while it selects the session it will write.
+    switch_lock: Arc<Mutex<()>>,
     /// Time to first token of the most recent metered turn (ADR-024).
     ttft_ms: Option<u64>,
     /// Context window of the model the session is running (ADR-015/024).
@@ -666,6 +677,13 @@ enum SessionSlot {
         /// `Exit` with the same reset, and if the person cancels the resume in
         /// between, the exit report must not arm that pause again.
         applied_limit_reset: Option<DateTime<Utc>>,
+        /// The ceiling of the last turn this session delivered.
+        ///
+        /// A limit report names the session, not the turn: a dead session's
+        /// exit report can arrive after its capped turn settled, when
+        /// `record.active` is already gone. The slot remembers which work the
+        /// session was last asked to do, so that report still caps the resume.
+        ceiling: Option<RuntimeMode>,
     },
 }
 
@@ -693,6 +711,31 @@ impl SessionSlot {
     fn is_live(&self, session: &SharedSession) -> bool {
         matches!(self, Self::Live { session: current, .. } if Arc::ptr_eq(current, session))
     }
+
+    /// The ceiling of the last turn `generation` delivered.
+    fn ceiling_for(&self, generation: u64) -> Option<RuntimeMode> {
+        match self {
+            Self::Live {
+                generation: current,
+                ceiling,
+                ..
+            } if *current == generation => *ceiling,
+            Self::None | Self::Starting(_) | Self::Live { .. } => None,
+        }
+    }
+
+    /// Records the ceiling of the turn `generation` is about to deliver.
+    fn note_delivery_ceiling(&mut self, generation: u64, ceiling: Option<RuntimeMode>) {
+        if let Self::Live {
+            generation: current,
+            ceiling: slot,
+            ..
+        } = self
+            && *current == generation
+        {
+            *slot = ceiling;
+        }
+    }
 }
 
 /// One turn's dispatch state, created with the turn.
@@ -710,6 +753,12 @@ struct TurnDispatch {
     input: UserInput,
     /// The most autonomy the turn's sender allows, when it named one.
     ceiling: Option<RuntimeMode>,
+    /// The outside grant whose turn this is, when one asked for it.
+    ///
+    /// A durable record that can start work later (a PR watch) copies this so
+    /// it can ask, at the moment that work would start, whether the grant is
+    /// still live. The grant id never leaves the daemon.
+    grant: Option<String>,
     state: std::sync::Mutex<DispatchState>,
     /// The session generation that was started for this turn, once one was.
     ///
@@ -1002,6 +1051,12 @@ struct DyingSession {
     session: SharedSession,
     /// The death's one row, held for the report that can sharpen it.
     report: Option<IdleTransportReport>,
+    /// The ceiling of the last turn this session delivered.
+    ///
+    /// The ceiling has to outlive the turn: an exit report that carries the
+    /// limit can land after the capped turn settled, and the resume it arms
+    /// must still run at that turn's ceiling.
+    ceiling: Option<RuntimeMode>,
     /// The reset this death already armed a schedule for.
     ///
     /// This belongs to the death, not to `scheduled_limit`: the person can
@@ -1015,10 +1070,21 @@ struct DyingSession {
 impl TurnDispatch {
     /// A dispatch whose turn may run with no more autonomy than `ceiling`.
     fn new_at_most(turn_id: TurnId, input: UserInput, ceiling: Option<RuntimeMode>) -> Self {
+        Self::new_for_work(turn_id, input, ceiling, None)
+    }
+
+    /// A dispatch for work an outside grant asked for.
+    fn new_for_work(
+        turn_id: TurnId,
+        input: UserInput,
+        ceiling: Option<RuntimeMode>,
+        grant: Option<String>,
+    ) -> Self {
         Self {
             turn_id,
             input,
             ceiling,
+            grant,
             state: std::sync::Mutex::new(DispatchState::Pending),
             started_generation: AtomicU64::new(NO_GENERATION),
             on_the_wire: AtomicBool::new(false),
@@ -1037,6 +1103,11 @@ impl TurnDispatch {
     /// mode cannot lift it.
     fn ceiling(&self) -> Option<RuntimeMode> {
         self.ceiling
+    }
+
+    /// The outside grant whose work this turn does, when one asked for it.
+    fn grant(&self) -> Option<&str> {
+        self.grant.as_deref()
     }
 
     /// Records that the prompt is being handed to the harness and returns the
@@ -1261,6 +1332,8 @@ struct RestoredSchedule {
     resume_at: DateTime<Utc>,
     reset_at: Option<DateTime<Utc>>,
     schedule_id: String,
+    /// The ceiling stored on the ledger row when it was armed.
+    ceiling: Option<RuntimeMode>,
 }
 
 /// One limit observation: which session generation reported it and what the
@@ -1268,6 +1341,12 @@ struct RestoredSchedule {
 #[derive(Clone, Copy, Debug)]
 struct LimitObservation {
     generation: Option<u64>,
+    /// The ceiling of the turn that reported the limit.
+    ///
+    /// It travels with the report itself, not with whichever dispatch happens
+    /// to be active when it lands: a dead session's exit report can arrive
+    /// after its capped turn has settled.
+    ceiling: Option<RuntimeMode>,
     reset_at: Option<DateTime<Utc>>,
     auto_resume: bool,
 }
@@ -1378,7 +1457,9 @@ impl ThreadRecord {
     /// Records a new turn and returns its dispatch.
     ///
     /// The dispatch carries the prompt, so the same object a Stop may stop is
-    /// the one the eventual writer must claim.
+    /// the one the eventual writer must claim. Test-only: production paths name
+    /// a ceiling or a grant.
+    #[cfg(test)]
     fn begin_turn(&mut self, at: DateTime<Utc>, input: UserInput) -> Arc<TurnDispatch> {
         self.begin_turn_at_most(at, input, None)
     }
@@ -1390,17 +1471,32 @@ impl ThreadRecord {
         input: UserInput,
         ceiling: Option<RuntimeMode>,
     ) -> Arc<TurnDispatch> {
+        self.begin_turn_for_work(at, input, ceiling, None)
+    }
+
+    /// [`Self::begin_turn_at_most`] for a turn an outside grant asked for.
+    fn begin_turn_for_work(
+        &mut self,
+        at: DateTime<Utc>,
+        input: UserInput,
+        ceiling: Option<RuntimeMode>,
+        grant: Option<String>,
+    ) -> Arc<TurnDispatch> {
         // A new turn is a fresh attempt: the previous limit, any resume target
         // and the ceiling the paused turn carried no longer describe the thread.
         self.resume_at = None;
         self.limit = None;
-        self.meta.resume_ceiling = None;
         self.transport_error_reported = None;
         self.transport_report = None;
         self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
         let turn_id = TurnId::new_uuid_v7();
         let item_id = assistant_item_id(&turn_id);
-        let dispatch = Arc::new(TurnDispatch::new_at_most(turn_id.clone(), input, ceiling));
+        let dispatch = Arc::new(TurnDispatch::new_for_work(
+            turn_id.clone(),
+            input,
+            ceiling,
+            grant,
+        ));
         self.active = Some(ActiveTurn {
             turn_id: turn_id.clone(),
             item_id: item_id.clone(),
@@ -1478,6 +1574,7 @@ impl ThreadRecord {
             generation: current,
             session,
             applied_limit_reset,
+            ceiling,
         } = std::mem::replace(&mut self.session, SessionSlot::None)
         else {
             return;
@@ -1488,6 +1585,7 @@ impl ThreadRecord {
                 generation: current,
                 session,
                 applied_limit_reset,
+                ceiling,
             };
             return;
         }
@@ -1496,6 +1594,7 @@ impl ThreadRecord {
             DyingSession {
                 session,
                 report: None,
+                ceiling,
                 applied_reset: applied_limit_reset,
             },
         );
@@ -2020,7 +2119,6 @@ impl ThreadRecord {
         self.scheduled_limit = None;
         self.resume_at = None;
         self.meta.parked = None;
-        self.meta.resume_ceiling = None;
     }
 
     /// The live session, when there is one.
@@ -2167,6 +2265,20 @@ impl ThreadManager {
         let handle = self.inner.handle(thread_id).await.ok()?;
         let record = handle.lock().await;
         Some(record.meta.clone())
+    }
+
+    /// The outside grant whose turn is running, with that turn's ceiling.
+    ///
+    /// A tool called inside the turn uses this to bind any work that outlives
+    /// the turn (a PR watch) to the grant and its limit.
+    pub async fn active_turn_grant(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<(String, Option<RuntimeMode>)> {
+        let handle = self.inner.handle(thread_id).await.ok()?;
+        let record = handle.lock().await;
+        let dispatch = &record.active.as_ref()?.dispatch;
+        Some((dispatch.grant()?.to_owned(), dispatch.ceiling()))
     }
 
     /// Whether a turn is in flight for this thread.
@@ -2412,9 +2524,20 @@ impl ThreadManager {
     ///
     /// Returns as soon as the thread row and the turn start are durable; harness
     /// output follows as events.
-    pub async fn create_thread(
+    pub async fn create_thread(&self, request: NewThread) -> Result<CreatedThread, ManagerError> {
+        self.create_thread_for_work(request, None, None).await
+    }
+
+    /// Creates a thread whose first turn is work an outside grant asked for.
+    ///
+    /// `ceiling` is attached to that first dispatch, not just to the thread's
+    /// recorded mode: raising the mode while the first prompt runs must not
+    /// lift the cap, and a resume after a usage limit keeps it.
+    pub async fn create_thread_for_work(
         &self,
         mut request: NewThread,
+        ceiling: Option<RuntimeMode>,
+        grant: Option<String>,
     ) -> Result<CreatedThread, ManagerError> {
         request.workspace_path = expand_home(&request.workspace_path);
         if !self.inner.harnesses.get(request.harness).is_some() {
@@ -2523,7 +2646,6 @@ impl ThreadManager {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
-            resume_ceiling: None,
         };
         let title_workspace = meta.workspace_path.clone();
 
@@ -2550,18 +2672,21 @@ impl ThreadManager {
             advertised_models: Vec::new(),
             session_settings: None,
             settings_lock: Arc::new(Mutex::new(())),
+            switch_lock: Arc::new(Mutex::new(())),
             ttft_ms: None,
             context_window: None,
             branch: None,
             restored_parked: false,
             closed: false,
         };
-        let dispatch = record.begin_turn(
+        let dispatch = record.begin_turn_for_work(
             now,
             UserInput {
                 text: request.prompt.clone(),
                 attachments: harness_attachments,
             },
+            ceiling,
+            grant,
         );
         let turn_id = dispatch.turn_id.clone();
 
@@ -2678,6 +2803,23 @@ impl ThreadManager {
         attachments: Vec<AttachmentId>,
         ceiling: Option<RuntimeMode>,
     ) -> Result<AcceptedMessage, ManagerError> {
+        self.send_message_for_work(thread_id, text, attachments, ceiling, None)
+            .await
+    }
+
+    /// Appends a message an outside grant asked for.
+    ///
+    /// The grant id rides with the turn so a PR watch that turn creates can
+    /// later ask whether the grant is still live. `ceiling` is the grant's own
+    /// limit, never the thread's mode.
+    pub async fn send_message_for_work(
+        &self,
+        thread_id: &ThreadId,
+        text: String,
+        attachments: Vec<AttachmentId>,
+        ceiling: Option<RuntimeMode>,
+        grant: Option<String>,
+    ) -> Result<AcceptedMessage, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let resolved_attachments = self
             .inner
@@ -2702,7 +2844,6 @@ impl ThreadManager {
                 // The new message is the next turn, so no resume target
                 // describes the thread any more.
                 record.resume_at = None;
-                record.meta.resume_ceiling = None;
             }
             if stale_schedule && let Some(meter) = self.inner.meter.get() {
                 let _ = meter.cancel_schedule(thread_id).await;
@@ -2721,6 +2862,7 @@ impl ThreadManager {
                     attachments: harness_attachments,
                 },
                 ceiling,
+                grant,
             });
             let mut domain = vec![ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -2736,7 +2878,6 @@ impl ThreadManager {
                 // The cancelled schedule explains nothing any more, so drop the
                 // pause it left behind even when it held no prompt to release.
                 record.meta.parked = None;
-                record.meta.resume_ceiling = None;
                 record.limit = None;
             }
             let wire = vec![Event::ItemCompleted {
@@ -2765,13 +2906,45 @@ impl ThreadManager {
             });
         }
 
-        let dispatch = record.begin_turn_at_most(
+        // No turn is running, so this send is about to select a session. A live
+        // mode switch applies to that session before it records the new value;
+        // choosing one in that window would trust a session that already
+        // switched. Take the same per-thread gate the live switch holds. The
+        // queued path above never needs it: it does not choose a session.
+        drop(record);
+        let switch_lock = handle.lock().await.switch_lock.clone();
+        let _switch = switch_lock.lock().await;
+        record = handle.lock().await;
+        if record.closed {
+            return Err(ManagerError::NotFound(format!(
+                "thread {thread_id} is closed"
+            )));
+        }
+        if record.active.is_some() {
+            // A settlement promoted queued work while this send waited for the
+            // gate. Queue this message behind it, exactly as if it had arrived
+            // a moment later.
+            drop(record);
+            drop(_switch);
+            return Box::pin(self.send_message_for_work(
+                thread_id,
+                text,
+                attachments,
+                ceiling,
+                grant,
+            ))
+            .await;
+        }
+        let now = self.now();
+
+        let dispatch = record.begin_turn_for_work(
             now,
             UserInput {
                 text: text.clone(),
                 attachments: harness_attachments,
             },
             ceiling,
+            grant,
         );
         let turn_id = dispatch.turn_id.clone();
         let stale_schedule = record.scheduled_limit.take().is_some();
@@ -3375,6 +3548,14 @@ impl ThreadManager {
             settings.fast,
         )?;
 
+        // From here the live session may change and the record has not caught
+        // up. A Send must not select a session in this window, so it waits on
+        // the same gate. The read above is deliberately outside it: a Send can
+        // safely start a turn before the switch, and the final decision below
+        // looks at the record it finds.
+        let switch_lock = handle.lock().await.switch_lock.clone();
+        let _switch = switch_lock.lock().await;
+
         let mut switched = false;
         // The live session an in-place switch actually changed, and its
         // catalogue after the switch, so the summary re-advertises what the new
@@ -3797,7 +3978,6 @@ impl ThreadManager {
         if let Some(record) = record.as_mut() {
             let was_paused = record.scheduled_limit.take().is_some();
             record.resume_at = None;
-            record.meta.resume_ceiling = None;
             release_pending = was_paused && record.pending_turn();
             if release_pending {
                 // The person's cancellation releases the parked prompt: the
@@ -4222,6 +4402,7 @@ impl Inner {
                         resume_at: schedule.resume_at,
                         reset_at,
                         schedule_id: schedule.schedule_id,
+                        ceiling: schedule.mode_ceiling,
                     });
             }
         }
@@ -4313,10 +4494,11 @@ impl Inner {
                                     // this pause was holding; no other turn may
                                     // be parked by it.
                                     parked_turn,
-                                    // The ceiling came back with the journal row,
-                                    // so a restart before the reset does not
-                                    // resume a capped turn at full autonomy.
-                                    ceiling: record.meta.resume_ceiling,
+                                    // The ceiling came back with the schedule row
+                                    // itself, so a restart between the arm and the
+                                    // reset still resumes at the capped turn's
+                                    // ceiling.
+                                    ceiling: restored.ceiling,
                                 });
                             }
                             Ok(_) => {
@@ -4328,7 +4510,6 @@ impl Inner {
                                 // change.
                                 release_prompt =
                                     record.pending_turn() && record.parks_persisted_prompt();
-                                record.meta.resume_ceiling = None;
                                 if !release_prompt {
                                     record.resume_at = None;
                                     record.meta.parked = None;
@@ -4386,7 +4567,6 @@ impl Inner {
                 // prompt runs now, so the thread leaves the paused phase and
                 // the limit no longer explains a wait.
                 record.meta.parked = None;
-                record.meta.resume_ceiling = None;
                 record.limit = None;
                 record.resume_at = None;
                 let released = vec![ThreadEvent::LimitResumeReleased { at: self.now() }];
@@ -4659,6 +4839,7 @@ impl Inner {
                 advertised_models: Vec::new(),
                 session_settings: None,
                 settings_lock: Arc::new(Mutex::new(())),
+                switch_lock: Arc::new(Mutex::new(())),
                 ttft_ms: None,
                 context_window: None,
                 branch,
@@ -4851,7 +5032,7 @@ impl Inner {
             && record.scheduled_limit.is_none()
             && let Some(queued) = record.queued.pop_front()
         {
-            let next = record.begin_turn_at_most(now, queued.input, queued.ceiling);
+            let next = record.begin_turn_for_work(now, queued.input, queued.ceiling, queued.grant);
             // This turn is the daemon's next step, not a person's Send: if the
             // transport it inherits dies before it runs, it goes back to the
             // queue instead of failing (see `requeue_promoted_turn`).
@@ -5061,6 +5242,7 @@ impl Inner {
                 generation,
                 session: Arc::clone(&session),
                 applied_limit_reset: None,
+                ceiling: turn.ceiling(),
             };
             // A new session that names a catalogue replaces the last one; a
             // session that names none leaves it alone, because the harness and
@@ -5209,6 +5391,7 @@ impl Inner {
         &self,
         record: &mut ThreadRecord,
         generation: Option<u64>,
+        ceiling: Option<RuntimeMode>,
         reset_at: Option<DateTime<Utc>>,
         auto_resume: bool,
         now: DateTime<Utc>,
@@ -5268,15 +5451,14 @@ impl Inner {
         // turn is still the active, pending dispatch, and a pump-end advance
         // must not deliver it into the provider this newer reset named.
         let parked_turn = record.parked_turn_to_keep();
-        // The resume this pause owns must keep the capped turn's ceiling: it is
-        // the turn whose autonomy the person's grant limited, and a policy
-        // prompt started later would otherwise run at the thread's own mode.
-        let ceiling = record
-            .active
-            .as_ref()
-            .and_then(|active| active.dispatch.ceiling());
+        // The resume this pause owns must keep the ceiling of the turn that
+        // reported the limit: it is the turn whose autonomy the person's grant
+        // limited, and a policy prompt started later would otherwise run at the
+        // thread's own mode. The ceiling travels with the report, so a dead
+        // session's exit report that arrives after its capped turn settled
+        // still caps the resume.
         match meter
-            .arm_schedule(&thread_id, reset_at, prompt, None, now)
+            .arm_schedule(&thread_id, reset_at, prompt, None, now, ceiling)
             .await
         {
             Ok(schedule) => {
@@ -5309,7 +5491,6 @@ impl Inner {
                     parked_turn,
                     ceiling,
                 });
-                record.meta.resume_ceiling = ceiling;
                 record.note_applied_reset(generation, reset_at);
                 None
             }
@@ -5415,6 +5596,7 @@ impl Inner {
                             &mut record,
                             LimitObservation {
                                 generation: Some(claimed_generation),
+                                ceiling: dispatch.ceiling(),
                                 reset_at: signal.reset_at,
                                 auto_resume: true,
                             },
@@ -5553,6 +5735,7 @@ impl Inner {
                                 &mut record,
                                 LimitObservation {
                                     generation: Some(claimed_generation),
+                                    ceiling: dispatch.ceiling(),
                                     reset_at: signal.reset_at,
                                     auto_resume,
                                 },
@@ -5643,10 +5826,16 @@ impl Inner {
             let mut detached = None;
             if let Some(signal) = limit {
                 let auto_resume = signal.reset_at.is_some();
+                // This write still owns the turn, so its dispatch is the work
+                // the limit reported on.
+                let ceiling = record
+                    .dispatch_for(turn_id)
+                    .and_then(|dispatch| dispatch.ceiling());
                 if let Some(event) = self
                     .apply_limit_hit(
                         &mut record,
                         Some(claimed_generation),
+                        ceiling,
                         signal.reset_at,
                         auto_resume,
                         now,
@@ -5817,7 +6006,7 @@ impl Inner {
         // prompt is not claimed yet.
         #[cfg(test)]
         self.pause_delivery().await;
-        let record = handle.lock().await;
+        let mut record = handle.lock().await;
         if record.dispatch_for(&dispatch.turn_id).is_none() || !record.session.is_live(session) {
             return None;
         }
@@ -5831,7 +6020,16 @@ impl Inner {
             return None;
         }
         let generation = record.session.generation()?;
-        dispatch.claim().then_some(generation)
+        if !dispatch.claim() {
+            return None;
+        }
+        // The session now owns this turn's ceiling. A limit report that names
+        // this session belongs to this work, even if the turn has settled by
+        // the time the report lands.
+        record
+            .session
+            .note_delivery_ceiling(generation, dispatch.ceiling());
+        Some(generation)
     }
 
     /// Gives a claimed prompt back when its session disappeared before the
@@ -6428,10 +6626,14 @@ impl Inner {
                     reset_at,
                     auto_resume,
                 } => {
+                    // The session that reported it was delivering this thread's
+                    // last turn; that turn's ceiling is what the resume keeps.
+                    let ceiling = record.session.ceiling_for(generation);
                     self.note_limit_hit(
                         &mut record,
                         LimitObservation {
                             generation: Some(generation),
+                            ceiling,
                             reset_at,
                             auto_resume,
                         },
@@ -6973,11 +7175,12 @@ impl Inner {
     ) {
         let LimitObservation {
             generation,
+            ceiling,
             reset_at,
             auto_resume,
         } = limit;
         if let Some(event) = self
-            .apply_limit_hit(record, generation, reset_at, auto_resume, now)
+            .apply_limit_hit(record, generation, ceiling, reset_at, auto_resume, now)
             .await
         {
             let _ = self.emit(record, Vec::new(), vec![event]).await;
@@ -7181,10 +7384,12 @@ impl Inner {
         }
         let mut domain = Vec::new();
         let mut wire = Vec::new();
+        let ceiling = record.session.ceiling_for(generation);
         self.note_limit_hit(
             &mut record,
             LimitObservation {
                 generation: Some(generation),
+                ceiling,
                 reset_at,
                 auto_resume,
             },
@@ -7267,10 +7472,15 @@ impl Inner {
                 let now = self.now();
                 let mut domain = Vec::new();
                 let mut wire = Vec::new();
+                let ceiling = record
+                    .dying_sessions
+                    .get(&generation)
+                    .and_then(|dying| dying.ceiling);
                 self.note_limit_hit(
                     &mut record,
                     LimitObservation {
                         generation: Some(generation),
+                        ceiling,
                         reset_at,
                         auto_resume,
                     },
@@ -7398,10 +7608,15 @@ impl Inner {
         let now = self.now();
         let mut domain = Vec::new();
         let mut wire = Vec::new();
+        let ceiling = record
+            .dying_sessions
+            .get(&generation)
+            .and_then(|dying| dying.ceiling);
         self.note_limit_hit(
             record,
             LimitObservation {
                 generation: Some(generation),
+                ceiling,
                 reset_at: Some(reset_at),
                 auto_resume: true,
             },
@@ -7423,6 +7638,11 @@ impl Inner {
     /// starting delivers it when it is ready, and this returns without starting
     /// a second one.
     async fn advance_queue(self: &Arc<Self>, handle: ThreadHandle) {
+        // The same gate a live mode switch holds: a switch that applied Full
+        // access to this thread's session but has not recorded it yet must not
+        // let a capped turn reuse that session.
+        let switch_lock = handle.lock().await.switch_lock.clone();
+        let _switch = switch_lock.lock().await;
         let (needs_session, stale) = {
             let mut record = handle.lock().await;
             if record.closed || record.active.is_none() {
@@ -10303,6 +10523,7 @@ mod tests {
                     reason: "the old model hit its limit".into(),
                 }),
                 manager.now(),
+                None,
             )
             .await
             .expect("arm schedule");
@@ -14498,7 +14719,14 @@ mod tests {
             let mut record = handle.lock().await;
             let event = manager
                 .inner
-                .apply_limit_hit(&mut record, Some(2), Some(newer_reset), true, manager.now())
+                .apply_limit_hit(
+                    &mut record,
+                    Some(2),
+                    None,
+                    Some(newer_reset),
+                    true,
+                    manager.now(),
+                )
                 .await;
             assert!(event.is_none(), "the newer pause armed");
         }
@@ -15779,6 +16007,7 @@ mod tests {
                     &mut record,
                     LimitObservation {
                         generation: Some(99),
+                        ceiling: None,
                         reset_at: Some(newer_reset),
                         auto_resume: true,
                     },
@@ -17001,7 +17230,14 @@ mod tests {
             let mut record = handle.lock().await;
             let event = manager
                 .inner
-                .apply_limit_hit(&mut record, Some(1), Some(reset_at), true, manager.now())
+                .apply_limit_hit(
+                    &mut record,
+                    Some(1),
+                    None,
+                    Some(reset_at),
+                    true,
+                    manager.now(),
+                )
                 .await;
             assert!(event.is_none(), "the older generation armed a pause");
             assert_eq!(
@@ -17082,7 +17318,14 @@ mod tests {
             let mut record = handle.lock().await;
             let event = manager
                 .inner
-                .apply_limit_hit(&mut record, Some(9), Some(reset_at), true, manager.now())
+                .apply_limit_hit(
+                    &mut record,
+                    Some(9),
+                    None,
+                    Some(reset_at),
+                    true,
+                    manager.now(),
+                )
                 .await;
             assert!(event.is_none(), "the other generation armed its pause");
             assert!(
@@ -17158,7 +17401,14 @@ mod tests {
             let mut record = handle.lock().await;
             let event = manager
                 .inner
-                .apply_limit_hit(&mut record, Some(9), Some(newer_reset), true, manager.now())
+                .apply_limit_hit(
+                    &mut record,
+                    Some(9),
+                    None,
+                    Some(newer_reset),
+                    true,
+                    manager.now(),
+                )
                 .await;
             assert!(event.is_none(), "the other generation armed its pause");
         }
@@ -17238,7 +17488,14 @@ mod tests {
             let mut record = handle.lock().await;
             let event = manager
                 .inner
-                .apply_limit_hit(&mut record, Some(2), Some(newer_reset), true, manager.now())
+                .apply_limit_hit(
+                    &mut record,
+                    Some(2),
+                    None,
+                    Some(newer_reset),
+                    true,
+                    manager.now(),
+                )
                 .await;
             assert!(event.is_none(), "the newer pause armed");
             let scheduled = record
@@ -19995,11 +20252,6 @@ mod tests {
                 Some(RuntimeMode::ApprovalRequired),
                 "the pause did not carry the capped turn's ceiling"
             );
-            assert_eq!(
-                record.meta.resume_ceiling,
-                Some(RuntimeMode::ApprovalRequired),
-                "the ceiling was not recorded for the journal"
-            );
         }
 
         // A restart between the limit and the reset keeps the ceiling.
@@ -20020,15 +20272,6 @@ mod tests {
         manager.resync_meter_state().await;
         let mut events = manager.subscribe();
 
-        let meta = manager
-            .thread_meta(&created.thread_id)
-            .await
-            .expect("thread meta");
-        assert_eq!(
-            meta.resume_ceiling,
-            Some(RuntimeMode::ApprovalRequired),
-            "the journal did not carry the paused turn's ceiling"
-        );
         {
             let handle = manager
                 .inner
@@ -20060,6 +20303,285 @@ mod tests {
             started_modes(&restarted_settings),
             vec![RuntimeMode::ApprovalRequired],
             "the resumed prompt ran above the paused turn's ceiling"
+        );
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the resumed turn completed");
+        assert_eq!(status, TurnStatus::Completed);
+        manager.shutdown().await;
+    }
+    /// A live mode switch and session selection are serialised.
+    ///
+    /// `set_thread_runtime_mode` switches the live session before it records
+    /// what it applied. A supervised send that read the record in that window
+    /// saw the old setting, trusted the session that had already switched to
+    /// Full access, and wrote its prompt into it. The settings gate now holds
+    /// the send out until the switch is recorded.
+    #[tokio::test]
+    async fn a_live_mode_switch_is_serialised_with_a_supervised_send() {
+        use h4rn_harness::SettingChange;
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, settings) = FakeHarness::new().with_session_settings();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        assert_eq!(
+            started_modes(&settings),
+            vec![RuntimeMode::ApprovalRequired],
+            "the thread did not start at its own mode"
+        );
+
+        let commit = Arc::new(SettingsCommitPause::default());
+        *manager
+            .inner
+            .settings_commit_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(commit.clone());
+
+        // The switch reaches the live session and waits before recording it.
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let switching = tokio::spawn(async move {
+            this.set_thread_runtime_mode(&thread_id, RuntimeMode::FullAccess)
+                .await
+        });
+        commit.switched.notified().await;
+        let sends_before = sends.get();
+
+        // A supervised send arrives in that window. It must not select the
+        // session the switch has already made permissive.
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let mut sending = tokio::spawn(async move {
+            this.send_message_at_most(
+                &thread_id,
+                "supervised".into(),
+                Vec::new(),
+                Some(RuntimeMode::ApprovalRequired),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut sending)
+                .await
+                .is_err(),
+            "the send selected a session before the switch recorded what it applied"
+        );
+        assert_eq!(
+            sends.get(),
+            sends_before,
+            "the supervised prompt reached the harness while the switch was unrecorded"
+        );
+
+        commit.commit.notify_one();
+        switching
+            .await
+            .expect("the switch task")
+            .expect("record the mode");
+        let sent = sending.await.expect("the send task").expect("send");
+
+        assert!(
+            wait_until(|| started_modes(&settings).len() >= 2).await,
+            "the supervised prompt was not given a clamped session: {:?}",
+            settings.get()
+        );
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired),
+            "the supervised prompt ran on the full-access session: {:?}",
+            settings.get()
+        );
+        assert_eq!(
+            settings
+                .get()
+                .iter()
+                .filter(|change| matches!(change, SettingChange::Mode(RuntimeMode::FullAccess)))
+                .count(),
+            1,
+            "the person's switch did not reach the old session: {:?}",
+            settings.get()
+        );
+        let _ = next_turn_completion(&mut events).await;
+        let _ = sent;
+        *manager
+            .inner
+            .settings_commit_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        manager.shutdown().await;
+    }
+
+    /// The exit report that arrives after a capped turn still caps the resume.
+    ///
+    /// The session's own process can report a provider reset between turns,
+    /// after the capped turn has settled and `active` is gone. The ceiling has
+    /// to come from the work that session last ran, not from whichever
+    /// dispatch happens to be active.
+    #[tokio::test]
+    async fn an_exit_report_after_the_capped_turn_settles_keeps_its_ceiling() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let (harness, injector) = FakeHarness::new().with_event_injector();
+        let (harness, settings) = harness.with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        manager.set_meter(Arc::new(
+            h4rn_meter::MeterHub::in_memory().await.expect("meter"),
+        ));
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.runtime_mode = RuntimeMode::FullAccess;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // The capped turn starts its own approval-required session and settles.
+        manager
+            .send_message_at_most(
+                &created.thread_id,
+                "capped".into(),
+                Vec::new(),
+                Some(RuntimeMode::ApprovalRequired),
+            )
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired)
+        );
+
+        // The process exits between turns and its exit report carries a reset.
+        injector.emit(HarnessEvent::TransportClosed {
+            message: "the agent exited".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
+            reset_at: Some(reset_at),
+        });
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        assert!(
+            wait_until(|| {
+                handle
+                    .try_lock()
+                    .is_ok_and(|record| record.scheduled_limit.is_some())
+            })
+            .await,
+            "the exit report armed no pause"
+        );
+        {
+            let record = handle.lock().await;
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.ceiling),
+                Some(RuntimeMode::ApprovalRequired),
+                "the pause lost the settled turn's ceiling"
+            );
+        }
+
+        manager
+            .resume_now(&created.thread_id)
+            .await
+            .expect("the pause fires");
+        assert!(
+            wait_until(|| started_modes(&settings).len() >= 2).await,
+            "the resume started no session"
+        );
+        assert_eq!(
+            started_modes(&settings).last().copied(),
+            Some(RuntimeMode::ApprovalRequired),
+            "the resume ran above the capped turn's ceiling: {:?}",
+            settings.get()
+        );
+        manager.shutdown().await;
+    }
+
+    /// A schedule committed by itself carries the ceiling across a restart.
+    ///
+    /// This is the state after a crash between the schedule write and any other
+    /// record: the ledger row is all that survived. It must still resume at the
+    /// ceiling of the turn that reported the limit.
+    #[tokio::test]
+    async fn a_schedule_alone_carries_the_ceiling_across_a_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let host = HostId::new("host_test");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let (harness, _settings) = FakeHarness::new().with_session_settings();
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.runtime_mode = RuntimeMode::FullAccess;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        manager.shutdown().await;
+        drop(manager);
+
+        // Only the ledger row exists: no thread record ever learned it.
+        meter
+            .arm_schedule(
+                &created.thread_id,
+                Some(reset_at),
+                "continue".into(),
+                None,
+                chrono::Utc::now(),
+                Some(RuntimeMode::ApprovalRequired),
+            )
+            .await
+            .expect("arm the schedule");
+
+        let (harness, restarted_settings) = FakeHarness::new().with_session_settings();
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        manager.set_meter(Arc::clone(&meter));
+        manager.resync_meter_state().await;
+        let mut events = manager.subscribe();
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        {
+            let record = handle.lock().await;
+            assert_eq!(
+                record
+                    .scheduled_limit
+                    .as_ref()
+                    .and_then(|scheduled| scheduled.ceiling),
+                Some(RuntimeMode::ApprovalRequired),
+                "the restored pause lost the ceiling stored with the schedule"
+            );
+        }
+        manager
+            .resume_now(&created.thread_id)
+            .await
+            .expect("the restored pause fires");
+        assert!(
+            wait_until(|| !started_modes(&restarted_settings).is_empty()).await,
+            "the resume started no session"
+        );
+        assert_eq!(
+            started_modes(&restarted_settings),
+            vec![RuntimeMode::ApprovalRequired],
+            "the resumed prompt ran above the stored ceiling"
         );
         let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
             .await
