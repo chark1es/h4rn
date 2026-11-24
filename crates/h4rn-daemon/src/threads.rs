@@ -2862,6 +2862,10 @@ impl ThreadManager {
     ///
     /// The lifecycle raises a hand and wakes a snoozed thread, and the wire
     /// carries the request itself so every client can render the card.
+    ///
+    /// Placement is checked here, under the same thread-record lock that
+    /// appends the card. A settle commits under that lock too, so it cannot
+    /// slip between a check and the event that makes the card answerable.
     pub async fn emit_guest_request(
         &self,
         thread_id: &ThreadId,
@@ -2869,6 +2873,12 @@ impl ThreadManager {
     ) -> Result<u64, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let mut record = handle.lock().await;
+        let tab = record.summary(&self.inner.options.settings, self.now()).tab;
+        if tab == h4rn_protocol::ThreadTab::Settled {
+            return Err(ManagerError::Conflict(
+                "This thread has settled. The owner can share it again after reopening it.".into(),
+            ));
+        }
         let now = self.now();
         let domain = vec![
             ThreadEvent::MessageReceived {

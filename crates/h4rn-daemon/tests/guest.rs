@@ -4020,11 +4020,14 @@ async fn a_snapshot_read_under_a_replaced_link_never_answers() {
     };
     gate.arrived().await;
 
-    owner
-        .request(ClientRequest::StopGuestSharing {
-            thread_id: thread_id.clone(),
-        })
-        .await;
+    // Replace the link, don't end it: the thread still has a live link when
+    // the old poll resumes, so a check for "any live link on this thread"
+    // would wrongly answer it. Only the exact link that started the read may.
+    daemon
+        .guest
+        .create(&thread_id, &format!("{base}/guest"))
+        .await
+        .expect("replace the link");
     gate.release();
 
     let (status, _, body) = polling.await.expect("poll task");
@@ -4085,5 +4088,130 @@ async fn a_guest_polling_after_a_dismiss_and_a_sweep_still_sees_its_card_resolve
         request_status(&daemon, &request_id).await.as_deref(),
         Some("dismissed")
     );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_resolution_lost_from_the_journal_is_emitted_by_the_sweep() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "lost resolution").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post("/messages", &guest_text_message("answer me"))
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    let resume = browser.state(0).await.next_seq;
+
+    // The exact state a failed journal write leaves: the row records the
+    // answer, but no `GuestRequestResolved` exists on the wire.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query(
+        "DELETE FROM daemon_wire_events
+         WHERE thread_id = ? AND event_json LIKE '%\"guest_request_resolved\"%'",
+    )
+    .bind(thread_id.as_str())
+    .execute(&pool)
+    .await
+    .expect("drop the resolution event");
+    sqlx::query("UPDATE guest_requests SET resolution_emitted = 0 WHERE request_id = ?")
+        .bind(&request_id)
+        .execute(&pool)
+        .await
+        .expect("clear the emitted marker");
+    pool.close().await;
+
+    daemon.guest.sweep_expired().await.expect("sweep");
+
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "the sweep never re-emitted a lost resolution: {:?}",
+        later.events
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_dismiss_whose_files_cannot_be_removed_stays_retryable_after_stop_sharing() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "dismiss cleanup").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "with a file".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"hello"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists(), "the request wrote no directory");
+
+    // A refused disk: the path exists but cannot be removed as a directory.
+    std::fs::remove_dir_all(&directory).expect("clear the request directory");
+    std::fs::write(&directory, b"not a directory").expect("block the cleanup");
+
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+
+    owner
+        .request(ClientRequest::StopGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    // The link is gone, but the row is a cleanup record until its files are
+    // gone: dropping it with the orphan still on disk would make the cleanup
+    // unreachable forever.
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("deleting"),
+        "Stop sharing dropped a row whose files are still on disk"
+    );
+    assert!(directory.exists());
+
+    std::fs::remove_file(&directory).expect("unblock the cleanup");
+    daemon.guest.sweep_expired().await.expect("sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await,
+        None,
+        "the retried cleanup never removed the row"
+    );
+    assert!(!directory.exists());
     daemon.stop().await;
 }

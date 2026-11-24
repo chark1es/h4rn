@@ -605,16 +605,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 - **A guest link now shows only what it was allowed to show, at every moment.** An agent error
   reaches you with its full diagnostic — including any path on this machine — while the guest
-  gets a plain "The agent hit an error." A thread that settles just as a guest message is being
-  published no longer gets an unanswerable card, because placement is checked again as the card
-  appears and a settle waits behind the same lock. A poll that read the journal under a link you
-  stopped or replaced mid-read is refused instead of delivering events from after your decision.
-  A guest who reloads after you dismissed its message and the sweep ran still learns that the card
-  resolved: a finished request keeps its row until its link ends. Over Connect, the daemon now
-  admits an upload — checking the link, the browser and the pending budget — before Connect sends
-  any body bytes, and that admission keeps one of the capped upload slots until the last frame of
-  the answer is queued; a refused upload costs no body frames. The attach control's keyboard focus
-  ring uses the design system's focus colour in both themes.
+  gets a plain "The agent hit an error." A thread that settles while a guest message is being
+  published no longer gets an unanswerable card: the last placement check and the card's append
+  happen under the same thread record lock, so a settle either refuses the card or resolves it.
+  A poll that read the journal under a link you stopped or replaced mid-read is refused instead
+  of delivering events from after your decision, and replacing the link does not make the old
+  browser's poll valid again. A Send or Dismiss never loses its answer: a failed journal write
+  leaves a durable marker that the sweep, a restart and Stop sharing all retry, and Stop sharing
+  keeps a finished row until its files are gone and its answer is on the wire. Over Connect a
+  daemon announces on its relay hello that it admits uploads, and Connect sends no body until
+  that admission arrives; a current daemon that stays quiet is an error, never mistaken for an
+  older build, while a daemon that does not announce it keeps the older bounded wait. Uploads
+  hold a separate capped slot from state and attachment reads, and an abandoned upload gives it
+  back at the next ping. The attach control's keyboard focus ring uses the design system's focus
+  colour in both themes.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,

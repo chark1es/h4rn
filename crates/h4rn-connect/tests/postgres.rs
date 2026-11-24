@@ -1453,3 +1453,147 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
     server.abort();
     fake.abort();
 }
+
+#[tokio::test]
+#[ignore]
+async fn a_failed_guest_proxy_leaves_no_waiter_and_no_body() {
+    use h4rn_protocol::RelayServerEvent;
+    use h4rn_protocol::{GuestHttpChunk, GuestHttpRequest, GuestHttpResponse, RelayFrameKind};
+
+    let token = "guest_token_for_the_failure_test";
+
+    // A relay that cannot deliver the frame: the peer's queue is already gone.
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-failure-a")).await;
+    let machine = state
+        .store
+        .machines(daemon.user.id, &std::collections::HashSet::new())
+        .await
+        .expect("machines")
+        .into_iter()
+        .find(|machine| machine.name == "guest-failure-a")
+        .expect("the daemon's machine");
+    let machine_id = Uuid::parse_str(&machine.id).expect("machine id");
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    drop(rx);
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_string(),
+            tx,
+        })
+        .await;
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/guest/{machine_id}/{token}/state"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delivery failure response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        state.relay.pending_guests().await,
+        0,
+        "a failed delivery kept its waiter"
+    );
+
+    // A daemon that starts a chunked answer and then never finishes: the
+    // answer timeout must take the waiter and the half-arrived body with it.
+    let state = test_state_with(|config| config.guest_answer_timeout_secs = 1).await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-failure-b")).await;
+    let machine = state
+        .store
+        .machines(daemon.user.id, &std::collections::HashSet::new())
+        .await
+        .expect("machines")
+        .into_iter()
+        .find(|machine| machine.name == "guest-failure-b")
+        .expect("the daemon's machine");
+    let machine_id = Uuid::parse_str(&machine.id).expect("machine id");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_string(),
+            tx,
+        })
+        .await;
+    let fake = {
+        let relay = state.relay.clone();
+        let device = daemon.device.id;
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let RelayServerEvent::Frame { frame } = event else {
+                    continue;
+                };
+                if frame.kind != RelayFrameKind::GuestHttp {
+                    continue;
+                }
+                let request: GuestHttpRequest =
+                    serde_json::from_slice(&frame.payload).expect("request json");
+                // A chunked answer that has started is never completed.
+                let started = relay
+                    .complete_guest(
+                        device,
+                        GuestHttpResponse {
+                            request_id: request.request_id.clone(),
+                            status: 200,
+                            chunked: true,
+                            headers: vec![(
+                                "content-type".to_string(),
+                                "application/json".to_string(),
+                            )],
+                            body: Vec::new(),
+                            set_cookie: None,
+                        },
+                    )
+                    .await;
+                assert!(started);
+                let chunk = relay
+                    .complete_guest_chunk(
+                        device,
+                        GuestHttpChunk {
+                            request_id: request.request_id,
+                            seq: 0,
+                            last: false,
+                            body: b"{\"state\":\"active\"".to_vec(),
+                        },
+                    )
+                    .await;
+                assert!(chunk);
+                break;
+            }
+        })
+    };
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/guest/{machine_id}/{token}/state"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("timeout response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        state.relay.pending_guests().await,
+        0,
+        "a timed-out exchange kept its waiter"
+    );
+    assert_eq!(
+        state.relay.pending_guest_bodies().await,
+        0,
+        "a timed-out exchange kept its half-arrived body"
+    );
+    fake.await.expect("fake daemon task");
+}

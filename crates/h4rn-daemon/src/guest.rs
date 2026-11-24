@@ -195,6 +195,12 @@ struct RequestRow {
     attachments: Vec<StoredAttachment>,
     created_at: DateTime<Utc>,
     status: String,
+    /// `sent` or `dismissed` once the card has an answer; `None` while it is
+    /// still waiting.
+    resolution: Option<String>,
+    /// Whether the resolution event reached the journal. A row whose answer
+    /// is still missing keeps this false so every cleanup path re-emits it.
+    resolution_emitted: bool,
 }
 
 impl RequestRow {
@@ -235,8 +241,8 @@ pub enum SubmitPhase {
     /// After the quota is reserved in the database and before files are
     /// written.
     AfterReserve,
-    /// After the first placement check and before the request becomes visible
-    /// to the owner, so a test can settle the thread in that window.
+    /// After the last placement check and before the card is appended, so a
+    /// test can settle the thread exactly between the two.
     BeforePublish,
 }
 
@@ -685,6 +691,26 @@ impl GuestService {
         )
         .execute(&self.pool)
         .await;
+        // The durable record of the card's answer: `resolution` says whether a
+        // finished request was sent or dismissed, and `resolution_emitted` says
+        // whether that event reached the journal. A failed write leaves the row
+        // here, so the sweep can try again instead of losing the answer.
+        for statement in [
+            "ALTER TABLE guest_requests ADD COLUMN resolution TEXT",
+            "ALTER TABLE guest_requests ADD COLUMN resolution_emitted INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = sqlx::query(statement).execute(&self.pool).await;
+        }
+        // A row from before these columns already carries its answer in its
+        // status. Treat its resolution as not yet emitted: a duplicate is
+        // harmless, a lost one is not.
+        let _ = sqlx::query(
+            "UPDATE guest_requests
+             SET resolution = CASE status WHEN 'sent' THEN 'sent' ELSE 'dismissed' END
+             WHERE resolution IS NULL AND status IN ('sent', 'dismissed', 'deleting')",
+        )
+        .execute(&self.pool)
+        .await;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_guest_requests_thread
              ON guest_requests (thread_id, status)",
@@ -758,7 +784,7 @@ impl GuestService {
     /// row and its files alone.
     async fn sweep_finished_requests(&self, recover_in_flight: bool) -> Result<(), GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
              FROM guest_requests",
         )
         .fetch_all(&self.pool)
@@ -797,6 +823,18 @@ impl GuestService {
             // link deletes the finished rows; a row whose link is gone has no
             // guest left to tell and is removed here.
             if linked > 0 && matches!(request.status.as_str(), "pending" | "sent" | "dismissed") {
+                // A resolution whose journal write failed is retried here
+                // while the card can still be resolved; the row is otherwise
+                // kept for the guest's next poll.
+                if !request.resolution_emitted
+                    && let Err(error) = self.emit_resolution(&request).await
+                {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "a guest resolution waits for the next sweep"
+                    );
+                }
                 continue;
             }
             // A Send, a submission or a publication still running owns its
@@ -824,8 +862,12 @@ impl GuestService {
         // A test can pause here, between the row this pass read and its update,
         // to prove a Send that claims in that window keeps the row and files.
         self.hold_cleanup().await;
+        // A request discarded while it was still waiting is answered as
+        // dismissed: the card must not survive the cleanup that claimed it. A
+        // finished row keeps the answer it already carries.
         let claimed = sqlx::query(
-            "UPDATE guest_requests SET status = 'deleting'
+            "UPDATE guest_requests
+             SET status = 'deleting', resolution = COALESCE(resolution, 'dismissed')
              WHERE request_id = ? AND status = ?",
         )
         .bind(&request.request_id)
@@ -835,35 +877,80 @@ impl GuestService {
         if claimed.rows_affected() == 0 {
             return Ok(());
         }
-        self.finish_cleanup(request).await;
+        // The claim wrote a dismissal for a waiting row; the cleanup record
+        // this pass carries must say the same so the event it emits matches.
+        let mut claimed_request = request.clone();
+        claimed_request.status = "deleting".into();
+        claimed_request.resolution = Some(
+            request
+                .resolution
+                .clone()
+                .unwrap_or_else(|| "dismissed".into()),
+        );
+        claimed_request.resolution_emitted = request.resolution_emitted;
+        self.finish_cleanup(&claimed_request).await;
+        Ok(())
+    }
+
+    /// Records one request's answer on the wire, once.
+    ///
+    /// Ok means the event is durable, or the thread is gone so no card can
+    /// remain. A failed write leaves `resolution_emitted` false, so the sweep,
+    /// startup and an ended link try again instead of losing the answer.
+    async fn emit_resolution(&self, request: &RequestRow) -> Result<(), ManagerError> {
+        if request.resolution_emitted {
+            return Ok(());
+        }
+        let Some(resolution) = request.resolution.as_deref() else {
+            return Ok(());
+        };
+        match self
+            .manager
+            .emit_guest_request_resolved(
+                &request.thread_id,
+                &request.request_id,
+                resolution == "sent",
+            )
+            .await
+        {
+            Ok(_) => {}
+            // The thread is gone, so no card can stay raised.
+            Err(ManagerError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        if let Err(error) =
+            sqlx::query("UPDATE guest_requests SET resolution_emitted = 1 WHERE request_id = ?")
+                .bind(&request.request_id)
+                .execute(&self.pool)
+                .await
+        {
+            // The event is on the wire; a failed marker can only cause a
+            // duplicate later, never a lost answer.
+            tracing::warn!(
+                request = %request.request_id,
+                %error,
+                "guest resolution was emitted but could not be marked"
+            );
+        }
         Ok(())
     }
 
     /// Removes a row already claimed as `deleting`.
     ///
-    /// The row goes last. A failed file delete leaves it for the next sweep; a
-    /// card is resolved before its row disappears so a crash in between can
-    /// never leave an answerable-looking card.
+    /// The row goes last, and only once both halves succeeded: its files are
+    /// gone and its card is resolved. A failure leaves the row for the next
+    /// sweep, so a refused disk or a failed journal write never orphans a
+    /// file or an answerable-looking card.
     async fn finish_cleanup(&self, request: &RequestRow) {
         match self.delete_request_files(request) {
             Ok(()) => {
-                match self
-                    .manager
-                    .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(ManagerError::NotFound(_)) => {
-                        // The thread is gone, so no card can stay raised.
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            request = %request.request_id,
-                            %error,
-                            "guest cleanup waits for the next sweep"
-                        );
-                        return;
-                    }
+                if let Err(error) = self.emit_resolution(request).await {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "guest cleanup waits for the next sweep"
+                    );
+                    return;
                 }
                 if let Err(error) = sqlx::query("DELETE FROM guest_requests WHERE request_id = ?")
                     .bind(&request.request_id)
@@ -885,11 +972,9 @@ impl GuestService {
                 );
                 // Take the card away even though the files must wait: the
                 // request can no longer be answered, and leaving its card up
-                // would offer a Send that can only fail.
-                let _ = self
-                    .manager
-                    .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
-                    .await;
+                // would offer a Send that can only fail. The row stays a
+                // cleanup record until the files are gone.
+                let _ = self.emit_resolution(request).await;
             }
         }
     }
@@ -925,7 +1010,9 @@ impl GuestService {
                     .await?;
                     return Ok(());
                 }
-                Err(ManagerError::NotFound(_)) => {}
+                // The thread is gone, or it settled after the check above; the
+                // row and its files have no card to raise.
+                Err(ManagerError::NotFound(_)) | Err(ManagerError::Conflict(_)) => {}
                 Err(error) => {
                     // Leave it publishing so the next startup tries again.
                     tracing::warn!(
@@ -1180,16 +1267,20 @@ impl GuestService {
             .remove(&link.link_id);
         self.discard_pending(link).await;
         // A finished request keeps its row while its link lives, so the guest
-        // can still learn that its card resolved. With the link gone no guest
-        // can read it, so the row goes with the link. A `sending` row belongs
-        // to a Send that will finish on its own; the sweep takes it later.
-        sqlx::query(
-            "DELETE FROM guest_requests
-             WHERE link_id = ? AND status IN ('sent', 'dismissed')",
-        )
-        .bind(&link.link_id)
-        .execute(&self.pool)
-        .await?;
+        // can still learn that its card resolved. With the link gone the row
+        // is only a cleanup record: resolve an answer that never reached the
+        // journal, remove its files, and drop the row once both succeeded. A
+        // `sending` row belongs to a Send that will finish on its own, and the
+        // sweep takes anything this pass could not remove.
+        for request in self.finished_requests(&link.link_id).await? {
+            if let Err(error) = self.claim_and_discard(&request).await {
+                tracing::warn!(
+                    request = %request.request_id,
+                    %error,
+                    "guest cleanup after a link ended waits for the next sweep"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1896,9 +1987,6 @@ impl GuestService {
                 "This thread has settled. The owner can share it again after reopening it.".into(),
             ));
         }
-        // A test can pause here, between the placement check and the moment the
-        // card is raised, to settle the thread in that window.
-        self.hold_submit(SubmitPhase::BeforePublish).await;
         // Only now does the request become visible. The status starts as
         // `publishing`: the row and its files are the first half of one
         // decision, and the owner's card is the second. A crash in between
@@ -1931,13 +2019,18 @@ impl GuestService {
         // lives in its journal events), and an archive commits without this
         // lock. Re-check it now that the row is `publishing`: the settle hook
         // waits for the submission lock, so a thread that settled in the window
-        // is caught here instead of getting a card it can never answer.
+        // is caught here instead of getting a card it can never answer. This is
+        // the last check before the append; the append itself checks again
+        // under the thread's own record lock, which a settle also takes.
         if self.is_settled(&resolved.link.thread_id).await {
             self.remove_request(&request_id, &directory).await;
             return Err(GuestError::Link(
                 "This thread has settled. The owner can share it again after reopening it.".into(),
             ));
         }
+        // A test can pause here, right after the last placement check and
+        // before the card, to settle the thread in that window.
+        self.hold_submit(SubmitPhase::BeforePublish).await;
 
         let row = RequestRow {
             request_id,
@@ -1947,19 +2040,30 @@ impl GuestService {
             attachments: stored,
             created_at,
             status: "publishing".into(),
+            resolution: None,
+            resolution_emitted: false,
         };
         // The resolved event and the row are one decision: the submit lock is
         // still held, and ending a link takes it too, so this event cannot be
         // raised after the link's resolved event for the same request.
-        if let Err(error) = self
+        match self
             .manager
             .emit_guest_request(&row.thread_id, row.to_proto())
             .await
         {
-            // The thread disappeared between the guard and the event; the
-            // request must not outlive the thread it names.
-            self.remove_request(&row.request_id, &directory).await;
-            return Err(GuestError::NotFound(error.to_string()));
+            Ok(_) => {}
+            // The settle won the thread-record lock between the check above
+            // and the append. The request must not outlive that decision.
+            Err(ManagerError::Conflict(message)) => {
+                self.remove_request(&row.request_id, &directory).await;
+                return Err(GuestError::Link(message));
+            }
+            Err(error) => {
+                // The thread disappeared between the guard and the event; the
+                // request must not outlive the thread it names.
+                self.remove_request(&row.request_id, &directory).await;
+                return Err(GuestError::NotFound(error.to_string()));
+            }
         }
         // The card is raised and the row becomes the waiting request it claims
         // to be. If this update is interrupted the row stays `publishing`, and
@@ -2037,7 +2141,7 @@ impl GuestService {
 
     async fn pending_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
         let rows = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
              FROM guest_requests WHERE link_id = ? AND status = 'pending'
              ORDER BY created_at ASC",
         )
@@ -2047,9 +2151,22 @@ impl GuestService {
         rows.into_iter().map(row_to_request).collect()
     }
 
+    /// Finished rows whose link has ended, including ones already claimed.
+    async fn finished_requests(&self, link_id: &str) -> Result<Vec<RequestRow>, GuestError> {
+        let rows = sqlx::query(
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
+             FROM guest_requests
+             WHERE link_id = ? AND status IN ('sent', 'dismissed', 'deleting')",
+        )
+        .bind(link_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_request).collect()
+    }
+
     async fn request_by_id(&self, request_id: &str) -> Result<Option<RequestRow>, GuestError> {
         let row = sqlx::query(
-            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status
+            "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
              FROM guest_requests WHERE request_id = ?",
         )
         .bind(request_id)
@@ -2076,7 +2193,7 @@ impl GuestService {
                 "This thread is settled. Reopen it before sending a guest message.".into(),
             ));
         }
-        let Some(request) = self.request_by_id(request_id).await? else {
+        let Some(mut request) = self.request_by_id(request_id).await? else {
             return Err(GuestError::NotFound(
                 "That request no longer exists.".into(),
             ));
@@ -2118,14 +2235,27 @@ impl GuestService {
         match result {
             Ok(()) => {
                 self.delete_request_files_best_effort(&request);
-                sqlx::query("UPDATE guest_requests SET status = 'sent' WHERE request_id = ?")
-                    .bind(&request.request_id)
-                    .execute(&self.pool)
-                    .await?;
-                let _ = self
-                    .manager
-                    .emit_guest_request_resolved(&request.thread_id, &request.request_id, true)
-                    .await;
+                // The answer is recorded with the status in one write: a crash
+                // before the event leaves `resolution_emitted` false, so the
+                // sweep re-emits it instead of losing the card's answer.
+                sqlx::query(
+                    "UPDATE guest_requests
+                     SET status = 'sent', resolution = 'sent', resolution_emitted = 0
+                     WHERE request_id = ?",
+                )
+                .bind(&request.request_id)
+                .execute(&self.pool)
+                .await?;
+                request.status = "sent".into();
+                request.resolution = Some("sent".into());
+                request.resolution_emitted = false;
+                if let Err(error) = self.emit_resolution(&request).await {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %error,
+                        "a sent guest request's resolution waits for the next sweep"
+                    );
+                }
                 Ok(())
             }
             Err(error) => {
@@ -2156,13 +2286,14 @@ impl GuestService {
                 "This thread is settled; its guest messages were already discarded.".into(),
             ));
         }
-        let Some(request) = self.request_by_id(request_id).await? else {
+        let Some(mut request) = self.request_by_id(request_id).await? else {
             return Err(GuestError::NotFound(
                 "That request no longer exists.".into(),
             ));
         };
         let claimed = sqlx::query(
-            "UPDATE guest_requests SET status = 'dismissed'
+            "UPDATE guest_requests
+             SET status = 'dismissed', resolution = 'dismissed', resolution_emitted = 0
              WHERE request_id = ? AND thread_id = ? AND status = 'pending'",
         )
         .bind(request_id)
@@ -2178,10 +2309,16 @@ impl GuestService {
         // claim cannot turn this successful dismissal into "no longer exists".
         self.hold_claim().await;
         self.delete_request_files_best_effort(&request);
-        let _ = self
-            .manager
-            .emit_guest_request_resolved(&request.thread_id, &request.request_id, false)
-            .await;
+        request.status = "dismissed".into();
+        request.resolution = Some("dismissed".into());
+        request.resolution_emitted = false;
+        if let Err(error) = self.emit_resolution(&request).await {
+            tracing::warn!(
+                request = %request.request_id,
+                %error,
+                "a dismissed guest request's resolution waits for the next sweep"
+            );
+        }
         Ok(())
     }
 
@@ -2282,6 +2419,11 @@ fn row_to_request(row: sqlx::sqlite::SqliteRow) -> Result<RequestRow, GuestError
             .map(|value| value.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
         status: row.try_get("status")?,
+        resolution: row.try_get("resolution").unwrap_or(None),
+        resolution_emitted: row
+            .try_get::<i64, _>("resolution_emitted")
+            .map(|value| value != 0)
+            .unwrap_or(false),
     })
 }
 

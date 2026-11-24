@@ -24,7 +24,7 @@ use h4rn_protocol::{
     RelayServerEvent, RelayService,
 };
 use serde::Deserialize;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{Notify, RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::api::{AppState, Authed, ClientIp};
@@ -73,6 +73,16 @@ pub struct RelayHub {
     /// missed its body would leave a chunked answer assembling forever. One
     /// lock makes a forgotten exchange either wholly present or wholly gone.
     guests: RwLock<GuestBook>,
+    /// Features each connected peer announced on its relay hello.
+    ///
+    /// A daemon that did not announce a feature keeps the older path for it;
+    /// nothing here is inferred from how long a peer takes to answer.
+    features: RwLock<HashMap<Uuid, Vec<String>>>,
+    /// Peers whose hello has been processed, so a missing one can be
+    /// distinguished from a hello that is still in flight.
+    greeted: RwLock<std::collections::HashSet<Uuid>>,
+    /// Wakes a guest exchange that is waiting for a peer's hello.
+    greeted_now: Notify,
 }
 
 /// A browser request and the chunked answers being assembled for it.
@@ -129,6 +139,8 @@ impl RelayHub {
     /// so the caller can tell the other end that it went away.
     pub async fn unregister(&self, device_id: Uuid) -> Vec<Session> {
         self.peers.write().await.remove(&device_id);
+        self.features.write().await.remove(&device_id);
+        self.greeted.write().await.remove(&device_id);
         let mut sessions = self.sessions.write().await;
         let dead: Vec<String> = sessions
             .iter()
@@ -145,6 +157,65 @@ impl RelayHub {
     /// Whether a daemon is connected.
     pub async fn online(&self, device_id: Uuid) -> bool {
         self.peers.read().await.contains_key(&device_id)
+    }
+
+    /// Records the features a peer announced on its relay hello.
+    pub async fn announce(&self, device_id: Uuid, hello: h4rn_protocol::RelayHello) {
+        self.features
+            .write()
+            .await
+            .insert(device_id, hello.features);
+        self.greeted.write().await.insert(device_id);
+        // A stored permit means a waiter that checks after this call still
+        // sees the hello, so the order of the check and the wake cannot lose
+        // an announcement.
+        self.greeted_now.notify_one();
+    }
+
+    /// Whether one connected peer announced a feature.
+    ///
+    /// A peer that is gone, or never sent a hello, advertises nothing: the
+    /// relay then uses the path that peer is known to speak.
+    pub async fn advertises(&self, device_id: Uuid, feature: &str) -> bool {
+        self.features
+            .read()
+            .await
+            .get(&device_id)
+            .is_some_and(|features| features.iter().any(|known| known == feature))
+    }
+
+    /// Whether a peer advertised a feature, waiting briefly for its hello.
+    ///
+    /// A daemon that has just opened its socket may not have sent its hello
+    /// yet; treating that instant as an older build would let an upload start
+    /// before a current daemon could admit it. A hello that arrives inside
+    /// `grace` decides the question, and a peer that never sends one is the
+    /// older path it actually is.
+    pub async fn advertises_when_ready(
+        &self,
+        device_id: Uuid,
+        feature: &str,
+        grace: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            if self.advertises(device_id, feature).await {
+                return true;
+            }
+            if self.greeted.read().await.contains(&device_id) {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            if tokio::time::timeout(remaining, self.greeted_now.notified())
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
     }
 
     /// Whether the daemon for a machine is connected.
@@ -974,6 +1045,17 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
             }
             Ok(())
         }
+        RelayFrameKind::Hello => {
+            // A hello tells the relay which guest protocol the peer speaks.
+            // Only a daemon uses it; a client has no guest exchange to offer.
+            if authed.device.kind != "daemon" {
+                return Ok(());
+            }
+            if let Ok(hello) = serde_json::from_slice::<h4rn_protocol::RelayHello>(&frame.payload) {
+                state.relay.announce(authed.device.id, hello).await;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -994,6 +1076,8 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     fn peer(
@@ -1207,6 +1291,76 @@ mod tests {
         let answer = waiter.await.expect("answer");
         assert_eq!(answer.status, 200);
         assert_eq!(answer.body, b"hello");
+    }
+
+    #[tokio::test]
+    async fn a_hello_that_arrives_during_the_grace_still_negotiates() {
+        // A daemon that just opened its socket may not have sent its hello
+        // when the browser's request arrives. The window must not read as an
+        // older build.
+        let hub = Arc::new(RelayHub::new());
+        let daemon = Uuid::now_v7();
+        let announcing = Arc::clone(&hub);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            announcing
+                .announce(
+                    daemon,
+                    h4rn_protocol::RelayHello {
+                        features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
+                    },
+                )
+                .await;
+        });
+        assert!(
+            hub.advertises_when_ready(
+                daemon,
+                h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION,
+                Duration::from_secs(2)
+            )
+            .await,
+            "a hello inside the grace was treated as an older daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_never_says_hello_keeps_the_legacy_path() {
+        let hub = RelayHub::new();
+        let daemon = Uuid::now_v7();
+        let started = std::time::Instant::now();
+        assert!(
+            !hub.advertises_when_ready(
+                daemon,
+                h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION,
+                Duration::from_millis(100)
+            )
+            .await
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(90),
+            "the hello grace ended early"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hello_without_the_feature_is_an_answer_not_a_timeout() {
+        let hub = RelayHub::new();
+        let daemon = Uuid::now_v7();
+        hub.announce(daemon, h4rn_protocol::RelayHello { features: vec![] })
+            .await;
+        let started = std::time::Instant::now();
+        assert!(
+            !hub.advertises_when_ready(
+                daemon,
+                h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION,
+                Duration::from_secs(5)
+            )
+            .await
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a hello without the feature waited for the grace to expire"
+        );
     }
 
     #[tokio::test]

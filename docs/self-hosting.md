@@ -93,6 +93,7 @@ both, using the snake_case names shown below.
 | `H4RN_CONNECT_RATE_RELAY_CONNECTS_PER_MINUTE` | `120` | Relay upgrades per IP per minute. |
 | `H4RN_CONNECT_RATE_PAIRING_CODE_PER_HOUR` | `10` | Short-code claim attempts per user and per IP per hour. |
 | `H4RN_CONNECT_PAIRING_ATTEMPTS` | `10` | Failed claims before a pairing is burned. |
+| `H4RN_CONNECT_GUEST_ANSWER_TIMEOUT_SECS` | `120` | How long Connect waits for a relayed guest exchange's answer before forgetting the exchange. |
 
 `RUST_LOG` controls tracing. The relay logs metadata (ids, status,
 frame sizes), never payloads or secrets.

@@ -129,14 +129,16 @@ The guest's text and files run with the thread's current permission mode once
 you send them. Check them first, as you would anything pasted from a chat.
 
 Over Connect a message's files are never uploaded before the daemon agrees to
-the exchange. Connect asks first and streams no body until the daemon has checked
-the link, the browser and the pending budget; a refused message is answered
-without reading a byte of its body. That admission also reserves the daemon's
-concurrent-upload slot, which stays held until the last frame of the answer has
-left the daemon, so a slow browser cannot leave buffered uploads outside the
-cap. A guest page from an older daemon that does not answer the question falls
-back to the short pre-authorization buffer the daemon keeps for exactly that
-case.
+the exchange. The daemon says on its relay hello that it admits uploads, Connect
+asks first, and it streams no body until that answer arrives; a refused message
+is answered without reading a byte of its body. A current daemon that goes quiet
+is an error, never treated as an older build, so a slow machine cannot receive an
+upload it has not accepted. The daemon holds a separate upload slot from the
+moment it admits the body until the body is complete, so a browser that trickles
+an upload never takes the slot a state read or a snapshot needs, and a browser
+that disappears gives its slot back at the next ping. A guest page from an older
+daemon that does not announce admission keeps the short pre-authorization
+buffer that build implements.
 
 ## What the daemon enforces
 
@@ -153,10 +155,10 @@ the card above your composer. Startup finishes or discards a request interrupted
 between them, so there is never a row that uses quota without a card. If the
 link ended, expired, the Labs switch turned off or the thread settled while the
 files were being written, publication is refused and the files and row are
-deleted. Placement is checked again as the row becomes visible: a settle that
-committed after the first check is caught before the card appears, and the settle
-hook waits its turn behind the same lock, so a settled thread never keeps an
-unanswerable card.
+deleted. The last placement check and the card's append happen under the same
+thread record lock, so a settle commits either before the check (and the card is
+refused) or after the card (and the settle hook resolves it); a settled thread
+never keeps an unanswerable card.
 
 A state read is answered under the link that allowed it, and the link is checked
 again after the journal was read. Stopping or replacing the link while a poll is
@@ -168,8 +170,11 @@ update, so a message can never be both sent and dismissed, and the sweep can
 never pull the files out from under a Send that already claimed them, even when
 it read the row just before that Send claimed it. A finished request keeps its
 row until its link ends, so a guest that polls after you dismissed its message
-still learns that the card resolved; ending the link deletes those rows with it.
-A submission or a Send runs to
+still learns that the card resolved. The answer is durable: if writing its event
+fails, the row records that it is still owed, and the sweep, a restart and Stop
+sharing all re-emit it before the row can go. Ending the link only drops a
+finished row once both its files are gone and its answer is on the wire; anything
+else stays a cleanup record for the next sweep. A submission or a Send runs to
 completion on the daemon while it keeps running, even if the guest's browser
 disconnects or the owner's connection drops while it is writing, so a dropped
 connection cannot strand a half-written
@@ -208,8 +213,11 @@ public `/guest/<machine>/<token>` prefix. Every relayed answer is sandboxed with
 is sent as a download instead of opening in Connect's tab. Request and response
 bodies travel in bounded 512 KB frames, so a 10 MB upload never grows a shared
 relay socket frame; Connect refuses an exchange over the guest limit before it
-reaches the socket. An upload waits for the daemon's own admission frame before
-its first chunk, so a request the daemon will refuse costs no body frames.
-Guest routes are traced by their template
+reaches the socket. A daemon announces on its relay hello that it admits uploads,
+and Connect waits for that admission frame before an upload's first chunk, so a
+request the daemon will refuse costs no body frames. A daemon that does not
+announce it keeps the older short wait and its own bounded buffer. If a relayed
+exchange fails or its answer times out, Connect forgets both its waiter and any
+half-arrived chunked body. Guest routes are traced by their template
 (`/guest/{token}/state`), never by the raw URI, so the token does not appear in
 logs.
