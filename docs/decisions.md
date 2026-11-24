@@ -1827,12 +1827,20 @@ app-server's `thread/fork` names the provider turn to copy through
 turn is exact even after the source carries on; Claude Code's
 `--resume <id> --fork-session` copies the whole session, so it is only used while
 the chosen turn is still the source session's tip, re-checked under the
-source's record lock when the fork starts. Otherwise — a harness without native
-forks, a source that moved on, or a failed start — the fork starts a fresh
-session and sends a bounded handoff of its copied history. This reuses the
-import's one-attempt machinery (ADR-045): the native intent is cleared when a
-session reports `SessionStarted`, or when it cannot be bounded or dies before
-that report, and the same turn is retried with the handoff.
+source's record lock when the fork starts. That check opens a per-source gate
+before the lock is released: the source's next dispatch waits, bounded, until
+the fork reports `SessionStarted` or its startup fails, so a message sent in
+that window cannot be read into the copy. A session id is offered only by a
+thread that started that session itself; an unused fork still points at the
+conversation it was made from and hands off instead. Otherwise — a harness
+without native forks, a source that moved on, or a failed start — the fork
+starts a fresh session and sends a bounded handoff of its copied history. This
+reuses the import's one-attempt machinery (ADR-045): the native intent is
+cleared when a session reports `SessionStarted`, or when it cannot be bounded or
+dies before that report, and the same turn is retried with the handoff. The
+handoff reads only the journaled turns before the dispatch it replaces, so a
+message queued during a pending startup is not part of the history and is not
+sent twice when it runs.
 
 Lineage is a `forked_from { thread_id, turn_id }` in the thread row, projected on
 the summary; the origin title is read from the thread list so a rename needs no

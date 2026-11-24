@@ -19,9 +19,25 @@ The fork keeps:
   reasoning effort and fast-tier setting;
 - a title of `<original title> (fork)`;
 - everything the source showed through the chosen turn, inclusive, with each
-  record's own time: messages and their attachments, tool calls, delegated
-  subagent rows, the plan, error and usage-limit rows, and an assistant reply
-  that was still streaming when h4rn stopped (rebuilt from its streamed text).
+  record's own time and in the same order: messages and their attachments, tool
+  calls, delegated subagent rows in their final state, the plan, error and
+  usage-limit rows, and an assistant reply that was still streaming when h4rn
+  stopped (rebuilt from its streamed text). A prompt is shown before the turn
+  it started, as in the live thread, so every copied prompt sits above its own
+  reply;
+- the turn's own completion: its token usage, its file-change list for the
+  "N files changed" card, and its real status. A turn the daemon lost to a
+  restart copies as **interrupted**; copied history was already finished and
+  stays finished;
+- its own copy of every attachment blob. The fork retains the blob and gets its
+  own per-thread file, so deleting the source never removes a file the fork
+  still shows.
+
+A queued message is its own turn from the moment it arrives; it is never part of
+the turn it waits behind, and a fork at that turn does not copy it. Journals
+written before queued prompts had their own turn id are read the same way: the
+prompt moves to the next turn that starts. A prompt that never started cannot be
+forked, and a turn interrupted by a restart is settled as interrupted.
 
 The original thread is read, never changed. Deleting, archiving or settling it
 afterwards does not affect the fork.
@@ -41,16 +57,23 @@ conversation over:
   on. Claude Code is started with `--resume <session-id> --fork-session`, which
   copies the whole saved conversation, so it is used only while the chosen turn
   is still the source session's tip; h4rn re-checks that when the fork starts.
-  If the source has moved on by then, or the fork cannot be bounded, the native
-  intent is cleared and the fork hands off instead. The provider keeps its own
-  context, including tool work h4rn never journaled, and the source session
-  keeps running untouched.
+  While that provider reads the source's saved session, the source's next message
+  waits, bounded, so it cannot be copied into the fork; the copy is over when
+  the fork reports its session or the startup fails. Only a thread that started
+  a session of its own offers its session id: a fork that has not sent anything
+  yet still points at the conversation it was made from, so a fork of that fork
+  uses the handoff instead. If the source has moved on by then, or the fork
+  cannot be bounded, the native intent is cleared and the fork hands off
+  instead. The provider keeps its own context, including tool work h4rn never
+  journaled, and the source session keeps running untouched.
 - **Portable handoff.** For a harness with no native fork, a source that moved
   on, or a native fork that dies before it reports a session, h4rn starts a
   fresh session and sends a bounded handoff of the copied transcript ahead of
   your exact request. The handoff selects the first request plus the newest
   messages under the same byte budget as an import (`H4RN_HANDOFF_BYTES`, 16,000
-  by default, clamped to 1,024–64,000) and never shortens your own message.
+  by default, clamped to 1,024–64,000) and never shortens your own message. It
+  reads only the turns before the one it is starting, so a message queued while
+  the startup was pending is not sent twice when it is promoted.
 
 The native attempt is spent once. If it succeeds, the fork's session id becomes
 the fork's own; if it fails before starting, the fork records that and uses the

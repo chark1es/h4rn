@@ -25,11 +25,27 @@ export function forkableTurn(turn: StreamTurn, turns: StreamTurn[]): string | nu
 /**
  * The newest turn a fork can name, when there is one.
  *
- * Only the newest row counts: "fork from the latest turn" must never quietly
- * walk back to an older finished turn while the newest one is still running.
+ * Rows are not in logical order: a queued prompt's cue is written when it
+ * arrives, while its daemon turn only appears when it starts, after later
+ * cues. Each row is ordered by the position of the cue that introduced its
+ * turn, so a promoted turn never hides a later prompt that is still waiting.
+ * The cue is preferred on a tie because it is the row that also names a
+ * prompt-only turn whose daemon row stays empty.
  */
 export function latestForkableTurn(turns: StreamTurn[]): string | null {
-  const newest = turns[turns.length - 1];
-  if (!newest) return null;
-  return forkableTurn(newest, turns);
+  let best: StreamTurn | null = null;
+  let bestPosition = -1;
+  turns.forEach((turn, index) => {
+    const cueIndex = turn.forkTurnId
+      ? index
+      : turns.findIndex((candidate) => candidate.forkTurnId === turn.id);
+    const position = cueIndex >= 0 ? cueIndex : index;
+    const cue = turn.id.startsWith("cue:");
+    if (position > bestPosition || (position === bestPosition && cue)) {
+      best = turn;
+      bestPosition = position;
+    }
+  });
+  if (!best) return null;
+  return forkableTurn(best, turns);
 }

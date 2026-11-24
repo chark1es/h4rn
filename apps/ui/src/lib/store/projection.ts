@@ -170,6 +170,26 @@ function latestRunningTurn(log: ThreadLog): StreamTurn | null {
   return null;
 }
 
+/** A row that shows a person's prompt, not the daemon turn behind it. */
+function isCue(turn: StreamTurn): boolean {
+  return turn.id.startsWith("cue:");
+}
+
+/**
+ * The newest row that is a daemon turn, skipping the prompt cues.
+ *
+ * A replayed error or limit names no turn, so it belongs to the turn it
+ * followed. When that turn is already settled, the last cue would otherwise
+ * take the row and show the person's prompt as an agent-styled block.
+ */
+function lastDaemonTurn(log: ThreadLog): StreamTurn | null {
+  for (let index = log.turns.length - 1; index >= 0; index -= 1) {
+    const turn = log.turns[index];
+    if (turn && !isCue(turn)) return turn;
+  }
+  return null;
+}
+
 function findTurn(log: ThreadLog, turnId: TurnId): StreamTurn | null {
   return log.turns.find((turn) => turn.id === turnId) ?? null;
 }
@@ -243,19 +263,27 @@ export function foldEvent(
 
   switch (event.type) {
     case "turn_started": {
-      const existing = findTurn(log, event.turn_id);
-      if (existing) {
-        existing.status = "running";
-        if (!existing.startedAt) existing.startedAt = event.started_at;
-      } else {
-        log.turns.push({
+      let turn = findTurn(log, event.turn_id);
+      if (!turn) {
+        turn = {
           id: event.turn_id,
           startedAt: event.started_at,
           status: "running",
           items: [],
           usage: null,
           changes: null,
-        });
+        };
+        log.turns.push(turn);
+      }
+      turn.status = "running";
+      if (!turn.startedAt) turn.startedAt = event.started_at;
+      // A copied turn's cue already says it came from a finished conversation.
+      // Mark the daemon row too, so a prompt-only copy (whose own row stays
+      // empty) never shows a "Finished" receipt it did not earn.
+      if (
+        log.turns.some((candidate) => candidate.forkTurnId === event.turn_id && candidate.imported)
+      ) {
+        turn.imported = true;
       }
       return log;
     }
@@ -472,6 +500,13 @@ export function foldEvent(
       turn.status = event.status;
       turn.usage = event.usage;
       if (event.changes) turn.changes = event.changes;
+      // The daemon row of a copied prompt-only turn is created here (there are
+      // no items to create it earlier); its cue says it is copied history.
+      if (
+        log.turns.some((candidate) => candidate.forkTurnId === event.turn_id && candidate.imported)
+      ) {
+        turn.imported = true;
+      }
       for (const item of turn.items) {
         if (item.kind === "message") item.streaming = false;
       }
@@ -482,7 +517,8 @@ export function foldEvent(
       // A replayed transcript settles each turn before its rows arrive, so a
       // copied limit row has no running turn to join; it belongs to the turn
       // it followed, exactly as the live stream attaches it to the newest one.
-      const turn = latestRunningTurn(log) ?? log.turns[log.turns.length - 1];
+      // A prompt cue is never that turn.
+      const turn = latestRunningTurn(log) ?? lastDaemonTurn(log);
       if (!turn) return log;
       if (!turn.items.some((item) => item.kind === "limit")) {
         turn.items.push({
@@ -497,8 +533,8 @@ export function foldEvent(
 
     case "error": {
       // Same as a limit row: a copied error belongs to the turn it followed,
-      // which the replay has already settled.
-      const turn = latestRunningTurn(log) ?? log.turns[log.turns.length - 1];
+      // which the replay has already settled. A prompt cue is never that turn.
+      const turn = latestRunningTurn(log) ?? lastDaemonTurn(log);
       if (!turn) return log;
       turn.items.push({
         kind: "error",

@@ -102,4 +102,22 @@ describe("latestForkableTurn", () => {
     expect(latestForkableTurn([turn({ id: "turn_1", status: "running" })])).toBeNull();
     expect(latestForkableTurn([])).toBeNull();
   });
+
+  it("resolves a prompt-only turn through its cue", () => {
+    const log = [cue({ id: "item_1", turnId: "turn_1" }), turn({ id: "turn_1", items: [] })];
+    expect(latestForkableTurn(log)).toBe("turn_1");
+  });
+
+  it("stops at a later prompt still waiting behind a promoted turn", () => {
+    // B was promoted and its daemon row lands after C's cue, but C was sent
+    // later and is still waiting; the newest logical turn is C.
+    const settledA = turn({ id: "turn_a" });
+    const cueB = cue({ id: "item_b", turnId: "turn_b" });
+    const cueC = cue({ id: "item_c", turnId: "turn_c" });
+    const daemonB = turn({ id: "turn_b" });
+    expect(latestForkableTurn([settledA, cueB, cueC, daemonB])).toBeNull();
+    // Once C runs and settles, it is the newest turn again.
+    const daemonC = turn({ id: "turn_c" });
+    expect(latestForkableTurn([settledA, cueB, cueC, daemonB, daemonC])).toBe("turn_c");
+  });
 });

@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
 use h4rn_protocol::{
-    Event, ForgeKind, ForgeRepoRef, HarnessKind, HostId, Item, RuntimeMode, ScheduleDestination,
-    ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask, ScheduleTaskId, SubagentId,
-    ThreadId, Usage, WorktreeRequest,
+    Event, ForgeKind, ForgeRepoRef, FsTurnChanges, HarnessKind, HostId, Item, RuntimeMode,
+    ScheduleDestination, ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask,
+    ScheduleTaskId, SubagentId, ThreadId, Usage, WorktreeRequest,
 };
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
@@ -250,6 +250,17 @@ pub struct JournaledTurn {
     /// An imported transcript's history has none: it was already finished when
     /// it was written.
     pub status: Option<h4rn_protocol::TurnStatus>,
+    /// The usage its completion reported, when it did.
+    pub usage: Option<Usage>,
+    /// The files it changed, when its completion reported them.
+    pub changes: Option<FsTurnChanges>,
+    /// Whether these records were copied from a finished conversation.
+    ///
+    /// An imported or forked turn carries explicit times on its messages and
+    /// has no completion row of its own; a live turn's records are journaled as
+    /// they happen. It is what tells a host-lost live turn from history when a
+    /// fork has to name a status for a turn that never completed.
+    pub copied: bool,
     /// The provider's own turn id, when the adapter reported one.
     ///
     /// A native fork that can copy through a named turn uses it.
@@ -914,6 +925,44 @@ async fn append_wire_on(
     Ok(seqs)
 }
 
+/// The turn a thread-only row belongs to: the open turn when there is one,
+/// otherwise the newest turn the journal holds.
+fn attach_turn(turns: &mut [JournaledTurn], open: Option<usize>) -> Option<&mut JournaledTurn> {
+    match open {
+        Some(index) => turns.get_mut(index),
+        None => turns.last_mut(),
+    }
+}
+
+/// Folds a subagent lifecycle event into the delegated row it describes.
+///
+/// The spawn row is copied from `Item::Delegated` as it was when the child
+/// started; the later events carry the child's real final state. A fork must
+/// show that final state, not a child that is forever "thinking".
+fn fold_subagent(turns: &mut [JournaledTurn], view: &h4rn_protocol::SubagentView) {
+    for turn in turns.iter_mut().rev() {
+        for item in turn.items.iter_mut().rev() {
+            if let JournaledItem::Item { item, .. } = item
+                && let Item::Delegated {
+                    subagent_id,
+                    thread_id,
+                    state,
+                    agent_state,
+                    ..
+                } = item
+                && *subagent_id == view.subagent_id
+            {
+                *state = view.state;
+                *agent_state = view.agent_state;
+                if view.child_thread_id.is_some() {
+                    *thread_id = view.child_thread_id.clone();
+                }
+                return;
+            }
+        }
+    }
+}
+
 /// The index of `turn_id` in `turns`, appending an empty turn when this event
 /// is the first one the journal holds for it.
 fn turn_index(turns: &mut Vec<JournaledTurn>, turn_id: &h4rn_protocol::TurnId) -> usize {
@@ -925,6 +974,9 @@ fn turn_index(turns: &mut Vec<JournaledTurn>, turn_id: &h4rn_protocol::TurnId) -
                 started_at: None,
                 items: Vec::new(),
                 status: None,
+                usage: None,
+                changes: None,
+                copied: false,
                 native_turn_id: None,
             });
             turns.len() - 1
@@ -1128,6 +1180,15 @@ impl Journal for SqliteJournal {
         .await?;
 
         let mut turns: Vec<JournaledTurn> = Vec::new();
+        // The turn whose `TurnStarted` has no `TurnCompleted` yet. A queued
+        // prompt is journaled under its own turn id while an earlier turn runs,
+        // so a row that names only the thread belongs to this turn, not to the
+        // newest turn the reader happens to hold.
+        let mut open_turn: Option<usize> = None;
+        // Prompts an older journal wrote under the running turn instead of the
+        // queued turn they belong to. Each one is given to the next turn that
+        // starts; anything left over never ran and belongs to no turn.
+        let mut held_prompts: Vec<JournaledItem> = Vec::new();
         // The item each streaming assistant reply is filling, by item id. A
         // reply that never finished stays here and is rebuilt from its deltas
         // once every event has been read.
@@ -1146,14 +1207,55 @@ impl Journal for SqliteJournal {
                     started_at,
                     ..
                 } => {
+                    let previous_open = open_turn;
                     let index = turn_index(&mut turns, &turn_id);
                     turns[index].started_at = Some(started_at);
+                    // An older journal wrote a queued prompt under the turn it
+                    // waited behind. The next turn that starts is the one it
+                    // was waiting to become, so hand it the oldest such prompt.
+                    if previous_open != Some(index) && !held_prompts.is_empty() {
+                        let prompt = held_prompts.remove(0);
+                        turns[index].items.insert(0, prompt);
+                    }
+                    open_turn = Some(index);
                 }
                 Event::ItemCompleted {
                     item, turn_id, at, ..
                 } => {
                     let index = turn_index(&mut turns, &turn_id);
+                    // An explicit authoring time marks a copied record: a live
+                    // turn's items carry none and fall back to the journal's.
+                    if at.is_some() {
+                        turns[index].copied = true;
+                    }
                     let at = at.unwrap_or(recorded_at);
+                    // A user item that arrives while its turn is already open,
+                    // after that turn's own prompt, is a prompt an older journal
+                    // stored under the turn it was queued behind. It belongs to
+                    // the next turn that starts, never to this one.
+                    if matches!(
+                        &item,
+                        Item::Message {
+                            role: h4rn_protocol::MessageRole::User,
+                            ..
+                        }
+                    ) && open_turn == Some(index)
+                        && turns[index].items.iter().any(|existing| {
+                            matches!(
+                                existing,
+                                JournaledItem::Item {
+                                    item: Item::Message {
+                                        role: h4rn_protocol::MessageRole::User,
+                                        ..
+                                    },
+                                    ..
+                                }
+                            )
+                        })
+                    {
+                        held_prompts.push(JournaledItem::Item { item, at });
+                        continue;
+                    }
                     // The daemon finishes a streamed reply with one item that
                     // carries the same id as its deltas. Keep the one entry the
                     // reader already saw, so the fork shows the reply once.
@@ -1241,13 +1343,16 @@ impl Journal for SqliteJournal {
                 }
                 // These name a thread but not a turn: the stream attaches them
                 // to the turn that was running, so the reader does the same.
+                // The open turn is the one whose start has no end yet; falling
+                // back to the newest turn only when nothing is open keeps a
+                // queued prompt's turn from taking an earlier turn's row.
                 Event::Error {
                     message,
                     hint,
                     retryable,
                     ..
                 } => {
-                    if let Some(turn) = turns.last_mut() {
+                    if let Some(turn) = attach_turn(&mut turns, open_turn) {
                         turn.items.push(JournaledItem::Error {
                             message,
                             hint,
@@ -1261,7 +1366,7 @@ impl Journal for SqliteJournal {
                     auto_resume,
                     ..
                 } => {
-                    if let Some(turn) = turns.last_mut() {
+                    if let Some(turn) = attach_turn(&mut turns, open_turn) {
                         turn.items.push(JournaledItem::Limit {
                             reset_at,
                             auto_resume,
@@ -1269,11 +1374,27 @@ impl Journal for SqliteJournal {
                         });
                     }
                 }
+                Event::SubagentSpawned { subagent, .. }
+                | Event::SubagentUpdated { subagent, .. }
+                | Event::SubagentFinished { subagent, .. } => {
+                    fold_subagent(&mut turns, &subagent);
+                }
                 Event::TurnCompleted {
-                    turn_id, status, ..
+                    turn_id,
+                    status,
+                    usage,
+                    changes,
+                    ..
                 } => {
                     let index = turn_index(&mut turns, &turn_id);
                     turns[index].status = Some(status);
+                    turns[index].usage = Some(usage);
+                    turns[index].changes = changes;
+                    if open_turn == Some(index) {
+                        open_turn = turns
+                            .iter()
+                            .rposition(|turn| turn.started_at.is_some() && turn.status.is_none());
+                    }
                 }
                 _ => {}
             }
@@ -2691,6 +2812,340 @@ mod tests {
                     if message.contains("linked_at")
             ),
             "{error:?}"
+        );
+    }
+
+    fn subagent_view(
+        state: h4rn_protocol::SubagentState,
+        agent_state: h4rn_protocol::AgentState,
+    ) -> h4rn_protocol::SubagentView {
+        h4rn_protocol::SubagentView {
+            subagent_id: SubagentId::new("sa_one"),
+            parent_thread_id: ThreadId::new("th_items"),
+            child_thread_id: Some(ThreadId::new("th_child")),
+            task: "do the thing".into(),
+            harness: HarnessKind::Codex,
+            host: HostId::new("host_test"),
+            model: "test-model".into(),
+            isolation: h4rn_protocol::SubagentIsolation::Shared,
+            workspace_path: "/tmp/work".into(),
+            branch: None,
+            depth: 1,
+            state,
+            agent_state,
+            progress: Default::default(),
+            budget: Default::default(),
+            context: h4rn_protocol::SubagentContext::None,
+            credential: h4rn_protocol::SubagentCredential {
+                label: "parent".into(),
+                shared_with_parent: true,
+            },
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            result: None,
+        }
+    }
+
+    /// A thread-only error names the open turn, not the prompt a later message
+    /// queued under its own id while the turn was still running.
+    #[tokio::test]
+    async fn an_error_belongs_to_the_open_turn_not_a_queued_prompt() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_queue");
+        let thread_id = one.thread_id.clone();
+        let running = h4rn_protocol::TurnId::new("turn_a");
+        let queued = h4rn_protocol::TurnId::new("turn_b");
+        journal
+            .append(
+                &one,
+                &[],
+                &[
+                    Event::TurnStarted {
+                        thread_id: thread_id.clone(),
+                        turn_id: running.clone(),
+                        started_at: Utc::now(),
+                    },
+                    Event::ItemCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: running.clone(),
+                        item: Item::Message {
+                            item_id: "item_a".into(),
+                            role: h4rn_protocol::MessageRole::User,
+                            text: "the first prompt".into(),
+                            attachments: Vec::new(),
+                        },
+                        at: None,
+                    },
+                    Event::ItemCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: queued.clone(),
+                        item: Item::Message {
+                            item_id: "item_b".into(),
+                            role: h4rn_protocol::MessageRole::User,
+                            text: "the queued prompt".into(),
+                            attachments: Vec::new(),
+                        },
+                        at: None,
+                    },
+                    Event::Error {
+                        thread_id: Some(thread_id.clone()),
+                        message: "the provider failed".into(),
+                        hint: None,
+                        retryable: true,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let turns = journal.read_journaled_turns(&thread_id).await.unwrap();
+        let a = turns
+            .iter()
+            .find(|turn| turn.turn_id == running)
+            .expect("the running turn");
+        assert!(
+            a.items.iter().any(|item| matches!(
+                item,
+                JournaledItem::Error { message, .. } if message == "the provider failed"
+            )),
+            "{:?}",
+            a.items
+        );
+        let b = turns
+            .iter()
+            .find(|turn| turn.turn_id == queued)
+            .expect("the queued turn");
+        assert!(
+            !b.items.iter().any(|item| matches!(
+                item,
+                JournaledItem::Error { .. } | JournaledItem::Limit { .. }
+            )),
+            "a queued prompt must not take the running turn's row: {:?}",
+            b.items
+        );
+    }
+
+    /// An older journal wrote a queued prompt under the running turn. The
+    /// reader hands it to the next turn that starts instead of copying it into
+    /// the turn it waited behind.
+    #[tokio::test]
+    async fn an_old_queued_prompt_moves_to_the_turn_it_runs_as() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_legacy");
+        let thread_id = one.thread_id.clone();
+        let a = h4rn_protocol::TurnId::new("turn_a");
+        let b = h4rn_protocol::TurnId::new("turn_b");
+        journal
+            .append(
+                &one,
+                &[],
+                &[
+                    Event::TurnStarted {
+                        thread_id: thread_id.clone(),
+                        turn_id: a.clone(),
+                        started_at: Utc::now(),
+                    },
+                    Event::ItemCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: a.clone(),
+                        item: Item::Message {
+                            item_id: "item_a".into(),
+                            role: h4rn_protocol::MessageRole::User,
+                            text: "A prompt".into(),
+                            attachments: Vec::new(),
+                        },
+                        at: None,
+                    },
+                    // The old live path filed this under the running turn.
+                    Event::ItemCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: a.clone(),
+                        item: Item::Message {
+                            item_id: "item_b".into(),
+                            role: h4rn_protocol::MessageRole::User,
+                            text: "B prompt".into(),
+                            attachments: Vec::new(),
+                        },
+                        at: None,
+                    },
+                    Event::TurnCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: a.clone(),
+                        usage: Usage::default(),
+                        status: h4rn_protocol::TurnStatus::Completed,
+                        changes: None,
+                    },
+                    Event::TurnStarted {
+                        thread_id: thread_id.clone(),
+                        turn_id: b.clone(),
+                        started_at: Utc::now(),
+                    },
+                    Event::TurnCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: b.clone(),
+                        usage: Usage::default(),
+                        status: h4rn_protocol::TurnStatus::Completed,
+                        changes: None,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let turns = journal.read_journaled_turns(&thread_id).await.unwrap();
+        let first = turns.iter().find(|turn| turn.turn_id == a).expect("A");
+        let prompts: Vec<&str> = first
+            .messages()
+            .into_iter()
+            .map(|(_, text, _)| text)
+            .collect();
+        assert_eq!(prompts, vec!["A prompt"], "A owns only its own prompt");
+        let second = turns.iter().find(|turn| turn.turn_id == b).expect("B");
+        let prompts: Vec<&str> = second
+            .messages()
+            .into_iter()
+            .map(|(_, text, _)| text)
+            .collect();
+        assert_eq!(prompts, vec!["B prompt"], "B receives the queued prompt");
+    }
+
+    /// A subagent row copied from the spawn event keeps the child's final
+    /// state, not a permanent "thinking" snapshot.
+    #[tokio::test]
+    async fn a_delegated_row_keeps_its_final_state() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_items");
+        let thread_id = one.thread_id.clone();
+        let turn_id = h4rn_protocol::TurnId::new("turn_one");
+        let running = subagent_view(
+            h4rn_protocol::SubagentState::Running,
+            h4rn_protocol::AgentState::Thinking,
+        );
+        let finished = subagent_view(
+            h4rn_protocol::SubagentState::Completed,
+            h4rn_protocol::AgentState::Done,
+        );
+        journal
+            .append(
+                &one,
+                &[],
+                &[
+                    Event::TurnStarted {
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        started_at: Utc::now(),
+                    },
+                    Event::ItemCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        item: Item::Delegated {
+                            item_id: "item_delegated_sa_one".into(),
+                            subagent_id: SubagentId::new("sa_one"),
+                            thread_id: Some(ThreadId::new("th_child")),
+                            task: "do the thing".into(),
+                            harness: HarnessKind::Codex,
+                            host: HostId::new("host_test"),
+                            model: "test-model".into(),
+                            state: h4rn_protocol::SubagentState::Running,
+                            agent_state: h4rn_protocol::AgentState::Thinking,
+                        },
+                        at: None,
+                    },
+                    Event::SubagentSpawned {
+                        parent_thread_id: thread_id.clone(),
+                        subagent: running,
+                    },
+                    Event::SubagentFinished {
+                        parent_thread_id: thread_id.clone(),
+                        subagent: finished,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let turns = journal.read_journaled_turns(&thread_id).await.unwrap();
+        let row = turns[0]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                JournaledItem::Item {
+                    item:
+                        Item::Delegated {
+                            state, agent_state, ..
+                        },
+                    ..
+                } => Some((*state, *agent_state)),
+                _ => None,
+            })
+            .expect("the delegated row");
+        assert_eq!(
+            row,
+            (
+                h4rn_protocol::SubagentState::Completed,
+                h4rn_protocol::AgentState::Done
+            )
+        );
+    }
+
+    /// A completion's usage, change set and real status are part of the turn a
+    /// fork copies, so its receipt and "N files changed" card are not invented.
+    #[tokio::test]
+    async fn a_completion_keeps_usage_changes_and_status() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_items");
+        let thread_id = one.thread_id.clone();
+        let turn_id = h4rn_protocol::TurnId::new("turn_one");
+        let usage = Usage {
+            input_tokens: 12,
+            output_tokens: 5,
+            cached_input_tokens: 3,
+            cost_micros: 900,
+            duration_ms: 1_500,
+            generation_ms: 1_200,
+            tps: 4,
+        };
+        let changes = h4rn_protocol::FsTurnChanges {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            files: vec![h4rn_protocol::FsTurnFile {
+                path: "src/lib.rs".into(),
+                added: 4,
+                removed: 1,
+                before_etag: None,
+                after_etag: Some("etag".into()),
+            }],
+            note: None,
+        };
+        journal
+            .append(
+                &one,
+                &[],
+                &[
+                    Event::TurnStarted {
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        started_at: Utc::now(),
+                    },
+                    Event::TurnCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        usage: usage.clone(),
+                        status: h4rn_protocol::TurnStatus::Interrupted,
+                        changes: Some(changes.clone()),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let turns = journal.read_journaled_turns(&thread_id).await.unwrap();
+        assert_eq!(turns[0].usage, Some(usage));
+        assert_eq!(turns[0].changes, Some(changes));
+        assert_eq!(
+            turns[0].status,
+            Some(h4rn_protocol::TurnStatus::Interrupted)
         );
     }
 }

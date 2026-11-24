@@ -322,6 +322,176 @@ describe("foldEvent", () => {
     });
   });
 
+  it("folds a fork's wire so a prompt sits above its reply and a limit stays in its turn", () => {
+    // The exact order a fork journals: the prompt before `TurnStarted` (as a
+    // live send does), the reply, then the settlement row, then completion.
+    const at = "2026-01-01T00:00:00.000Z";
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_user",
+        role: "user",
+        text: "the prompt",
+        attachments: [],
+      },
+      at,
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: at,
+    });
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_reply",
+        role: "assistant",
+        text: "the reply",
+        attachments: [],
+      },
+      at,
+    });
+    log = foldEvent(log, {
+      type: "usage_limit_hit",
+      thread_id: "t1",
+      reset_at: null,
+      auto_resume: false,
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      usage: USAGE,
+      status: "completed",
+    });
+
+    expect(log.turns.map((turn) => turn.id)).toEqual(["cue:user:item_user", "turn_1"]);
+    expect(log.turns[0]?.items.map((item) => item.kind)).toEqual(["message"]);
+    expect(log.turns[1]?.items.map((item) => item.kind)).toEqual(["message", "limit"]);
+    expect(log.turns[1]?.items.at(-1)).toMatchObject({ kind: "limit" });
+    expect(log.turns[1]?.imported).toBe(true);
+  });
+
+  it("keeps a replayed error off a prompt cue after the turn settled", () => {
+    // A queued prompt's cue can be the newest row while the turn that already
+    // settled is the one an error belongs to. The cue must not take the row.
+    const at = "2026-01-01T00:00:00.000Z";
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_user",
+        role: "user",
+        text: "the prompt",
+        attachments: [],
+      },
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: at,
+    });
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_reply",
+        role: "assistant",
+        text: "the reply",
+        attachments: [],
+      },
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      usage: USAGE,
+      status: "completed",
+    });
+    // The person queued another prompt; its cue is now the newest row, but its
+    // turn has not started.
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_2",
+      item: {
+        kind: "message",
+        item_id: "item_queued",
+        role: "user",
+        text: "the queued prompt",
+        attachments: [],
+      },
+    });
+    log = foldEvent(log, {
+      type: "error",
+      thread_id: "t1",
+      message: "the transport closed",
+      hint: null,
+      retryable: true,
+    });
+
+    const cue = log.turns.find((turn) => turn.id === "cue:user:item_queued");
+    expect(cue?.items.every((item) => item.kind === "message")).toBe(true);
+    const daemon = log.turns.find((turn) => turn.id === "turn_1");
+    expect(daemon?.items.at(-1)).toMatchObject({
+      kind: "error",
+      message: "the transport closed",
+    });
+  });
+
+  it("marks the daemon row of a copied prompt-only turn imported", () => {
+    // A copied turn with no reply has no item to carry the copied marker, so
+    // its empty daemon row must learn it from the cue. Otherwise the fork
+    // claims a zero-token "Finished" receipt.
+    const at = "2026-01-01T00:00:00.000Z";
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_user",
+        role: "user",
+        text: "just this",
+        attachments: [],
+      },
+      at,
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: at,
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      usage: USAGE,
+      status: "completed",
+    });
+
+    const daemon = log.turns.find((turn) => turn.id === "turn_1");
+    expect(daemon?.items).toEqual([]);
+    expect(daemon?.imported).toBe(true);
+    expect(log.turns.every((turn) => turn.imported)).toBe(true);
+  });
+
   it("ignores a duplicate completed user message", () => {
     const event = {
       type: "item_completed" as const,
