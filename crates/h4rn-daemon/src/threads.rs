@@ -3270,7 +3270,7 @@ impl ThreadManager {
             .unwrap_or_else(ThreadId::new_uuid_v7);
         let resolved_attachments = self
             .inner
-            .resolve_attachments(&thread_id, &request.attachments)
+            .resolve_attachments(&thread_id, &request.attachments, None)
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
         // Worktree creation is the last fallible setup: once the checkout
@@ -3758,9 +3758,10 @@ impl ThreadManager {
         item_id: Option<String>,
     ) -> Result<AcceptedMessage, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
+        let guest = item_id.is_some();
         let resolved_attachments = self
             .inner
-            .resolve_attachments(thread_id, &attachments)
+            .resolve_attachments(thread_id, &attachments, item_id.as_deref())
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
         let mut record = handle.lock().await;
@@ -3793,7 +3794,11 @@ impl ThreadManager {
             // holds no prompt to deliver at all.
             let release_pending =
                 stale_schedule && record.pending_turn() && record.parks_persisted_prompt();
-            record.queued.push_back(QueuedTurn {
+            // A guest dispatch is not eligible for delivery until its item is
+            // in the journal. Pushing it first would leave it queued after a
+            // failed append, and the running turn would then promote it: an
+            // owner retry would deliver the same message twice.
+            let mut queued = Some(QueuedTurn {
                 input: UserInput {
                     text: text.clone(),
                     attachments: harness_attachments,
@@ -3801,6 +3806,9 @@ impl ThreadManager {
                 ceiling,
                 grant,
             });
+            if !guest {
+                record.queued.extend(queued.take());
+            }
             let mut domain = vec![ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
                 at: now,
@@ -3829,6 +3837,12 @@ impl ThreadManager {
                 at: None,
             }];
             let emitted = self.inner.emit(&mut record, domain, wire).await;
+            if emitted.is_ok() && guest {
+                // The append committed, so the guest's prompt may be delivered
+                // now. The record lock is still held, so a settling turn cannot
+                // promote the queue in between.
+                record.queued.extend(queued.take());
+            }
             drop(record);
             if release_pending {
                 // The delivery owner must exist even when the journal write
@@ -3881,6 +3895,7 @@ impl ThreadManager {
         } else {
             None
         };
+        let previous_last_turn = record.last_turn_id.clone();
         let dispatch = record.begin_turn_for_work(
             now,
             UserInput {
@@ -3924,7 +3939,15 @@ impl ThreadManager {
                 started_at: now,
             },
         ];
-        let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+        let emitted = self.inner.emit(&mut record, domain, wire).await;
+        if emitted.is_err() && guest {
+            // The append failed, so this turn never existed. Leaving it active
+            // would keep the thread Working with no delivery, and an owner
+            // retry would queue behind a turn nothing ever finishes.
+            record.active = None;
+            record.last_turn_id = previous_last_turn;
+        }
+        let (_, seq) = emitted?;
 
         // A setting this session could not switch in place (an effort or model
         // it only applies when starting) makes this the turn that must start a
@@ -5648,6 +5671,7 @@ impl Inner {
         &self,
         thread_id: &ThreadId,
         ids: &[AttachmentId],
+        hold: Option<&str>,
     ) -> Result<Vec<Attachment>, ManagerError> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -5657,15 +5681,19 @@ impl Inner {
                 "this daemon has no attachment store".into(),
             ));
         };
-        resolver
-            .resolve(thread_id, ids)
-            .await
-            .map_err(|error| match error {
-                BlobError::NotFound(id) => ManagerError::InvalidRequest(format!(
-                    "attachment {id} is no longer available; upload it again"
-                )),
-                other => ManagerError::Internal(other.to_string()),
-            })
+        let resolved = match hold {
+            // A guest Send records exactly the references it takes, so an
+            // interrupted Send releases those and nothing an earlier message
+            // of the same thread already holds.
+            Some(holder) => resolver.resolve_for(thread_id, ids, holder).await,
+            None => resolver.resolve(thread_id, ids).await,
+        };
+        resolved.map_err(|error| match error {
+            BlobError::NotFound(id) => ManagerError::InvalidRequest(format!(
+                "attachment {id} is no longer available; upload it again"
+            )),
+            other => ManagerError::Internal(other.to_string()),
+        })
     }
 
     async fn handle(&self, thread_id: &ThreadId) -> Result<ThreadHandle, ManagerError> {
@@ -9769,8 +9797,9 @@ fn user_item_id(turn_id: &TurnId) -> String {
 ///
 /// It names the request, so recovery can ask the journal whether that message
 /// is in the thread: the stored row alone cannot tell an append that happened
-/// from one that was interrupted.
-fn guest_item_id(request_id: &str) -> String {
+/// from one that was interrupted. The same name is the holder its attachment
+/// references are staged under until the append confirms them.
+pub(crate) fn guest_item_id(request_id: &str) -> String {
     format!("item_guest_{request_id}")
 }
 
@@ -17044,6 +17073,136 @@ mod tests {
                 .expect("the released turn completed instead of being stranded");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// A guest prompt whose append failed is not left queued for delivery.
+    ///
+    /// The card goes back to `pending` for a retry, so the prompt must not stay
+    /// behind the running turn: the turn would promote it, and the retry would
+    /// deliver the same message twice.
+    #[tokio::test]
+    async fn a_failed_guest_append_leaves_nothing_to_deliver() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let (harness, sends) = harness.with_send_count();
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "guest"))
+            .await
+            .expect("create");
+        let thread_id = created.thread_id.clone();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The thread is working: the second prompt is held in the harness
+        // write, so a guest prompt would queue behind it.
+        manager
+            .send_message(&thread_id, "holding".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            wait_until(|| sends.get() == 2).await,
+            "the running turn's prompt never reached the harness"
+        );
+
+        journal.fail_next_appends(1);
+        let error = manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await;
+        assert!(
+            error.is_err(),
+            "the injected journal failure was not reported"
+        );
+        assert_eq!(
+            manager.thread_queue_len(&thread_id).await,
+            Some(0),
+            "a guest prompt whose append failed was left queued for delivery"
+        );
+        assert!(
+            !manager
+                .guest_message_in_thread(&thread_id, "req-1")
+                .await
+                .expect("read the journal"),
+            "a failed append reached the journal"
+        );
+
+        // The retry commits and the running turn promotes it once.
+        manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await
+            .expect("retry");
+        assert_eq!(manager.thread_queue_len(&thread_id).await, Some(1));
+        gate.release();
+        assert!(
+            wait_until(|| sends.get() >= 3).await,
+            "the retried guest prompt never reached the harness"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if manager.thread_queue_len(&thread_id).await == Some(0)
+                    && !manager.turn_in_flight(&thread_id).await
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the thread never went idle");
+        assert_eq!(sends.get(), 3, "the guest prompt reached the harness twice");
+    }
+
+    /// A guest prompt whose append failed on an idle thread leaves no turn.
+    ///
+    /// The card goes back to `pending`, so the thread must look exactly as it
+    /// did: leaving the turn active would keep it Working with nothing to
+    /// deliver, and the retry would queue behind that turn forever.
+    #[tokio::test]
+    async fn a_failed_guest_append_on_an_idle_thread_leaves_no_turn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "guest"))
+            .await
+            .expect("create");
+        let thread_id = created.thread_id.clone();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sends.get(), 1);
+
+        journal.fail_next_appends(1);
+        let error = manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await;
+        assert!(
+            error.is_err(),
+            "the injected journal failure was not reported"
+        );
+        assert!(
+            !manager.turn_in_flight(&thread_id).await,
+            "a failed append left a turn nothing will deliver"
+        );
+        assert_eq!(manager.thread_queue_len(&thread_id).await, Some(0));
+
+        // The retry is a normal send again, and it delivers the prompt once.
+        manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await
+            .expect("retry");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sends.get(), 2, "the guest prompt was delivered twice");
+        assert!(
+            manager
+                .guest_message_in_thread(&thread_id, "req-1")
+                .await
+                .expect("read the journal"),
+            "the retried prompt is not in the thread"
+        );
     }
 
     /// A guest card whose append failed raises no pending count.

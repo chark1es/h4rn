@@ -152,9 +152,17 @@ or a snapshot needs, and a browser that disappears gives its slot back at the
 next ping. A cancel releases that slot at once, even while the link check or the
 relay's outbound queue is still busy, and the admitted state is written before
 the go-ahead leaves, so the pre-authorization cap covers only bytes that arrived
-before authorization. A completed body keeps its slot until its answer actually
-holds a work slot, so uploads cannot pile up past the cap while every work slot
-is busy.
+before authorization; a refusal gives the slot back before its answer waits for
+queue room. A chunk that waited for queue capacity is checked against its pinned
+connection once more as it is enqueued, so it can never enter a socket the
+daemon has replaced. A session belongs to the sockets that opened it: when the
+daemon reconnects, the replaced socket still closes its own sessions and tells
+the other device, and its frames can no longer reach the replacement under the
+old session. The replacement's presence is not overwritten by the old socket's
+close: presence updates are serialised per device and check the connection they
+belong to as they are written. A completed body keeps its slot until its answer
+actually holds a work slot, so uploads cannot pile up past the cap while every
+work slot is busy.
 
 ## What the daemon enforces
 
@@ -173,11 +181,17 @@ and the placement it causes exist only once the journal holds them: a failed
 append restores the state you last saw, so a publication that never happened
 leaves no pending count behind. A Send or reservation interrupted by a shutdown
 is answered from the thread itself: the message carries the request's id in its
-item id, so recovery asks the journal. A message that reached the thread
-resolves as sent; a row claimed before the append, whose message never arrived,
-resolves as dismissed and its files are removed. In both cases its resolution is
-raised and the row stays while the link lives, so the same browser's next poll
-clears its card. A refused
+item id, so recovery asks the journal before it decides anything about the link.
+A message that reached the thread resolves as sent, even when the link expired
+while the daemon was down; a row claimed before the append, whose message never
+arrived, resolves as dismissed and its files are removed. A prompt whose append
+failed is not queued for delivery, so retrying a Send delivers it once. A Send
+also records the attachment references it takes for the thread, so a crash
+between that step and the append releases exactly those references and the
+per-thread copy, without touching a file an earlier message of the same thread
+already uses. In both cases its resolution is raised and the row stays while the
+link lives, so the same browser's next poll clears its card; a row whose link is
+already gone is dropped once its answer is raised. A refused
 submission whose files cannot be removed keeps a cleanup record until the sweep
 retries, rather than losing the only row that names those files. If the
 link ended, expired, the Labs switch turned off or the thread settled while the

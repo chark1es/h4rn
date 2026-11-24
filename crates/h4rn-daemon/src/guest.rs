@@ -920,6 +920,12 @@ impl GuestService {
             // link deletes the finished rows; a row whose link is gone has no
             // guest left to tell and is removed here.
             if linked > 0 && matches!(request.status.as_str(), "pending" | "sent" | "dismissed") {
+                // A finished row settles the attachments its Send staged: an
+                // accepted message keeps them, a dismissed one gives them
+                // back. A failure here is retried by the next sweep.
+                if matches!(request.status.as_str(), "sent" | "dismissed") {
+                    self.settle_holds(&request).await;
+                }
                 // A resolution whose journal write failed is retried here
                 // while the card can still be resolved; the row is otherwise
                 // kept for the guest's next poll.
@@ -1008,21 +1014,19 @@ impl GuestService {
     /// row never reached a turn. A `sending` row was claimed, and whether its
     /// message reached the thread is not something the row can claim: the
     /// journal is asked. A message that is journaled is `sent`; one that never
-    /// arrived is `dismissed` and its files are removed. While the link still
-    /// lives the guest can poll again, and the snapshot only mentions a
-    /// `GuestRequestResolved` whose request id is still a row for that link.
-    /// The row therefore stays as the provenance record of that answer: its
-    /// resolution is raised, its files go, and the same browser's next poll
-    /// clears the card. Ending the link, or the sweep after it is gone, drops
-    /// the row exactly as it does for any other finished request.
+    /// arrived is `dismissed` and its files are removed.
+    ///
+    /// The journal is asked first, before anything is decided about the link:
+    /// the owner's thread outlives the link, and a message that reached it must
+    /// never be called dismissed because the link happened to expire while the
+    /// daemon was down. While the link still lives the guest can poll again,
+    /// and the snapshot only mentions a `GuestRequestResolved` whose request id
+    /// is still a row for that link. The row therefore stays as the provenance
+    /// record of that answer: its resolution is raised, its files go, and the
+    /// same browser's next poll clears the card. A row whose link is already
+    /// gone has no browser left to poll, so its answer is raised and the row is
+    /// then dropped like any other finished request.
     async fn recover_interrupted_submission(&self, request: &RequestRow) -> Result<(), GuestError> {
-        let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_links WHERE link_id = ?")
-            .bind(&request.link_id)
-            .fetch_one(&self.pool)
-            .await?;
-        if linked == 0 {
-            return self.claim_and_discard(request).await;
-        }
         let accepted = if request.status == "sending" {
             match self
                 .manager
@@ -1063,17 +1067,34 @@ impl GuestService {
         if claimed.rows_affected() == 0 {
             return Ok(());
         }
-        self.delete_request_files_best_effort(request);
         let mut recovered = request.clone();
         recovered.status = resolution.into();
         recovered.resolution = Some(resolution.into());
         recovered.resolution_emitted = false;
-        if let Err(error) = self.emit_resolution(&recovered).await {
-            tracing::warn!(
+        // The answer decides what happens to the references the Send staged:
+        // an accepted message owns them, a dismissed one gives them back. The
+        // hold lives in the attachment store, so it is settled outside this
+        // row's write and every later sweep retries a failure.
+        self.settle_holds(&recovered).await;
+        self.delete_request_files_best_effort(request);
+        match self.emit_resolution(&recovered).await {
+            Ok(()) => recovered.resolution_emitted = true,
+            Err(error) => tracing::warn!(
                 request = %request.request_id,
                 %error,
                 "a recovered guest resolution waits for the next sweep"
-            );
+            ),
+        }
+        // Nothing is left to poll for an answer once the link is gone. The
+        // resolution above still belongs to the owner's thread, so the row can
+        // go now (and only now): dropping it first would lose the answer this
+        // recovery computed from the journal.
+        let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_links WHERE link_id = ?")
+            .bind(&request.link_id)
+            .fetch_one(&self.pool)
+            .await?;
+        if linked == 0 {
+            self.claim_and_discard(&recovered).await?;
         }
         Ok(())
     }
@@ -1128,6 +1149,10 @@ impl GuestService {
     /// sweep, so a refused disk or a failed journal write never orphans a
     /// file or an answerable-looking card.
     async fn finish_cleanup(&self, request: &RequestRow) {
+        // A row that still holds staged references settles them with its last
+        // half: an accepted message keeps them, a discarded one gives them
+        // back.
+        self.settle_holds(request).await;
         match self.delete_request_files(request) {
             Ok(()) => {
                 if let Err(error) = self.emit_resolution(request).await {
@@ -2456,20 +2481,21 @@ impl GuestService {
                 // recovery still answers sent.
                 self.hold_send(SendPhase::AfterAppend).await;
                 self.delete_request_files_best_effort(&request);
-                // The answer is recorded with the status in one write: a crash
-                // before the event leaves `resolution_emitted` false, so the
-                // sweep re-emits it instead of losing the card's answer.
-                sqlx::query(
-                    "UPDATE guest_requests
-                     SET status = 'sent', resolution = 'sent', resolution_emitted = 0
-                     WHERE request_id = ?",
-                )
-                .bind(&request.request_id)
-                .execute(&self.pool)
-                .await?;
                 request.status = "sent".into();
                 request.resolution = Some("sent".into());
                 request.resolution_emitted = false;
+                // The append committed, so the attachments are the message's:
+                // confirming the hold stops any later cleanup releasing them.
+                // This happens before the row claims `sent`, so a failure here
+                // still leaves a `sending` row recovery answers from the
+                // journal.
+                self.settle_holds(&request).await;
+                // Raise the answer before the row records it: a client that
+                // polls while the row is still `sending` may already see the
+                // resolution, but never the reverse — a `sent` row whose card
+                // still counts as pending. A crash in between leaves a
+                // `sending` row that recovery answers from the journal, and a
+                // duplicate event is harmless.
                 if let Err(error) = self.emit_resolution(&request).await {
                     tracing::warn!(
                         request = %request.request_id,
@@ -2477,9 +2503,24 @@ impl GuestService {
                         "a sent guest request's resolution waits for the next sweep"
                     );
                 }
+                // The answer is recorded with the status in one write, after
+                // the event. A failed event leaves `resolution_emitted` false
+                // (the update above did not run), so the sweep re-emits it
+                // instead of losing the card's answer.
+                sqlx::query(
+                    "UPDATE guest_requests
+                     SET status = 'sent', resolution = 'sent'
+                     WHERE request_id = ?",
+                )
+                .bind(&request.request_id)
+                .execute(&self.pool)
+                .await?;
                 Ok(())
             }
             Err(error) => {
+                // The append did not commit, so the references it staged must
+                // not stay retained.
+                self.release_hold_best_effort(&request.request_id).await;
                 // The turn did not start: give the owner the chance to retry.
                 let _ = sqlx::query(
                     "UPDATE guest_requests SET status = 'pending'
@@ -2530,6 +2571,7 @@ impl GuestService {
         // The row was read before the claim, so a cleanup that ran after the
         // claim cannot turn this successful dismissal into "no longer exists".
         self.hold_claim().await;
+        self.release_hold_best_effort(&request.request_id).await;
         self.delete_request_files_best_effort(&request);
         request.status = "dismissed".into();
         request.resolution = Some("dismissed".into());
@@ -2542,6 +2584,45 @@ impl GuestService {
             );
         }
         Ok(())
+    }
+
+    /// Settles the attachment references a Send staged, by the row's answer.
+    ///
+    /// A message the thread accepted owns the references it resolved, so its
+    /// hold is confirmed (deleted without releasing); a request that was never
+    /// delivered gives exactly its staged references back. The hold lives in
+    /// the attachment store, so this is idempotent and every sweep retries it.
+    async fn settle_holds(&self, request: &RequestRow) {
+        let holder = crate::threads::guest_item_id(&request.request_id);
+        let result = if request.resolution.as_deref() == Some("sent") {
+            self.blobs.confirm_holds(&holder).await
+        } else {
+            self.blobs.release_holds(&holder).await.map(|_| ())
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                request = %request.request_id,
+                %error,
+                "a guest send's staged references wait for the next sweep"
+            );
+        }
+    }
+
+    /// Releases the attachment references a Send staged for its thread.
+    ///
+    /// The hold names the request, so release touches exactly the references
+    /// that Send took: a file also attached to an earlier message in the thread
+    /// keeps its own reference. A failure leaves the hold for the next cleanup,
+    /// and a retried release never decrements twice.
+    async fn release_hold_best_effort(&self, request_id: &str) {
+        let holder = crate::threads::guest_item_id(request_id);
+        if let Err(error) = self.blobs.release_holds(&holder).await {
+            tracing::warn!(
+                request = %request_id,
+                %error,
+                "a guest send's staged references wait for cleanup"
+            );
+        }
     }
 
     /// Deletes a request's files, leaving the row for the sweep if the disk

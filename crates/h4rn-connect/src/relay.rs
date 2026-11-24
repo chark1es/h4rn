@@ -11,6 +11,7 @@
 //! never formatted.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::Query;
@@ -64,6 +65,24 @@ pub struct Session {
     pub machine_id: Uuid,
     /// Owner.
     pub user_id: Uuid,
+    /// The client's socket when the session opened.
+    ///
+    /// A session belongs to the two sockets that opened it, not only to their
+    /// devices: a reconnect replaces the socket, and a session left behind must
+    /// not route to the replacement under its old `conn_id`.
+    pub client_connection: Uuid,
+    /// The daemon's socket when the session opened.
+    pub daemon_connection: Uuid,
+}
+
+/// What closing one socket did to the relay.
+pub struct Unregistered {
+    /// Whether this socket was still the device's live peer. Only a live
+    /// socket's close says anything about the device's presence.
+    pub live: bool,
+    /// Sessions opened on this socket. The caller tells each partner they are
+    /// gone; the device's own presence is untouched when `live` is false.
+    pub sessions: Vec<Session>,
 }
 
 /// Peers and sessions. All methods are async and lock-free at the await points
@@ -72,6 +91,14 @@ pub struct Session {
 pub struct RelayHub {
     peers: RwLock<HashMap<Uuid, Peer>>,
     sessions: RwLock<HashMap<String, Session>>,
+    /// The generation of each device's current connection, bumped on every
+    /// register. A presence write reads it under the device's lock, so a socket
+    /// a reconnect already replaced cannot report the device offline after the
+    /// replacement published it online.
+    generations: RwLock<HashMap<Uuid, u64>>,
+    /// One presence lock per device: presence is read, checked and written as
+    /// one step, so online and offline updates cannot pass each other.
+    presence_locks: std::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     /// Guest HTTP exchanges: the browser request waiting on a daemon's answer
     /// and any answer whose body is still arriving in chunks.
     ///
@@ -188,8 +215,9 @@ impl RelayHub {
     ///
     /// The replacement also resets what the relay knows about this peer's
     /// hello: capability is a property of the socket, and the new socket has
-    /// not spoken yet.
-    pub async fn register(&self, peer: Peer) {
+    /// not spoken yet. Returns the generation this connection now owns; a
+    /// presence write checks it so an older socket cannot publish after it.
+    pub async fn register(&self, peer: Peer) -> u64 {
         let device_id = peer.device_id;
         let connection = peer.connection_id;
         let state = if peer.announces_hello {
@@ -205,32 +233,81 @@ impl RelayHub {
             .await
             .insert(device_id, PeerHello { connection, state });
         self.peers.write().await.insert(device_id, peer);
+        let generation = {
+            let mut generations = self.generations.write().await;
+            let generation = generations.get(&device_id).copied().unwrap_or(0) + 1;
+            generations.insert(device_id, generation);
+            generation
+        };
         // A waiter for the previous connection re-reads the new one, which
         // starts from what its own handshake promised.
         self.greeted_now.notify_waiters();
+        generation
     }
 
-    /// Removes a peer and every session it took part in. Returns the sessions
-    /// so the caller can tell the other end that it went away.
+    /// The generation of one device's current connection.
+    pub async fn generation(&self, device_id: Uuid) -> u64 {
+        self.generations
+            .read()
+            .await
+            .get(&device_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether `generation` still owns this device's presence.
     ///
-    /// Only the socket that is still the registered one may do this: an old
-    /// connection closing after a reconnect must not erase the new
-    /// connection's capability or sessions. `None` says this socket was not the
-    /// live peer, so its closure says nothing about the device's presence.
-    pub async fn unregister(&self, device_id: Uuid, connection: Uuid) -> Option<Vec<Session>> {
+    /// A presence write asks this while holding the device's presence lock: a
+    /// connection that has been replaced must not publish online or offline
+    /// after the replacement did.
+    pub async fn owns_presence(&self, device_id: Uuid, generation: u64) -> bool {
+        self.generation(device_id).await == generation
+    }
+
+    /// Waits for the device's presence lock.
+    ///
+    /// The caller holds it across the presence read, its generation check and
+    /// the write, so a closing socket and its replacement cannot interleave
+    /// their online/offline updates.
+    pub async fn presence_guard(&self, device_id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .presence_locks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(
+                locks
+                    .entry(device_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        lock.lock_owned().await
+    }
+
+    /// Removes a peer and the sessions opened on its socket. Returns what that
+    /// close means for the caller: whether the device went away, and the
+    /// sessions whose partners must be told.
+    ///
+    /// Only the socket that is still the registered one reports the device
+    /// offline: an old connection closing after a reconnect must not erase the
+    /// new connection's capability or presence. Its sessions still go, though:
+    /// they were opened on a socket that is gone, and leaving them would route
+    /// frames to the replacement under a `conn_id` it never opened.
+    pub async fn unregister(&self, device_id: Uuid, connection: Uuid) -> Unregistered {
         // The check and the removal are one critical section, so a socket that
         // reconnects in this instant cannot be erased by the old one closing.
-        {
+        let live = {
             let mut peers = self.peers.write().await;
             match peers.get(&device_id) {
-                Some(peer) if peer.connection_id != connection => return None,
+                Some(peer) if peer.connection_id != connection => false,
                 Some(_) => {
                     peers.remove(&device_id);
+                    true
                 }
-                None => return None,
+                None => false,
             }
-        }
-        {
+        };
+        if live {
             let mut features = self.features.write().await;
             // A newer connection may have registered since the peers lock was
             // released; only its own hello state may be removed.
@@ -248,15 +325,39 @@ impl RelayHub {
         let dead: Vec<String> = sessions
             .iter()
             .filter(|(_, session)| {
-                session.client_device_id == device_id || session.daemon_device_id == device_id
+                session.client_connection == connection || session.daemon_connection == connection
             })
             .map(|(conn_id, _)| conn_id.clone())
             .collect();
-        Some(
-            dead.into_iter()
+        Unregistered {
+            live,
+            sessions: dead
+                .into_iter()
                 .filter_map(|conn_id| sessions.remove(&conn_id))
                 .collect(),
-        )
+        }
+    }
+
+    /// Tells each session's other end that the session is gone.
+    ///
+    /// `closed_connection` names the socket that went away, so the partner is
+    /// the other party, never the device that is closing.
+    pub async fn close_partners(&self, closed_connection: Uuid, sessions: Vec<Session>) {
+        for session in sessions {
+            let other = if session.client_connection == closed_connection {
+                session.daemon_device_id
+            } else {
+                session.client_device_id
+            };
+            let _ = self
+                .send(
+                    other,
+                    RelayServerEvent::Frame {
+                        frame: RelayFrame::close(session.conn_id.clone()),
+                    },
+                )
+                .await;
+        }
     }
 
     /// Whether a daemon is connected.
@@ -511,7 +612,10 @@ impl RelayHub {
     ///
     /// The write fails retryably once that socket is no longer the live peer,
     /// so an exchange whose connection was replaced never delivers a chunk (or
-    /// a cancel) to the socket that replaced it.
+    /// a cancel) to the socket that replaced it. The check is made again at the
+    /// moment the enqueue commits: a frame that waited for queue capacity may
+    /// have waited long enough for the connection to be replaced, and entering
+    /// the old queue then would deliver it to a socket the daemon has dropped.
     pub async fn send_wait_to(
         &self,
         link: DaemonLink,
@@ -519,7 +623,42 @@ impl RelayHub {
         wait: Duration,
     ) -> Result<()> {
         let tx = self.link_sender(link).await?;
-        wait_for_capacity(tx, event, wait).await
+        let permit = match tokio::time::timeout(wait, tx.reserve()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return Err(AppError::unavailable(
+                    "peer_offline",
+                    "the other device is not connected",
+                ));
+            }
+            Err(_) => {
+                return Err(AppError::unavailable(
+                    "relay_backpressure",
+                    "the other device is too slow",
+                ));
+            }
+        };
+        // No await between this check and the send: the replacement either
+        // committed before the check (and this frame is refused) or after
+        // (and it was already committed to the old queue, which holds it).
+        if !self.is_live(link).await {
+            drop(permit);
+            return Err(AppError::unavailable(
+                "guest_connection_replaced",
+                "the machine reconnected; try again",
+            ));
+        }
+        permit.send(event);
+        Ok(())
+    }
+
+    /// Whether `link` is still the device's live connection.
+    async fn is_live(&self, link: DaemonLink) -> bool {
+        self.peers
+            .read()
+            .await
+            .get(&link.device_id)
+            .is_some_and(|peer| peer.connection_id == link.connection_id)
     }
 
     /// The outbound queue of one exact connection, while it is still live.
@@ -906,7 +1045,7 @@ async fn handle_socket(state: AppState, socket: WebSocket, authed: Authed, annou
 
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel(state.config.relay_queue_depth.max(1));
-    state
+    let generation = state
         .relay
         .register(Peer {
             device_id: device.id,
@@ -921,6 +1060,13 @@ async fn handle_socket(state: AppState, socket: WebSocket, authed: Authed, annou
 
     let _ = state.store.touch_device(device.id).await;
     if kind == "daemon" {
+        // The presence write is serialized per device and checks the
+        // connection's generation, so a socket a reconnect already replaced
+        // cannot publish "online" after the replacement's own write.
+        let _presence = state.relay.presence_guard(device.id).await;
+        if !state.relay.owns_presence(device.id, generation).await {
+            return;
+        }
         let _ = state
             .store
             .set_presence(device.id, user_id, machine_id, true)
@@ -1011,30 +1157,28 @@ async fn handle_socket(state: AppState, socket: WebSocket, authed: Authed, annou
     }
 
     // A socket that a reconnect already replaced must not report the device
-    // offline: the new connection is the device's presence now.
-    let Some(closed) = state.relay.unregister(device.id, connection).await else {
-        writer.abort();
-        return;
-    };
-    for session in closed {
-        let other = if session.client_device_id == device.id {
-            session.daemon_device_id
-        } else {
-            session.client_device_id
-        };
-        let _ = state
-            .relay
-            .send(
-                other,
-                RelayServerEvent::Frame {
-                    frame: RelayFrame::close(session.conn_id.clone()),
-                },
-            )
-            .await;
-    }
+    // offline: the new connection is the device's presence now. Its sessions
+    // still go, though, so frames stop routing to the replacement under a
+    // `conn_id` the replacement never opened.
+    let closed = state.relay.unregister(device.id, connection).await;
+    state
+        .relay
+        .close_partners(connection, closed.sessions)
+        .await;
     writer.abort();
+    if !closed.live {
+        return;
+    }
 
     if kind == "daemon" {
+        // The offline write holds the device's presence lock and re-checks the
+        // connection generation: a replacement that registered (and published
+        // online) since `unregister` must not be overwritten by this socket's
+        // close, and one that registers now publishes after this write.
+        let _presence = state.relay.presence_guard(device.id).await;
+        if !state.relay.owns_presence(device.id, generation).await {
+            return;
+        }
         let _ = state
             .store
             .set_presence(device.id, user_id, machine_id, false)
@@ -1145,12 +1289,12 @@ async fn dispatch(
             let daemon_device_id = machine.daemon_device_id.ok_or_else(|| {
                 AppError::unavailable("daemon_missing", "the machine has no daemon")
             })?;
-            if !state.relay.online(daemon_device_id).await {
+            let Some(daemon_link) = state.relay.link(daemon_device_id).await else {
                 return Err(AppError::unavailable(
                     "daemon_offline",
                     "the machine's daemon is not connected",
                 ));
-            }
+            };
 
             let forwarded = RelayOpen {
                 machine_id: machine_id.to_string(),
@@ -1169,6 +1313,8 @@ async fn dispatch(
                         daemon_device_id,
                         machine_id,
                         user_id: authed.user.id,
+                        client_connection: connection,
+                        daemon_connection: daemon_link.connection_id,
                     },
                     frame,
                 )
@@ -1370,6 +1516,8 @@ mod tests {
         let user = Uuid::now_v7();
         let (daemon_peer, mut daemon_rx) = peer(daemon, user, Some(machine), 8);
         let (client_peer, mut client_rx) = peer(client, user, None, 8);
+        let daemon_connection = daemon_peer.connection_id;
+        let client_connection = client_peer.connection_id;
         hub.register(daemon_peer).await;
         hub.register(client_peer).await;
         assert!(hub.machine_online(machine).await);
@@ -1380,6 +1528,8 @@ mod tests {
             daemon_device_id: daemon,
             machine_id: machine,
             user_id: user,
+            client_connection,
+            daemon_connection,
         };
         hub.open(session, RelayFrame::open("c1", machine.to_string()))
             .await
@@ -1443,6 +1593,7 @@ mod tests {
         let (daemon_peer, _daemon_rx) = peer(daemon, user, Some(machine), 8);
         let daemon_connection = daemon_peer.connection_id;
         let (client_peer, _client_rx) = peer(client, user, None, 8);
+        let client_connection = client_peer.connection_id;
         hub.register(daemon_peer).await;
         hub.register(client_peer).await;
         hub.open(
@@ -1452,19 +1603,193 @@ mod tests {
                 daemon_device_id: daemon,
                 machine_id: machine,
                 user_id: user,
+                client_connection,
+                daemon_connection,
             },
             RelayFrame::open("c1", machine.to_string()),
         )
         .await
         .unwrap();
-        let sessions = hub
-            .unregister(daemon, daemon_connection)
-            .await
-            .expect("the live socket reported its sessions");
+        let closed = hub.unregister(daemon, daemon_connection).await;
+        assert!(closed.live, "the live socket reported its sessions");
+        let sessions = closed.sessions;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].conn_id, "c1");
         assert!(!hub.machine_online(machine).await);
         assert!(hub.online_machines(user).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_replaced_sockets_session_is_closed_for_its_partner() {
+        // A session belongs to the socket that opened it. When the daemon
+        // reconnects, the old socket's session must go: its partner is told,
+        // and the old conn_id can no longer reach the replacement.
+        let hub = RelayHub::new();
+        let machine = Uuid::now_v7();
+        let daemon = Uuid::now_v7();
+        let client = Uuid::now_v7();
+        let user = Uuid::now_v7();
+        let (daemon_peer, mut daemon_rx) = peer(daemon, user, Some(machine), 8);
+        let old_connection = daemon_peer.connection_id;
+        let (client_peer, mut client_rx) = peer(client, user, None, 8);
+        let client_connection = client_peer.connection_id;
+        hub.register(daemon_peer).await;
+        hub.register(client_peer).await;
+        hub.open(
+            Session {
+                conn_id: "c1".to_string(),
+                client_device_id: client,
+                daemon_device_id: daemon,
+                machine_id: machine,
+                user_id: user,
+                client_connection,
+                daemon_connection: old_connection,
+            },
+            RelayFrame::open("c1", machine.to_string()),
+        )
+        .await
+        .unwrap();
+        match daemon_rx.recv().await.expect("open") {
+            RelayServerEvent::Frame { frame } => assert_eq!(frame.kind, RelayFrameKind::Open),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // The daemon reconnects; its new socket is the device's live peer.
+        let (replacement, mut replacement_rx) = peer(daemon, user, Some(machine), 8);
+        hub.register(replacement).await;
+
+        // The old socket closes. It did not own the device any more, but its
+        // own session still has to go.
+        let closed = hub.unregister(daemon, old_connection).await;
+        assert!(
+            !closed.live,
+            "a replaced socket claimed the device went away"
+        );
+        assert_eq!(
+            closed.sessions.len(),
+            1,
+            "a replaced socket's session was left behind"
+        );
+        assert_eq!(closed.sessions[0].conn_id, "c1");
+        hub.close_partners(old_connection, closed.sessions).await;
+        match client_rx.recv().await.expect("the partner is connected") {
+            RelayServerEvent::Frame { frame } => {
+                assert_eq!(frame.kind, RelayFrameKind::Close);
+                assert_eq!(frame.conn_id, "c1");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // The removal is also what stops the old conn_id from routing to the
+        // replacement.
+        let error = hub
+            .route(client, RelayFrame::data("c1", b"late".to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.body().code, "session_not_found");
+        assert!(
+            replacement_rx.try_recv().is_err(),
+            "a frame reached the replacement under the old conn_id"
+        );
+        assert!(
+            hub.online(daemon).await,
+            "closing the replaced socket marked the live one offline"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_before_the_offline_write_keeps_the_new_presence() {
+        // A daemon's socket unregisters, and the reconnect lands before the
+        // offline write runs. The offline write's generation check must see
+        // that the new connection owns presence, so it is never overwritten.
+        let hub = RelayHub::new();
+        let machine = Uuid::now_v7();
+        let daemon = Uuid::now_v7();
+        let user = Uuid::now_v7();
+        let (old_peer, _old_rx) = peer(daemon, user, Some(machine), 8);
+        let old_connection = old_peer.connection_id;
+        let old_generation = hub.register(old_peer).await;
+        assert!(hub.owns_presence(daemon, old_generation).await);
+
+        let closed = hub.unregister(daemon, old_connection).await;
+        assert!(closed.live);
+
+        // The reconnect happens between `unregister` and the offline update.
+        let (new_peer, _new_rx) = peer(daemon, user, Some(machine), 8);
+        let new_generation = hub.register(new_peer).await;
+        assert_ne!(old_generation, new_generation);
+
+        assert!(
+            !hub.owns_presence(daemon, old_generation).await,
+            "the closing socket still believed it owned the device's presence"
+        );
+        assert!(hub.owns_presence(daemon, new_generation).await);
+        assert!(
+            hub.online(daemon).await,
+            "the reconnected socket was reported offline"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_waited_for_capacity_never_enters_a_replaced_queue() {
+        let hub = Arc::new(RelayHub::new());
+        let machine = Uuid::now_v7();
+        let daemon = Uuid::now_v7();
+        let user = Uuid::now_v7();
+        let (daemon_peer, mut old_rx) = peer(daemon, user, Some(machine), 1);
+        let old_connection = daemon_peer.connection_id;
+        hub.register(daemon_peer).await;
+        // The old socket's queue is full, so the upload's frame must wait.
+        hub.send(
+            daemon,
+            RelayServerEvent::Frame {
+                frame: RelayFrame::data("fill", b"fill".to_vec()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let link = link_for(daemon, old_connection);
+        let waiting = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                hub.send_wait_to(
+                    link,
+                    RelayServerEvent::Frame {
+                        frame: RelayFrame::data("c1", b"chunk".to_vec()),
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+            })
+        };
+        // The task's only await before the capacity wait is the peer lookup, so
+        // a short pause leaves it parked on the full queue.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The daemon reconnects while the frame is still waiting.
+        let (replacement, mut replacement_rx) = peer(daemon, user, Some(machine), 8);
+        hub.register(replacement).await;
+
+        // Room appears on the old queue: the frame must be refused instead of
+        // committed to a socket the daemon has replaced.
+        match old_rx.recv().await.expect("the old queue") {
+            RelayServerEvent::Frame { frame } => assert_eq!(frame.conn_id, "fill"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let error = waiting
+            .await
+            .expect("the send task")
+            .expect_err("a frame waiting on a replaced socket was accepted");
+        assert_eq!(error.body().code, "guest_connection_replaced");
+        assert!(
+            old_rx.try_recv().is_err(),
+            "the chunk entered the replaced socket's queue"
+        );
+        assert!(
+            replacement_rx.try_recv().is_err(),
+            "the chunk reached the socket that replaced the one it began on"
+        );
     }
 
     #[tokio::test]
@@ -1716,8 +2041,13 @@ mod tests {
         let previous = register_daemon(&hub, daemon, true).await;
         hub.announce(daemon, previous, admission_hello()).await;
         let current = register_daemon(&hub, daemon, true).await;
+        let closed = hub.unregister(daemon, previous).await;
         assert!(
-            hub.unregister(daemon, previous).await.is_none(),
+            !closed.live,
+            "a replaced socket reported the device as present"
+        );
+        assert!(
+            closed.sessions.is_empty(),
             "a replaced socket reported sessions it no longer owns"
         );
         // The old socket closing must not report the device offline: the new

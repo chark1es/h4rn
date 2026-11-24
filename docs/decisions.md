@@ -1582,13 +1582,21 @@ deleted, and the resolved event names its request. A crash between the claim and
 the event therefore leaves a row the startup sweep can resolve, and a repeated
 event from that sweep cannot clear another guest's hand. The periodic sweep
 leaves a `sending` or `reserving` row alone while a task may still be reading
-it; only the startup pass, where no reader can exist, recovers it. A Send
-records its acceptance in the same claim that moves the row out of `pending`,
-before the turn starts. When the interrupted row's link still lives, recovery
-answers it from that record (sent when accepted, dismissed otherwise), deletes
-its files, raises that resolution and keeps the row as the provenance record the
-guest's later poll needs; ending the link then drops it like any finished
-request. A connection
+it; only the startup pass, where no reader can exist, recovers it. A Send's
+acceptance is the thread's journal, not a flag beside it: the message is
+appended with the item id `item_guest_<request_id>`, and nothing becomes
+deliverable before that append commits — a prompt whose append failed is not
+left in the running turn's queue, so the owner's retry delivers it exactly once.
+The references the Send takes for its thread's attachments are recorded under a
+hold named for the request in the same transaction that takes them, so recovery
+releases exactly those (the reference and the per-thread copy) when the message
+never arrived, or confirms them when it did, without touching a reference an
+earlier message of the same thread already held. When a Send is interrupted,
+recovery asks the journal first and decides about the link and the row only
+afterwards: a journaled message is `sent`, never dismissed because its link
+expired while the daemon was down. While the link still lives the row stays as
+the provenance record the guest's later poll needs; an ended or expired link
+drops it once its answer is raised. A connection
 runs its handlers to completion, so closing the peer never cancels a step that
 already changed the record. Work that can take a while — a submission, Send and
 Dismiss — runs on its own task and cannot be stranded by a dropped socket
@@ -1620,8 +1628,11 @@ and opens on the revoked notice. The page request carries the browser's own
 binding cookie, so a bound browser reloads to its own state while a fresh one
 sees "unbound", and a page GET still never claims the link. Each exchange
 travels to the daemon over its existing authenticated relay socket and is
-answered by that daemon only: a waiter is bound to the selected daemon's device
-id, and a reply from any other device is ignored. A current daemon marks its
+answered by that daemon only: an exchange and its answer are pinned to one
+connection id — not merely the daemon's device id — so a reply from another
+device, or from a socket the daemon has since replaced, is ignored, and a chunk
+that waited for queue capacity is checked against the pinned connection once
+more as it is enqueued. A current daemon marks its
 socket as one that sends a hello, and capability is recorded per socket: a
 reconnect starts unknown, and a hello from a replaced socket is ignored. A
 daemon that promised a hello and has not sent one is never sent a body; the
@@ -1629,7 +1640,14 @@ browser gets a retryable error and the exchange is cancelled. Only a socket from
 a build that predates hellos, or a hello that omits admission, keeps the legacy
 path. A hello wakes every exchange waiting for it, and an announced daemon gets
 no body before its admission; when it stays silent, the cancel lets it release
-the slot it was holding instead of pinning it until an idle timeout.
+the slot it was holding instead of pinning it until an idle timeout. A session
+belongs to the two sockets that opened it: a socket a reconnect replaced still
+closes exactly its own sessions and tells each partner, while the device's
+presence stays with the replacement. Presence writes are serialised per device
+and check the connection generation as they are written, so an old socket's
+close can never report online after the replacement did. A refusal by the daemon
+releases its upload slot before the refusal is queued, so a full outbound queue
+cannot pin the slot.
 Bodies are split into bounded frames, so a 10 MB upload never grows a shared
 WebSocket frame; Connect refuses an exchange over the guest limit before it
 reaches the socket, and rebuilds every response header, including the binding

@@ -2120,6 +2120,35 @@ async fn summary_pending_guest_requests(client: &mut Client, thread_id: &ThreadI
     }
 }
 
+/// Every event the owner's thread has recorded, read from the start.
+async fn owner_events(client: &mut Client, thread_id: &ThreadId) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut since = 0;
+    loop {
+        match client
+            .request(ClientRequest::GetThread {
+                thread_id: thread_id.clone(),
+                since_seq: since,
+            })
+            .await
+        {
+            ResponseBody::Thread {
+                events: page,
+                next_seq,
+                more,
+                ..
+            } => {
+                events.extend(page.into_iter().map(|entry| entry.event));
+                if !more {
+                    return events;
+                }
+                since = next_seq;
+            }
+            other => panic!("unexpected thread response: {other:?}"),
+        }
+    }
+}
+
 fn guest_text_message(text: &str) -> GuestMessageInput {
     GuestMessageInput {
         text: text.into(),
@@ -2526,6 +2555,192 @@ async fn startup_recovers_a_send_whose_message_is_journaled_as_sent() {
         "the guest never learned its accepted message resolved: {:?}",
         later.events
     );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_a_journaled_send_whose_link_expired_while_down() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "expired after append").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post(
+            "/messages",
+            &guest_text_message("arrived before the link died"),
+        )
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The append happened, then the daemon stopped before recording `sent`.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::AfterAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the crash point was before the append"
+    );
+
+    // The 24 hours pass while the daemon is down, so startup ends the link
+    // before it recovers the row. The owner's thread still has the message, and
+    // it must be answered as sent rather than dismissed.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("UPDATE guest_links SET expires_at = ? WHERE thread_id = ?")
+        .bind((chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339())
+        .bind(thread_id.as_str())
+        .execute(&pool)
+        .await
+        .expect("expire link");
+    pool.close().await;
+
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "the owner still shows a pending guest request"
+    );
+    let events = owner_events(&mut owner, &thread_id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::GuestRequestResolved { request_id: id, sent: true, .. } if id == &request_id
+        )),
+        "a journaled send whose link expired was never answered as sent: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "a journaled send was dismissed because its link expired"
+    );
+    let pool = journal_pool(&daemon).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests WHERE request_id = ?")
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count row");
+    pool.close().await;
+    assert_eq!(rows, 0, "an ended link kept a finished request row");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_crashed_send_releases_the_thread_attachment_it_staged() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "staged files").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "with a file".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "staged.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"staged before the append"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let guest_dir = daemon.dir.path().join("guest").join(&request_id);
+    let thread_attachments = daemon
+        .dir
+        .path()
+        .join("attachments")
+        .join(thread_id.as_str());
+    assert!(guest_dir.is_dir());
+    assert!(count_files(&thread_attachments) == 0);
+
+    // The append is paused: the file has already been copied into the thread
+    // and its reference taken, but the message is not journaled yet.
+    let gate = daemon.manager.pause_next_append();
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+    assert!(
+        !daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the crash point was after the append"
+    );
+    assert_eq!(
+        count_files(&thread_attachments),
+        1,
+        "the crash point was before the attachment was resolved into the thread"
+    );
+    let blobs = blob_pool(&daemon).await;
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE refcount > 0")
+        .fetch_one(&blobs)
+        .await
+        .expect("count retained blobs");
+    assert_eq!(retained, 1, "the staged blob was not referenced");
+
+    // Recovery dismisses the send because the thread never got it, and the
+    // references it staged must go with the guest's own files.
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    assert!(!guest_dir.exists(), "the dismissed send kept its files");
+    assert_eq!(
+        count_files(&thread_attachments),
+        0,
+        "the thread kept a copy only the failed send referenced"
+    );
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE refcount > 0")
+        .fetch_one(&blobs)
+        .await
+        .expect("count retained blobs");
+    assert_eq!(retained, 0, "a dismissed send kept its blob reference");
+    let holds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_holds")
+        .fetch_one(&blobs)
+        .await
+        .expect("count holds");
+    assert_eq!(holds, 0, "a recovered send kept its staged hold");
+    blobs.close().await;
     daemon.stop().await;
 }
 
@@ -3149,6 +3364,23 @@ async fn journal_pool(daemon: &TestDaemon) -> sqlx::SqlitePool {
     ))
     .await
     .expect("open journal")
+}
+
+/// The blob store's own database, for reference and hold assertions.
+async fn blob_pool(daemon: &TestDaemon) -> sqlx::SqlitePool {
+    sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        daemon.dir.path().join("blobs").join("meta.db").display()
+    ))
+    .await
+    .expect("open blob store")
+}
+
+/// How many files one directory holds; a missing directory is empty.
+fn count_files(directory: &std::path::Path) -> usize {
+    std::fs::read_dir(directory)
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0)
 }
 
 /// The stored status of one guest request, or none when the row is gone.
