@@ -38,6 +38,9 @@ among them, so 02:00 and 02:30 jobs in Berlin both run in the first pass. A
 start: it never matches again in the repeated hour, and neither an edit nor a
 pause during the run followed by a resume re-arms the same date and time.
 Naming a different date, time or time zone in an edit does arm a new slot.
+A spent **Once** marker written by a daemon from before the time zone joined
+that identity is migrated when the task is opened, so an upgrade cannot arm the
+slot again.
 
 Cron accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `1-30/2`) and comma
 lists. Weekdays are 0 (Sunday) through 6, with 7 also accepted as Sunday. When
@@ -68,7 +71,7 @@ that thread last switched to.
 
 A thread with an enabled one-thread task keeps its worktree through a clear.
 Settings → Worktrees reports it as skipped with **has an enabled scheduled
-task**; pausing or deleting the task releases it.
+task**; pausing, deleting or disarming the task releases it.
 
 ## Missed runs and overlap
 
@@ -93,9 +96,21 @@ run does not acquire a clock time. A slot whose write is still retrying is not
 treated as due: the runner wakes on the retry deadline instead of checking the
 past slot over and over. If the stored schedule cannot produce the slot after
 the current one (an invalid time zone, for example), the run is not
-dispatched. The task is disarmed and a **Failed** run records the reason, so no
-thread is started for a run that could never be recorded and no backoff starts
-another. Fix the schedule and resume the task to run it again. A
+dispatched. The task is disarmed and paused in one write: a **Failed** run
+records the reason, and it is committed together with the pause, so the failure
+can never be lost while the task stays paused. The pause makes the same decision
+from the task's current settings under the same write, on the first attempt and
+on its retry; if that write fails, the pause is staged with it and retried. A
+person who fixes the schedule meanwhile keeps the task
+enabled, still gets the original failure in the history, and the slot runs once.
+No thread is started for a run that could never be recorded and
+no backoff starts another; the toggle reads **Resume** instead of offering to
+pause a task that will never run, and the thread's checkout stops being held
+for worktree cleanup. On opening a stored task, the pause is restored only when
+its newest clock-scheduled run is that disarm failure and it has no next slot —
+a **Run now** pressed after the disarm does not hide it; a row with an
+unreadable timestamp and no such failure is left exactly as stored, so its
+checkout stays protected. Fix the schedule and resume the task to run it again. A
 **Once** task whose run started is spent even when its write is still
 retrying.
 

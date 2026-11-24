@@ -75,8 +75,19 @@ All notable changes to h4rn are recorded here. The format follows
   during the run cannot arm it again, and a spent Once task stays spent across
   edits and resumes; only a different date, time or time zone names a new slot,
   and a run is refused until that marker is durable, so a crash cannot re-arm
-  it. A schedule that cannot name its next slot is disarmed and records the
-  reason instead of starting a thread on every backoff. Daily and weekly times
+  it; a spent marker written before time zones joined that identity is migrated
+  when the daemon opens it. A schedule that cannot name its next slot is
+  disarmed and paused in the same write — it records the reason, offers
+  **Resume** instead of **Pause**, and releases its thread's checkout — instead
+  of starting a thread on every backoff; a failed write retries the pause with
+  its failure, and the pause checks the task's current settings under the same
+  write on the first attempt and on the retry, so fixing the schedule meanwhile
+  keeps the task enabled and lets that slot run once while the original failure
+  stays in the history. On open, a task is paused only when its newest
+  clock-scheduled run is that disarm failure — a **Run now** pressed after it
+  changes nothing; a row whose timestamp cannot be read and
+  that never failed to run is left as stored, keeping its checkout protected.
+  Daily and weekly times
   run only at the first occurrence in a fall-back hour, cron returns the
   earliest UTC instant among that hour's jobs, and the editor's default zone
   comes from the daemon. The editor also says why when it cannot reveal a
@@ -502,6 +513,22 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A queued message runs at most once, even when the agent hits a limit.** A prompt the agent has
+  accepted is never sent again automatically, whether or not it reported work: the turn settles as
+  limited with its trace, and the person can resend. Only a write that failed before acceptance is
+  handed back to the pause. While a promoted turn's write is in flight, its output is held and
+  released in order; a flood of tool updates can no longer push its completion out of the hold, and
+  an acceptance that lands between two events still releases the earlier output first, so the turn
+  can never stay Working forever. The hold also counts stale diagnostics, so an agent that floods
+  the stream with garbage during the write cannot grow it without limit while the completion is
+  still kept. The ACP reader now bounds every event it queues, not only session updates: a
+  notification or stdout-garbage flood drops the excess like text does, a permission backlog has
+  its own small bound, and a permission flood can never delay the exit report. A permission request
+  the backlog cannot take is answered at once with the cancelled outcome instead of being dropped,
+  so the agent never waits on a request no one will answer and a turn never hangs on it. Below
+  that pressure the lanes keep their arrival order, so a permission request that arrives before an
+  update is not overtaken. A turn stopped while a closed session's write fails ends Interrupted with
+  no transport row, and a prompt is saved for a restart only once a schedule really owns it.
 - **Issues follow through on the tracker's answers.** An Azure team project whose name has a
   space (`Platform Team`) now reads through percent-encoded paths and links instead of a 404, and
   Gitea/Forgejo finds a label that belongs to the organization as well as one that belongs to the

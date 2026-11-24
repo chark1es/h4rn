@@ -8,10 +8,10 @@ use std::time::Duration;
 use chrono::Utc;
 use h4rn_harness::{FakeHarness, Harness, HarnessEvent};
 use h4rn_protocol::{
-    AgentState, HarnessKind, HostId, RuntimeMode, SubagentBudget, SubagentContext,
-    SubagentCredential, SubagentId, SubagentIsolation, SubagentState, SubagentView, ThreadId,
-    ThreadTab, ToolCall, ToolCallStatus, TrackedWorktree, WorktreeAccess, WorktreeOrigin,
-    WorktreeStatus,
+    AgentState, HarnessKind, HostId, RuntimeMode, ScheduleRun, ScheduleRunOutcome, SubagentBudget,
+    SubagentContext, SubagentCredential, SubagentId, SubagentIsolation, SubagentState,
+    SubagentView, ThreadId, ThreadTab, ToolCall, ToolCallStatus, TrackedWorktree, WorktreeAccess,
+    WorktreeOrigin, WorktreeStatus,
 };
 use serde_json::json;
 
@@ -23,7 +23,7 @@ use super::{
     preflight, prepare, run_clear_entry, select_entries,
 };
 use crate::harnesses::StaticHarnessCatalog;
-use crate::journal::SqliteJournal;
+use crate::journal::{Journal, SqliteJournal};
 use crate::subagents::{SubagentManager, SubagentOptions};
 use crate::threads::{NewThread, ThreadManager, ThreadManagerOptions};
 
@@ -6259,5 +6259,155 @@ async fn a_clear_keeps_a_thread_with_an_enabled_scheduled_task() {
     assert!(
         !second.exists(),
         "a deleted task no longer keeps the checkout"
+    );
+}
+
+#[tokio::test]
+async fn a_disarmed_scheduled_task_releases_its_checkout() {
+    let fixture = Fixture::new();
+    let checkout = fixture.add_worktree("wt-disarmed", "disarmed-branch");
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(FakeHarness::new())]).await;
+    let journal: Arc<dyn Journal> =
+        Arc::new(SqliteJournal::in_memory().await.expect("schedule journal"));
+    let open = |journal: Arc<dyn Journal>, threads: Arc<ThreadManager>| {
+        crate::schedules::ScheduleService::open(
+            journal,
+            threads,
+            HostId::new("host_local"),
+            Arc::new(crate::threads::SystemClock),
+        )
+    };
+    let schedules = Arc::new(
+        open(Arc::clone(&journal), Arc::clone(&threads))
+            .await
+            .expect("schedule service"),
+    );
+    let task = schedules
+        .create(scheduled_draft(&checkout))
+        .await
+        .expect("create scheduled task");
+    run_scheduled(&schedules, &threads, &task.task_id).await;
+    tracker.set_schedule_service(Arc::clone(&schedules));
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == git::norm(&checkout))
+        .unwrap_or_else(|| panic!("the scheduled thread workspace is listed: {listed:?}"))
+        .clone();
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert_eq!(outcome.skipped[0].reason, "has an enabled scheduled task");
+
+    // A stored schedule that cannot name its next slot disarms and pauses the
+    // task; its checkout must be released with it.
+    let mut broken = schedules.task(&task.task_id).await.expect("the task");
+    broken.timezone = "Mars/Olympus_Mons".into();
+    broken.next_run_at = Some(Utc::now() - chrono::Duration::minutes(1));
+    journal
+        .upsert_schedule(&broken)
+        .await
+        .expect("write the corrupted row");
+    let reopened = Arc::new(
+        open(journal, Arc::clone(&threads))
+            .await
+            .expect("reopen the schedule service"),
+    );
+    tracker.set_schedule_service(Arc::clone(&reopened));
+    reopened.run_due().await;
+    let disarmed = reopened.task(&task.task_id).await.expect("the task");
+    assert!(!disarmed.enabled, "the disarmed task is paused");
+    assert!(disarmed.next_run_at.is_none());
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert_eq!(outcome.removed, vec![entry.path.clone()], "{outcome:?}");
+    assert!(
+        !checkout.exists(),
+        "a disarmed task no longer keeps the checkout"
+    );
+}
+
+#[tokio::test]
+async fn a_task_disarmed_on_upgrade_releases_its_checkout() {
+    let fixture = Fixture::new();
+    let checkout = fixture.add_worktree("wt-upgrade-disarmed", "upgrade-disarmed-branch");
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(FakeHarness::new())]).await;
+    let journal: Arc<dyn Journal> =
+        Arc::new(SqliteJournal::in_memory().await.expect("schedule journal"));
+    let open = |journal: Arc<dyn Journal>, threads: Arc<ThreadManager>| {
+        crate::schedules::ScheduleService::open(
+            journal,
+            threads,
+            HostId::new("host_local"),
+            Arc::new(crate::threads::SystemClock),
+        )
+    };
+    let schedules = Arc::new(
+        open(Arc::clone(&journal), Arc::clone(&threads))
+            .await
+            .expect("schedule service"),
+    );
+    let task = schedules
+        .create(scheduled_draft(&checkout))
+        .await
+        .expect("create scheduled task");
+    run_scheduled(&schedules, &threads, &task.task_id).await;
+    tracker.set_schedule_service(Arc::clone(&schedules));
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == git::norm(&checkout))
+        .unwrap_or_else(|| panic!("the scheduled thread workspace is listed: {listed:?}"))
+        .clone();
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert_eq!(outcome.skipped[0].reason, "has an enabled scheduled task");
+
+    // An older daemon cleared the slot of a schedule it could not compute but
+    // left the task enabled. Opening it restores the pause it never wrote, so
+    // the checkout is free; its newest run is the disarm failure that says why.
+    let mut legacy = schedules.task(&task.task_id).await.expect("the task");
+    legacy.enabled = true;
+    legacy.next_run_at = None;
+    journal
+        .upsert_schedule(&legacy)
+        .await
+        .expect("write the legacy row");
+    let mut refusal = ScheduleRun {
+        run_id: 0,
+        task_id: task.task_id.clone(),
+        scheduled_for: Some(Utc::now() - chrono::Duration::minutes(1)),
+        started_at: Utc::now(),
+        thread_id: None,
+        outcome: ScheduleRunOutcome::Failed,
+        detail: Some(
+            "Its schedule has no next run: the task has an invalid time zone. Fix the schedule to run it again."
+                .into(),
+        ),
+    };
+    journal
+        .append_schedule_run(&mut refusal, crate::schedules::HISTORY_LIMIT)
+        .await
+        .expect("write the disarm failure");
+    let reopened = Arc::new(
+        open(journal, Arc::clone(&threads))
+            .await
+            .expect("reopen the schedule service"),
+    );
+    tracker.set_schedule_service(Arc::clone(&reopened));
+    let paused = reopened.task(&task.task_id).await.expect("the task");
+    assert!(!paused.enabled, "the upgrade pauses a disarmed task");
+    assert!(paused.next_run_at.is_none());
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
+    assert_eq!(outcome.removed, vec![entry.path.clone()], "{outcome:?}");
+    assert!(
+        !checkout.exists(),
+        "a task disarmed on upgrade no longer keeps the checkout"
     );
 }
