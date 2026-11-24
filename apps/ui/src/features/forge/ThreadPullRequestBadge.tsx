@@ -32,9 +32,14 @@ function issueScopeLabel(issue: ThreadIssue): string {
     return `${owner}/${repo}#${issue.issue_id}`;
   }
   const state = issue.state;
-  if (state?.tracker !== "linear") return issue.issue_id;
-  // Name the team the way Linear shows it (`ENG`), not its internal UUID.
-  return `${state.issue.identifier} (${state.issue.team_key})`;
+  if (state?.tracker === "linear") {
+    // Name the team the way Linear shows it (`ENG`), not its internal UUID.
+    return `${state.issue.identifier} (${state.issue.team_key})`;
+  }
+  // A failed refresh empties the state. The identifier stored at link time
+  // still names the issue; a link made before it was stored gets a label
+  // instead of the provider's internal id.
+  return issue.identifier ?? "Linear issue";
 }
 
 /**
@@ -60,7 +65,7 @@ function issueLabel(issue: ThreadIssue): string {
 }
 
 function issueTitle(issue: ThreadIssue): string {
-  return issue.state ? issue.state.issue.title : "Issue unavailable";
+  return issue.state?.issue.title ?? issue.title ?? "Issue unavailable";
 }
 
 function issueUrl(issue: ThreadIssue): string {

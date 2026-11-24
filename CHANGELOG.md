@@ -637,6 +637,10 @@ All notable changes to h4rn are recorded here. The format follows
   then skipped again. A transcript that names no session id is still keyed by its
   path, size and fingerprint, so a Codex rollout that keeps growing is offered
   again as a new conversation.
+- **A linked Linear issue keeps its name when the tracker cannot be reached.**
+  The link now stores the issue's human identifier (`ENG-123`) and title, so a
+  failed refresh shows those instead of the provider's internal UUID. Links
+  made before this change show "Linear issue".
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,

@@ -583,12 +583,21 @@ impl SqliteJournal {
                 scope_key  TEXT NOT NULL,
                 scope_json TEXT NOT NULL,
                 issue_id   TEXT NOT NULL,
+                identifier TEXT,
+                title      TEXT,
                 linked_at  TEXT NOT NULL,
                 PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
             )",
         )
         .execute(&self.pool)
         .await?;
+        // A database written before the link stored its human identity still
+        // opens: the two columns are added empty, and the UI falls back to a
+        // generic label for those links.
+        self.ensure_column("daemon_issue_links", "identifier", "TEXT")
+            .await?;
+        self.ensure_column("daemon_issue_links", "title", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_issue_links_thread
@@ -1118,10 +1127,13 @@ impl Journal for SqliteJournal {
             .map_err(|error| JournalError::Database(sqlx::Error::Protocol(error.to_string())))?;
         sqlx::query(
             "INSERT INTO daemon_issue_links
-                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id,
+                 identifier, title, linked_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(thread_id, scope_kind, scope_key, issue_id) DO UPDATE SET
-                account_id = excluded.account_id",
+                account_id = excluded.account_id,
+                identifier = excluded.identifier,
+                title = excluded.title",
         )
         .bind(link.thread_id.as_str())
         .bind(&link.account_id)
@@ -1129,6 +1141,8 @@ impl Journal for SqliteJournal {
         .bind(key)
         .bind(scope_json)
         .bind(&link.issue_id)
+        .bind(&link.identifier)
+        .bind(&link.title)
         .bind(link.linked_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -1160,7 +1174,7 @@ impl Journal for SqliteJournal {
         thread_id: &ThreadId,
     ) -> Result<Vec<IssueLinkRecord>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, account_id, scope_json, issue_id, linked_at
+            "SELECT thread_id, account_id, scope_json, issue_id, identifier, title, linked_at
              FROM daemon_issue_links WHERE thread_id = ?
              ORDER BY linked_at ASC, rowid ASC",
         )
@@ -1695,6 +1709,8 @@ fn issue_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<IssueLinkRecord, 
             )))
         })?,
         issue_id: row.try_get("issue_id")?,
+        identifier: row.try_get("identifier")?,
+        title: row.try_get("title")?,
         linked_at: DateTime::parse_from_rfc3339(&linked_at)
             .map(|value| value.with_timezone(&Utc))
             .map_err(|error| {
@@ -1871,6 +1887,51 @@ mod tests {
         assert_eq!(threads[0].thread_id.as_str(), "th_old");
         assert_eq!(threads[0].agent_id, None);
         assert_eq!(threads[0].harness, HarnessKind::ClaudeCode);
+    }
+
+    #[tokio::test]
+    async fn an_issue_link_written_before_the_identity_was_stored_migrates_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("old-links.db");
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("open old database");
+        sqlx::query(
+            "CREATE TABLE daemon_issue_links (
+                thread_id  TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                scope_key  TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                issue_id   TEXT NOT NULL,
+                linked_at  TEXT NOT NULL,
+                PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old schema");
+        sqlx::query(
+            "INSERT INTO daemon_issue_links
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
+             VALUES ('th_1', 'lin_1', 'linear', 'team_1',
+                     '{\"tracker\":\"linear\",\"team_id\":\"team_1\"}', 'issue_uuid_1',
+                     '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("old row");
+        pool.close().await;
+
+        let journal = SqliteJournal::connect(&path).await.expect("open journal");
+        let links = journal
+            .issue_links_for_thread(&ThreadId::new("th_1"))
+            .await
+            .expect("list");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].issue_id, "issue_uuid_1");
+        assert_eq!(links[0].identifier, None);
+        assert_eq!(links[0].title, None);
     }
 
     #[tokio::test]

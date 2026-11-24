@@ -459,11 +459,16 @@ labels, assignees, and close/reopen. Gitea/Forgejo replace labels through
 `PUT /repos/{owner}/{repo}/issues/{index}/labels` with label ids, not through
 the issue PATCH body. Gitea accepts a label owned by the repository or by the
 organization that owns it. The labels already on the issue are read from the
-issue's own label list, which a repository-scoped token can read; a name that
-is not applied yet is looked up in the repository catalogue and then in
-`GET /orgs/{org}/labels`. That organization catalogue needs an
-organization-scoped token, so a `403` from it names the label that could not be
-found instead of failing the whole edit. The daemon
+issue's own label list, which a repository-scoped token can read, and a name
+that is not applied yet is looked up first in the repository catalogue, which
+the same token can read: those labels keep working. Only names the repository
+catalogue does not carry are looked up in `GET /orgs/{org}/labels`, which
+needs an organization-scoped token. When that organization catalogue answers
+`403`, the repository labels still resolve and the organization labels are
+left out of the lookup; if a requested name is one of them, the edit is
+refused before any replacement is sent, and the error names the label so the
+person can create it on the repository or connect an account with organization
+access. The daemon
 only sends the fields the caller
 named, so an edit never clears the others. GitHub closes with a
 `state_reason`, and a duplicate close also sends `duplicate_issue_id`; the UI
@@ -511,11 +516,15 @@ connected".
 ### Thread links
 
 `LinkIssue` stores the tracker scope and provider issue id in the journal, so
-a link survives a restart; `ThreadIssues` reads each linked issue live and
-reports a failed read as an error rather than a stale row. The thread header's
-linked-items panel shows issues beside pull requests with open and unlink, and
-names each issue by its scope (`owner/repo#12`, or Linear's identifier and
-team), so two issues numbered `#12` in different repositories never look alike.
+a link survives a restart. It also stores the issue's human identifier
+(`ENG-123` for Linear) and its title at link time, so a failed refresh still
+names the issue instead of falling back to the provider's internal id; a link
+made before those were stored is labelled "Linear issue". `ThreadIssues` reads
+each linked issue live and reports a failed read as an error rather than a
+stale row. The thread header's linked-items panel shows issues beside pull
+requests with open and unlink, and names each issue by its scope
+(`owner/repo#12`, or Linear's identifier and team), so two issues numbered
+`#12` in different repositories never look alike.
 
 ## Checks, logs, re-run and commits
 

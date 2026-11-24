@@ -29,6 +29,12 @@ pub struct IssueLinkRecord {
     pub scope: IssueScope,
     /// Provider issue id: a decimal number for forge issues.
     pub issue_id: String,
+    /// Human identifier stored when the link was made (`ENG-123` for Linear).
+    #[serde(default)]
+    pub identifier: Option<String>,
+    /// Issue title stored when the link was made, used when a refresh fails.
+    #[serde(default)]
+    pub title: Option<String>,
     /// When the link was created.
     pub linked_at: DateTime<Utc>,
 }
@@ -192,11 +198,23 @@ impl IssueLinkService {
         }
         let account_id = self.source.resolve_account(account_id, scope).await?;
         let state = self.read(&account_id, scope, issue_id).await?;
+        // Keep what people search for, so a failed refresh can still name the
+        // issue instead of falling back to a provider UUID.
+        let identifier = match &state {
+            LinkedIssueState::Forge { .. } => None,
+            LinkedIssueState::Linear { issue } => Some(issue.identifier.clone()),
+        };
+        let title = Some(match &state {
+            LinkedIssueState::Forge { issue } => issue.title.clone(),
+            LinkedIssueState::Linear { issue } => issue.title.clone(),
+        });
         let record = IssueLinkRecord {
             thread_id: thread_id.clone(),
             account_id,
             scope: scope.clone(),
             issue_id: issue_id.to_owned(),
+            identifier,
+            title,
             linked_at: Utc::now(),
         };
         self.journal.upsert_issue_link(&record).await?;
@@ -206,6 +224,8 @@ impl IssueLinkService {
             account_id: record.account_id,
             state: Some(state),
             error: None,
+            identifier: record.identifier,
+            title: record.title,
             linked_at: record.linked_at,
         })
     }
@@ -243,6 +263,8 @@ impl IssueLinkService {
                     account_id: record.account_id,
                     state: Some(state),
                     error: None,
+                    identifier: record.identifier,
+                    title: record.title,
                     linked_at: record.linked_at,
                 }),
                 Err(error) => issues.push(ThreadIssue {
@@ -251,6 +273,8 @@ impl IssueLinkService {
                     account_id: record.account_id,
                     state: None,
                     error: Some(error.to_string()),
+                    identifier: record.identifier,
+                    title: record.title,
                     linked_at: record.linked_at,
                 }),
             }
@@ -424,6 +448,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("linear:{issue_id}"));
+            if *self.fail.lock().unwrap() {
+                return Err(IssueLinkError::Tracker("linear is down".into()));
+            }
             Ok(LinearIssueSummary {
                 id: issue_id.into(),
                 identifier: "ENG-1".into(),
@@ -514,6 +541,58 @@ mod tests {
                 .unwrap()
                 .contains("forge is down")
         );
+    }
+
+    #[tokio::test]
+    async fn a_linear_link_keeps_its_human_identifier_when_the_read_fails() {
+        let (service, source, _journal) = service().await;
+        let thread = ThreadId::new("th_1");
+        let scope = IssueScope::Linear {
+            team_id: "team_1".into(),
+        };
+        let linked = service
+            .link(&thread, None, &scope, "issue_uuid_1")
+            .await
+            .unwrap();
+        assert_eq!(linked.identifier.as_deref(), Some("ENG-1"));
+        assert_eq!(linked.title.as_deref(), Some("Rate limit"));
+
+        // The tracker is briefly unreachable: the stored identity is all the
+        // row has to name the issue, and it must not be the provider UUID.
+        *source.fail.lock().unwrap() = true;
+        let listed = service.list(&thread).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].state.is_none());
+        assert_eq!(listed[0].identifier.as_deref(), Some("ENG-1"));
+        assert_eq!(listed[0].title.as_deref(), Some("Rate limit"));
+        assert_eq!(listed[0].issue_id, "issue_uuid_1");
+    }
+
+    #[tokio::test]
+    async fn a_link_written_before_the_identity_was_stored_reads_back_without_one() {
+        let (service, source, journal) = service().await;
+        let thread = ThreadId::new("th_1");
+        let scope = IssueScope::Linear {
+            team_id: "team_1".into(),
+        };
+        journal
+            .upsert_issue_link(&IssueLinkRecord {
+                thread_id: thread.clone(),
+                account_id: "lin_1".into(),
+                scope: scope.clone(),
+                issue_id: "issue_uuid_1".into(),
+                identifier: None,
+                title: None,
+                linked_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        *source.fail.lock().unwrap() = true;
+        let listed = service.list(&thread).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].state.is_none());
+        assert_eq!(listed[0].identifier, None);
+        assert_eq!(listed[0].title, None);
     }
 
     #[tokio::test]
