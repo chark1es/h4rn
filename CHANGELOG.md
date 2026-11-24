@@ -557,6 +557,22 @@ All notable changes to h4rn are recorded here. The format follows
   reported, a malformed or duplicated `Origin`/`Sec-Fetch-Site` is refused
   instead of treated as absent, `set_harness` commits a switch only after its
   write succeeds, and both browser sign-in screens lost their uppercase eyebrow.
+- **A queued message runs at most once, even when the agent hits a limit.** A prompt the agent has
+  accepted is never sent again automatically, whether or not it reported work: the turn settles as
+  limited with its trace, and the person can resend. Only a write that failed before acceptance is
+  handed back to the pause. While a promoted turn's write is in flight, its output is held and
+  released in order; a flood of tool updates can no longer push its completion out of the hold, and
+  an acceptance that lands between two events still releases the earlier output first, so the turn
+  can never stay Working forever. The hold also counts stale diagnostics, so an agent that floods
+  the stream with garbage during the write cannot grow it without limit while the completion is
+  still kept. The ACP reader now bounds every event it queues, not only session updates: a
+  notification or stdout-garbage flood drops the excess like text does, a permission backlog has
+  its own small bound, and a permission flood can never delay the exit report. A permission request
+  the backlog cannot take is answered at once with the cancelled outcome instead of being dropped,
+  so the agent never waits on a request no one will answer and a turn never hangs on it. Below
+  that pressure the lanes keep their arrival order, so a permission request that arrives before an
+  update is not overtaken. A turn stopped while a closed session's write fails ends Interrupted with
+  no transport row, and a prompt is saved for a restart only once a schedule really owns it.
 - **Issues follow through on the tracker's answers.** An Azure team project whose name has a
   space (`Platform Team`) now reads through percent-encoded paths and links instead of a 404, and
   Gitea/Forgejo finds a label that belongs to the organization as well as one that belongs to the

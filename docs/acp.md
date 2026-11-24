@@ -106,13 +106,18 @@ thread and the next session all name it, instead of the `default` alias or an id
 longer running. Typing `default` afterwards returns the thread to the agent's own choice. A load also
 replays the old conversation as session updates; h4rn consumes that history before the new turn, so
 it is neither shown twice nor able to fill the event queue and stall a long conversation. A slow
-consumer cannot grow the reader's memory either: the updates the reader holds for it are capped at
-four session queues, and beyond that the newest update is dropped and counted. A permission request,
-a transport close, stdout closing and the process exit report have a reserved path: once more than
-one session queue of updates is waiting, they get the next slot, so a flood of text never hides the
-event that decides what a request means or that the agent is gone. While the consumer keeps up the
-reader's order is kept, so a close never arrives before the words read ahead of it. A turn's
-settlement also keeps its place behind the updates already read.
+consumer cannot grow the reader's memory either: every session update, unknown notification and
+parse error the reader holds for it is counted against one bound of four session queues, and beyond
+that the newest is dropped and counted. A permission request has its own small bound, and one that
+arrives when that bound is full is answered at once with the cancelled outcome instead of being
+dropped, so every request id the agent sent gets exactly one reply and none is left waiting. The
+terminal reports (a transport close, stdout closing and the process exit report) take a separate
+queue that is never counted or dropped, so a permission backlog can never delay an exit. Under
+pressure a reserved event gets the next slot, so a flood of text never hides the event that decides
+what a request means or that the agent is gone. While the consumer keeps up the lanes are merged by
+arrival order, so a permission request that arrived before an update is not overtaken and a close
+never arrives before the words read ahead of it. A turn's settlement also keeps its place behind the
+updates already read.
 
 The new-thread and composer mode pickers only offer a choice h4rn can map onto an advertised mode id.
 The mapping is the daemon's: Approval required → `default`, `ask`, `manual` or `supervised`;
