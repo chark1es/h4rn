@@ -193,22 +193,26 @@ pub(crate) fn is_loopback_ip(ip: IpAddr) -> bool {
 /// wildcard address, whose loopback connection is the same socket. The guest
 /// handlers repeat the check on the peer address, so a wildcard bind still
 /// refuses a LAN peer. A concrete non-loopback bind has no direct guest path;
-/// Connect is the way to share from there.
+/// Connect is the way to share from there. The address is canonicalised first,
+/// so an IPv4-mapped bind such as `[::ffff:127.0.0.1]` is judged as the IPv4
+/// loopback it names.
 fn serves_direct_guest(bound: SocketAddr) -> bool {
-    is_loopback_ip(bound.ip()) || bound.ip().is_unspecified()
+    let ip = bound.ip().to_canonical();
+    is_loopback_ip(ip) || ip.is_unspecified()
 }
 
 /// The loopback URL a listener's direct guest routes answer on, when it has any.
 ///
 /// A wildcard bind answers a loopback connection on the same port, so the link
 /// names `127.0.0.1` for an unspecified IPv4 bind and `[::1]` for an IPv6
-/// loopback or unspecified bind. A concrete non-loopback bind has no direct
-/// path at all.
+/// loopback or unspecified bind. An IPv4-mapped bind names the IPv4 address it
+/// really bound, because that is where the socket answers. A concrete
+/// non-loopback bind has no direct path at all.
 pub(crate) fn direct_guest_base(bound: SocketAddr) -> Option<String> {
     if !serves_direct_guest(bound) {
         return None;
     }
-    let host = match bound.ip() {
+    let host = match bound.ip().to_canonical() {
         IpAddr::V4(ip) if ip.is_loopback() => ip.to_string(),
         IpAddr::V4(_) => "127.0.0.1".to_owned(),
         IpAddr::V6(ip) if ip.is_loopback() => "[::1]".to_owned(),
@@ -2541,6 +2545,13 @@ mod tests {
         assert!(serves_direct_guest("[::]:47800".parse().unwrap()));
         // Every address in 127.0.0.0/8 is loopback, not just 127.0.0.1.
         assert!(serves_direct_guest("127.0.0.2:47800".parse().unwrap()));
+        // An IPv4-mapped bind names the IPv4 loopback it really is.
+        assert!(serves_direct_guest(
+            "[::ffff:127.0.0.1]:47800".parse().unwrap()
+        ));
+        assert!(serves_direct_guest(
+            "[::ffff:127.0.0.2]:47800".parse().unwrap()
+        ));
         // A concrete network address is not a place a bearer token may live.
         assert!(!serves_direct_guest("192.168.1.9:47800".parse().unwrap()));
         assert!(!serves_direct_guest("100.64.1.5:47800".parse().unwrap()));
@@ -2555,6 +2566,16 @@ mod tests {
         // A concrete loopback bind names the address it really bound.
         assert_eq!(
             direct_guest_base("127.0.0.2:47800".parse().unwrap()).as_deref(),
+            Some("http://127.0.0.2:47800/guest")
+        );
+        // An IPv4-mapped bind names the IPv4 loopback address, which is where
+        // the socket answers; `[::1]` would have no listener.
+        assert_eq!(
+            direct_guest_base("[::ffff:127.0.0.1]:47800".parse().unwrap()).as_deref(),
+            Some("http://127.0.0.1:47800/guest")
+        );
+        assert_eq!(
+            direct_guest_base("[::ffff:127.0.0.2]:47800".parse().unwrap()).as_deref(),
             Some("http://127.0.0.2:47800/guest")
         );
         // The wildcard bind answers this machine on loopback, so the link uses

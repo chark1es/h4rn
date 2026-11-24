@@ -1627,6 +1627,40 @@ async fn the_direct_link_names_the_first_loopback_listener() {
 }
 
 #[tokio::test]
+async fn an_ipv4_mapped_loopback_bind_names_its_reachable_address() {
+    // An IPv4-mapped bind really listens on the IPv4 address it names. The
+    // link must say so; `[::1]` would be a host where nothing is listening.
+    for (mapped, named) in [
+        ("[::ffff:127.0.0.1]:0", "127.0.0.1"),
+        ("[::ffff:127.0.0.2]:0", "127.0.0.2"),
+    ] {
+        let bind: std::net::SocketAddr = mapped.parse().expect("mapped loopback");
+        if std::net::TcpListener::bind(bind).is_err() {
+            eprintln!("cannot bind an IPv4-mapped loopback address here; skipping {mapped}");
+            continue;
+        }
+        let daemon = boot_on(bind, None).await;
+        let port = daemon.addr.port();
+        assert_eq!(
+            daemon.guest.local_base(),
+            Some(format!("http://{named}:{port}/guest")),
+            "a mapped-address bind handed out a link with no listener"
+        );
+        // The address the link names really answers.
+        let (status, _, body) = Browser::new(format!("http://{named}:{port}"))
+            .get("/guest/not-a-real-token")
+            .await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::OK,
+            "the named address did not answer: {}",
+            String::from_utf8_lossy(&body)
+        );
+        daemon.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn a_dual_stack_bind_treats_an_ipv4_loopback_peer_as_this_machine() {
     // Some systems make an IPv6 wildcard socket IPv6-only. Probe the same bind
     // the daemon uses, rather than assume the default.

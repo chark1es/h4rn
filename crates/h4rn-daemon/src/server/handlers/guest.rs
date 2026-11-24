@@ -307,16 +307,56 @@ mod tests {
         assert!(!url_visible_to(true, None));
     }
 
-    /// A gated Send whose handler future is dropped after the claim still
-    /// leaves its audit line, because the audit runs inside the detached task.
-    #[tokio::test]
-    async fn a_dropped_guest_send_still_writes_its_audit_line() {
+    /// Which owner action a dropped handler must still finish.
+    #[derive(Clone, Copy)]
+    enum OwnerAction {
+        Send,
+        Dismiss,
+    }
+
+    impl OwnerAction {
+        fn request(self, thread_id: &h4rn_protocol::ThreadId, request_id: &str) -> ClientRequest {
+            match self {
+                Self::Send => ClientRequest::SendGuestRequest {
+                    thread_id: thread_id.clone(),
+                    request_id: request_id.to_owned(),
+                },
+                Self::Dismiss => ClientRequest::DismissGuestRequest {
+                    thread_id: thread_id.clone(),
+                    request_id: request_id.to_owned(),
+                },
+            }
+        }
+
+        fn final_status(self) -> &'static str {
+            match self {
+                Self::Send => "sent",
+                Self::Dismiss => "dismissed",
+            }
+        }
+
+        fn audit_action(self) -> &'static str {
+            match self {
+                Self::Send => "\"action\":\"guest.request_sent\"",
+                Self::Dismiss => "\"action\":\"guest.request_dismissed\"",
+            }
+        }
+    }
+
+    /// A handler future dropped after its claim still finishes the owner's
+    /// action: the detached task owns the row, its files and its audit line.
+    ///
+    /// Inlining the claim removes the detachment, so dropping the future
+    /// leaves the row in `sending` (Send) or the files on disk (Dismiss) and
+    /// the assertions below fail. Removing the audit call inside the detached
+    /// task fails the audit check for either action.
+    async fn a_dropped_owner_action_still_finishes(action: OwnerAction) {
         use std::collections::HashMap;
         use std::sync::atomic::{AtomicBool, AtomicU64};
 
         use h4rn_protocol::{
-            Event, GuestLinkState, GuestMessageInput, GuestSnapshot, HarnessKind, HostId,
-            RuntimeMode,
+            Event, GuestAttachmentInput, GuestLinkState, GuestMessageInput, GuestSnapshot,
+            HarnessKind, HostId, RuntimeMode,
         };
         use tokio::sync::{Notify, mpsc};
 
@@ -326,6 +366,7 @@ mod tests {
         use crate::remote::{RemoteAudit, SessionOrigin};
         use crate::server::{Connection, Outbound};
         use crate::threads::NewThread;
+        use base64::Engine as _;
 
         let data = tempfile::tempdir().expect("daemon dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
@@ -381,7 +422,9 @@ mod tests {
             .expect("create link");
         let token = created.token;
 
-        // Load the page, bind this browser, and submit one waiting message.
+        // Load the page, bind this browser, and submit one waiting message
+        // with a file, so Dismiss has something to delete and Send has
+        // something to move.
         let page = state
             .guest
             .handle(GuestHttpInput {
@@ -433,7 +476,11 @@ mod tests {
                 fetch_site: None,
                 body: serde_json::to_vec(&GuestMessageInput {
                     text: "audit me".into(),
-                    attachments: Vec::new(),
+                    attachments: vec![GuestAttachmentInput {
+                        name: "note.txt".into(),
+                        mime: "text/plain".into(),
+                        data: base64::engine::general_purpose::STANDARD.encode(b"audit me too"),
+                    }],
                 })
                 .expect("message json"),
             })
@@ -466,6 +513,8 @@ mod tests {
                 _ => None,
             })
             .expect("waiting request");
+        let files = data.path().join("guest").join(&request_id);
+        assert!(files.exists(), "the waiting request has no files");
 
         let (tx, _rx) = mpsc::channel::<Outbound>(8);
         let connection = Connection {
@@ -487,28 +536,30 @@ mod tests {
         // connection tears its request down.
         let gate = state.guest.pause_next_claim();
         {
-            let handler = handle(
-                &connection,
-                ClientRequest::SendGuestRequest {
-                    thread_id: thread.thread_id.clone(),
-                    request_id,
-                },
-            );
+            let handler = handle(&connection, action.request(&thread.thread_id, &request_id));
             tokio::pin!(handler);
             tokio::select! {
                 _ = gate.arrived() => {}
-                result = &mut handler => panic!("the Send finished before the gate: {result:?}"),
+                result = &mut handler => panic!("the action finished before the gate: {result:?}"),
             }
             // Dropping the future is what a torn-down connection does.
         }
         drop(connection);
         gate.release();
 
-        let audit_path = audit_dir.path().join("remote-audit.jsonl");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            if let Ok(audit) = std::fs::read_to_string(&audit_path)
-                && audit.contains("\"action\":\"guest.request_sent\"")
+            let status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM guest_requests WHERE request_id = ?")
+                    .bind(&request_id)
+                    .fetch_optional(state.guest.store_pool())
+                    .await
+                    .expect("read request row");
+            let audit = std::fs::read_to_string(audit_dir.path().join("remote-audit.jsonl"))
+                .unwrap_or_default();
+            if status.as_deref() == Some(action.final_status())
+                && !files.exists()
+                && audit.contains(action.audit_action())
             {
                 assert!(
                     audit.contains("dev_remote_owner"),
@@ -522,9 +573,153 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "a dropped connection lost the Send's audit line"
+                "a dropped connection left the {:?} unfinished (row {status:?}, files {})",
+                std::mem::discriminant(&action),
+                files.exists()
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// A gated Send whose handler future is dropped after the claim still
+    /// finishes, because the claim runs inside a detached task.
+    #[tokio::test]
+    async fn a_dropped_guest_send_still_finishes_its_row_files_and_audit_line() {
+        a_dropped_owner_action_still_finishes(OwnerAction::Send).await;
+    }
+
+    /// A gated Dismiss whose handler future is dropped after the claim still
+    /// finishes, for the same reason.
+    #[tokio::test]
+    async fn a_dropped_guest_dismiss_still_finishes_its_row_files_and_audit_line() {
+        a_dropped_owner_action_still_finishes(OwnerAction::Dismiss).await;
+    }
+
+    /// The real share request on a daemon with no listener a guest could
+    /// reach says what to do, and creates no link.
+    ///
+    /// The owner's socket is loopback-only, so a LAN-only daemon cannot be
+    /// driven over a WebSocket in a test; this calls the same handler the
+    /// socket calls, with the state a LAN-only `bind()` really produces.
+    #[tokio::test]
+    async fn sharing_with_no_serving_listener_names_the_remedy() {
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+
+        use h4rn_protocol::{HarnessKind, HostId, RuntimeMode};
+        use tokio::sync::{Notify, mpsc};
+
+        use crate::config::Config;
+        use crate::daemon::DaemonBuilder;
+        use crate::remote::SessionOrigin;
+        use crate::server::{Connection, Outbound};
+        use crate::threads::NewThread;
+
+        let Some(lan) = crate::remote::local_ipv4() else {
+            eprintln!(
+                "no non-loopback address on this machine; the LAN-only case cannot be exercised"
+            );
+            return;
+        };
+        let data = tempfile::tempdir().expect("daemon dir");
+        let config = Config {
+            data_dir: data.path().to_path_buf(),
+            bind: std::net::SocketAddr::new(lan, 0),
+            extra_bind: None,
+            log_level: "off".to_owned(),
+            tailscale: crate::remote::TailscaleMode::Off,
+            network_access: None,
+            network_port: 0,
+        };
+        let daemon = DaemonBuilder::new(config)
+            .with_local_host(HostId::new("host_no_listener"), "no listener")
+            .without_title_agents()
+            .with_catalog(Arc::new(crate::harnesses::StaticHarnessCatalog::with(
+                Arc::new(h4rn_harness::FakeHarness::new()),
+            )))
+            .build()
+            .await
+            .expect("build daemon");
+        let bound = daemon.bind().await.expect("bind daemon");
+        let state = bound.app_state().clone();
+        assert_eq!(
+            state.guest.local_base(),
+            None,
+            "a LAN-only daemon named a direct link"
+        );
+        let thread = state
+            .manager
+            .create_thread(NewThread {
+                thread_id: None,
+                parent_thread_id: None,
+                subagent_id: None,
+                host: HostId::new("host_no_listener"),
+                harness: HarnessKind::ClaudeCode,
+                agent_id: None,
+                workspace_path: data.path().display().to_string(),
+                model: "fake-model".into(),
+                prompt: "first".into(),
+                attachments: Vec::new(),
+                runtime_mode: RuntimeMode::ApprovalRequired,
+                reasoning_effort: None,
+                fast: false,
+                worktree: None,
+            })
+            .await
+            .expect("create thread");
+        state.guest.set_enabled(true).await.expect("enable guests");
+
+        let (tx, _rx) = mpsc::channel::<Outbound>(8);
+        let connection = Connection {
+            state: state.clone(),
+            hello_done: true,
+            topics: Arc::new(std::sync::RwLock::new(vec![h4rn_protocol::Topic::All])),
+            ready: Arc::new(AtomicBool::new(true)),
+            last_seq: Arc::new(AtomicU64::new(0)),
+            device: None,
+            viewer_id: state.terminals.next_viewer_id(),
+            tx,
+            origin: SessionOrigin::local(),
+            watches: HashMap::new(),
+            overflowed: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        };
+
+        let error = handle(
+            &connection,
+            ClientRequest::ShareThreadWithGuest {
+                thread_id: thread.thread_id.clone(),
+            },
+        )
+        .await
+        .expect_err("a daemon with nowhere to point handed out a link");
+        assert_eq!(error.code, h4rn_protocol::ProtoErrorCode::InvalidRequest);
+        // These are the words the share dialog shows, so the remedies have to
+        // be in the message itself.
+        for remedy in [
+            "no address a guest link can open on",
+            "Add a loopback listener",
+            "link this machine to Connect",
+            "then share again",
+        ] {
+            assert!(
+                error.message.contains(remedy),
+                "the refusal did not say {remedy:?}: {}",
+                error.message
+            );
+        }
+        let hint = error.hint.expect("the refusal carried a hint");
+        assert!(
+            hint.contains("loopback") && hint.contains("Connect"),
+            "the hint did not name both remedies: {hint}"
+        );
+
+        // A refused share leaves no half-created link behind.
+        let sharing = state
+            .guest
+            .sharing(&thread.thread_id, "", true)
+            .await
+            .expect("sharing");
+        assert!(sharing.link.is_none(), "a refused share still made a link");
     }
 }
