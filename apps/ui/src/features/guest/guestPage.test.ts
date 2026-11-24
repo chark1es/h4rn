@@ -94,10 +94,12 @@ function plan(entries: string[], turnId = turn) {
   };
 }
 
-function boot(responses: Array<Snapshot | Error>) {
+function boot(responses: Array<Snapshot | Error>, servedState = "active") {
   const timers: Array<() => void> = [];
   let calls = 0;
-  const dom = new JSDOM(pageHtml, {
+  // The daemon substitutes the link's state into the page it serves.
+  const html = pageHtml.replace("__STATE__", servedState);
+  const dom = new JSDOM(html, {
     runScripts: "dangerously",
     url: "http://localhost/guest/tok",
     beforeParse(window: {
@@ -258,7 +260,30 @@ describe("the guest page", () => {
   it("draws the attach control's focus ring on the visible label", () => {
     // The file input is invisible (opacity 0, full label overlay), so the
     // browser's default ring on it would never be seen.
-    expect(pageHtml).toContain(".attach:focus-within");
+    expect(pageHtml).toContain(".attach:has(:focus-visible)");
     expect(pageHtml).toContain("outline: 2px solid var(--accent)");
+    // A mouse click must not draw the ring: only keyboard focus does.
+    expect(pageHtml).not.toContain(".attach:focus-within");
   });
+
+  const servedStates = [
+    ["expired", "This link expired"],
+    ["revoked", "Sharing stopped"],
+    ["disabled", "Guest links are off"],
+    ["unbound", "Open this link in the browser that first used it"],
+  ] as const;
+
+  for (const [served, title] of servedStates) {
+    it(`starts a ${served} link on its notice and hides the composer`, async () => {
+      const page = openPage([new Error("offline")], served);
+      // The state the server rendered applies synchronously, before any poll.
+      const notice = page.document.getElementById("notice");
+      expect(notice?.hidden).toBe(false);
+      expect(page.document.getElementById("notice-title")?.textContent).toBe(title);
+      // The composer never appears for a link that cannot submit.
+      expect(page.document.getElementById("composer-wrap")?.hidden).toBe(true);
+      await page.domFlush();
+      expect(page.document.getElementById("composer-wrap")?.hidden).toBe(true);
+    });
+  }
 });

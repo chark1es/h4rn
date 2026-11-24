@@ -124,8 +124,8 @@ pub struct AppState {
 /// the loopback bind and binds the operator named carry it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ListenerKind {
-    /// The primary loopback bind (`--bind`).
-    Loopback,
+    /// The primary bind (`--bind`).
+    Primary,
     /// An extra address the operator named (`--extra-bind`).
     ExtraBind,
     /// The address discovered on the tailnet by Tailscale auto mode.
@@ -137,34 +137,55 @@ pub enum ListenerKind {
 impl ListenerKind {
     /// Whether this listener serves `/webhooks/{secret}`.
     ///
-    /// Only the loopback bind and an explicitly configured extra bind do. The
+    /// Only the primary bind and an explicitly configured extra bind do. The
     /// tailnet address and the LAN listener carry the encrypted session routes
     /// only, so a webhook secret never leaves the listeners the operator chose.
     pub fn serves_webhooks(self) -> bool {
-        matches!(self, Self::Loopback | Self::ExtraBind)
+        matches!(self, Self::Primary | Self::ExtraBind)
     }
 
     /// The router this listener serves.
-    pub fn router(self, state: AppState) -> Router {
+    ///
+    /// Which guest routes exist is decided from the address the listener
+    /// actually bound, not from the flag that created it: `--bind 0.0.0.0` is
+    /// still the primary listener, but it is not a loopback address.
+    pub fn router(self, state: AppState, bound: SocketAddr) -> Router {
         match self {
-            Self::Loopback | Self::ExtraBind => router(state),
+            Self::Primary | Self::ExtraBind => operator_router(state, bound),
             Self::Tailnet => core_router(state),
             Self::NetworkAccess => network_router(state),
         }
     }
 }
 
-/// Builds the daemon router.
+/// Builds the router for a listener the operator chose.
 ///
-/// This is the loopback and explicit-bind router: it carries the webhook
-/// endpoint because the operator chose where it listens. `/secure` is always
-/// registered so a remote client gets a clear "not enabled" response instead
-/// of a 404, while plain WebSocket access stays loopback-only (ADR-009).
-pub fn router(state: AppState) -> Router {
-    core_routes()
-        .route("/webhooks/{secret}", post(webhook_post))
-        .merge(guest_router())
-        .with_state(state)
+/// It carries the webhook endpoint because the operator chose where it
+/// listens. `/secure` is always registered so a remote client gets a clear
+/// "not enabled" response instead of a 404, while plain WebSocket access stays
+/// loopback-only (ADR-009). Direct guest routes are mounted only where the
+/// bound address can answer this machine: loopback, or the wildcard address,
+/// which still accepts a loopback connection.
+fn operator_router(state: AppState, bound: SocketAddr) -> Router {
+    let app = core_routes().route("/webhooks/{secret}", post(webhook_post));
+    let app = if serves_direct_guest(bound) {
+        app.merge(guest_router())
+    } else {
+        app
+    };
+    app.with_state(state)
+}
+
+/// Whether a listener bound to `bound` may serve the direct guest routes.
+///
+/// A direct guest link is a bearer token in a URL over plaintext HTTP, so the
+/// socket must be one only this machine can reach: a loopback bind, or the
+/// wildcard address, whose loopback connection is the same socket. The guest
+/// handlers repeat the check on the peer address, so a wildcard bind still
+/// refuses a LAN peer. A concrete non-loopback bind has no direct guest path;
+/// Connect is the way to share from there.
+fn serves_direct_guest(bound: SocketAddr) -> bool {
+    bound.ip().is_loopback() || bound.ip().is_unspecified()
 }
 
 /// Every route except the webhook endpoint.
@@ -248,9 +269,13 @@ async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> R
 /// The guest page for one link token.
 async fn guest_page_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
     guest_exchange(
         &state,
         crate::guest::Method::Get,
@@ -265,9 +290,13 @@ async fn guest_page_handler(
 /// The guest snapshot, with history from the start.
 async fn guest_state_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
     guest_exchange(
         &state,
         crate::guest::Method::Get,
@@ -282,9 +311,13 @@ async fn guest_state_handler(
 /// The guest snapshot after one sequence.
 async fn guest_state_since_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path((token, since)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
     guest_exchange(
         &state,
         crate::guest::Method::Get,
@@ -302,10 +335,14 @@ async fn guest_state_since_handler(
 /// body is read: an unauthenticated upload is refused without buffering it.
 async fn guest_message_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(token): Path<String>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
     let input = guest_input(
         crate::guest::Method::Post,
         format!("/guest/{token}/messages"),
@@ -320,24 +357,35 @@ async fn guest_message_handler(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    guest_exchange(
-        &state,
-        crate::guest::Method::Post,
-        format!("/guest/{token}/messages"),
-        None,
-        &headers,
-        body,
-    )
-    .await
+    // The submission runs in its own task. A browser that disconnects while
+    // the row is being written must not cancel it half-way: that would leave a
+    // `reserving` row, its files and its quota behind until the next restart.
+    let guest = Arc::clone(&state.guest);
+    let task = tokio::spawn(async move {
+        let mut input = input;
+        input.body = body;
+        guest.handle(input).await
+    });
+    match task.await {
+        Ok(output) => guest_output(output),
+        Err(error) => guest_output(crate::guest::GuestHttpOutput::text(
+            500,
+            &format!("The message could not be submitted: {error}"),
+        )),
+    }
 }
 
 /// One attachment the thread shows.
 async fn guest_blob_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path((token, id)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(response) = guest_peer_refused(peer) {
+        return response;
+    }
     // Forward the value unchanged: the guest surface decides what `1` and `0`
     // mean, and a bare `?thumbnail=0` must not turn into a thumbnail request.
     let suffix = query
@@ -353,6 +401,17 @@ async fn guest_blob_handler(
         Vec::new(),
     )
     .await
+}
+
+/// Refuses a direct guest request from a peer that is not this machine.
+///
+/// The direct routes are mounted only on a loopback or wildcard bind, but a
+/// wildcard socket also accepts LAN peers. This is the second guard, the same
+/// one `/ws` makes. It answers 404 like an unmounted route: a network peer
+/// must not be able to confirm that a guest path exists.
+fn guest_peer_refused(peer: SocketAddr) -> Option<Response> {
+    (!peer.ip().is_loopback())
+        .then(|| guest_output(crate::guest::GuestHttpOutput::text(404, "Not found.")))
 }
 
 /// Runs one exchange through the guest surface and renders its answer.
@@ -2423,10 +2482,23 @@ mod tests {
 
     #[test]
     fn webhook_routes_are_exposed_only_on_operator_chosen_listeners() {
-        assert!(ListenerKind::Loopback.serves_webhooks());
+        assert!(ListenerKind::Primary.serves_webhooks());
         assert!(ListenerKind::ExtraBind.serves_webhooks());
         assert!(!ListenerKind::Tailnet.serves_webhooks());
         assert!(!ListenerKind::NetworkAccess.serves_webhooks());
+    }
+
+    #[test]
+    fn direct_guest_routes_need_an_address_this_machine_can_reach_as_loopback() {
+        assert!(serves_direct_guest("127.0.0.1:47800".parse().unwrap()));
+        assert!(serves_direct_guest("[::1]:47800".parse().unwrap()));
+        // The wildcard bind answers a loopback connection on the same socket;
+        // the handlers' peer check keeps a LAN peer out.
+        assert!(serves_direct_guest("0.0.0.0:47800".parse().unwrap()));
+        assert!(serves_direct_guest("[::]:47800".parse().unwrap()));
+        // A concrete network address is not a place a bearer token may live.
+        assert!(!serves_direct_guest("192.168.1.9:47800".parse().unwrap()));
+        assert!(!serves_direct_guest("100.64.1.5:47800".parse().unwrap()));
     }
 
     #[test]

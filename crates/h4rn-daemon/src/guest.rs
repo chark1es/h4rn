@@ -251,11 +251,12 @@ pub struct SubmitGate {
     release: tokio::sync::Notify,
 }
 
-/// A test's hold on one Send or Dismiss, after it claimed its row.
+/// A test's hold on one Send, Dismiss or cleanup claim, after it read its row.
 ///
-/// [`GuestService::pause_next_claim`] installs it; the next Send or Dismiss
-/// announces its claim and waits for [`Self::release`], so a test can run a
-/// sweep against a row that is genuinely in flight.
+/// [`GuestService::pause_next_claim`] and [`GuestService::pause_next_cleanup`]
+/// install it; the next matching claim announces that it reached the point and
+/// waits for [`Self::release`], so a test can run another writer against a row
+/// that is genuinely in flight.
 #[doc(hidden)]
 pub struct ClaimGate {
     used: std::sync::atomic::AtomicBool,
@@ -328,6 +329,9 @@ pub struct GuestService {
     submit_gate: Mutex<Option<Arc<SubmitGate>>>,
     /// A test's pause point for the next Send or Dismiss.
     claim_gate: Mutex<Option<Arc<ClaimGate>>>,
+    /// A test's pause point for the next cleanup claim, between the row it read
+    /// and its conditional update.
+    cleanup_gate: Mutex<Option<Arc<ClaimGate>>>,
 }
 
 impl std::fmt::Debug for GuestService {
@@ -371,6 +375,7 @@ impl GuestService {
             submit_lock: tokio::sync::Mutex::new(()),
             submit_gate: Mutex::new(None),
             claim_gate: Mutex::new(None),
+            cleanup_gate: Mutex::new(None),
         };
         service.ensure_schema().await?;
         std::fs::create_dir_all(service.guest_root())?;
@@ -442,6 +447,26 @@ impl GuestService {
         gate
     }
 
+    /// Pauses the next cleanup claim between the row it read and its
+    /// conditional update, until the returned gate is released.
+    ///
+    /// Used by a test that races a Send against the sweep's decision to discard
+    /// the same row. It is not read by the production path unless a test
+    /// installs one.
+    #[doc(hidden)]
+    pub fn pause_next_cleanup(&self) -> Arc<ClaimGate> {
+        let gate = Arc::new(ClaimGate {
+            used: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .cleanup_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
     /// Waits at the claim gate a test installed.
     async fn hold_claim(&self) {
         let gate = self
@@ -458,6 +483,33 @@ impl GuestService {
         gate.hold().await;
         let mut slot = self
             .claim_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &gate))
+        {
+            *slot = None;
+        }
+    }
+
+    /// Waits at the cleanup gate a test installed, after the row was read and
+    /// before its conditional update.
+    async fn hold_cleanup(&self) {
+        let gate = self
+            .cleanup_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        if gate.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        gate.hold().await;
+        let mut slot = self
+            .cleanup_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if slot
@@ -711,6 +763,9 @@ impl GuestService {
     /// The claim is a conditional update from the status this pass saw, so a
     /// row a Send, a submission or another sweep already moved is left alone.
     async fn claim_and_discard(&self, request: &RequestRow) -> Result<(), GuestError> {
+        // A test can pause here, between the row this pass read and its update,
+        // to prove a Send that claims in that window keeps the row and files.
+        self.hold_cleanup().await;
         let claimed = sqlx::query(
             "UPDATE guest_requests SET status = 'deleting'
              WHERE request_id = ? AND status = ?",
@@ -1322,22 +1377,42 @@ impl GuestService {
     /// Checks a submission before its body is read.
     ///
     /// The full submission checks again; this one exists so an upload from an
-    /// unknown browser, or a cross-site form, is refused without buffering its
-    /// bytes.
+    /// unknown browser, a cross-site form or a link whose pending budget is
+    /// already full is refused without buffering its bytes.
     pub async fn check_submission(&self, input: &GuestHttpInput) -> Result<(), GuestHttpOutput> {
         if let Err(error) = same_origin(input) {
             return Err(self.error(error));
         }
-        match self
+        let resolved = match self
             .resolve(guest_token(&input.path), input.cookie.as_deref(), false)
             .await
         {
-            Ok(resolved) if resolved.state == GuestLinkState::Active => Ok(()),
+            Ok(resolved) if resolved.state == GuestLinkState::Active => resolved,
             Ok(resolved) => {
-                Err(self.error(GuestError::Link(notice_for(resolved.state).to_owned())))
+                return Err(self.error(GuestError::Link(notice_for(resolved.state).to_owned())));
             }
-            Err(error) => Err(self.error(error)),
+            Err(error) => return Err(self.error(error)),
+        };
+        // The quota is part of what decides a submission, and it is cheap to
+        // read: a guest that already has the whole budget waiting must not get
+        // to pin an upload's bytes before the same answer.
+        let pending: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM guest_requests
+             WHERE link_id = ? AND status IN ('pending', 'reserving', 'publishing')",
+        )
+        .bind(&resolved.link.link_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| self.error(GuestError::from(error)))?;
+        if pending.0 >= GUEST_MAX_PENDING_REQUESTS as i64
+            || pending.1 >= GUEST_MAX_PENDING_BYTES as i64
+        {
+            return Err(self.error(GuestError::Invalid(
+                "Too many messages are already waiting for the owner. Send or dismiss some first."
+                    .into(),
+            )));
         }
+        Ok(())
     }
 
     /// Answers one guest request.

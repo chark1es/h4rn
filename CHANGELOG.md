@@ -538,6 +538,17 @@ All notable changes to h4rn are recorded here. The format follows
   names. The LAN listener serves no guest route at all, direct links stay loopback-only, and the
   guest page shows real plan text (not "Step 1"), keys plans by turn, and draws its focus ring on
   the visible attach control. `?thumbnail=0` now serves the original image, not a thumbnail.
+- **A guest link follows the address the daemon really bound, and a dropped upload still
+  finishes.** The direct guest routes are chosen from each listener's actual bound address: a
+  loopback bind, or a wildcard bind whose loopback connection reaches the same port. The guest
+  handlers repeat the peer check `/ws` makes and answer 404 to any other address, so a plaintext
+  network request never reaches a token. The direct link names the primary listener's port instead
+  of the Network-access port, and a full pending queue is refused from the request headers before
+  an upload is buffered. A submission or a Send now runs to completion on the daemon when the
+  guest's browser or the owner's app disconnects, so a half-written request, its files and its
+  quota are never stranded until the next restart. The guest page opens on the state the daemon
+  served — expired, revoked, disabled or unbound shows its notice with no composer — and its attach
+  focus ring appears only for keyboard focus.
 - **The diff pane follows the editor tab in every review mode.** Branch and Commits used to keep
   the file picked from their list while a tab switch moved the pane only in Uncommitted and Turn.
   All four sources now show the active tab's file against the source on screen, and the wider

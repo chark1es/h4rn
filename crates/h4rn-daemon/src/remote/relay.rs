@@ -182,7 +182,7 @@ impl GuestRelay {
             return;
         }
         // Check the link before any part of a body is buffered.
-        self.spawn_exchange(frame.conn_id.clone(), request, None);
+        self.spawn_exchange(frame.conn_id.clone(), request, None, None);
     }
 
     /// Handles one `GuestHttpChunk` frame without waiting on anything.
@@ -250,7 +250,7 @@ impl GuestRelay {
             return;
         };
         drop(state);
-        self.spawn_exchange(pending.conn_id, pending.request, Some(pending.body));
+        self.spawn_exchange(pending.conn_id, pending.request, Some(pending.body), None);
     }
 
     /// Checks a chunked submission's link before its body is trusted.
@@ -258,9 +258,10 @@ impl GuestRelay {
         let relay = self.clone();
         let surface = Arc::clone(&self.surface);
         tokio::spawn(async move {
-            let _permit = relay
+            let permit = relay
                 .permits
-                .acquire()
+                .clone()
+                .acquire_owned()
                 .await
                 .expect("the guest exchange semaphore is never closed");
             let input = {
@@ -293,7 +294,10 @@ impl GuestRelay {
                         Some((pending.conn_id, pending.request, pending.body))
                     };
                     if let Some((conn_id, request, body)) = started {
-                        relay.spawn_exchange(conn_id, request, Some(body));
+                        // The check's permit goes to the exchange: the slot
+                        // never reopens between authorization and the work it
+                        // admitted, so another upload cannot take it.
+                        relay.spawn_exchange(conn_id, request, Some(body), Some(permit));
                     }
                 }
                 Err(output) => {
@@ -316,21 +320,30 @@ impl GuestRelay {
     }
 
     /// Runs one exchange in its own task, capped by the semaphore.
+    ///
+    /// A caller that already holds a permit passes it in; otherwise the task
+    /// acquires one. The permit is held until the last frame is queued, so a
+    /// large answer is not free simply because the surface call returned.
     fn spawn_exchange(
         &self,
         conn_id: String,
         request: h4rn_protocol::GuestHttpRequest,
         body: Option<Vec<u8>>,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let relay = self.clone();
         let surface = Arc::clone(&self.surface);
         let request_id = request.request_id.clone();
         tokio::spawn(async move {
-            let _permit = relay
-                .permits
-                .acquire()
-                .await
-                .expect("the guest exchange semaphore is never closed");
+            let _permit = match permit {
+                Some(permit) => permit,
+                None => relay
+                    .permits
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("the guest exchange semaphore is never closed"),
+            };
             let headers = guest_headers(&request);
             let input = crate::server::guest_input(
                 guest_method(&request.method),
@@ -340,8 +353,6 @@ impl GuestRelay {
                 body.unwrap_or(request.body),
             );
             let output = surface.exchange(input).await;
-            // The permit is held until the last frame is queued: a large
-            // answer is not free simply because the surface call returned.
             relay.send_output(conn_id, request_id, &output).await;
         });
     }

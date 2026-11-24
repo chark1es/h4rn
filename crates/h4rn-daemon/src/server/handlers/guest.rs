@@ -6,6 +6,8 @@
 //! points: the Connect relay when this machine is linked, otherwise the
 //! daemon's own network address.
 
+use std::sync::Arc;
+
 use h4rn_protocol::{ClientRequest, GuestSettings, ProtoError, ResponseBody};
 use tokio::task::JoinHandle;
 
@@ -104,10 +106,16 @@ pub(super) async fn handle(
             thread_id,
             request_id,
         } => {
-            conn.state
-                .guest
-                .send_request(&thread_id, &request_id)
+            // Send runs in its own task: a connection that drops while the turn
+            // is being started must not cancel the send half-way. A cancelled
+            // claim would leave a `sending` row, its files and its quota until
+            // the next daemon start.
+            let guest = Arc::clone(&conn.state.guest);
+            let send_thread = thread_id.clone();
+            let send_request = request_id.clone();
+            tokio::spawn(async move { guest.send_request(&send_thread, &send_request).await })
                 .await
+                .map_err(join_failed)?
                 .map_err(guest_error)?;
             conn.audit(
                 "guest.request_sent",
@@ -123,11 +131,20 @@ pub(super) async fn handle(
             thread_id,
             request_id,
         } => {
-            conn.state
-                .guest
-                .dismiss_request(&thread_id, &request_id)
-                .await
-                .map_err(guest_error)?;
+            // Dismiss runs in its own task for the same reason as Send: a
+            // dropped connection must not cancel the claim and leave the row
+            // and its files behind.
+            let guest = Arc::clone(&conn.state.guest);
+            let dismiss_thread = thread_id.clone();
+            let dismiss_request = request_id.clone();
+            tokio::spawn(async move {
+                guest
+                    .dismiss_request(&dismiss_thread, &dismiss_request)
+                    .await
+            })
+            .await
+            .map_err(join_failed)?
+            .map_err(guest_error)?;
             conn.audit(
                 "guest.request_dismissed",
                 Some("thread"),
@@ -236,6 +253,15 @@ fn guest_error(error: crate::guest::GuestError) -> ProtoError {
         ),
         other => internal(other),
     }
+}
+
+/// A guest writer task that panicked or was cancelled before its answer.
+fn join_failed(error: tokio::task::JoinError) -> ProtoError {
+    ProtoError::new(
+        h4rn_protocol::ProtoErrorCode::Internal,
+        error.to_string(),
+        "Check Settings → Labs → Guest links and try again",
+    )
 }
 
 #[cfg(test)]

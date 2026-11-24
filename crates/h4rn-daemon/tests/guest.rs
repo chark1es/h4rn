@@ -23,6 +23,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 
 struct TestDaemon {
     addr: std::net::SocketAddr,
+    addrs: Vec<std::net::SocketAddr>,
     token: String,
     dir: tempfile::TempDir,
     guest: Arc<h4rn_daemon::guest::GuestService>,
@@ -70,11 +71,43 @@ async fn boot_with_tick(
     journal: Option<Arc<dyn h4rn_daemon::journal::Journal>>,
     tick_interval: Duration,
 ) -> TestDaemon {
+    boot_full(
+        settings,
+        journal,
+        tick_interval,
+        "127.0.0.1:0".parse().expect("bind"),
+        None,
+    )
+    .await
+}
+
+/// Boots a daemon on the listener addresses a test names.
+async fn boot_on(
+    bind: std::net::SocketAddr,
+    extra_bind: Option<std::net::SocketAddr>,
+) -> TestDaemon {
+    boot_full(
+        LifecycleSettings::default(),
+        None,
+        Duration::from_millis(20),
+        bind,
+        extra_bind,
+    )
+    .await
+}
+
+async fn boot_full(
+    settings: LifecycleSettings,
+    journal: Option<Arc<dyn h4rn_daemon::journal::Journal>>,
+    tick_interval: Duration,
+    bind: std::net::SocketAddr,
+    extra_bind: Option<std::net::SocketAddr>,
+) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
-        bind: "127.0.0.1:0".parse().expect("bind"),
-        extra_bind: None,
+        bind,
+        extra_bind,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Off,
         network_access: None,
@@ -103,6 +136,7 @@ async fn boot_with_tick(
         .expect("token exists");
     let bound = daemon.bind().await.expect("bind");
     let addr = bound.local_addr();
+    let addrs = bound.addrs().to_vec();
     let guest = bound.guest();
     let manager = bound.manager();
     let (shutdown, rx) = oneshot::channel();
@@ -115,6 +149,7 @@ async fn boot_with_tick(
     });
     TestDaemon {
         addr,
+        addrs,
         token,
         dir,
         guest,
@@ -132,7 +167,13 @@ struct Client {
 
 impl Client {
     async fn connect(daemon: &TestDaemon) -> Self {
-        let url = format!("ws://{}/ws?token={}", daemon.addr, daemon.token);
+        Self::connect_at(daemon, daemon.addr).await
+    }
+
+    /// Connects to the daemon at a specific address, for a test whose bind is
+    /// the wildcard address.
+    async fn connect_at(daemon: &TestDaemon, addr: std::net::SocketAddr) -> Self {
+        let url = format!("ws://{addr}/ws?token={}", daemon.token);
         let (ws, _) = connect_async(url).await.expect("connect");
         let mut client = Self {
             ws,
@@ -1441,6 +1482,279 @@ async fn an_unauthenticated_oversized_post_is_refused_before_its_body() {
     // Without the fix the body limit answered first (413); the token is
     // checked before a single byte is buffered.
     assert_eq!(response.status(), reqwest::StatusCode::GONE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn direct_guest_routes_follow_the_bound_address() {
+    let Some(lan) = h4rn_daemon::remote::local_ipv4() else {
+        eprintln!("no non-loopback address on this machine; the LAN half cannot be exercised");
+        return;
+    };
+    // The primary bind is the wildcard, as in the documented `--bind
+    // 0.0.0.0:47800` setup. It is not a loopback address, but its loopback
+    // connection reaches the same socket.
+    let daemon = boot_on("0.0.0.0:0".parse().expect("wildcard"), None).await;
+    let port = daemon.addr.port();
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    // The direct link names loopback on the port the primary listener really
+    // bound, not the Network-access port.
+    assert_eq!(
+        daemon.guest.local_base(),
+        Some(format!("http://127.0.0.1:{port}/guest"))
+    );
+
+    // A real link loads over that loopback connection.
+    let mut owner = Client::connect_at(&daemon, loopback).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "wildcard bind").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    assert_eq!(browser.state(0).await.state, GuestLinkState::Active);
+
+    // A LAN peer gets the same 404 an unmounted route gives, even though the
+    // link is live.
+    let lan_addr = std::net::SocketAddr::new(lan, port);
+    let response = reqwest::Client::new()
+        .get(format!("http://{lan_addr}/guest/not-a-real-token"))
+        .send()
+        .await
+        .expect("LAN GET");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a guest path answered a non-loopback peer"
+    );
+    daemon.stop().await;
+
+    // An extra non-loopback bind mounts no guest route at all.
+    let daemon = boot_on(
+        "127.0.0.1:0".parse().expect("loopback"),
+        Some(std::net::SocketAddr::new(lan, 0)),
+    )
+    .await;
+    let extra = daemon.addrs[1];
+    assert!(!extra.ip().is_loopback());
+    let response = reqwest::Client::new()
+        .get(format!("http://{extra}/guest/not-a-real-token"))
+        .send()
+        .await
+        .expect("extra GET");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "an extra network bind served a guest path"
+    );
+    // The primary loopback listener still serves it. Guest links are off in
+    // this fresh daemon, so the page itself is the honest answer.
+    let (status, _, body) = Browser::new(format!("http://{}/guest", daemon.addr))
+        .get("/not-a-real-token")
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&body).contains(r#"data-state="disabled""#),
+        "the primary loopback listener did not serve the guest page"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_full_pending_budget_refuses_an_upload_before_its_body_is_buffered() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "full budget").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    for index in 0..h4rn_protocol::GUEST_MAX_PENDING_REQUESTS {
+        let (status, body) = browser
+            .post(
+                "/messages",
+                &guest_text_message(&format!("waiting {index}")),
+            )
+            .await;
+        assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    }
+    assert_eq!(
+        pending_requests(&daemon, &thread_id).await,
+        h4rn_protocol::GUEST_MAX_PENDING_REQUESTS as i64
+    );
+
+    // Send the headers for a 10 MB upload and stop: with the quota checked
+    // before the body, the refusal arrives without those bytes ever being
+    // buffered.
+    let token = link.rsplit('/').next().expect("token");
+    let cookie = browser.cookie.clone().expect("binding cookie");
+    let mut stream = TcpStream::connect(daemon.addr).await.expect("connect");
+    let headers = format!(
+        "POST /guest/{token}/messages HTTP/1.1\r\nHost: {}\r\nCookie: h4rn_guest={cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        daemon.addr,
+        10 * 1024 * 1024
+    );
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    stream
+        .write_all(headers.as_bytes())
+        .await
+        .expect("write headers");
+    let mut buffer = vec![0u8; 4096];
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer))
+        .await
+        .expect("the refusal must not wait for the upload body")
+        .expect("read response");
+    let response = String::from_utf8_lossy(&buffer[..read]);
+    assert!(response.contains("400"), "{response}");
+    assert!(response.contains("already waiting"), "{response}");
+
+    // Nothing new was reserved or written.
+    assert_eq!(
+        pending_requests(&daemon, &thread_id).await,
+        h4rn_protocol::GUEST_MAX_PENDING_REQUESTS as i64
+    );
+    let directories = std::fs::read_dir(daemon.dir.path().join("guest"))
+        .expect("guest dir")
+        .count();
+    assert_eq!(directories, h4rn_protocol::GUEST_MAX_PENDING_REQUESTS);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+#[allow(deprecated)] // SO_LINGER zero is how a test closes a socket with a reset.
+async fn a_submission_survives_the_browser_disconnecting_mid_write() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "cancelled").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let token = link.rsplit('/').next().expect("token").to_owned();
+    let cookie = browser.cookie.clone().expect("binding cookie");
+    let body = serde_json::to_string(&guest_text_message("send me anyway")).expect("json");
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::AfterReserve);
+    let mut stream = TcpStream::connect(daemon.addr).await.expect("connect");
+    let request = format!(
+        "POST /guest/{token}/messages HTTP/1.1\r\nHost: {}\r\nCookie: h4rn_guest={cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        daemon.addr,
+        body.len()
+    );
+    use tokio::io::AsyncWriteExt as _;
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    // The row is reserved and no file exists yet.
+    gate.arrived().await;
+    // Abort the connection with a reset, the way a closing browser tab does.
+    stream
+        .set_linger(Some(Duration::ZERO))
+        .expect("linger option");
+    drop(stream);
+    gate.release();
+
+    // The submission finishes on the daemon even though its reader is gone.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while pending_requests(&daemon, &thread_id).await == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a disconnected submission stayed stranded in `reserving`"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let request_id = request_id_from_snapshot(&browser).await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("pending"),
+        "the cancelled submission did not reach the owner"
+    );
+    assert!(
+        daemon.dir.path().join("guest").join(&request_id).exists(),
+        "the cancelled submission lost its files"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_cleanup_claim_that_lost_to_send_keeps_the_row_and_files() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "cleanup race").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "keep me".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "keep.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"keep me"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists());
+
+    // The link is gone (the crash window after revocation), and the sweep has
+    // read the row but not yet claimed it.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("DELETE FROM guest_links")
+        .execute(&pool)
+        .await
+        .expect("end the link row");
+    pool.close().await;
+
+    let cleanup = daemon.guest.pause_next_cleanup();
+    let cleaning = {
+        let guest = Arc::clone(&daemon.guest);
+        tokio::spawn(async move { guest.sweep_expired().await })
+    };
+    cleanup.arrived().await;
+
+    // Send claims the same row inside that window.
+    let claim = daemon.guest.pause_next_claim();
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    claim.arrived().await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+
+    cleanup.release();
+    cleaning.await.expect("sweep task").expect("periodic sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending"),
+        "the cleanup claim stole a row Send owned"
+    );
+    assert!(
+        directory.join("0-keep.txt").exists(),
+        "the cleanup claim deleted a file Send had claimed"
+    );
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        1,
+        "the cleanup claim resolved a card Send was answering"
+    );
+
+    claim.release();
+    sending.await.expect("send task").expect("send completed");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sent")
+    );
+    assert!(!directory.exists());
     daemon.stop().await;
 }
 

@@ -713,7 +713,7 @@ impl Daemon {
             .await
             .map_err(|error| anyhow::anyhow!("bind {}: {error}", self.config.bind))?;
         addrs.push(primary.local_addr()?);
-        listeners.push((primary, server::ListenerKind::Loopback));
+        listeners.push((primary, server::ListenerKind::Primary));
 
         if let Some(extra) = self.config.extra_bind
             && extra != self.config.bind
@@ -822,14 +822,12 @@ impl Daemon {
         // daemon has no TLS listener, so a direct link is loopback only: the
         // bearer token must never cross a LAN in plaintext. The share dialog
         // says the link works only on this machine, and Connect is the way to
-        // share with a teammate elsewhere.
-        let loopback_port = addrs
-            .iter()
-            .find(|address| address.ip().is_loopback())
-            .map(|address| address.port())
-            .unwrap_or_else(|| network.snapshot().port);
+        // share with a teammate elsewhere. The name uses the port the primary
+        // listener actually bound: a wildcard bind still answers loopback on
+        // that same port, so the link reaches it.
+        let primary_port = addrs[0].port();
         self.guest
-            .set_local_base(format!("http://127.0.0.1:{loopback_port}/guest"));
+            .set_local_base(format!("http://127.0.0.1:{primary_port}/guest"));
 
         let mut remote_tasks = Vec::new();
         // Guest links expire after 24 hours. Sweeping keeps their waiting
@@ -1020,10 +1018,14 @@ impl BoundDaemon {
             "h4rn daemon listening"
         );
 
-        let routes: Vec<(TcpListener, axum::Router)> = listeners
-            .into_iter()
-            .map(|(listener, kind)| (listener, kind.router(state.clone())))
-            .collect();
+        let routes: Vec<(TcpListener, axum::Router)> = {
+            let mut routes = Vec::new();
+            for (listener, kind) in listeners {
+                let bound = listener.local_addr()?;
+                routes.push((listener, kind.router(state.clone(), bound)));
+            }
+            routes
+        };
         server::serve_all(routes, shutdown).await?;
         // Close the LAN/tailnet listener before the services it routes to go
         // away, so no new remote session starts during shutdown.
