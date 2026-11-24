@@ -980,6 +980,59 @@ describe("a tab switch during a held commit file list", () => {
   });
 });
 
+describe("a resumed review yields to a newer tab switch", () => {
+  it("opens the tab switched back to, and drops the held replies", async () => {
+    await mount();
+    await waitFor(() => latest?.active?.path === "a.ts");
+
+    // Branch is started for a.ts and its file list is held.
+    const releaseFirst = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.selectDiffSource("branch");
+    });
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // The person leaves for another workspace mid-load.
+    const home = workspace.path;
+    await switchWorkspace(`${home}-other`);
+
+    // Coming back resumes the review for a.ts, and that read is held too.
+    const releaseResumed = holdNext("fs_diff_files");
+    await switchWorkspace(home);
+    await waitFor(() => latest?.state.filesLoading === true);
+
+    // A tab switch to b.ts reads its list while the resumed one is still out.
+    const releaseB = holdNext("fs_diff_files");
+    await act(async () => {
+      void latest?.followDiffTab("b.ts");
+    });
+    await waitFor(
+      () => state.requests.filter((request) => request.type === "fs_diff_files").length === 3,
+    );
+
+    // Back to a.ts: the resume's note names a.ts, but it belongs to the older
+    // request, so it must not swallow this switch. Without the generation
+    // check the follow would return here and no reply would ever open a.ts.
+    await act(async () => {
+      void latest?.followDiffTab("a.ts");
+    });
+    await waitFor(() => latest?.state.diff?.path === "a.ts");
+    expect(latest?.state.diff?.against).toEqual({ kind: "base", base: "main" });
+
+    // The three held replies belong to requests the switch replaced. The b.ts
+    // one would open b.ts if it were applied; a.ts must stay on screen.
+    const diffs = state.requests.filter((request) => request.type === "fs_diff").length;
+    await releaseHold(releaseB);
+    await releaseHold(releaseResumed);
+    await releaseHold(releaseFirst);
+    expect(latest?.state.diff?.path).toBe("a.ts");
+    expect(latest?.state.diffPath).toBe("a.ts");
+    expect(latest?.state.diffFiles?.against).toEqual({ kind: "base", base: null });
+    expect(latest?.state.filesLoading).toBe(false);
+    expect(state.requests.filter((request) => request.type === "fs_diff")).toHaveLength(diffs);
+  });
+});
+
 describe("a workspace change advances the branch generation", () => {
   it("ignores the previous workspace's branch list and file list", async () => {
     await mount();

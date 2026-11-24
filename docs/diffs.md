@@ -119,8 +119,9 @@ until you press Send. The comments then leave the pane.
   the daemon's error. Leaving a workspace mid-read and coming back clears the cached spinner, and a
   branch list or diff reply from the workspace you left is ignored: the branch list's generation
   moves with the workspace. A Branch or Commits review that was still loading reads its file list
-  once when you come back: the resumed load already opens the tab in front of the editor, so the
-  tab follow does not read the same list again.
+  once when you come back, and reopens the tab it was started for even if the editor has moved
+  since: the resumed load already opens that file, so the tab follow does not read the same list
+  again.
 - Binary files and files over the 2 MiB read limit say so instead of showing mojibake, in the diff
   body only: the file list, source bar and comment actions stay usable, so another file or source
   is one click away. Both sides of `HEAD` and commit diffs are size-checked before they are read.

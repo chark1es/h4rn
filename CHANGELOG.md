@@ -331,7 +331,9 @@ All notable changes to h4rn are recorded here. The format follows
   picker's own list belongs to the repository, so it still arrives after the diff. The picker shows
   the new source while it loads. The path bar always names the file on screen, including a diff
   whose tab was closed since the diff outlives its tab. Replies for a previous workspace are
-  dropped too, so switching threads never shows one project's diff in another.
+  dropped too, so switching threads never shows one project's diff in another. A Branch or Commits
+  review that was still loading when you left comes back with one file-list read, reopening the
+  tab the review was started for.
 - **Line review comments go to the thread's composer as plain context.** Select a line or range in
   any diff mode (click, Shift-click, or the keyboard) and write a comment. Each comment remembers
   the exact diff it was written on — the turn's id, the commit's sha, the resolved base's name —
