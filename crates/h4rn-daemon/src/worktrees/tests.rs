@@ -443,6 +443,35 @@ fn subagent_worktrees_are_listed_with_their_status() {
     );
 }
 
+#[tokio::test]
+async fn a_registered_thread_worktree_is_stored_as_the_threads_own() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-thread-own", "thread-own-branch");
+    let (tracker, _threads, _subagents) = managers(&fixture, Vec::new()).await;
+    let thread = ThreadId::new("th_thread_own");
+
+    tracker
+        .register_thread_worktree(&thread, &linked.to_string_lossy())
+        .await;
+
+    let stored = tracker.inner.store.load().await.expect("load");
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].origin, WorktreeOrigin::Thread);
+    assert_eq!(stored[0].branch.as_deref(), Some("thread-own-branch"));
+    assert_eq!(stored[0].accesses.len(), 1);
+    assert_eq!(stored[0].accesses[0].thread_id, thread.as_str());
+
+    // With no live thread row, the stored observation is still listed, so the
+    // checkout remains clearable after its thread is deleted.
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| entry.path == linked.to_string_lossy())
+        .expect("the thread's own worktree is listed");
+    assert_eq!(entry.origin, WorktreeOrigin::Thread);
+    assert_eq!(entry.branch.as_deref(), Some("thread-own-branch"));
+}
+
 #[test]
 fn harness_observations_merge_and_vanish_with_their_directory() {
     let fixture = Fixture::new();
@@ -451,6 +480,7 @@ fn harness_observations_merge_and_vanish_with_their_directory() {
         path: path.to_string_lossy().into_owned(),
         repo: fixture.repo.to_string_lossy().into_owned(),
         branch: Some("harness-branch".into()),
+        origin: WorktreeOrigin::Harness,
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         accesses: vec![StoredAccess {
@@ -1559,6 +1589,7 @@ async fn a_busy_accessor_found_only_in_the_store_keeps_the_checkout() {
             &linked.to_string_lossy(),
             &fixture.repo.to_string_lossy(),
             Some("store-branch"),
+            WorktreeOrigin::Harness,
             thread.as_str(),
             None,
             Utc::now(),
@@ -1589,6 +1620,7 @@ async fn a_moved_harness_worktree_stays_listed_and_is_cleared_by_registration() 
             &linked.to_string_lossy(),
             &fixture.repo.to_string_lossy(),
             Some("harness-moved-branch"),
+            WorktreeOrigin::Harness,
             "th_gone",
             None,
             Utc::now(),
@@ -1850,6 +1882,7 @@ fn a_failed_registration_snapshot_keeps_a_missing_stored_row() {
         path: missing.to_string_lossy().into_owned(),
         repo: repo.to_string_lossy().into_owned(),
         branch: Some("gone-branch".into()),
+        origin: WorktreeOrigin::Harness,
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         accesses: Vec::new(),
@@ -2729,6 +2762,7 @@ fn a_row_whose_repository_vanished_is_forgotten() {
         path: path.to_string_lossy().into_owned(),
         repo: gone_repo.to_string_lossy().into_owned(),
         branch: None,
+        origin: WorktreeOrigin::Harness,
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         accesses: Vec::new(),
@@ -3813,6 +3847,7 @@ async fn a_symlink_that_replaced_a_tracked_checkout_is_never_followed() {
             &tracked.to_string_lossy(),
             &fixture.repo.to_string_lossy(),
             None,
+            WorktreeOrigin::Harness,
             "th_gone",
             None,
             Utc::now(),
@@ -4130,6 +4165,7 @@ async fn a_bulk_clear_skips_a_row_that_became_a_thread_workspace() {
             &linked.to_string_lossy(),
             &fixture.repo.to_string_lossy(),
             Some("bulk-branch"),
+            WorktreeOrigin::Harness,
             "th_gone",
             None,
             Utc::now(),
@@ -4222,6 +4258,7 @@ fn a_fifo_registration_head_is_never_opened() {
                 path: linked.to_string_lossy().into_owned(),
                 repo: repo.to_string_lossy().into_owned(),
                 branch: Some("fifo-head-branch".into()),
+                origin: WorktreeOrigin::Harness,
                 first_seen: Utc::now(),
                 last_seen: Utc::now(),
                 accesses: Vec::new(),
@@ -4390,6 +4427,7 @@ async fn a_bulk_clear_skips_a_checkout_holding_a_vanished_thread_workspace() {
             &linked.to_string_lossy(),
             &fixture.repo.to_string_lossy(),
             Some("no-src"),
+            WorktreeOrigin::Harness,
             "th_gone",
             None,
             Utc::now(),
@@ -4443,6 +4481,7 @@ async fn a_thread_that_starts_inside_a_later_entry_during_a_bulk_clear_keeps_it(
                 &path.to_string_lossy(),
                 &fixture.repo.to_string_lossy(),
                 Some(branch),
+                WorktreeOrigin::Harness,
                 "th_gone",
                 None,
                 Utc::now(),
@@ -4568,6 +4607,7 @@ fn an_unreadable_registration_makes_the_snapshot_incomplete() {
         path: missing_harness.to_string_lossy().into_owned(),
         repo: fixture.repo.to_string_lossy().into_owned(),
         branch: None,
+        origin: WorktreeOrigin::Harness,
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         accesses: Vec::new(),
@@ -4926,6 +4966,7 @@ async fn a_bulk_clear_compares_live_workspaces_like_the_selection() {
                 &path.to_string_lossy(),
                 &fixture.repo.to_string_lossy(),
                 Some(branch),
+                WorktreeOrigin::Harness,
                 "th_gone",
                 None,
                 Utc::now(),
