@@ -342,6 +342,20 @@ pub enum HarnessError {
         /// Underlying failure.
         message: String,
     },
+    /// The frame never reached the transport, so nothing was delivered.
+    ///
+    /// A closed writer, a shut-down session or a channel whose writer task has
+    /// already exited is a definite pre-write failure: unlike [`Self::Transport`]
+    /// it cannot have left the text half-written. The daemon puts a message it
+    /// was steering back in the queue instead of treating the delivery as
+    /// unknown.
+    #[error("{harness:?} did not take the message: {message}")]
+    NotSent {
+        /// Harness involved.
+        harness: HarnessKind,
+        /// What closed before the frame was accepted.
+        message: String,
+    },
     /// The harness refused a prompt because of a provider usage limit.
     ///
     /// Only an adapter that parsed the limit out of its own failure detail

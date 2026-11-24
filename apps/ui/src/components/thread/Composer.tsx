@@ -150,6 +150,14 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
    */
   const editingRef = useRef(editing);
   editingRef.current = editing;
+  /**
+   * The edit buffer's revision, counted from the edit's own text.
+   *
+   * A Save names the revision it submitted. Its acknowledgement may arrive
+   * after the person typed again; the editor then stays open with the newer
+   * text instead of discarding it.
+   */
+  const editRevision = useRef(0);
   const followUp = useFollowUpBehavior();
   const multiline = useMultilineEnter();
   const running = isTurnRunning(summary);
@@ -301,6 +309,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     // thread's draft; the draft stays in storage untouched for Cancel.
     if (!editing) {
       revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
+    } else {
+      editRevision.current += 1;
     }
   };
 
@@ -399,6 +409,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
 
   const beginEdit = (message: QueuedMessage) => {
     if (sending) return;
+    editRevision.current += 1;
     // A second Edit while one is open only points the edit at the other
     // message: the thread's draft is in storage, so nothing is displaced.
     setEditing({
@@ -452,6 +463,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const saveEdit = async () => {
     if (!editing) return;
     const submitted = editing;
+    const submittedRevision = editRevision.current;
     const message = queued?.find((item) => item.message_id === submitted.messageId);
     if (!message) {
       endEdit(false);
@@ -468,6 +480,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     // ended) must not touch the box: it acknowledges the message it saved, not
     // whatever the person is editing now.
     if (editingRef.current !== submitted) return;
+    // The acknowledgement names the text it submitted. If the person typed
+    // again while it was in flight, that newer text stays in the open editor;
+    // closing it here would silently discard what they just wrote.
+    if (editRevision.current !== submittedRevision) return;
     endEdit(true);
     requestAnimationFrame(autosize);
   };

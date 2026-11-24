@@ -31,6 +31,8 @@ const message: QueuedMessage = {
   text: "a queued thought",
   attachments: [],
   queued_at: "2026-01-01T00:00:00.000Z",
+  steerable: true,
+  delivery_unknown: false,
 };
 
 function summary(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
@@ -83,6 +85,8 @@ function renderQueued(
     total?: number;
     steer?: boolean;
     running?: boolean;
+    steerable?: boolean;
+    deliveryUnknown?: boolean;
   } = {},
 ) {
   const total = options.total ?? 2;
@@ -90,6 +94,8 @@ function renderQueued(
     ...message,
     message_id: `qm_${index}`,
     text: `message ${index}`,
+    steerable: options.steerable ?? true,
+    delivery_unknown: options.deliveryUnknown ?? false,
   }));
   const threadSummary = summary({
     steer: options.steer ?? true,
@@ -122,6 +128,24 @@ describe("QueuedTurn", () => {
     expect(screen.getByText("Queued")).toBeTruthy();
     expect(screen.getByText("message 0")).toBeTruthy();
     expect(screen.getByText("Send now steers it into this turn")).toBeTruthy();
+  });
+
+  it("does not promise a steer for a row the daemon will move to the front", () => {
+    renderQueued({ steerable: false });
+    expect(screen.getByText("Waits for this turn to finish")).toBeTruthy();
+    expect(screen.queryByText("Send now steers it into this turn")).toBeNull();
+  });
+
+  it("shows a row that may already have been delivered as resend or discard", () => {
+    renderQueued({ deliveryUnknown: true });
+    expect(screen.getByText("May have been delivered")).toBeTruthy();
+    expect(
+      screen.getByText("May have been delivered; sending again adds a second copy"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send again" }));
+    expect(mock.sendQueuedNow).toHaveBeenCalledWith("th_one", "qm_0");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(mock.removeQueuedMessage).toHaveBeenCalledWith("th_one", "qm_0");
   });
 
   it("offers Send now, Edit and Remove", () => {

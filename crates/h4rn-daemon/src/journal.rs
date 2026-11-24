@@ -181,15 +181,20 @@ pub struct QueuedClaim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueuedClaimState {
-    /// Written down, but the adapter has not answered yet.
+    /// Written down, but the adapter has not been called yet.
     ///
-    /// On startup this is not known to have reached the turn, so it goes back
+    /// On startup this is known not to have reached the turn, so it goes back
     /// to the queue rather than being dropped.
     Claimed,
-    /// The adapter took the message, or the outcome was unclear.
+    /// The adapter call has started, so delivery is unknown.
     ///
-    /// Either way it may already be in the turn, so a restart never delivers it
-    /// again.
+    /// A restart keeps the payload and shows it as a row that may have been
+    /// delivered. It is never sent automatically again, and the person can
+    /// resend or discard it.
+    Sending,
+    /// The adapter took the message.
+    ///
+    /// A restart never delivers it again.
     Delivered,
     /// The adapter definitely refused it and its queue row still has to be put
     /// back. A startup restores it.

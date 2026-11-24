@@ -182,6 +182,8 @@ pub struct FakeHarness {
     steer_failure: Option<String>,
     /// A test-only refusal a steer reports before touching the transport.
     steer_rejection: Option<String>,
+    /// A test-only definite pre-write failure a steer reports.
+    steer_not_sent: Option<String>,
     /// A test-only count of interrupts the session received.
     interrupt_count: Option<InterruptCount>,
     /// Cancels still due to fail with a transient error (the session stays
@@ -642,6 +644,7 @@ impl Default for FakeHarness {
             steer_count: None,
             steer_failure: None,
             steer_rejection: None,
+            steer_not_sent: None,
             write_gate: None,
             send_count: None,
             interrupt_count: None,
@@ -793,6 +796,15 @@ impl FakeHarness {
     /// so a queued message may safely stay queued.
     pub fn with_steer_rejection(mut self, message: impl Into<String>) -> Self {
         self.steer_rejection = Some(message.into());
+        self
+    }
+
+    /// Makes every steer fail as a definite pre-write failure.
+    ///
+    /// The adapter knows the frame never reached the transport, so the daemon
+    /// must put the message back rather than reporting an unknown delivery.
+    pub fn with_steer_not_sent(mut self, message: impl Into<String>) -> Self {
+        self.steer_not_sent = Some(message.into());
         self
     }
 
@@ -1341,6 +1353,7 @@ impl Harness for FakeHarness {
             steer_count: self.steer_count.clone(),
             steer_failure: self.steer_failure.clone(),
             steer_rejection: self.steer_rejection.clone(),
+            steer_not_sent: self.steer_not_sent.clone(),
             interrupt_count: self.interrupt_count.clone(),
             interrupt_failures: self.interrupt_failures.clone(),
             dead_sends_after: self.dead_sends_after,
@@ -1404,6 +1417,8 @@ pub struct FakeSession {
     steer_failure: Option<String>,
     /// A test-only refusal a steer reports.
     steer_rejection: Option<String>,
+    /// A test-only definite pre-write failure a steer reports.
+    steer_not_sent: Option<String>,
     /// A shared count of cancels this session received.
     interrupt_count: Option<InterruptCount>,
     /// Cancels still due to fail with a transient error.
@@ -1490,7 +1505,7 @@ impl HarnessSession for FakeSession {
 
     async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed {
-            return Err(HarnessError::Transport {
+            return Err(HarnessError::NotSent {
                 harness: self.kind,
                 message: "session is shut down".into(),
             });
@@ -1503,6 +1518,12 @@ impl HarnessSession for FakeSession {
         }
         if let Some(message) = &self.steer_rejection {
             return Err(HarnessError::Protocol {
+                harness: self.kind,
+                message: message.clone(),
+            });
+        }
+        if let Some(message) = &self.steer_not_sent {
+            return Err(HarnessError::NotSent {
                 harness: self.kind,
                 message: message.clone(),
             });

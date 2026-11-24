@@ -468,6 +468,9 @@ pub struct ThreadManager {
 }
 
 struct Inner {
+    /// A weak handle to this manager, so a retry that outlives its caller can
+    /// find the thread again without holding the manager alive forever.
+    self_weak: std::sync::OnceLock<std::sync::Weak<Inner>>,
     journal: Arc<dyn Journal>,
     harnesses: Arc<dyn crate::harnesses::HarnessCatalog>,
     attachments: Option<Arc<dyn AttachmentResolver>>,
@@ -937,6 +940,8 @@ struct StartSnapshot {
     queue_revision: u64,
     resume_at: Option<DateTime<Utc>>,
     limit: Option<LimitBrief>,
+    scheduled_limit: Option<ScheduledLimit>,
+    parked: Option<ParkedPrompt>,
     transport_error_reported: Option<TurnId>,
     transport_report: Option<TransportReport>,
     branch: Option<String>,
@@ -2036,13 +2041,16 @@ impl ThreadRecord {
             .position(|claim| &claim.message.message.message_id == message_id)
     }
 
-    /// Puts every claim whose delivery was never proven back in the queue.
+    /// Puts every claim whose delivery is known not to have happened back in
+    /// the queue, and keeps the ones that may have happened as visible rows.
     ///
-    /// A claim is written before the adapter sees its message. If the daemon
-    /// stopped before the adapter answered, or after a definite refusal whose
-    /// restore write failed, the only safe copy is the claim: it goes back to
-    /// the position it waited in. A claim that was delivered (or may have been)
-    /// is dropped, because a second automatic delivery is worse than none.
+    /// A `claimed` claim was written before the adapter was called, and a
+    /// `refused` one was definitely turned away: both go back to the position
+    /// they waited in. A `sending` claim means the adapter call had started, so
+    /// the text may already be in the turn. It becomes a queue row marked
+    /// [`QueuedMessage::delivery_unknown`], which the person can resend or
+    /// discard but which is never sent automatically. A `delivered` claim is
+    /// dropped so a restart cannot send it twice.
     ///
     /// Returns whether the queue changed.
     fn recover_claimed_messages(&mut self) -> bool {
@@ -2052,11 +2060,19 @@ impl ThreadRecord {
         let claims = std::mem::take(&mut self.meta.claimed);
         let mut restored = false;
         for claim in claims {
-            if claim.state != QueuedClaimState::Delivered {
-                let index = (claim.index as usize).min(self.meta.queued.len());
-                self.meta.queued.insert(index, claim.message);
-                restored = true;
+            let index = (claim.index as usize).min(self.meta.queued.len());
+            match claim.state {
+                QueuedClaimState::Claimed | QueuedClaimState::Refused => {
+                    self.meta.queued.insert(index, claim.message);
+                }
+                QueuedClaimState::Sending => {
+                    let mut message = claim.message;
+                    message.message.delivery_unknown = true;
+                    self.meta.queued.insert(index, message);
+                }
+                QueuedClaimState::Delivered => continue,
             }
+            restored = true;
         }
         if restored {
             self.note_queue_change();
@@ -2079,6 +2095,8 @@ impl ThreadRecord {
             queue_revision: self.queue_revision,
             resume_at: self.resume_at,
             limit: self.limit.clone(),
+            scheduled_limit: self.scheduled_limit.clone(),
+            parked: self.meta.parked.clone(),
             transport_error_reported: self.transport_error_reported.clone(),
             transport_report: self.transport_report.take(),
             branch: self.branch.clone(),
@@ -2094,6 +2112,8 @@ impl ThreadRecord {
         self.queue_revision = snapshot.queue_revision;
         self.resume_at = snapshot.resume_at;
         self.limit = snapshot.limit;
+        self.scheduled_limit = snapshot.scheduled_limit;
+        self.meta.parked = snapshot.parked;
         self.transport_error_reported = snapshot.transport_error_reported;
         self.transport_report = snapshot.transport_report;
         self.branch = snapshot.branch;
@@ -2801,54 +2821,55 @@ impl ThreadManager {
             .clock
             .clone()
             .unwrap_or_else(|| Arc::new(SystemClock));
-        let manager = Self {
-            inner: Arc::new(Inner {
-                journal,
-                harnesses,
-                attachments,
-                local_host,
-                options,
-                events,
-                emit_lock: Arc::new(Mutex::new(())),
-                threads: Mutex::new(HashMap::new()),
-                ticker: std::sync::Mutex::new(None),
-                closed: AtomicBool::new(false),
-                snapshots: std::sync::OnceLock::new(),
-                proxy: std::sync::OnceLock::new(),
-                mcp: std::sync::OnceLock::new(),
-                meter: std::sync::OnceLock::new(),
-                text_generation: std::sync::OnceLock::new(),
-                worktrees: std::sync::OnceLock::new(),
-                settle_hook: std::sync::OnceLock::new(),
-                grant_authority: std::sync::OnceLock::new(),
-                redactor: std::sync::OnceLock::new(),
-                title_jobs: std::sync::Mutex::new(HashSet::new()),
-                title_settled: tokio::sync::Notify::new(),
-                last_schedule_check: std::sync::Mutex::new(None),
-                resync_pending: AtomicBool::new(false),
-                resync_retry: std::sync::Mutex::new(ResyncRetry::default()),
-                clock,
-                append_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                restart_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                settings_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                settings_commit_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                deliver_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                held_release_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                fire_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                resync_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                queue_pause: std::sync::Mutex::new(None),
-                #[cfg(test)]
-                claim_refused: tokio::sync::Notify::new(),
-            }),
-        };
+        let inner = Arc::new(Inner {
+            self_weak: std::sync::OnceLock::new(),
+            journal,
+            harnesses,
+            attachments,
+            local_host,
+            options,
+            events,
+            emit_lock: Arc::new(Mutex::new(())),
+            threads: Mutex::new(HashMap::new()),
+            ticker: std::sync::Mutex::new(None),
+            closed: AtomicBool::new(false),
+            snapshots: std::sync::OnceLock::new(),
+            proxy: std::sync::OnceLock::new(),
+            mcp: std::sync::OnceLock::new(),
+            meter: std::sync::OnceLock::new(),
+            text_generation: std::sync::OnceLock::new(),
+            worktrees: std::sync::OnceLock::new(),
+            settle_hook: std::sync::OnceLock::new(),
+            grant_authority: std::sync::OnceLock::new(),
+            redactor: std::sync::OnceLock::new(),
+            title_jobs: std::sync::Mutex::new(HashSet::new()),
+            title_settled: tokio::sync::Notify::new(),
+            last_schedule_check: std::sync::Mutex::new(None),
+            resync_pending: AtomicBool::new(false),
+            resync_retry: std::sync::Mutex::new(ResyncRetry::default()),
+            clock,
+            append_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            restart_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            settings_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            settings_commit_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            deliver_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            held_release_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            fire_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            resync_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            queue_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            claim_refused: tokio::sync::Notify::new(),
+        });
+        let _ = inner.self_weak.set(Arc::downgrade(&inner));
+        let manager = Self { inner };
         manager.inner.restore().await?;
         Ok(manager)
     }
@@ -3998,10 +4019,13 @@ impl ThreadManager {
                 let mut record = handle.lock().await;
                 let mut domain = Vec::new();
                 // A steer means the person is working the thread by hand, so a
-                // rate-limit resume armed for it is stale.
-                self.inner
-                    .release_armed_limit(thread_id, &mut record, false, &mut domain)
-                    .await;
+                // rate-limit resume armed for it is stale. The steer already
+                // reached the turn, so cancelling the ledger now is correct even
+                // if recording this row then fails.
+                let released = self
+                    .inner
+                    .release_armed_limit(&mut record, false, &mut domain);
+                self.inner.cancel_released_limit(thread_id, released).await;
                 domain.push(ThreadEvent::MessageReceived {
                     source: h4rn_core::MessageSource::User,
                     at: now,
@@ -4077,16 +4101,21 @@ impl ThreadManager {
             // does not park is not a release, and an idle thread's stale pause
             // holds no prompt to deliver at all.
             let release_pending = record.pending_turn() && record.parks_persisted_prompt();
+            let previous_scheduled = record.scheduled_limit.clone();
+            let previous_resume_at = record.resume_at;
+            let previous_limit = record.limit.clone();
+            let previous_parked = record.meta.parked.clone();
             let mut domain = Vec::new();
-            let cancelled_schedule = self
-                .inner
-                .release_armed_limit(thread_id, &mut record, release_pending, &mut domain)
-                .await;
+            let released =
+                self.inner
+                    .release_armed_limit(&mut record, release_pending, &mut domain);
             let queued = QueuedMessage {
                 message_id: QueuedMessageId::new_uuid_v7(),
                 text,
                 attachments: resolved_attachments,
                 queued_at: now,
+                steerable: false,
+                delivery_unknown: false,
             };
             let previous_queue = record.meta.queued.clone();
             let previous_state = record.state.clone();
@@ -4100,8 +4129,8 @@ impl ThreadManager {
                 source: h4rn_core::MessageSource::User,
                 at: now,
             });
-            if cancelled_schedule {
-                // The cancelled schedule explains nothing any more, so drop the
+            if released {
+                // The released schedule explains nothing any more, so drop the
                 // pause it left behind even when it held no prompt to release.
                 record.meta.parked = None;
             }
@@ -4109,18 +4138,24 @@ impl ThreadManager {
             if emitted.is_err() {
                 // The send failed, so nothing of it may stay in memory: a row
                 // the journal never accepted would look deliverable and be
-                // dropped by a restart.
+                // dropped by a restart. The resume is still armed, exactly as
+                // it was before this attempt.
                 record.meta.queued = previous_queue;
                 record.state = previous_state;
+                record.scheduled_limit = previous_scheduled;
+                record.resume_at = previous_resume_at;
+                record.limit = previous_limit;
+                record.meta.parked = previous_parked;
             }
             drop(record);
+            let (_, seq) = emitted?;
+            self.inner.cancel_released_limit(thread_id, released).await;
             if release_pending {
-                // The delivery owner must exist even when the journal write
-                // failed: the schedule is already cancelled, so without this
-                // the parked turn would stay Pending forever.
+                // The delivery owner must exist now that the schedule is really
+                // cancelled: without this the parked turn would stay Pending
+                // forever.
                 self.inner.spawn_advance(handle);
             }
-            let (_, seq) = emitted?;
             return Ok(AcceptedMessage {
                 thread_id: thread_id.clone(),
                 turn_id: active_turn_id,
@@ -4162,14 +4197,24 @@ impl ThreadManager {
         }
 
         // A queue older than this message (left by a restart) goes first, so
-        // its oldest entry becomes the turn and this one waits behind it.
-        if !record.meta.queued.is_empty() {
+        // its oldest entry becomes the turn and this one waits behind it. A
+        // row that may already have been delivered is the person's decision to
+        // resend, so it never starts automatically: this send starts instead
+        // and the uncertain row stays for them.
+        if record
+            .meta
+            .queued
+            .first()
+            .is_some_and(|front| !front.message.delivery_unknown)
+        {
             let snapshot = record.start_snapshot();
             let queued = QueuedMessage {
                 message_id: QueuedMessageId::new_uuid_v7(),
                 text,
                 attachments: resolved_attachments,
                 queued_at: now,
+                steerable: false,
+                delivery_unknown: false,
             };
             record.meta.queued.push(StoredQueuedMessage {
                 message: queued.clone(),
@@ -4188,9 +4233,9 @@ impl ThreadManager {
             let mut domain = Vec::new();
             // The queue's oldest message becomes this turn, so a resume armed
             // for the pause has nothing left to deliver.
-            self.inner
-                .release_armed_limit(thread_id, &mut record, false, &mut domain)
-                .await;
+            let released = self
+                .inner
+                .release_armed_limit(&mut record, false, &mut domain);
             domain.extend([
                 ThreadEvent::MessageReceived {
                     source: h4rn_core::MessageSource::User,
@@ -4220,6 +4265,7 @@ impl ThreadManager {
             let stale = record.detach_stale_session();
             let live = record.live_session().cloned();
             drop(record);
+            self.inner.cancel_released_limit(thread_id, released).await;
             if let Some(stale) = stale {
                 tokio::spawn(async move {
                     let _ = stale.lock().await.shutdown().await;
@@ -4259,9 +4305,9 @@ impl ThreadManager {
         );
         let turn_id = dispatch.turn_id.clone();
         let mut domain = Vec::new();
-        self.inner
-            .release_armed_limit(thread_id, &mut record, false, &mut domain)
-            .await;
+        let released = self
+            .inner
+            .release_armed_limit(&mut record, false, &mut domain);
         domain.extend([
             ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -4304,6 +4350,7 @@ impl ThreadManager {
         let stale = record.detach_stale_session();
         let live = record.live_session().cloned();
         drop(record);
+        self.inner.cancel_released_limit(thread_id, released).await;
         if let Some(stale) = stale {
             tokio::spawn(async move {
                 let _ = stale.lock().await.shutdown().await;
@@ -4440,7 +4487,7 @@ impl ThreadManager {
         let record = handle.lock().await;
         Ok(QueueUpdate {
             thread_id: thread_id.clone(),
-            queued: stored_queue_page(&record.meta.queued, offset as usize),
+            queued: stored_queue_page(&record, offset as usize),
             total: record.meta.queued.len() as u32,
             revision: record.queue_revision,
             seq: 0,
@@ -4492,12 +4539,13 @@ impl ThreadManager {
             )
         };
 
-        // The client named the turn it saw. A different turn running means the
-        // one it meant already ended: a steer is refused rather than landing in
-        // a turn the person did not choose, and Send now falls back to moving
-        // the message to the front.
-        if let (Some(observed), Some((current, _))) = (&turn_id, &active)
-            && observed != current
+        // A mid-turn delivery needs the exact turn the client observed. A
+        // missing id (the client last saw idle) or a different one means the
+        // turn it meant already ended: a steer is refused rather than landing
+        // in a turn the person did not choose, and Send now falls back to
+        // moving the message to the front.
+        if let Some((current, _)) = &active
+            && turn_id.as_ref() != Some(current)
         {
             if steer_only {
                 return Err(ManagerError::Conflict(
@@ -4547,6 +4595,33 @@ impl ThreadManager {
                     .move_queued_to_front(handle, thread_id, message_id, index)
                     .await;
             };
+            // Say durably that the adapter call is starting before it starts.
+            // From here on delivery is unknown, so a restart must never put the
+            // message back in the queue and send it a second time. If this
+            // cannot be written, nothing reached the adapter: the claim is
+            // undone and the message goes back where it waited.
+            let sending_saved = {
+                let mut record = handle.lock().await;
+                if let Some(position) = record.claim_position(message_id) {
+                    record.meta.claimed[position].state = QueuedClaimState::Sending;
+                }
+                self.inner
+                    .save_claim_change(&mut record, "a steer about to be sent")
+                    .await
+            };
+            if !sending_saved {
+                let mut record = handle.lock().await;
+                record
+                    .meta
+                    .claimed
+                    .retain(|claim| &claim.message.message.message_id != message_id);
+                restore_queue_item(&mut record, index, message);
+                record.note_queue_change();
+                self.inner.save_restored_queue(&mut record).await;
+                return Err(ManagerError::Internal(
+                    "the message could not be marked as sending, so nothing was sent".into(),
+                ));
+            }
             let steered = {
                 let mut guard = session.lock().await;
                 let still_active = {
@@ -4610,6 +4685,15 @@ impl ThreadManager {
                 }
             }
             let mut record = handle.lock().await;
+            // The adapter took it. Record that before anything else can fail:
+            // even if the transcript row is never written, a restart must drop
+            // the claim instead of offering it as "may have been delivered".
+            if let Some(position) = record.claim_position(message_id) {
+                record.meta.claimed[position].state = QueuedClaimState::Delivered;
+            }
+            self.inner
+                .save_claim_change(&mut record, "a delivered steer")
+                .await;
             // The turn has the text, so the claim no longer needs to hold it.
             // Removing it in the same write that records the transcript row
             // keeps one copy of the message.
@@ -4618,35 +4702,44 @@ impl ThreadManager {
                 .claimed
                 .retain(|claim| &claim.message.message.message_id != message_id);
             let mut domain = Vec::new();
-            self.inner
-                .release_armed_limit(thread_id, &mut record, false, &mut domain)
-                .await;
+            let released = self
+                .inner
+                .release_armed_limit(&mut record, false, &mut domain);
+            self.inner.cancel_released_limit(thread_id, released).await;
             domain.push(ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
                 at: now,
             });
+            let item = Item::Message {
+                item_id: fresh_item_id("user"),
+                role: MessageRole::User,
+                text: message.message.text.clone(),
+                attachments: message.message.attachments.clone(),
+            };
             let wire = vec![Event::ItemCompleted {
                 thread_id: thread_id.clone(),
                 turn_id: active_turn_id.clone(),
-                item: Item::Message {
-                    item_id: fresh_item_id("user"),
-                    role: MessageRole::User,
-                    text: message.message.text.clone(),
-                    attachments: message.message.attachments.clone(),
-                },
+                item,
                 at: None,
             }];
             let seq = match self.inner.emit(&mut record, domain, wire).await {
                 Ok((_, seq)) => seq,
                 Err(error) => {
-                    // The message is in the turn and was claimed durably, so it
-                    // is delivered; only its transcript row is missing. Clearing
-                    // the claim is retried, so a restart cannot send it again.
+                    // The message is in the turn, so it is delivered; only its
+                    // transcript row is missing. Put the delivered claim back so
+                    // the record still describes what happened, and try the
+                    // write once more.
                     tracing::error!(
                         %thread_id,
                         %error,
                         "a queued steer reached the turn but its transcript row was not saved"
                     );
+                    record.meta.claimed.push(QueuedClaim {
+                        message: message.clone(),
+                        index: index as u32,
+                        turn_id: active_turn_id.clone(),
+                        state: QueuedClaimState::Delivered,
+                    });
                     self.inner
                         .save_claim_change(&mut record, "a delivered steer")
                         .await;
@@ -4716,7 +4809,11 @@ impl ThreadManager {
         if !self.inner.grant_allows(grant) {
             return Err(ManagerError::Conflict(REVOKED_GRANT_MESSAGE.into()));
         }
-        let message = record.meta.queued.remove(current);
+        let mut message = record.meta.queued.remove(current);
+        // A person choosing Send now or Steer on a row that may already have
+        // been delivered is deliberately trying it again, so it starts a fresh
+        // attempt instead of staying marked uncertain.
+        message.message.delivery_unknown = false;
         record.meta.claimed.push(QueuedClaim {
             message: message.clone(),
             index: current as u32,
@@ -4768,20 +4865,35 @@ impl ThreadManager {
         }
         let now = self.now();
         let turn_is_running = record.active.is_some();
-        let snapshot = record.start_snapshot();
-        let item = record.meta.queued.remove(index);
+        // Starting a turn needs the whole start state to go back on a failed
+        // append. Moving a message in front of a running turn only changes the
+        // queue: taking the start snapshot here would take `active` with it and
+        // leave the running turn nobody to settle it.
+        let snapshot = if turn_is_running {
+            None
+        } else {
+            Some(record.start_snapshot())
+        };
+        let previous_queue = record.meta.queued.clone();
+        let previous_revision = record.queue_revision;
+        let mut item = record.meta.queued.remove(index);
+        // Send now on a row that may already have been delivered is the person's
+        // decision to resend it.
+        item.message.delivery_unknown = false;
         record.meta.queued.insert(0, item);
         record.note_queue_change();
         if turn_is_running {
             let (_, seq) = match self.inner.emit(&mut record, Vec::new(), Vec::new()).await {
                 Ok(emitted) => emitted,
                 Err(error) => {
-                    record.restore_start(snapshot);
+                    record.meta.queued = previous_queue;
+                    record.queue_revision = previous_revision;
                     return Err(error);
                 }
             };
             return Ok(queue_update(thread_id, &record, seq));
         }
+        let snapshot = snapshot.expect("an idle start snapshots the whole turn");
         let promoted = record.meta.queued.remove(0);
         record.note_queue_change();
         let dispatch = record.begin_turn_for_work(
@@ -4792,9 +4904,9 @@ impl ThreadManager {
         );
         let turn_id = dispatch.turn_id.clone();
         let mut domain = Vec::new();
-        self.inner
-            .release_armed_limit(thread_id, &mut record, false, &mut domain)
-            .await;
+        let released = self
+            .inner
+            .release_armed_limit(&mut record, false, &mut domain);
         domain.extend([
             ThreadEvent::TurnQueued { at: now },
             ThreadEvent::TurnStarted { at: now },
@@ -4818,6 +4930,7 @@ impl ThreadManager {
         let live = record.live_session().cloned();
         let update = queue_update(thread_id, &record, seq);
         drop(record);
+        self.inner.cancel_released_limit(thread_id, released).await;
         if let Some(stale) = stale {
             tokio::spawn(async move {
                 let _ = stale.lock().await.shutdown().await;
@@ -6630,11 +6743,11 @@ impl Inner {
     /// has it. A transient journal failure must not leave the durable copy
     /// describing an earlier state: the retry lands the refusal, the delivery
     /// or the clearing, and the in-memory claim stays truthful either way.
-    async fn save_claim_change(&self, record: &mut ThreadRecord, what: &str) {
+    async fn save_claim_change(&self, record: &mut ThreadRecord, what: &str) -> bool {
         const ATTEMPTS: usize = 3;
         for attempt in 1..=ATTEMPTS {
             match self.emit(record, Vec::new(), Vec::new()).await {
-                Ok(_) => return,
+                Ok(_) => return true,
                 Err(error) if attempt < ATTEMPTS => {
                     tracing::warn!(%error, attempt, "a steer claim's state was not saved; retrying");
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -6644,6 +6757,7 @@ impl Inner {
                 }
             }
         }
+        false
     }
 
     /// Waits between a delivery's liveness check and its claim, when a test
@@ -7026,11 +7140,10 @@ impl Inner {
                 });
             }
         }
-        record.active = None;
-        // The pause, if any, was holding that turn's prompt. A settled turn has
-        // nothing left for a schedule to deliver, and the row must not restore
-        // a prompt that already ended.
-        record.meta.parked = None;
+        // The settled turn stays active until its completion is durable. A Send
+        // that arrives meanwhile therefore queues behind it instead of starting
+        // work a restart would find unrecorded; `apply_settlement_once` puts it
+        // back on every failed attempt.
         domain.push(ThreadEvent::TurnCompleted { status, at: now });
         // Events that must survive the completion (a usage limit that keeps the
         // thread scheduled) are applied after it, exactly as the lifecycle
@@ -7054,53 +7167,12 @@ impl Inner {
         let mut attempts = 0;
         loop {
             attempts += 1;
-            let snapshot = record.start_snapshot();
-            let mut attempt_domain = domain.clone();
-            let mut attempt_wire = wire.clone();
-            if !record.closed && record.scheduled_limit.is_none() && !record.meta.queued.is_empty()
+            match self
+                .apply_settlement_once(record, turn_id, now, &domain, &wire)
+                .await
             {
-                let promoted = record.meta.queued.remove(0);
-                record.note_queue_change();
-                let next = record.begin_turn_for_work(
-                    now,
-                    queued_input(&promoted.message),
-                    promoted.ceiling,
-                    promoted.grant,
-                );
-                // This turn is the daemon's next step, not a person's Send: if
-                // the transport it inherits dies before it runs, it goes back
-                // to the queue instead of failing (see `requeue_promoted_turn`).
-                if let Some(active) = record.active.as_mut() {
-                    active.promoted = true;
-                }
-                let next_id = next.turn_id.clone();
-                attempt_domain.push(ThreadEvent::TurnQueued { at: now });
-                attempt_domain.push(ThreadEvent::TurnStarted { at: now });
-                attempt_wire.push(queued_item_event(
-                    &record.meta.thread_id,
-                    &next_id,
-                    &promoted.message,
-                ));
-                attempt_wire.push(Event::TurnStarted {
-                    thread_id: record.meta.thread_id.clone(),
-                    turn_id: next_id,
-                    started_at: now,
-                });
-            }
-            match self.emit(record, attempt_domain, attempt_wire).await {
-                Ok(_) => break,
-                Err(error) => {
-                    // Nothing was delivered: the promotion is undone so the
-                    // message is still first in line, and the settlement's own
-                    // events are applied again on the retry.
-                    record.restore_start(snapshot);
-                    if attempts >= 3 {
-                        tracing::error!(
-                            %error,
-                            "a settled turn and its promotion could not be recorded; the queue keeps the message"
-                        );
-                        break;
-                    }
+                Ok(()) => return true,
+                Err(error) if attempts < 3 => {
                     tracing::warn!(
                         %error,
                         attempt = attempts,
@@ -7108,9 +7180,152 @@ impl Inner {
                     );
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
+                Err(error) => {
+                    // Storage is still refusing the write. Give the settlement
+                    // its own owner: a background retry with backoff keeps
+                    // trying, so the queued message is promoted once storage
+                    // recovers without the person having to do anything.
+                    tracing::error!(
+                        %error,
+                        "a settled turn and its promotion could not be recorded; retrying in the background"
+                    );
+                    self.spawn_settlement_retry(
+                        record.meta.thread_id.clone(),
+                        turn_id.clone(),
+                        now,
+                        domain.clone(),
+                        wire.clone(),
+                    );
+                    return true;
+                }
             }
         }
-        true
+    }
+
+    /// Applies a settled turn and its promotion once, restoring everything on
+    /// a refused append.
+    ///
+    /// `Ok(())` also covers "this turn is no longer the settled active one":
+    /// another path already recorded it, so there is nothing to write.
+    async fn apply_settlement_once(
+        &self,
+        record: &mut ThreadRecord,
+        turn_id: &TurnId,
+        now: DateTime<Utc>,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+    ) -> Result<(), ManagerError> {
+        let ours = record.active.as_ref().is_some_and(|active| {
+            &active.turn_id == turn_id && active.dispatch.state() == DispatchState::Settled
+        });
+        if !ours {
+            return Ok(());
+        }
+        let snapshot = record.start_snapshot();
+        // The pause, if any, was holding that turn's prompt. A settled turn has
+        // nothing left for a schedule to deliver, and the row must not restore
+        // a prompt that already ended.
+        record.meta.parked = None;
+        let mut attempt_domain = domain.to_vec();
+        let mut attempt_wire = wire.to_vec();
+        // A row that may already have been delivered is never auto-sent: only
+        // the person's Send now or Steer may try it again.
+        if !record.closed
+            && record.scheduled_limit.is_none()
+            && record
+                .meta
+                .queued
+                .first()
+                .is_some_and(|front| !front.message.delivery_unknown)
+        {
+            let promoted = record.meta.queued.remove(0);
+            record.note_queue_change();
+            let next = record.begin_turn_for_work(
+                now,
+                queued_input(&promoted.message),
+                promoted.ceiling,
+                promoted.grant,
+            );
+            // This turn is the daemon's next step, not a person's Send: if the
+            // transport it inherits dies before it runs, it goes back to the
+            // queue instead of failing (see `requeue_promoted_turn`).
+            if let Some(active) = record.active.as_mut() {
+                active.promoted = true;
+            }
+            let next_id = next.turn_id.clone();
+            attempt_domain.push(ThreadEvent::TurnQueued { at: now });
+            attempt_domain.push(ThreadEvent::TurnStarted { at: now });
+            attempt_wire.push(queued_item_event(
+                &record.meta.thread_id,
+                &next_id,
+                &promoted.message,
+            ));
+            attempt_wire.push(Event::TurnStarted {
+                thread_id: record.meta.thread_id.clone(),
+                turn_id: next_id,
+                started_at: now,
+            });
+        }
+        match self.emit(record, attempt_domain, attempt_wire).await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // Nothing was delivered: the promotion is undone so the message
+                // is still first in line, and the settlement's own events are
+                // applied again on the next attempt.
+                record.restore_start(snapshot);
+                Err(error)
+            }
+        }
+    }
+
+    /// Keeps trying a settlement storage refused, without the record lock held.
+    fn spawn_settlement_retry(
+        &self,
+        thread_id: ThreadId,
+        turn_id: TurnId,
+        now: DateTime<Utc>,
+        domain: Vec<ThreadEvent>,
+        wire: Vec<Event>,
+    ) {
+        let Some(weak) = self.self_weak.get().cloned() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let mut delay = Duration::from_millis(50);
+            loop {
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                let Ok(handle) = inner.handle(&thread_id).await else {
+                    return;
+                };
+                let outcome = {
+                    let mut record = handle.lock().await;
+                    if inner.closed.load(Ordering::Relaxed) || record.closed {
+                        return;
+                    }
+                    inner
+                        .apply_settlement_once(&mut record, &turn_id, now, &domain, &wire)
+                        .await
+                };
+                match outcome {
+                    Ok(()) => {
+                        // The promotion, if any, needs its session and prompt
+                        // now that it is durable.
+                        inner.spawn_advance(handle);
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "a settled turn is still not recorded; retrying in the background"
+                        );
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(5));
+            }
+        });
     }
 
     /// Starts the next turn now: any armed resume must not survive it.
@@ -7126,9 +7341,8 @@ impl Inner {
     /// for a prompt the pause never parked would move the phase and spend an
     /// advance on a turn that already has an owner. Returns whether a schedule
     /// was cancelled.
-    async fn release_armed_limit(
+    fn release_armed_limit(
         &self,
-        thread_id: &ThreadId,
         record: &mut ThreadRecord,
         parked_prompt: bool,
         domain: &mut Vec<ThreadEvent>,
@@ -7138,16 +7352,28 @@ impl Inner {
         }
         record.resume_at = None;
         record.limit = None;
+        if parked_prompt {
+            domain.push(ThreadEvent::LimitResumeReleased { at: self.now() });
+        }
+        true
+    }
+
+    /// Cancels the ledger schedule once the write that releases it is durable.
+    ///
+    /// The record clears its own pause first so the summary and the event that
+    /// started the turn already agree; this is the other half, kept separate so
+    /// a failed append leaves the schedule armed for its retry instead of
+    /// cancelling a resume the journal never recorded as released.
+    async fn cancel_released_limit(&self, thread_id: &ThreadId, released: bool) {
+        if !released {
+            return;
+        }
         if let Some(meter) = self.meter.get() {
             // A ledger that refuses the cancel leaves a schedule behind, but the
             // thread's own state no longer claims one; the cancellation is best
             // effort and the reservation expires on its own.
             let _ = meter.cancel_schedule(thread_id).await;
         }
-        if parked_prompt {
-            domain.push(ThreadEvent::LimitResumeReleased { at: self.now() });
-        }
-        true
     }
 
     /// Sends a recorded turn's prompt on a live session, or starts one.
@@ -10130,6 +10356,15 @@ impl Inner {
             if record.closed || record.active.is_none() {
                 return;
             }
+            if record
+                .active
+                .as_ref()
+                .is_some_and(|active| active.dispatch.state() == DispatchState::Settled)
+            {
+                // A settlement whose append storage refused still owns this
+                // turn; its retry starts the promoted work when it lands.
+                return;
+            }
             let parks_active = record
                 .active
                 .as_ref()
@@ -10889,13 +11124,24 @@ fn restore_queue_item(record: &mut ThreadRecord, index: usize, message: StoredQu
 ///
 /// Only the [`QueuedMessage`] half of each stored row is published: the
 /// ceiling and the grant's token family never leave the daemon, so a client
-/// cannot read them back out.
-fn stored_queue_page(
-    queued: &[StoredQueuedMessage],
-    offset: usize,
-) -> Vec<h4rn_protocol::QueuedMessage> {
-    let messages: Vec<h4rn_protocol::QueuedMessage> =
-        queued.iter().map(|entry| entry.message.clone()).collect();
+/// cannot read them back out. `steerable` is computed for this read: it says
+/// whether Send now would really steer this row into the turn running now.
+fn stored_queue_page(record: &ThreadRecord, offset: usize) -> Vec<h4rn_protocol::QueuedMessage> {
+    let steer_ready = record
+        .active
+        .as_ref()
+        .is_some_and(|active| active.dispatch.write_accepted())
+        && h4rn_harness::capabilities(record.meta.harness).steer;
+    let messages: Vec<h4rn_protocol::QueuedMessage> = record
+        .meta
+        .queued
+        .iter()
+        .map(|entry| {
+            let mut message = entry.message.clone();
+            message.steerable = steer_ready && entry.ceiling.is_none() && !message.delivery_unknown;
+            message
+        })
+        .collect();
     h4rn_protocol::queue_page(&messages, offset)
 }
 
@@ -10903,7 +11149,7 @@ fn stored_queue_page(
 fn queue_update(thread_id: &ThreadId, record: &ThreadRecord, seq: u64) -> QueueUpdate {
     QueueUpdate {
         thread_id: thread_id.clone(),
-        queued: stored_queue_page(&record.meta.queued, 0),
+        queued: stored_queue_page(record, 0),
         total: record.meta.queued.len() as u32,
         revision: record.queue_revision,
         seq,
@@ -10955,10 +11201,11 @@ enum SteerFailure {
 
 /// Classifies a failed steer by whether the message could have been taken.
 ///
-/// A refused feature, a missing binary, a failed spawn, a deferred value and a
-/// protocol error all mean the adapter answered/tried before writing the
-/// message, so re-queueing cannot duplicate it. A transport failure or a
-/// provider limit can happen after the write, so the claim stands.
+/// A refused feature, a missing binary, a failed spawn, a deferred value, a
+/// protocol error and a definite pre-write failure all mean the adapter
+/// answered/tried before writing the message, so re-queueing cannot duplicate
+/// it. A transport failure or a provider limit can happen after the write, so
+/// the claim stands.
 fn steer_failure(error: h4rn_harness::HarnessError) -> SteerFailure {
     use h4rn_harness::HarnessError;
     match &error {
@@ -10966,7 +11213,8 @@ fn steer_failure(error: h4rn_harness::HarnessError) -> SteerFailure {
         | HarnessError::Spawn { .. }
         | HarnessError::Protocol { .. }
         | HarnessError::Unsupported { .. }
-        | HarnessError::Deferred { .. } => SteerFailure::Rejected(steer_error(error)),
+        | HarnessError::Deferred { .. }
+        | HarnessError::NotSent { .. } => SteerFailure::Rejected(steer_error(error)),
         HarnessError::Transport { .. } | HarnessError::RateLimited { .. } => {
             SteerFailure::Unclear(steer_error(error))
         }
@@ -18286,10 +18534,10 @@ mod tests {
         assert_eq!(status, TurnStatus::Completed);
     }
 
-    /// A Send over a pause still releases the parked prompt when the journal
-    /// cannot record the new message.
+    /// A Send over a pause whose journal write fails leaves the pause armed, so
+    /// the parked prompt still has the schedule that delivers it.
     #[tokio::test]
-    async fn a_send_release_survives_a_failing_journal_write() {
+    async fn a_failed_send_over_a_pause_keeps_the_parked_prompt_armed() {
         let journal = FlakyJournal::in_memory().await;
         let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
         let parked = park_requeued_turn_on(
@@ -18314,8 +18562,18 @@ mod tests {
             .await;
         assert!(refused.is_err(), "the journal rejected the new message");
 
-        // The new message was not recorded, but the parked turn was released:
-        // the schedule is gone, so it has no other delivery owner.
+        // The new message was not recorded, so the pause and its schedule stay
+        // exactly as they were: the schedule still owns the parked prompt.
+        let summary = manager.thread_summary(&thread_id).await.expect("summary");
+        assert!(
+            summary.resume_at.is_some(),
+            "the failed send lost the armed resume"
+        );
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the schedule still fires");
+
         tokio::time::timeout(Duration::from_secs(10), sessions.wait_for(2))
             .await
             .expect("the release never started a session");
@@ -24249,16 +24507,18 @@ mod tests {
             .expect("queue");
         let message_id = queued.queued_message_id.expect("queued id");
 
-        // The claim's append succeeds; the one that records the message in the
-        // turn fails. The harness already has the text by then, so the send is
-        // reported as done rather than as a failure that invites a resend, and a
-        // restart must not find it waiting again.
-        journal.fail_appends_after(1, 1);
+        // The claim and the `sending` state are durable; the writes that clear
+        // the claim after the adapter's Ok all fail. The harness already has
+        // the text by then, so a restart must keep the payload as "may have
+        // been delivered" and never send it a second time.
+        journal.fail_appends_after(2, 100);
         let accepted = manager
             .queue_message(
                 &created.thread_id,
                 &message_id,
-                QueueAction::SendNow { turn_id: None },
+                QueueAction::SendNow {
+                    turn_id: Some(created.turn_id.clone()),
+                },
             )
             .await
             .expect("the steer is delivered even though the row is not recorded");
@@ -24273,7 +24533,21 @@ mod tests {
             .expect("queue");
         assert!(queue.queued.is_empty(), "the claim is not in the queue");
 
+        // The daemon stopped in the window where the claim says `sending`.
+        {
+            let handle = manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("handle");
+            let mut record = handle.lock().await;
+            if let Some(position) = record.claim_position(&message_id) {
+                record.meta.claimed[position].state = QueuedClaimState::Sending;
+            }
+        }
         manager.shutdown().await;
+        // Let the restarted daemon's own recovery write land.
+        journal.fail_next_appends(0);
         let (fresh, restarted_steers) = FakeHarness::new()
             .with_kind(HarnessKind::Codex)
             .with_steer_count();
@@ -24282,14 +24556,94 @@ mod tests {
             .thread_queue(&created.thread_id, 0)
             .await
             .expect("queue after restart");
-        assert!(
-            queue.queued.is_empty(),
-            "an accepted steer is not delivered again after a restart"
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("steer me", true)],
+            "the payload is kept as a row that may already have been delivered"
         );
         assert_eq!(
             restarted_steers.get(),
             0,
             "the restart never steers the message a second time"
+        );
+        restarted.shutdown().await;
+    }
+
+    /// A crash after the daemon said it was `sending`, before the adapter was
+    /// called, keeps the payload visible and never sends it automatically.
+    #[tokio::test]
+    async fn a_crash_during_sending_keeps_the_payload_and_does_not_resend_it() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, _steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+        let queued = manager
+            .send_message(&created.thread_id, "half sent".into(), Vec::new())
+            .await
+            .expect("queue");
+        let message_id = queued.queued_message_id.expect("queued id");
+
+        // Take the claim and mark it sending exactly as a steer does just
+        // before the adapter call, then stop the daemon there.
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        manager
+            .claim_queued_for_steer(&handle, &message_id, 0, &created.turn_id, None)
+            .await
+            .expect("claim")
+            .expect("the running turn accepts the claim");
+        {
+            let mut record = handle.lock().await;
+            let position = record.claim_position(&message_id).expect("claim");
+            record.meta.claimed[position].state = QueuedClaimState::Sending;
+            manager
+                .inner
+                .save_claim_change(&mut record, "a sending steer")
+                .await;
+        }
+        manager.shutdown().await;
+
+        let (fresh, restarted_steers) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let restarted = open_test_manager_with_journal(fresh, host, journal).await;
+        let queue = restarted
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue after restart");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("half sent", true)],
+            "the payload survives as an unsure row"
+        );
+        assert_eq!(
+            restarted_steers.get(),
+            0,
+            "nothing is sent automatically after the crash"
         );
         restarted.shutdown().await;
     }
@@ -24318,7 +24672,9 @@ mod tests {
             .queue_message(
                 &created.thread_id,
                 &message_id,
-                QueueAction::Steer { turn_id: None },
+                QueueAction::Steer {
+                    turn_id: Some(created.turn_id.clone()),
+                },
             )
             .await;
         assert!(failed.is_err(), "the timeout is reported");
@@ -24357,7 +24713,9 @@ mod tests {
             .queue_message(
                 &created.thread_id,
                 &message_id,
-                QueueAction::Steer { turn_id: None },
+                QueueAction::Steer {
+                    turn_id: Some(created.turn_id.clone()),
+                },
             )
             .await;
         assert!(failed.is_err(), "the refusal is reported");
@@ -24373,6 +24731,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["still queued"],
             "a refused steer goes back to the queue"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A closed writer before the frame was accepted is a definite refusal, so
+    /// the message returns to the queue instead of being marked delivered.
+    #[tokio::test]
+    async fn a_steer_that_never_reached_a_closed_writer_goes_back_to_the_queue() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let harness = harness.with_steer_not_sent("the codex writer task has exited");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+        let queued = manager
+            .send_message(&created.thread_id, "never sent".into(), Vec::new())
+            .await
+            .expect("queue");
+        let message_id = queued.queued_message_id.expect("queued id");
+
+        let failed = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Steer {
+                    turn_id: Some(created.turn_id.clone()),
+                },
+            )
+            .await;
+        assert!(failed.is_err(), "the closed writer is reported");
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("never sent", false)],
+            "a message the adapter never saw stays queued and deliverable"
         );
         manager.shutdown().await;
     }
@@ -25223,12 +25629,15 @@ mod tests {
             let manager = Arc::clone(&manager);
             let thread_id = created.thread_id.clone();
             let message_id = message_id.clone();
+            let turn_id = created.turn_id.clone();
             async move {
                 manager
                     .queue_message(
                         &thread_id,
                         &message_id,
-                        QueueAction::SendNow { turn_id: None },
+                        QueueAction::SendNow {
+                            turn_id: Some(turn_id),
+                        },
                     )
                     .await
             }
@@ -25374,6 +25783,133 @@ mod tests {
             "the older message keeps its place behind it"
         );
         assert_eq!(steers.get(), 0, "nothing was steered into the new turn");
+        manager.shutdown().await;
+    }
+
+    /// A Send now whose client last saw an idle thread never steers into the
+    /// turn that started since: it cannot name it, so the message is queued.
+    #[tokio::test]
+    async fn send_now_without_an_observed_turn_does_not_steer() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+        let queued = manager
+            .send_message(&created.thread_id, "queued while idle".into(), Vec::new())
+            .await
+            .expect("queue");
+        let message_id = queued.queued_message_id.expect("queued id");
+
+        // The client's cached summary said no turn was running, so its Send
+        // now carries no turn id. A turn started in between.
+        let sent = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::SendNow { turn_id: None },
+            )
+            .await
+            .expect("send now");
+        assert_eq!(steers.get(), 0, "an unnamed turn is never steered into");
+        assert_eq!(
+            sent.queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["queued while idle"],
+            "the message stays queued instead"
+        );
+        manager.shutdown().await;
+    }
+
+    /// Send now falls back to moving the message to the front without taking
+    /// the running turn with it.
+    ///
+    /// The move used the start snapshot even when a turn was running, and that
+    /// snapshot takes `active`; the later completion then had no turn to settle
+    /// and no promotion ran.
+    #[tokio::test]
+    async fn send_now_moves_to_front_without_taking_the_running_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("second send");
+        loop {
+            if let Event::TurnStarted { turn_id, .. } = next_event(&mut events).await.event
+                && turn_id == second.turn_id
+            {
+                break;
+            }
+        }
+        let queued = manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+        let message_id = queued.queued_message_id.expect("queued id");
+
+        let sent = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::SendNow {
+                    turn_id: Some(second.turn_id.clone()),
+                },
+            )
+            .await
+            .expect("send now");
+        assert_eq!(
+            sent.queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["queued"],
+            "the message moved to the front"
+        );
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        assert_eq!(
+            snapshot.summary.active_turn_id.as_ref(),
+            Some(&second.turn_id),
+            "the running turn is still the active one"
+        );
+
+        gate.release();
+        let (settled, status) = next_turn_completion(&mut events).await;
+        assert_eq!(settled, second.turn_id, "the original turn still settles");
+        assert_eq!(status, TurnStatus::Completed);
+        let promoted = loop {
+            if let Event::TurnStarted { turn_id, .. } = next_event(&mut events).await.event
+                && turn_id != created.turn_id
+                && turn_id != second.turn_id
+            {
+                break turn_id;
+            }
+        };
+        let (done, status) = next_turn_completion(&mut events).await;
+        assert_eq!(done, promoted, "the reordered message then starts");
+        assert_eq!(status, TurnStatus::Completed);
+        sends.wait_for(3).await;
         manager.shutdown().await;
     }
 
@@ -25531,7 +26067,9 @@ mod tests {
             .queue_message(
                 &created.thread_id,
                 &message_id,
-                QueueAction::Steer { turn_id: None },
+                QueueAction::Steer {
+                    turn_id: Some(created.turn_id.clone()),
+                },
             )
             .await;
         assert!(failed.is_err(), "the refusal is reported");
@@ -25968,6 +26506,197 @@ mod tests {
             "the queue's oldest message is the turn that started"
         );
         assert_eq!(snapshot.summary.queued_count, 1);
+        manager.shutdown().await;
+    }
+
+    /// A failed idle Send now leaves the armed resume in place.
+    ///
+    /// The release used to cancel the ledger schedule before the append that
+    /// recorded the start, so a failed write lost the very resume that would
+    /// have delivered the paused message.
+    #[tokio::test]
+    async fn a_failed_idle_send_now_keeps_the_resume_armed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let (harness, gate) = FakeHarness::new().with_later_completion_gate();
+        let (harness, harness_events) = harness.with_event_injector();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let alpha = manager
+            .send_message(&created.thread_id, "alpha".into(), Vec::new())
+            .await
+            .expect("queue alpha")
+            .queued_message_id
+            .expect("queued id");
+        harness_events.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        });
+        gate.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert!(
+            manager
+                .get_thread(&created.thread_id, 0)
+                .await
+                .expect("thread")
+                .summary
+                .resume_at
+                .is_some(),
+            "the limit armed a pause"
+        );
+
+        // The start's append fails, so the schedule must survive.
+        journal.fail_next_appends(1);
+        let failed = manager
+            .queue_message(
+                &created.thread_id,
+                &alpha,
+                QueueAction::SendNow { turn_id: None },
+            )
+            .await;
+        assert!(failed.is_err(), "the failed start is reported");
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        assert!(
+            snapshot.summary.resume_at.is_some(),
+            "the summary still names the resume"
+        );
+        assert!(
+            meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the failed start must not cancel the armed resume"
+        );
+
+        // The schedule fires normally and delivers the paused message.
+        manager
+            .resume_now(&created.thread_id)
+            .await
+            .expect("the schedule still fires");
+        let mut alpha_started = false;
+        for _ in 0..100 {
+            let current = manager
+                .get_thread(&created.thread_id, 0)
+                .await
+                .expect("thread");
+            if current.events.iter().any(|seq| {
+                matches!(
+                    &seq.event,
+                    Event::ItemCompleted {
+                        item: Item::Message { text, .. },
+                        ..
+                    } if text == "alpha"
+                )
+            }) {
+                alpha_started = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(alpha_started, "the resumed schedule delivered the message");
+        manager.shutdown().await;
+    }
+
+    /// A settlement storage keeps refusing is retried on its own.
+    ///
+    /// The three immediate attempts may all fail; the queued message must still
+    /// be promoted once storage recovers, without another Send or restart.
+    #[tokio::test]
+    async fn a_settlement_retries_in_the_background_and_promotes_the_queue() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, gate) = FakeHarness::new().with_later_completion_gate();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("second send");
+        manager
+            .send_message(&created.thread_id, "queued".into(), Vec::new())
+            .await
+            .expect("queue");
+
+        // Every immediate settlement attempt fails; storage recovers on its
+        // own after the third.
+        journal.fail_next_settlements(3);
+        gate.release();
+
+        let mut promoted = false;
+        for _ in 0..200 {
+            let current = manager
+                .get_thread(&created.thread_id, 0)
+                .await
+                .expect("thread");
+            if current.summary.queued_count == 0
+                && current.events.iter().any(|seq| {
+                    matches!(
+                        &seq.event,
+                        Event::ItemCompleted {
+                            item: Item::Message { text, .. },
+                            ..
+                        } if text == "queued"
+                    )
+                })
+            {
+                promoted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            promoted,
+            "the background retry recorded the settlement and promoted the queue"
+        );
+        assert_eq!(
+            manager
+                .get_thread(&created.thread_id, 0)
+                .await
+                .expect("thread")
+                .summary
+                .queued_count,
+            0
+        );
+        let _ = second;
         manager.shutdown().await;
     }
 

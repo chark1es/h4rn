@@ -31,15 +31,20 @@ type Row =
   | { kind: "queued"; message: QueuedMessage; key: string; index: number };
 
 /**
- * The copy for what Send now will really do right now.
+ * The copy for what Send now will really do with this row right now.
  *
- * Steering is only a promise while a turn is running on a harness that takes
- * mid-turn input; otherwise Send now moves the message to the front of the
- * queue, and the row says exactly that.
+ * The daemon publishes `steerable` per row: a message with its own permission
+ * ceiling, or one that may already have been delivered, is moved to the front
+ * instead. The hint says exactly that instead of promising a steer.
  */
-export function sendNowHint(summary: ThreadSummary): string {
+export function sendNowHint(summary: ThreadSummary, message: QueuedMessage): string {
+  if (message.delivery_unknown) {
+    return "May have been delivered; sending again adds a second copy";
+  }
   if (isTurnRunning(summary)) {
-    return summary.steer ? "Send now steers it into this turn" : "Waits for this turn to finish";
+    return message.steerable
+      ? "Send now steers it into this turn"
+      : "Waits for this turn to finish";
   }
   return "Send now starts it next";
 }
@@ -65,12 +70,14 @@ export function QueuedTurn({
   total: number;
   editing: boolean;
 }) {
-  const steers = isTurnRunning(summary) && summary.steer;
+  const steers = isTurnRunning(summary) && message.steerable;
   return (
     <div className="q-queued" data-editing={editing || undefined}>
       <div className="q-queued-h">
-        <span className="q-queued-label">Queued</span>
-        <span className="q-faint">{sendNowHint(summary)}</span>
+        <span className="q-queued-label">
+          {message.delivery_unknown ? "May have been delivered" : "Queued"}
+        </span>
+        <span className="q-faint">{sendNowHint(summary, message)}</span>
       </div>
       <div className="q-queued-text">{message.text}</div>
       {message.attachments.length > 0 ? (
@@ -82,13 +89,15 @@ export function QueuedTurn({
           className="q-btn ghost"
           onClick={() => void sendQueuedNow(threadId, message.message_id)}
           title={
-            steers
-              ? "Steer this message into the running turn"
-              : "Move this message to the front of the queue"
+            message.delivery_unknown
+              ? "Send this message again; it may already be in the turn"
+              : steers
+                ? "Steer this message into the running turn"
+                : "Move this message to the front of the queue"
           }
         >
           <CornerDownRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          Send now
+          {message.delivery_unknown ? "Send again" : "Send now"}
         </button>
         <button
           type="button"
@@ -109,10 +118,10 @@ export function QueuedTurn({
           type="button"
           className="q-btn ghost"
           onClick={() => void removeQueuedMessage(threadId, message.message_id)}
-          title="Remove from the queue"
+          title={message.delivery_unknown ? "Discard this row" : "Remove from the queue"}
         >
           <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-          Remove
+          {message.delivery_unknown ? "Discard" : "Remove"}
         </button>
         <span className="grow" />
         <button

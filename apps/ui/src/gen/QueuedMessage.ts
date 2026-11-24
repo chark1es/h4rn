@@ -21,4 +21,20 @@ attachments: Array<Attachment>,
 /**
  * When the message was queued.
  */
-queued_at: string, };
+queued_at: string, 
+/**
+ * Whether Send now can steer this row into the running turn.
+ *
+ * A row with its own permission ceiling, or one waiting on a harness
+ * without mid-turn input, is moved to the front instead. The hint and the
+ * button use this so they never promise a steer the daemon will not make.
+ */
+steerable: boolean, 
+/**
+ * Whether this row may already have reached the agent once.
+ *
+ * Set when the daemon stopped after handing the message to the adapter
+ * but before it knew the outcome. The row is never sent automatically;
+ * the person can send it again or discard it.
+ */
+delivery_unknown: boolean, };

@@ -662,6 +662,19 @@ All notable changes to h4rn are recorded here. The format follows
   never sent a second time, and a refused steer's row is written again instead of being kept only in
   memory. Move down is disabled on the last queued row, and Cancel on an edit restores the draft
   another tab saved while the edit was open.
+- **Send now never takes the running turn with it, and a message that may have been sent says so.**
+  Send now that falls back to the front of the queue leaves the running turn working, so it finishes
+  and then starts the reordered message. Only Send now or Steer that names the turn the person
+  actually saw can deliver mid-turn; a client that last saw an idle thread queues its message
+  instead. A steer marks itself `sending` durably before the agent is called, then `delivered` as
+  soon as it is accepted: a crash after the agent took the text keeps the payload as a **May have
+  been delivered** row that can be sent again or discarded, never re-sent automatically, while a
+  message the agent never saw goes back to the queue. A closed writer is now a definite pre-write
+  refusal in every adapter, so that message also returns to the queue. A failed Send now leaves an
+  armed auto-resume in place, a settlement storage refuses retries on its own until the waiting
+  message is promoted, a Save that is acknowledged after newer typing keeps the editor open with
+  that newer text, and the queue row's hint no longer promises a steer the daemon will move to the
+  front instead.
 - **A queued message or steer reaches the turn it belongs to, once, with the limits it was saved
   with.** A queued message keeps its sender's grant and ceiling when it is steered: a revoked grant
   is refused, and a message with its own permission limit is never steered into a running turn

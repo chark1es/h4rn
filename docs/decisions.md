@@ -1831,26 +1831,38 @@ do not advertise it either. Claude's steering was withdrawn in the council's fir
 
 A steer is delivered **at most once**. It names the turn the client observed (`SendMessage.turn_id`),
 and so does a queue action: `QueueMessage`'s `SendNow` and `Steer` carry the turn the client saw, and
-the daemon refuses a stale id and a turn whose first prompt the harness has not accepted yet. The
-check runs again under the lock that claims the message, so a turn that ends between the client's
-look and the claim cannot receive it; `Send now` then moves the message to the front instead, while
-`Steer` refuses, because moving it is not what it promised. A direct steer that names an ended turn
-is refused even when the thread is idle: it never starts a fresh turn the person did not choose.
+the daemon refuses a stale id and a turn whose first prompt the harness has not accepted yet. A
+missing id is not a wildcard: while a turn runs it means the client last saw an idle thread, so the
+message is queued rather than steered into a turn the person never saw. The check runs again under
+the lock that claims the message, so a turn that ends between the client's look and the claim cannot
+receive it; `Send now` then moves the message to the front instead, while `Steer` refuses, because
+moving it is not what it promised. Moving a message in front of a running turn only changes the
+queue: the running turn stays active, completes normally, and its settlement starts the reordered
+message. A direct steer that names an ended turn is refused even when the thread is idle: it never
+starts a fresh turn the person did not choose.
 
 Sending now from the queue **claims the message durably before the adapter sees it**, as a row in the
 thread's `claimed_json` holding the message, the position it waited in and the turn it was claimed
-for. The row's state says what is known: `claimed` (written, the adapter has not answered),
-`delivered` (the adapter took it, or the outcome was unclear) and `refused` (the adapter definitely
-refused it). A failed claim append is undone and nothing was delivered. On a definite refusal
-(unsupported, missing binary, a protocol error answer) the refusal is written down and the message
-goes back where it was; if the restore append fails, its retries run, and a restart still finds the
-refusal and restores the message. On an unclear outcome (a timeout, a dead transport) the claim is
-marked delivered and the error says the message may have reached the agent, because a second
-automatic delivery is worse than a row the person has to check. At startup a `claimed` or `refused`
-row goes back to the queue at its old position, and a `delivered` row is dropped: neither a crash
-before the adapter nor a failed restore can lose the only copy. The claim reads the message under the
-same lock that removes it, so an edit committed in between cannot send text the person already
-replaced.
+for. The row's state says what is actually known: `claimed` (written, the adapter has not been
+called), `sending` (the adapter call has started, so delivery is unknown), `delivered` (the adapter
+took it) and `refused` (a definite refusal before any write). A failed claim append is undone and
+nothing was delivered. The `sending` write must land before the adapter is called; if it cannot, the
+message goes back to the queue and nothing is sent. Immediately after the adapter answers `Ok` the
+claim becomes `delivered`, before the transcript row is written, so a failed transcript cannot make a
+delivered steer look unsent. On a definite refusal (unsupported, missing binary, a protocol error
+answer, or a closed writer the adapter knows never accepted the frame) the refusal is written down
+and the message goes back where it was; if the restore append fails, its retries run, and a restart
+still finds the refusal and restores the message. On an unclear outcome (a timeout, a dead transport
+after the write) the claim is marked delivered and the error says the message may have reached the
+agent, because a second automatic delivery is worse than a row the person has to check. At startup a
+`claimed` or `refused` row goes back to the queue at its old position, a `sending` row becomes a
+queue row marked **May have been delivered** that the person can send again or discard but that is
+never promoted automatically, and a `delivered` row is dropped: neither a crash before the adapter
+nor a failed restore can lose the only copy, and a crash during the adapter call is never silently
+re-sent. The claim reads the message under the same lock that removes it, so an edit committed in
+between cannot send text the person already replaced. The queue row publishes a per-row `steerable`
+flag, so the hint and the button never promise a steer for a message the daemon will move to the
+front instead.
 
 **A queued steer obeys the message's sender.** The stored ceiling and grant are read with the
 message: a message that carries a ceiling is never steered into a running turn, because a steer
@@ -1883,8 +1895,16 @@ otherwise moves the message to the front (and starts a turn if none runs).
 **Starting work by hand cancels an armed auto-resume.** An ordinary send, an idle promotion of an
 older queue, `Send now` and a steer into a paused turn all take the thread's `scheduled_limit`, clear
 the summary's resume target and limit, cancel the ledger schedule, and publish
-`LimitResumeReleased` when the pause really held the pending prompt. Without that, the schedule
-fired a stale resume later and its guard kept the next queued message from ever being promoted.
+`LimitResumeReleased` when the pause really held the pending prompt. The record releases the pause
+first and the ledger schedule is cancelled only after the write that records the start succeeds: a
+failed append puts the pause back, so the schedule still delivers its message instead of being
+cancelled for a start that never happened. Without that, the schedule fired a stale resume later and
+its guard kept the next queued message from ever being promoted.
+
+**A settlement storage refuses keeps an owner.** When the append that records a finished turn and
+its promoted message fails three times, a background task retries with backoff until storage
+accepts it. The settled turn stays the active marker meanwhile, so a Send queues behind it and no
+other path starts work the settlement has not recorded.
 
 The queue's **contents are not in `ThreadSummary`**. A full queue is unbounded while a paired
 transport refuses a frame over 512 KiB, so carrying it in every summary made a large queue break the

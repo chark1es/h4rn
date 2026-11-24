@@ -1813,7 +1813,7 @@ export function steerOldestQueued(threadId: ThreadId): boolean {
   const summary = state.threads[threadId];
   if (!summary?.steer || !isTurnRunning(summary)) return false;
   const oldest = state.queues[threadId]?.queued[0];
-  if (!oldest) return false;
+  if (!oldest?.steerable) return false;
   void steerQueuedMessage(threadId, oldest.message_id);
   return true;
 }

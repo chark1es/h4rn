@@ -1393,6 +1393,8 @@ describe("follow-up behaviour and queued messages", () => {
     text,
     attachments: [],
     queued_at: "2026-01-01T00:00:00.000Z",
+    steerable: true,
+    delivery_unknown: false,
   });
 
   const running: Partial<ThreadSummary> = {
@@ -1550,6 +1552,63 @@ describe("follow-up behaviour and queued messages", () => {
     );
   });
 
+  it("keeps newer text typed while a Save acknowledgement is in flight", async () => {
+    let resolveSave: (ok: boolean) => void = () => undefined;
+    mock.editQueuedMessage.mockReturnValueOnce(
+      new Promise<boolean>((resolve) => {
+        resolveSave = resolve;
+      }),
+    );
+    render(showQueued({}, [queuedMessage("qm_one", "queued words")]));
+    const input = textarea();
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+
+    fireEvent.change(input, { target: { value: "version A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mock.editQueuedMessage).toHaveBeenCalledWith(THREAD, "qm_one", "version A", []),
+    );
+
+    // The acknowledgement for A arrives after the person typed B. Closing the
+    // editor now would throw B away.
+    fireEvent.change(input, { target: { value: "version B" } });
+    resolveSave(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(input.value).toBe("version B");
+    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+  });
+
+  it("keeps an open edit when an older summary arrives", () => {
+    mock.state.queues = {
+      ...mock.state.queues,
+      [THREAD]: {
+        queued: [queuedMessage("qm_one", "queued words")],
+        total: 1,
+        revision: 4,
+      },
+    };
+    const view = render(
+      showQueued({ queued_count: 1, queue_revision: 4 }, [queuedMessage("qm_one", "queued words")]),
+    );
+    const input = textarea();
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp", altKey: true });
+    fireEvent.change(input, { target: { value: "editing at revision four" } });
+
+    // A summary written before the rows this client holds says nothing waits;
+    // it must not end the edit or clear its text.
+    view.rerender(
+      showQueued({ queued_count: 0, queue_revision: 3 }, [queuedMessage("qm_one", "queued words")]),
+    );
+
+    expect(input.value).toBe("editing at revision four");
+    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+  });
+
   it("a late Save reply does not close an edit opened after it", async () => {
     let resolveSave: (ok: boolean) => void = () => undefined;
     mock.editQueuedMessage.mockReturnValueOnce(
@@ -1575,6 +1634,8 @@ describe("follow-up behaviour and queued messages", () => {
                 text,
                 attachments: [],
                 queued_at: "2026-01-01T00:00:00.000Z",
+                steerable: true,
+                delivery_unknown: false,
               },
             },
           }),
@@ -1654,6 +1715,8 @@ describe("follow-up behaviour and queued messages", () => {
               text: "first queued",
               attachments: [],
               queued_at: "2026-01-01T00:00:00.000Z",
+              steerable: true,
+              delivery_unknown: false,
             },
           },
         }),

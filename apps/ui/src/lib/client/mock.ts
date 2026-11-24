@@ -2389,6 +2389,8 @@ class MockDaemon {
             text: body.text,
             attachments: this.attachmentsFor(body.attachments),
             queued_at: iso(),
+            steerable: entry.summary.steer,
+            delivery_unknown: false,
           };
           this.setMockQueue(body.thread_id, [...(entry.queued ?? []), message]);
           this.ok(frame.id, {
