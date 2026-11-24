@@ -175,6 +175,14 @@ pub struct QueuedClaim {
     pub turn_id: h4rn_protocol::TurnId,
     /// What is known about its delivery.
     pub state: QueuedClaimState,
+    /// Whether this claim is the turn's own promoted prompt, not a steer.
+    ///
+    /// A promoted prompt's claim is what recovery uses when the daemon stops
+    /// between removing the queue row and handing the text to the adapter. A
+    /// steer's claim is kept for its message alone, so the two are told apart:
+    /// settling a turn drops its promoted claim but never an unclear steer's.
+    #[serde(default)]
+    pub promoted: bool,
 }
 
 /// What a [`QueuedClaim`] knows about its message's delivery.

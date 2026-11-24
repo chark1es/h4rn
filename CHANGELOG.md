@@ -679,17 +679,25 @@ All notable changes to h4rn are recorded here. The format follows
   front instead.
 - **A queued message or steer reaches the turn it belongs to, once, with the limits it was saved
   with.** A queued message keeps its sender's grant and ceiling when it is steered: a revoked grant
-  is refused, and a message with its own permission limit is never steered into a running turn
-  (Send now puts it first in line instead). A steer is now held in a durable claim with a known
-  state, so a daemon that stops before the agent answers, or a refusal whose restore write failed,
-  puts the message back in the queue at startup instead of losing it; an unclear outcome is
-  reported as "may have been delivered" instead of inviting a resend. A direct steer that names a
-  turn that has ended is refused even when the thread is idle. A promote or Send now that starts a
-  turn takes the same settings gate a live mode switch holds, a failed write leaves no phantom
-  running turn, and a settlement whose write fails keeps the waiting message queued rather than
-  handing the agent a prompt storage still lists as waiting. A delayed summary with an older queue
-  revision no longer clears loaded rows or ends an edit, and a late Save reply only closes the edit
-  that submitted it. Long unbroken text in a queued row wraps at phone width.
+  is refused — checked again under the session lock immediately before the agent write, so a
+  revocation between the read and the write cannot slip through — and a message with its own
+  permission limit is never steered into a running turn (Send now puts it first in line instead). A
+  steer is held in a durable claim with a known state, so a daemon that stops before the agent
+  answers, or a refusal whose restore write failed, puts the message back in the queue at startup
+  instead of losing it. An unclear outcome stays marked `sending` and comes back after a restart as a
+  **May have been delivered** row the person can resend or discard; it is never recorded as delivered
+  and never sent again on its own. A queue promotion now writes the starting turn's delivery claim in
+  the same append that removes the queue row, so a daemon that stops before the agent accepts the
+  promoted prompt restores it (or shows it as unsure) instead of dropping the only copy. A direct
+  steer that names no turn — the client last saw the thread idle — waits in the queue instead of
+  landing in a turn that started afterwards, and a direct steer that names a turn that has ended is
+  refused even when the thread is idle. A **May have been delivered** row no longer blocks the rows
+  behind it: automatic promotion skips it and runs the next confirmed-unsent message. A promote or
+  Send now that starts a turn takes the same settings gate a live mode switch holds, a failed write
+  leaves no phantom running turn, and a settlement whose write fails keeps the waiting message queued
+  rather than handing the agent a prompt storage still lists as waiting. A delayed summary with an
+  older queue revision no longer clears loaded rows or ends an edit, and a late Save reply only
+  closes the edit that submitted it. Long unbroken text in a queued row wraps at phone width.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

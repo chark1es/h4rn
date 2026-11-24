@@ -1853,22 +1853,38 @@ delivered steer look unsent. On a definite refusal (unsupported, missing binary,
 answer, or a closed writer the adapter knows never accepted the frame) the refusal is written down
 and the message goes back where it was; if the restore append fails, its retries run, and a restart
 still finds the refusal and restores the message. On an unclear outcome (a timeout, a dead transport
-after the write) the claim is marked delivered and the error says the message may have reached the
-agent, because a second automatic delivery is worse than a row the person has to check. At startup a
-`claimed` or `refused` row goes back to the queue at its old position, a `sending` row becomes a
-queue row marked **May have been delivered** that the person can send again or discard but that is
-never promoted automatically, and a `delivered` row is dropped: neither a crash before the adapter
-nor a failed restore can lose the only copy, and a crash during the adapter call is never silently
-re-sent. The claim reads the message under the same lock that removes it, so an edit committed in
-between cannot send text the person already replaced. The queue row publishes a per-row `steerable`
-flag, so the hint and the button never promise a steer for a message the daemon will move to the
-front instead.
+after the write) the claim stays `sending`, so a restart shows the message as **May have been
+delivered** for the person to resend or discard, and no path ever sends it again on its own; the
+error says the message may have reached the agent because a second automatic delivery is worse than
+a row the person has to check. At startup a `claimed` or `refused` row goes back to the queue at its
+old position, a `sending` row becomes a queue row marked **May have been delivered** that the person
+can send again or discard but that is never promoted automatically, and a `delivered` row is dropped:
+neither a crash before the adapter nor a failed restore can lose the only copy, and a crash during
+the adapter call is never silently re-sent. The claim reads the message under the same lock that
+removes it, so an edit committed in between cannot send text the person already replaced. The queue
+row publishes a per-row `steerable` flag, so the hint and the button never promise a steer for a
+message the daemon will move to the front instead.
 
 **A queued steer obeys the message's sender.** The stored ceiling and grant are read with the
 message: a message that carries a ceiling is never steered into a running turn, because a steer
 cannot narrow permissions the turn already started with; `Send now` moves it to the front and
-`Steer` refuses. The sender's grant is re-checked under the claim lock, so work asked for by a token
-family revoked while it waited never reaches the turn.
+`Steer` refuses. The sender's grant is re-checked under the claim lock, and **again under the
+session lock immediately before the adapter write**: a token family revoked between the
+authorisation read and the write never reaches the turn, and the message is restored to the queue.
+
+**A promotion keeps a recoverable record.** A queued message that starts a turn has its queue row
+removed in the same append that writes a delivery claim for the new turn, with the same states a
+steer uses: `claimed` (the row is gone, the adapter has not been called), `sending` (the adapter call
+started, so delivery is unknown) and `delivered` (the adapter took it, after which the claim is
+cleared). At startup a `claimed` promotion goes back to the queue at the position it was taken from,
+a `sending` one is shown as **May have been delivered**, and a `delivered` one is dropped — unless
+the pause already holds that exact prompt for its resume. A turn that ends drops its promoted claim,
+so ending a turn never leaves work behind to be revived by a restart. Without this record a daemon
+that stopped between the dequeue and the adapter write lost the only copy of the message.
+
+**An uncertain row does not block the queue.** Only the person's Send now or Steer may retry a row
+marked **May have been delivered**; automatic promotion skips past such rows and starts the next
+known-safe message. The uncertain row stays visible at its place in the queue.
 
 **Every idle way into a turn selects its session behind the same gate.** `Send now`, and an ordinary
 send that promotes an older queued message, take the per-thread switch lock a live settings change

@@ -150,7 +150,8 @@ steer: boolean,
  *
  * A steer names its target so a turn that ended between the person's
  * click and the request is refused instead of catching a newer turn.
- * Omitted (or `None`) means "whatever turn is running now".
+ * Omitted (or `None`) means the client last saw an idle thread: while a
+ * turn runs the message waits in the queue.
  */
 turn_id?: TurnId, } | { "type": "queue_message", 
 /**
