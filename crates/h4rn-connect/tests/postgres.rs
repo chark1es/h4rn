@@ -1597,3 +1597,174 @@ async fn a_failed_guest_proxy_leaves_no_waiter_and_no_body() {
     );
     fake.await.expect("fake daemon task");
 }
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_router_upload_waits_for_the_announced_admission() {
+    use h4rn_protocol::{
+        GuestHttpChunk, GuestHttpRequest, GuestHttpResponse, RelayFrameKind, RelayServerEvent,
+    };
+
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-admission")).await;
+    let machine_id = daemon.device.machine_id.expect("the daemon owns a machine");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_owned(),
+            tx,
+        })
+        .await;
+    // The hello a real daemon sends: this peer promises to admit an upload's
+    // body before it arrives.
+    state
+        .relay
+        .announce(
+            daemon.device.id,
+            h4rn_protocol::RelayHello {
+                features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
+            },
+        )
+        .await;
+
+    let relay = state.relay.clone();
+    let device = daemon.device.id;
+    let (report_tx, report_rx) = tokio::sync::oneshot::channel();
+    let fake = tokio::spawn(async move {
+        // Request one is never admitted: Connect must time it out and cancel
+        // it. Request two is admitted after a short pause, which proves no
+        // chunk crosses before the admission.
+        let mut first = String::new();
+        let mut admitted = false;
+        let mut chunk_before_admission = false;
+        let mut cancelled = false;
+        let mut body = Vec::new();
+        let mut answered_second = false;
+        while let Some(event) = rx.recv().await {
+            let RelayServerEvent::Frame { frame } = event else {
+                continue;
+            };
+            match frame.kind {
+                RelayFrameKind::GuestHttp => {
+                    let request: GuestHttpRequest =
+                        serde_json::from_slice(&frame.payload).expect("guest request");
+                    assert!(request.chunked, "a router upload was not chunked");
+                    if first.is_empty() && !admitted {
+                        first = request.request_id;
+                        continue;
+                    }
+                    let second = request.request_id;
+                    // Show that Connect waits for the admission; if it did
+                    // not, a chunk would appear in this window.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    while let Ok(event) = rx.try_recv() {
+                        if let RelayServerEvent::Frame { frame } = event
+                            && frame.kind == RelayFrameKind::GuestHttpChunk
+                        {
+                            chunk_before_admission = true;
+                        }
+                    }
+                    assert!(
+                        relay.admit_guest(device, &second).await,
+                        "the admission failed"
+                    );
+                    admitted = true;
+                }
+                RelayFrameKind::GuestHttpChunk => {
+                    let chunk: GuestHttpChunk =
+                        serde_json::from_slice(&frame.payload).expect("chunk");
+                    if chunk.request_id == first {
+                        // A relay that guessed the timeout streamed this body
+                        // for an exchange it never admitted. Answer it so the
+                        // test fails on the status instead of hanging.
+                        cancelled = true;
+                        relay
+                            .complete_guest(
+                                device,
+                                GuestHttpResponse {
+                                    request_id: chunk.request_id,
+                                    status: 202,
+                                    chunked: false,
+                                    headers: Vec::new(),
+                                    body: b"{}".to_vec(),
+                                    set_cookie: None,
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+                    if !admitted {
+                        chunk_before_admission = true;
+                    }
+                    body.extend_from_slice(&chunk.body);
+                    if chunk.last && !answered_second {
+                        answered_second = true;
+                        relay
+                            .complete_guest(
+                                device,
+                                GuestHttpResponse {
+                                    request_id: chunk.request_id,
+                                    status: 202,
+                                    chunked: false,
+                                    headers: vec![(
+                                        "content-type".to_owned(),
+                                        "application/json".to_owned(),
+                                    )],
+                                    body: format!("{{\"received\":{}}}", body.len()).into_bytes(),
+                                    set_cookie: None,
+                                },
+                            )
+                            .await;
+                    }
+                }
+                RelayFrameKind::GuestHttpCancel => {
+                    if let Ok(cancel) =
+                        serde_json::from_slice::<h4rn_protocol::GuestHttpAdmission>(&frame.payload)
+                        && cancel.request_id == first
+                    {
+                        cancelled = true;
+                    }
+                }
+                _ => {}
+            }
+            if answered_second {
+                let _ = report_tx.send((chunk_before_admission, cancelled, body.len()));
+                return;
+            }
+        }
+    });
+
+    // A real router request, so `guest_proxy_exchange` negotiates the hello
+    // itself instead of a test passing its result in.
+    let post = |body: Vec<u8>| {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/guest/{machine_id}/guest_token_for_router_test/messages"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+
+    // A daemon that never admits is an error, not an invitation to upload.
+    let (status, body) = send(&state, post(vec![b'a'; 64 * 1024])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "guest_admission_timeout");
+
+    // The next upload is admitted and streams to the daemon.
+    let upload = vec![b'a'; 128 * 1024];
+    let (status, body) = send(&state, post(upload.clone())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["received"], upload.len());
+
+    let (early, cancelled, received) = report_rx.await.expect("the daemon never answered");
+    assert!(!early, "a chunk crossed before the admission");
+    assert!(cancelled, "Connect never cancelled the timed-out admission");
+    assert_eq!(received, upload.len());
+    fake.abort();
+}

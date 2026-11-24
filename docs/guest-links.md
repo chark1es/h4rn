@@ -129,16 +129,22 @@ The guest's text and files run with the thread's current permission mode once
 you send them. Check them first, as you would anything pasted from a chat.
 
 Over Connect a message's files are never uploaded before the daemon agrees to
-the exchange. The daemon says on its relay hello that it admits uploads, Connect
-asks first, and it streams no body until that answer arrives; a refused message
-is answered without reading a byte of its body. A current daemon that goes quiet
-is an error, never treated as an older build, so a slow machine cannot receive an
-upload it has not accepted. The daemon holds a separate upload slot from the
-moment it admits the body until the body is complete, so a browser that trickles
-an upload never takes the slot a state read or a snapshot needs, and a browser
-that disappears gives its slot back at the next ping. A guest page from an older
-daemon that does not announce admission keeps the short pre-authorization
-buffer that build implements.
+the exchange. The daemon says on its relay hello that it admits uploads, and a
+guest request that arrives before the hello waits for it; a hello wakes every
+waiting request, so two uploads at once both learn what the daemon speaks.
+Connect asks first, and it streams no body until that answer arrives; a refused
+message is answered without reading a byte of its body. A current daemon that
+goes quiet is an error, never treated as an older build, so a slow machine
+cannot receive an upload it has not accepted; Connect then tells the daemon to
+drop the exchange, so a slot held for a body that will never come is released
+at once rather than at the idle timeout. The daemon holds a separate upload slot
+from the moment it admits the body until the body is complete, so a browser that
+trickles an upload never takes the slot a state read or a snapshot needs, and a
+browser that disappears gives its slot back at the next ping. A completed body
+keeps its slot until its answer actually holds a work slot, so uploads cannot
+pile up past the cap while every work slot is busy. A guest page from an older
+daemon that does not announce admission keeps the short pre-authorization buffer
+that build implements.
 
 ## What the daemon enforces
 
@@ -152,7 +158,10 @@ is read, requires a same-origin JSON POST, reserves the pending quota before it
 writes any file, and publishes the request only after the files are written. A
 request is written in two steps: a row that holds the quota and its files, then
 the card above your composer. Startup finishes or discards a request interrupted
-between them, so there is never a row that uses quota without a card. If the
+between them, so there is never a row that uses quota without a card. A Send or
+reservation interrupted by a shutdown is answered as dismissed: its files go,
+its resolution is raised and the row stays while the link lives, so the guest's
+next poll clears its card. If the
 link ended, expired, the Labs switch turned off or the thread settled while the
 files were being written, publication is refused and the files and row are
 deleted. The last placement check and the card's append happen under the same

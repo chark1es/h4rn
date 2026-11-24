@@ -641,7 +641,12 @@ All notable changes to h4rn are recorded here. The format follows
   that admission arrives; a current daemon that stays quiet is an error, never mistaken for an
   older build, while a daemon that does not announce it keeps the older bounded wait. Uploads
   hold a separate capped slot from state and attachment reads, and an abandoned upload gives it
-  back at the next ping. The attach control's keyboard focus ring uses the design system's focus
+  back at the next ping. A restart no longer loses the guest's answer: an interrupted Send or
+  reservation is answered as dismissed and its row stays while the link lives, so the guest's card
+  clears too. A completed upload keeps its slot until its answer holds a work slot, so finished
+  bodies cannot pile up past the cap, and a timed-out admission is cancelled so the daemon
+  releases its slot at once. Two guest requests waiting for the same daemon's hello both see it.
+  The attach control's keyboard focus ring uses the design system's focus
   colour in both themes.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps

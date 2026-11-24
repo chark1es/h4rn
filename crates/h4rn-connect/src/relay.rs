@@ -73,16 +73,26 @@ pub struct RelayHub {
     /// missed its body would leave a chunked answer assembling forever. One
     /// lock makes a forgotten exchange either wholly present or wholly gone.
     guests: RwLock<GuestBook>,
-    /// Features each connected peer announced on its relay hello.
+    /// What each connected peer announced on its relay hello.
     ///
-    /// A daemon that did not announce a feature keeps the older path for it;
-    /// nothing here is inferred from how long a peer takes to answer.
-    features: RwLock<HashMap<Uuid, Vec<String>>>,
-    /// Peers whose hello has been processed, so a missing one can be
-    /// distinguished from a hello that is still in flight.
-    greeted: RwLock<std::collections::HashSet<Uuid>>,
-    /// Wakes a guest exchange that is waiting for a peer's hello.
+    /// Features and the greeted flag live in one entry under one lock, so a
+    /// waiter can never see a hello's features without also seeing that the
+    /// hello arrived (or the reverse). A daemon that did not announce a
+    /// feature keeps the older path for it; nothing here is inferred from how
+    /// long a peer takes to answer.
+    features: RwLock<HashMap<Uuid, PeerHello>>,
+    /// Wakes every guest exchange that is waiting for a peer's hello.
     greeted_now: Notify,
+}
+
+/// What one peer said on its relay hello.
+#[derive(Clone, Debug, Default)]
+struct PeerHello {
+    /// Feature names the peer implements.
+    features: Vec<String>,
+    /// Whether the hello has been processed, so a missing one is
+    /// distinguished from a hello that is still in flight.
+    greeted: bool,
 }
 
 /// A browser request and the chunked answers being assembled for it.
@@ -140,7 +150,9 @@ impl RelayHub {
     pub async fn unregister(&self, device_id: Uuid) -> Vec<Session> {
         self.peers.write().await.remove(&device_id);
         self.features.write().await.remove(&device_id);
-        self.greeted.write().await.remove(&device_id);
+        // A waiter that was still hoping for this peer's hello re-checks and
+        // keeps waiting for the grace it was given; no one is left asleep.
+        self.greeted_now.notify_waiters();
         let mut sessions = self.sessions.write().await;
         let dead: Vec<String> = sessions
             .iter()
@@ -160,16 +172,19 @@ impl RelayHub {
     }
 
     /// Records the features a peer announced on its relay hello.
+    ///
+    /// The features and the greeted flag are published together, so a waiter
+    /// that wakes can never observe half a hello. Every waiter is woken, not
+    /// just one: two guest requests may be waiting on the same peer.
     pub async fn announce(&self, device_id: Uuid, hello: h4rn_protocol::RelayHello) {
-        self.features
-            .write()
-            .await
-            .insert(device_id, hello.features);
-        self.greeted.write().await.insert(device_id);
-        // A stored permit means a waiter that checks after this call still
-        // sees the hello, so the order of the check and the wake cannot lose
-        // an announcement.
-        self.greeted_now.notify_one();
+        self.features.write().await.insert(
+            device_id,
+            PeerHello {
+                features: hello.features,
+                greeted: true,
+            },
+        );
+        self.greeted_now.notify_waiters();
     }
 
     /// Whether one connected peer announced a feature.
@@ -181,7 +196,9 @@ impl RelayHub {
             .read()
             .await
             .get(&device_id)
-            .is_some_and(|features| features.iter().any(|known| known == feature))
+            .is_some_and(|hello| {
+                hello.greeted && hello.features.iter().any(|known| known == feature)
+            })
     }
 
     /// Whether a peer advertised a feature, waiting briefly for its hello.
@@ -199,23 +216,37 @@ impl RelayHub {
     ) -> bool {
         let deadline = tokio::time::Instant::now() + grace;
         loop {
-            if self.advertises(device_id, feature).await {
-                return true;
-            }
-            if self.greeted.read().await.contains(&device_id) {
-                return false;
+            // Register this waiter before reading the state. `notify_waiters`
+            // keeps no permit for a later waiter, so a hello published between
+            // the read and the wait would otherwise be missed by this one and
+            // by every other waiter that happened to check first.
+            let notified = self.greeted_now.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let features = self.features.read().await;
+                if let Some(hello) = features.get(&device_id) {
+                    if hello.features.iter().any(|known| known == feature) {
+                        return true;
+                    }
+                    if hello.greeted {
+                        // The peer said what it speaks; a missing feature is
+                        // the older path, not a hello still in flight.
+                        return false;
+                    }
+                }
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return false;
+                break;
             }
-            if tokio::time::timeout(remaining, self.greeted_now.notified())
-                .await
-                .is_err()
-            {
-                return false;
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                break;
             }
         }
+        // A hello that landed just as the wait expired still decides the
+        // question, rather than being reported as a peer that never spoke.
+        self.advertises(device_id, feature).await
     }
 
     /// Whether the daemon for a machine is connected.
@@ -1056,6 +1087,11 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
             }
             Ok(())
         }
+        RelayFrameKind::GuestHttpCancel => {
+            // Only the relay sends this, to a daemon whose admission it gave
+            // up on. A device sending one is ignored: it has no slot here.
+            Ok(())
+        }
     }
 }
 
@@ -1320,6 +1356,52 @@ mod tests {
             )
             .await,
             "a hello inside the grace was treated as an older daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_waiters_both_see_one_hello() {
+        // A waking primitive that keeps one permit, or wakes one waiter, loses
+        // this: the second guest request would sit out the whole grace and
+        // report an older daemon even though the hello arrived.
+        let hub = Arc::new(RelayHub::new());
+        let daemon = Uuid::now_v7();
+        let waiter = |hub: Arc<RelayHub>| {
+            tokio::spawn(async move {
+                hub.advertises_when_ready(
+                    daemon,
+                    h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION,
+                    Duration::from_secs(5),
+                )
+                .await
+            })
+        };
+        let first = waiter(Arc::clone(&hub));
+        let second = waiter(Arc::clone(&hub));
+        // Let both register before the single hello.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        hub.announce(
+            daemon,
+            h4rn_protocol::RelayHello {
+                features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
+            },
+        )
+        .await;
+        // Both must wake on the hello itself, not sit out the grace and only
+        // learn the answer from the timeout re-check.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("the first waiter was not woken by the hello")
+                .expect("first waiter"),
+            "the first waiter missed the hello"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), second)
+                .await
+                .expect("the second waiter was not woken by the hello")
+                .expect("second waiter"),
+            "the second waiter missed the hello"
         );
     }
 

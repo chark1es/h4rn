@@ -329,6 +329,7 @@ impl h4rn_transport::relay::RelayLink for ConnectRelayLink {
                     h4rn_protocol::RelayFrameKind::GuestHttp => continue,
                     h4rn_protocol::RelayFrameKind::GuestHttpChunk => continue,
                     h4rn_protocol::RelayFrameKind::GuestHttpAdmit => continue,
+                    h4rn_protocol::RelayFrameKind::GuestHttpCancel => continue,
                     h4rn_protocol::RelayFrameKind::Hello => continue,
                 },
                 h4rn_protocol::RelayServerEvent::Error { conn_id, .. }
@@ -1332,4 +1333,91 @@ async fn a_connect_guest_link_binds_the_first_browser_and_refuses_the_second() {
 
     daemon.stop().await;
     relay.stop().await;
+}
+
+#[tokio::test]
+async fn a_daemon_says_which_guest_protocol_it_speaks_before_anything_else() {
+    // The relay learns that this daemon admits an upload before a guest
+    // exchange can start. A daemon that stays silent would be treated as an
+    // older build and receive bodies it never agreed to read.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the fake relay");
+    let addr = listener.local_addr().expect("fake relay address");
+    let (first_tx, first_rx) = oneshot::channel();
+    let first_tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(first_tx)));
+    let fake = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let first_tx = std::sync::Arc::clone(&first_tx);
+            tokio::spawn(async move {
+                // The daemon also posts presence to this base URL; only a
+                // real WebSocket handshake is its relay connection.
+                let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let tx = first_tx.lock().await.take();
+                if let Some(tx) = tx {
+                    loop {
+                        match socket.next().await {
+                            Some(Ok(Message::Text(text))) => {
+                                let _ = tx.send(text.to_string());
+                                break;
+                            }
+                            Some(Ok(_)) => continue,
+                            _ => return,
+                        }
+                    }
+                }
+                // Hold the socket open so the daemon does not reconnect.
+                let _ = socket.next().await;
+            });
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("daemon dir");
+    let identity = load_or_create(&FileKeyStore::new(dir.path().join("transport-identity")))
+        .expect("daemon identity");
+    Credentials {
+        connect_url: format!("http://{addr}"),
+        user_id: uuid::Uuid::now_v7().to_string(),
+        device_id: uuid::Uuid::now_v7().to_string(),
+        machine_id: uuid::Uuid::now_v7().to_string(),
+        // Values are built here so no credential-shaped literal is committed.
+        access_token: ["test", "access", "token"].concat(),
+        refresh_token: ["test", "refresh", "token"].concat(),
+        expires_at: Utc::now().timestamp() + 3600,
+        token_type: "Bearer".to_owned(),
+    }
+    .save(dir.path())
+    .expect("persist the daemon's credentials");
+    let service = Arc::new(SecureService::new(SecureOptions::new(identity)));
+    let daemon = boot_with_host(dir.path(), service, None).await;
+
+    let first = tokio::time::timeout(Duration::from_secs(20), first_rx)
+        .await
+        .expect("the daemon never connected to the relay")
+        .expect("the daemon sent no first frame");
+    let frame: h4rn_protocol::RelayFrame =
+        serde_json::from_str(&first).expect("the first relay frame is not JSON");
+    assert_eq!(
+        frame.kind,
+        h4rn_protocol::RelayFrameKind::Hello,
+        "the daemon's first frame was not its hello"
+    );
+    let hello: h4rn_protocol::RelayHello =
+        serde_json::from_slice(&frame.payload).expect("the hello payload is not RelayHello JSON");
+    assert!(
+        hello
+            .features
+            .iter()
+            .any(|feature| feature == h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION),
+        "the hello did not carry guest admission: {:?}",
+        hello.features
+    );
+
+    daemon.stop().await;
+    fake.abort();
 }

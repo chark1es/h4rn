@@ -1582,7 +1582,11 @@ deleted, and the resolved event names its request. A crash between the claim and
 the event therefore leaves a row the startup sweep can resolve, and a repeated
 event from that sweep cannot clear another guest's hand. The periodic sweep
 leaves a `sending` or `reserving` row alone while a task may still be reading
-it; only the startup pass, where no reader can exist, recovers it. A connection
+it; only the startup pass, where no reader can exist, recovers it. When the
+interrupted row's link still lives, recovery answers it as dismissed, deletes
+its files, raises that resolution and keeps the row as the provenance record the
+guest's later poll needs; ending the link then drops it like any finished
+request. A connection
 runs its handlers to completion, so closing the peer never cancels a step that
 already changed the record. Work that can take a while — a submission, Send and
 Dismiss — runs on its own task and cannot be stranded by a dropped socket
@@ -1615,7 +1619,11 @@ binding cookie, so a bound browser reloads to its own state while a fresh one
 sees "unbound", and a page GET still never claims the link. Each exchange
 travels to the daemon over its existing authenticated relay socket and is
 answered by that daemon only: a waiter is bound to the selected daemon's device
-id, and a reply from any other device is ignored.
+id, and a reply from any other device is ignored. A daemon announces on its
+relay hello that it admits a chunked body, and that hello wakes every exchange
+waiting for it. Connect sends no body before the admission; when a current
+daemon stays silent, Connect cancels the exchange so the daemon releases the
+upload slot it was holding instead of pinning it until an idle timeout.
 Bodies are split into bounded frames, so a 10 MB upload never grows a shared
 WebSocket frame; Connect refuses an exchange over the guest limit before it
 reaches the socket, and rebuilds every response header, including the binding

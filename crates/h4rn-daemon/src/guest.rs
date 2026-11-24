@@ -806,7 +806,7 @@ impl GuestService {
                         continue;
                     }
                     "reserving" | "sending" => {
-                        self.claim_and_discard(&request).await?;
+                        self.recover_interrupted_submission(&request).await?;
                         continue;
                     }
                     _ => {}
@@ -889,6 +889,50 @@ impl GuestService {
         );
         claimed_request.resolution_emitted = request.resolution_emitted;
         self.finish_cleanup(&claimed_request).await;
+        Ok(())
+    }
+
+    /// Recovers a submission or Send interrupted by the last shutdown.
+    ///
+    /// No writer is left, so the row's answer is decided here. While its link
+    /// still lives the guest can poll again, and the snapshot only mentions a
+    /// `GuestRequestResolved` whose request id is still a row for that link.
+    /// The row therefore becomes a dismissed provenance record: its files go,
+    /// its resolution is raised, and the row stays so the guest's next poll
+    /// clears the card. Ending the link, or the sweep after it is gone, drops
+    /// the row exactly as it does for any other finished request.
+    async fn recover_interrupted_submission(&self, request: &RequestRow) -> Result<(), GuestError> {
+        let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_links WHERE link_id = ?")
+            .bind(&request.link_id)
+            .fetch_one(&self.pool)
+            .await?;
+        if linked == 0 {
+            return self.claim_and_discard(request).await;
+        }
+        let claimed = sqlx::query(
+            "UPDATE guest_requests
+             SET status = 'dismissed', resolution = 'dismissed', resolution_emitted = 0
+             WHERE request_id = ? AND status = ?",
+        )
+        .bind(&request.request_id)
+        .bind(&request.status)
+        .execute(&self.pool)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            return Ok(());
+        }
+        self.delete_request_files_best_effort(request);
+        let mut recovered = request.clone();
+        recovered.status = "dismissed".into();
+        recovered.resolution = Some("dismissed".into());
+        recovered.resolution_emitted = false;
+        if let Err(error) = self.emit_resolution(&recovered).await {
+            tracing::warn!(
+                request = %request.request_id,
+                %error,
+                "a recovered guest resolution waits for the next sweep"
+            );
+        }
         Ok(())
     }
 

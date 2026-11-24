@@ -2466,12 +2466,42 @@ async fn forward_guest_body(
         // The daemon answered instead of admitting: the refusal is already on
         // its way to the browser, and none of the body was read.
         Ok(Err(_)) => Ok(()),
-        Err(_) if negotiated => Err(AppError::unavailable(
-            "guest_admission_timeout",
-            "the machine did not admit the upload in time",
-        )),
+        Err(_) if negotiated => {
+            // The daemon may already hold an upload slot for an exchange whose
+            // body will never arrive. Tell it to release the slot now instead
+            // of pinning it until its idle timeout.
+            cancel_guest_admission(relay, daemon, request_id).await;
+            Err(AppError::unavailable(
+                "guest_admission_timeout",
+                "the machine did not admit the upload in time",
+            ))
+        }
         Err(_) => stream_guest_body(relay, daemon, request_id, body).await,
     }
+}
+
+/// Tells a daemon to forget an upload Connect will not send a body for.
+///
+/// Best effort: the exchange already fails, and a daemon that misses the
+/// cancel still gives the slot back at its idle timeout.
+async fn cancel_guest_admission(relay: &RelayHub, daemon: Uuid, request_id: &str) {
+    let Ok(payload) = serde_json::to_vec(&h4rn_protocol::GuestHttpAdmission {
+        request_id: request_id.to_owned(),
+    }) else {
+        return;
+    };
+    let frame = RelayFrame {
+        conn_id: format!("guest-{request_id}"),
+        kind: RelayFrameKind::GuestHttpCancel,
+        payload,
+    };
+    let _ = relay
+        .send_wait(
+            daemon,
+            RelayServerEvent::Frame { frame },
+            Duration::from_secs(1),
+        )
+        .await;
 }
 
 /// Streams a guest upload to its daemon in frames that stay small.
@@ -3269,6 +3299,19 @@ mod tests {
             .expect("the admission wait never ended")
             .expect("send task");
         assert!(failed.is_err(), "a silent daemon was treated as admitted");
+        // The daemon may already hold an upload slot for this exchange; the
+        // only thing Connect sends is a cancel, never a body frame.
+        let frame = next_daemon_frame(&mut rx)
+            .await
+            .expect("the daemon was never told to release the upload");
+        assert_eq!(
+            frame.kind,
+            RelayFrameKind::GuestHttpCancel,
+            "a timed-out admission was not cancelled"
+        );
+        let cancel: h4rn_protocol::GuestHttpAdmission =
+            serde_json::from_slice(&frame.payload).expect("cancel json");
+        assert_eq!(cancel.request_id, "g1");
         assert!(
             rx.try_recv().is_err(),
             "a body crossed for an upload that was never admitted"

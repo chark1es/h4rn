@@ -2349,7 +2349,11 @@ async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
     pool.close().await;
     assert_eq!(rows, 1, "a periodic sweep deleted a row Send is reading");
 
-    // Startup has no reader, so it resolves the card and removes the row.
+    // Startup has no reader, so it resolves the card. The row stays while the
+    // link lives: the guest snapshot only mentions a resolution whose request
+    // id is still a row for that link, so deleting it here would leave the
+    // guest's card up forever.
+    let resume = browser.state(0).await.next_seq;
     daemon
         .guest
         .recover_after_restart()
@@ -2366,7 +2370,35 @@ async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
         .await
         .expect("count row");
     pool.close().await;
-    assert_eq!(rows, 0);
+    assert_eq!(rows, 1, "startup deleted the row the guest needs to poll");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "the guest never learned its recovered card resolved: {:?}",
+        later.events
+    );
+
+    // Ending the link drops the provenance row like any finished request.
+    owner
+        .request(ClientRequest::StopGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    let pool = journal_pool(&daemon).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests WHERE request_id = ?")
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count row");
+    pool.close().await;
+    assert_eq!(rows, 0, "an ended link kept a finished request row");
     daemon.stop().await;
 }
 

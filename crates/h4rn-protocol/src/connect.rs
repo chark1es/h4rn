@@ -11,7 +11,8 @@
 //! for one Noise session; connect routes it by `conn_id` and never inspects it
 //! (ADR-010). Only [`RelayFrameKind::Open`] and the guest control frames
 //! ([`RelayFrameKind::GuestHttp`], [`RelayFrameKind::GuestHttpChunk`],
-//! [`RelayFrameKind::GuestHttpAdmit`], [`RelayFrameKind::Hello`]) have a payload
+//! [`RelayFrameKind::GuestHttpAdmit`], [`RelayFrameKind::GuestHttpCancel`],
+//! [`RelayFrameKind::Hello`]) have a payload
 //! the relay parses; everything else is opaque.
 //!
 //! Payload bytes travel as base64 in JSON because control frames and data
@@ -74,6 +75,13 @@ pub enum RelayFrameKind {
     /// [`GuestHttpAdmission`]; a refusal arrives as a [`GuestHttpResponse`]
     /// instead, so no upload frame is ever sent for a rejected exchange.
     GuestHttpAdmit,
+    /// Connect gave up on an exchange it never admitted (ADR-044).
+    ///
+    /// The payload is a JSON [`GuestHttpAdmission`] naming the exchange. It
+    /// tells a daemon that was still deciding, or had already admitted an
+    /// upload whose body Connect will never send, to drop that upload and the
+    /// slot it holds instead of pinning it until its idle timeout.
+    GuestHttpCancel,
     /// What a peer understands, sent once when its relay socket opens.
     ///
     /// Only a daemon sends this. The payload is a JSON [`RelayHello`]. A relay
