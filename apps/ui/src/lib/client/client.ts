@@ -423,6 +423,26 @@ const FATAL_CLOSE_CODES = new Map<number, { message: string; hint: string }>([
  * All protocol knowledge lives here and in `projection.ts`; components only
  * consume the store.
  */
+/**
+ * Splits `text` into pieces of at most `size` UTF-16 code units, never
+ * between the two halves of a surrogate pair: a lone half would serialise as
+ * an unpaired `\ud83d` escape that the daemon's JSON parser rejects.
+ */
+export function chunkText(text: string, size: number): Array<[number, string, boolean]> {
+  const pieces: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(text.length, start + size);
+    if (end < text.length && end - start > 1) {
+      const code = text.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    }
+    pieces.push(text.slice(start, end));
+    start = end;
+  }
+  return pieces.map((piece, index) => [index, piece, index === pieces.length - 1]);
+}
+
 export class H4rnClient {
   private readonly options: Required<
     Pick<ClientOptions, "url" | "transportLabel" | "requestTimeoutMs">
@@ -623,16 +643,8 @@ export class H4rnClient {
       transport.send(text);
       return;
     }
-    const total = Math.ceil(text.length / OUTBOUND_CHUNK_CHARS);
-    for (let index = 0; index < total; index += 1) {
-      const start = index * OUTBOUND_CHUNK_CHARS;
-      const end = Math.min(text.length, start + OUTBOUND_CHUNK_CHARS);
-      transport.send(
-        JSON.stringify({
-          id,
-          chunk: { index, last: index === total - 1, data: text.slice(start, end) },
-        }),
-      );
+    for (const [index, piece, last] of chunkText(text, OUTBOUND_CHUNK_CHARS)) {
+      transport.send(JSON.stringify({ id, chunk: { index, last, data: piece } }));
     }
   }
 

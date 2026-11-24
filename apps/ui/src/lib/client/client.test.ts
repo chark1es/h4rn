@@ -10,7 +10,7 @@ import type {
   ThreadFilter,
 } from "@/gen";
 
-import { H4rnClient } from "./client";
+import { chunkText, H4rnClient } from "./client";
 import type { EventEnvelope, ReadyInfo, Transport, TransportHandlers } from "./types";
 import { isProtocolToken } from "./ws";
 
@@ -1149,5 +1149,29 @@ describe("isProtocolToken", () => {
     expect(isProtocolToken("has space")).toBe(false);
     expect(isProtocolToken("café")).toBe(false);
     expect(isProtocolToken("a".repeat(124))).toBe(false);
+  });
+});
+
+describe("chunkText", () => {
+  it("never splits a surrogate pair across pieces", () => {
+    // An emoji whose high half sits exactly on the last code unit of a piece.
+    const size = 8;
+    const text = `${"a".repeat(size - 1)}😀${"b".repeat(size)}`;
+    const pieces = chunkText(text, size);
+    for (const [, piece] of pieces) {
+      // Each piece survives a JSON round trip with no lone surrogate.
+      const parsed = JSON.parse(JSON.stringify(piece)) as string;
+      expect(parsed).toBe(piece);
+      expect(/[\uD800-\uDBFF]$/.test(piece)).toBe(false);
+      expect(/^[\uDC00-\uDFFF]/.test(piece)).toBe(false);
+    }
+    expect(pieces.map(([, piece]) => piece).join("")).toBe(text);
+    expect(pieces.at(-1)?.[2]).toBe(true);
+    expect(pieces.slice(0, -1).every(([, , last]) => !last)).toBe(true);
+  });
+
+  it("keeps ASCII pieces at the full size", () => {
+    const pieces = chunkText("x".repeat(20), 8);
+    expect(pieces.map(([, piece]) => piece.length)).toEqual([8, 8, 4]);
   });
 });
