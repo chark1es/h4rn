@@ -41,6 +41,11 @@ type Prefs = { projectSort: ProjectSort; threadSort: ThreadSort; order: string[]
 export type ProjectsState = {
   projects: Project[];
   loaded: boolean;
+  /**
+   * The local host's home folder, for expanding a `~` path exactly as the
+   * daemon does. Null until the daemon has answered.
+   */
+  home: string | null;
   prefs: Prefs;
 };
 
@@ -73,6 +78,7 @@ function loadPrefs(): Prefs {
 let state: ProjectsState = {
   projects: [],
   loaded: false,
+  home: null,
   prefs: typeof window === "undefined" ? DEFAULT_PREFS : loadPrefs(),
 };
 const listeners = new Set<() => void>();
@@ -145,6 +151,18 @@ export async function loadProjects(): Promise<void> {
     if (response.type === "projects") set({ projects: response.projects, loaded: true });
   } catch {
     set({ loaded: true });
+  }
+  // The home folder is only needed to expand a typed `~` path, so it is read
+  // once from any listing (the same answer the daemon itself expands with).
+  // A failure leaves it unknown rather than guessing: a worktree option that
+  // cannot be checked is not offered.
+  if (state.home === null) {
+    try {
+      const response = await send({ type: "browse_directories", host, path: null });
+      if (response.type === "directories") set({ home: response.listing.home });
+    } catch {
+      // Leave it unknown; the next load tries again.
+    }
   }
 }
 

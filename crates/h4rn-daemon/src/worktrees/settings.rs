@@ -87,7 +87,7 @@ impl WorktreeSettingsStore {
 }
 
 /// Trims and validates settings: the location must be absolute or a `~` path,
-/// and the branch prefix is kept exactly as typed (non-empty by default).
+/// and the branch prefix must be able to start a valid git branch name.
 fn normalize(mut settings: WorktreeSettings) -> Result<WorktreeSettings, String> {
     // An explicit empty prefix is a choice (add nothing); only a missing field
     // falls back to the default, which serde supplies when reading.
@@ -98,7 +98,26 @@ fn normalize(mut settings: WorktreeSettings) -> Result<WorktreeSettings, String>
             Some(location.to_owned())
         }
     };
+    validate_prefix(&settings.branch_prefix)?;
     Ok(settings)
+}
+
+/// Refuses a prefix that can only generate a name git will not accept.
+///
+/// The prefix is normalised exactly as the generator normalises it, then a
+/// sample generated name is checked with the same guard the generator uses.
+/// This catches the cases a person is likely to type (`.hidden`, `v1..2`) at
+/// the point they can fix them; git still checks the final name at creation.
+fn validate_prefix(prefix: &str) -> Result<(), String> {
+    let cleaned = crate::worktrees::create::branch_prefix(prefix);
+    let sample = format!("{cleaned}thread");
+    if !crate::worktrees::create::is_valid_branch_name(&sample) {
+        return Err(format!(
+            "the branch prefix `{}` cannot start a valid git branch name: a name cannot contain `..`, start a part with `.`, or end a part with `.lock`",
+            prefix.trim()
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `location` is an absolute path or a path rooted at the home folder.
@@ -222,6 +241,49 @@ mod tests {
 
         let reopened = WorktreeSettingsStore::open(dir.path()).expect("reopen");
         assert_eq!(reopened.get(), saved);
+    }
+
+    #[test]
+    fn a_prefix_that_cannot_start_a_branch_is_refused_when_saved() {
+        for prefix in [".hidden", "v1..2"] {
+            let settings = WorktreeSettings {
+                branch_prefix: prefix.into(),
+                ..WorktreeSettings::default()
+            };
+            let error = normalize(settings).expect_err(prefix);
+            assert!(
+                error.contains("branch prefix") && error.contains("valid git branch name"),
+                "{prefix}: {error}"
+            );
+        }
+
+        // The store refuses it too, and keeps the previous value.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = WorktreeSettingsStore::open(dir.path()).expect("open");
+        assert!(
+            store
+                .set(WorktreeSettings {
+                    branch_prefix: ".hidden".into(),
+                    ..WorktreeSettings::default()
+                })
+                .is_err()
+        );
+        assert_eq!(store.get().branch_prefix, "h4rn/");
+    }
+
+    #[test]
+    fn a_prefix_that_sanitises_to_a_valid_name_is_kept() {
+        // The colon never reaches a branch name; it becomes a hyphen.
+        let settings = WorktreeSettings {
+            branch_prefix: "feat:".into(),
+            ..WorktreeSettings::default()
+        };
+        assert_eq!(
+            normalize(settings)
+                .expect("valid after normalising")
+                .branch_prefix,
+            "feat:"
+        );
     }
 
     #[test]

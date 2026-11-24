@@ -184,8 +184,18 @@ impl WorktreeRollback {
 
 impl Drop for WorktreeRollback {
     fn drop(&mut self) {
-        if let Some(created) = self.0.take() {
-            created.rollback();
+        let Some(created) = self.0.take() else {
+            return;
+        };
+        // The rollback removes the checkout and deletes the branch, both by
+        // shelling out to git. A `Drop` cannot await, so it runs on the blocking
+        // pool instead of stalling an async worker; the checkout is gone a
+        // moment later. Outside a runtime (a plain unit test) it runs inline.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || created.rollback());
+            }
+            Err(_) => created.rollback(),
         }
     }
 }
@@ -8552,6 +8562,80 @@ mod tests {
         )
         .await
         .expect("manager")
+    }
+
+    /// A repository the worktree creator can branch from.
+    fn worktree_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("repo");
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "wt@h4rn.invalid"]);
+        run(&["config", "user.name", "h4rn test"]);
+        std::fs::write(dir.path().join("README.md"), "hello\n").expect("readme");
+        run(&["add", "README.md"]);
+        run(&["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    /// A failure after the checkout exists removes the checkout and the branch
+    /// h4rn made, and does the git work off the async runtime.
+    #[tokio::test]
+    async fn a_worktree_for_a_thread_that_fails_to_start_is_rolled_back() {
+        let repo = worktree_repo();
+        let data = tempfile::tempdir().expect("data");
+        let journal = FlakyJournal::in_memory().await;
+        let manager = open_test_manager_with_journal(
+            FakeHarness::new(),
+            HostId::new("host_test"),
+            journal.clone(),
+        )
+        .await;
+        manager.set_worktree_creator(Arc::new(crate::worktrees::create::WorktreeCreator::new(
+            data.path().to_path_buf(),
+            Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory()),
+        )));
+
+        // The checkout is made first; the thread's first durable write then
+        // fails, which is exactly the window the guard covers.
+        journal.fail_next_appends(1);
+        let mut request = new_thread(HostId::new("host_test"), repo.path(), "Fix the rollback");
+        request.worktree = Some(h4rn_protocol::WorktreeRequest::Generated(true));
+        let error = manager
+            .create_thread(request)
+            .await
+            .expect_err("the journal write fails after the checkout exists");
+        assert!(
+            error.to_string().contains("injected journal write failure"),
+            "{error:?}"
+        );
+
+        // The rollback runs on the blocking pool, so wait for it rather than
+        // assuming it finished inside the failed call.
+        let repo_path = repo.path().to_path_buf();
+        let rolled_back = wait_until(|| {
+            crate::worktrees::git::list_worktrees(&repo_path)
+                .map(|listed| listed.is_empty())
+                .unwrap_or(false)
+                && crate::worktrees::git::h4rn_branches(&repo_path)
+                    .map(|branches| branches.is_empty())
+                    .unwrap_or(false)
+        })
+        .await;
+        assert!(
+            rolled_back,
+            "the failed thread's checkout and branch are removed"
+        );
     }
 
     /// A clock that only moves when a test says so.

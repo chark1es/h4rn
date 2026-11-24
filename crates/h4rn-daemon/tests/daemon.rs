@@ -145,8 +145,32 @@ async fn boot_in_dir(
     text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
     linear_endpoint: Option<String>,
 ) -> TestDaemon {
+    boot_at(
+        dir.path().to_path_buf(),
+        Some(dir),
+        options,
+        harness,
+        isolated,
+        text_generation,
+        linear_endpoint,
+    )
+    .await
+}
+
+/// Boots a daemon over a data directory the caller keeps alive, so a test can
+/// stop it, change what is stored and boot again.
+async fn boot_at(
+    data_dir: std::path::PathBuf,
+    owned: Option<tempfile::TempDir>,
+    options: ThreadManagerOptions,
+    harness: FakeHarness,
+    isolated: bool,
+    text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
+    linear_endpoint: Option<String>,
+) -> TestDaemon {
+    let token_dir = data_dir.clone();
     let config = Config {
-        data_dir: dir.path().to_path_buf(),
+        data_dir,
         bind: "127.0.0.1:0".parse().expect("bind"),
         extra_bind: None,
         log_level: "off".to_owned(),
@@ -176,7 +200,7 @@ async fn boot_in_dir(
         builder.with_harness(Arc::new(harness))
     };
     let daemon = builder.build().await.expect("build daemon");
-    let token = TokenStore::new(dir.path())
+    let token = TokenStore::new(&token_dir)
         .load()
         .expect("read token")
         .expect("token exists");
@@ -194,7 +218,7 @@ async fn boot_in_dir(
     TestDaemon {
         addr,
         token,
-        _dir: Some(dir),
+        _dir: owned,
         shutdown: Some(shutdown),
         task,
     }
@@ -1492,7 +1516,19 @@ async fn create_and_send_report_durable_ids_and_a_non_git_workspace_is_refused_f
 
 #[tokio::test]
 async fn a_thread_runs_in_its_new_worktree_and_the_tracker_shows_the_thread() {
-    let daemon = boot().await;
+    // The test keeps the data directory so it can stop the daemon, remove the
+    // thread the way a deletion would, and boot again over the same store.
+    let data_dir = tempfile::tempdir().expect("data");
+    let daemon = boot_at(
+        data_dir.path().to_path_buf(),
+        None,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        None,
+        None,
+    )
+    .await;
     let host = host_id_for(&daemon).await;
     let repo = git_repo();
     let location = tempfile::tempdir().expect("worktree location");
@@ -1630,6 +1666,53 @@ async fn a_thread_runs_in_its_new_worktree_and_the_tracker_shows_the_thread() {
     assert!(marker.is_file());
 
     std::fs::remove_file(&marker).expect("remove the marker");
+
+    // Delete the thread, then boot again over the same worktree store. The row
+    // must still be there — the create-time registration is what keeps it —
+    // and it must still be clearable.
+    daemon.stop().await;
+    delete_thread_row(data_dir.path(), &thread_id).await;
+    let daemon = boot_at(
+        data_dir.path().to_path_buf(),
+        None,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        None,
+        None,
+    )
+    .await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    match client
+        .request(ClientRequest::ListThreads {
+            filter: ThreadFilter::default(),
+        })
+        .await
+        .expect("list threads after the deletion")
+    {
+        ResponseBody::Threads { threads } => assert!(
+            threads.iter().all(|thread| thread.thread_id != thread_id),
+            "the thread was deleted: {threads:?}"
+        ),
+        other => panic!("unexpected list response: {other:?}"),
+    }
+    let tracked = match client
+        .request(ClientRequest::ListWorktrees)
+        .await
+        .expect("list worktrees after the deletion")
+    {
+        ResponseBody::Worktrees { worktrees } => worktrees,
+        other => panic!("unexpected worktrees response: {other:?}"),
+    };
+    let entry = tracked
+        .iter()
+        .find(|worktree| worktree.path == summary.workspace_path)
+        .unwrap_or_else(|| panic!("the deleted thread's worktree is still listed: {tracked:?}"));
+    assert_eq!(entry.origin, h4rn_protocol::WorktreeOrigin::Thread);
+    assert_eq!(entry.branch.as_deref(), Some(branch.as_str()));
+    assert!(entry.exists);
+
     let outcome = match client
         .request(ClientRequest::ClearWorktrees {
             paths: Some(vec![summary.workspace_path.clone()]),
@@ -1637,7 +1720,7 @@ async fn a_thread_runs_in_its_new_worktree_and_the_tracker_shows_the_thread() {
             bulk: false,
         })
         .await
-        .expect("clear the clean worktree")
+        .expect("clear the checkout left by the deleted thread")
     {
         ResponseBody::WorktreesCleared {
             removed, skipped, ..
@@ -1662,6 +1745,26 @@ async fn a_thread_runs_in_its_new_worktree_and_the_tracker_shows_the_thread() {
     }
 
     daemon.stop().await;
+}
+
+/// Removes a thread's durable row, which is what a deletion removes.
+///
+/// The daemon has no delete-thread request yet, so the integration test edits
+/// the journal directly; every other way of making a thread disappear would
+/// also leave its row, and with it the live-derived worktree row, in place.
+async fn delete_thread_row(data_dir: &Path, thread_id: &ThreadId) {
+    let options = sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.join("events.db"));
+    let pool = sqlx::SqlitePool::connect_with(options)
+        .await
+        .expect("open the daemon's journal");
+    let deleted = sqlx::query("DELETE FROM daemon_threads WHERE thread_id = ?")
+        .bind(thread_id.as_str())
+        .execute(&pool)
+        .await
+        .expect("delete the thread row")
+        .rows_affected();
+    assert_eq!(deleted, 1, "the thread row was there to delete");
+    pool.close().await;
 }
 
 #[tokio::test]

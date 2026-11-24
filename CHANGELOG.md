@@ -513,6 +513,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Two threads started at once can no longer delete each other's worktree.** A
+  new checkout's folder is claimed atomically before git runs, so a create that
+  finds the folder taken refuses (or moves to the next generated suffix) instead
+  of cleaning up a checkout another create owns. A failed create removes only
+  the folder it claimed and only when git holds no registration for it, and that
+  cleanup now runs off the async runtime. Saving a branch prefix that can only
+  produce an invalid branch name (`.hidden`, `v1..2`) is refused in Settings with
+  the reason, and the generator never falls back to a name git would refuse. The
+  New thread dialog expands a typed `~` path against the host's home before
+  matching a registered git project, including a subfolder of one. Deleting a
+  thread no longer hides its worktree from Settings: the create-time
+  registration keeps the row listed and clearable. See
+  [docs/worktrees.md](docs/worktrees.md).
 - **A queued message runs at most once, even when the agent hits a limit.** A prompt the agent has
   accepted is never sent again automatically, whether or not it reported work: the turn settles as
   limited with its trace, and the person can resend. Only a write that failed before acceptance is

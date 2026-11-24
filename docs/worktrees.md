@@ -30,7 +30,9 @@ changes its index or working tree.
 ## Where they go
 
 By default: `<data_dir>/worktrees/<project>/<branch>`. `data_dir` is h4rn's data
-folder on that machine.
+folder on that machine. A `/` in the branch name becomes `-` in the folder
+name, so `feat/login` lives at `.../worktrees/<project>/feat-login`; each
+branch still gets one folder of its own.
 
 **Settings → Worktrees → New worktrees → Location** sets another directory:
 

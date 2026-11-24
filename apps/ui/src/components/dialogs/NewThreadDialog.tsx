@@ -56,9 +56,22 @@ const DEFAULT_MODELS = Object.fromEntries(
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
-/** A path without trailing separators, for comparing a project with a folder. */
+/** A path with one separator style and no trailing separators, for comparison. */
 function folderKey(path: string): string {
-  return path.trim().replace(/[\\/]+$/, "");
+  return path.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * A typed path with a leading `~` expanded against the host's home folder, the
+ * way the daemon expands it. An unknown home leaves the path alone: guessing
+ * could offer a worktree for a folder that is not the project.
+ */
+function expandHome(path: string, home: string | null): string {
+  const trimmed = path.trim();
+  if (!home) return trimmed;
+  if (trimmed === "~") return folderKey(home);
+  if (trimmed.startsWith("~/")) return folderKey(`${home}/${trimmed.slice(2)}`);
+  return trimmed;
 }
 
 function FieldLabel({
@@ -363,14 +376,18 @@ export function NewThreadDialog() {
   // registered git project on this host. The daemon still checks again and
   // answers honestly when a folder is not one.
   const projects = useProjects((value) => value.projects);
+  const hostHome = useProjects((value) => value.home);
+  const workspacePath = expandHome(effectiveWorkspace, hostHome);
   const gitProject =
     fixedWorkspace === null &&
-    projects.some(
-      (project) =>
-        project.git &&
-        project.host === boundHost &&
-        folderKey(project.path) === folderKey(effectiveWorkspace),
-    );
+    projects.some((project) => {
+      if (!project.git || project.host !== boundHost) return false;
+      // The daemon resolves the folder to its repository's top level, so a
+      // subfolder of a registered project is a valid place to start one too.
+      const projectPath = folderKey(project.path);
+      const folder = folderKey(workspacePath);
+      return folder === projectPath || folder.startsWith(`${projectPath}/`);
+    });
   useEffect(() => {
     if (!gitProject) {
       setWorktreeEnabled(false);

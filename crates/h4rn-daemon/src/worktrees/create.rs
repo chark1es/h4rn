@@ -130,7 +130,10 @@ pub fn create_blocking(
     };
     let project = project_name(&repo);
 
-    let (branch, created_branch) = match request.branch().map(str::trim) {
+    // The folder is claimed atomically before any git call (see [`claim_dir`]),
+    // so two creates for one folder can never both own it and then remove each
+    // other's checkout after the loser's `git worktree add` fails.
+    let (branch, created_branch, dest) = match request.branch().map(str::trim) {
         Some(named) if !named.is_empty() => {
             if !valid_branch(&repo, named)? {
                 return Err(format!("`{named}` is not a valid branch name"));
@@ -158,29 +161,17 @@ pub fn create_blocking(
                     existing.path.display()
                 ));
             }
+            let dest = checkout_path(&location, &project, named);
+            if !claim_dir(&dest)? {
+                return Err(format!("a folder already exists at {}", dest.display()));
+            }
             // An existing branch is attached, not recreated, so its history
             // is the one the person asked for.
-            (named.to_owned(), !branches.contains(named))
+            (named.to_owned(), !branches.contains(named), dest)
         }
-        _ => {
-            let generated =
-                generated_branch(settings, prompt, &branches, &worktrees, &location, &project);
-            (generated, true)
-        }
+        _ => claim_generated_branch(settings, prompt, &branches, &worktrees, &location, &project)?,
     };
 
-    let dest = checkout_path(&location, &project, &branch);
-    if dest.exists() {
-        return Err(format!("a folder already exists at {}", dest.display()));
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "could not create the worktree folder {}: {error}",
-                parent.display()
-            )
-        })?;
-    }
     let dest_text = dest.to_string_lossy().into_owned();
     let add = if created_branch {
         git::run_with_timeout(
@@ -196,9 +187,16 @@ pub fn create_blocking(
         )
     };
     if let Err(error) = add {
-        // A failed add can leave the folder behind; the registration is not
-        // there, so removing the directory is enough.
-        let _ = std::fs::remove_dir_all(&dest);
+        // Remove only the folder this call claimed, and only when git holds no
+        // registration for it: a failed add can leave one behind, and a folder
+        // another create owns must never be deleted here.
+        let registered = git::list_worktrees(&repo)
+            .map(|listed| listed.iter().any(|worktree| worktree.path == dest))
+            // A listing git could not answer proves nothing; keep the folder.
+            .unwrap_or(true);
+        if !registered {
+            let _ = std::fs::remove_dir_all(&dest);
+        }
         return Err(format!(
             "could not create the worktree at {}: {error}",
             dest.display()
@@ -272,15 +270,20 @@ fn submodule_args(dest: &Path) -> Vec<&'static str> {
 }
 
 /// The daemon-generated branch for `prompt`, with a short suffix when the
-/// obvious name is taken.
-fn generated_branch(
+/// obvious name is taken, and its checkout folder claimed for this call.
+///
+/// A name whose folder another create claimed first gets the next suffix. The
+/// fallback never trusts the prefix: a prefix saved before prefix validation
+/// existed can still start an invalid name, so a candidate git would refuse is
+/// replaced by one that needs no prefix at all.
+fn claim_generated_branch(
     settings: &h4rn_protocol::WorktreeSettings,
     prompt: &str,
     branches: &std::collections::HashSet<&str>,
     worktrees: &[git::GitWorktree],
     location: &Path,
     project: &str,
-) -> String {
+) -> Result<(String, bool, std::path::PathBuf), String> {
     let prefix = branch_prefix(&settings.branch_prefix);
     let slug = prompt_slug(prompt);
     let base = format!("{prefix}{slug}");
@@ -290,31 +293,76 @@ fn generated_branch(
         } else {
             format!("{base}-{suffix}")
         };
-        if !is_valid_branch_name(&candidate) {
+        if !free_branch_name(&candidate, branches, worktrees) {
             continue;
         }
-        if branches.contains(candidate.as_str()) {
-            continue;
+        let dest = checkout_path(location, project, &candidate);
+        // Another create may have taken this folder between the listing and
+        // now; the atomic claim is what decides, not the earlier look.
+        if claim_dir(&dest)? {
+            return Ok((candidate, true, dest));
         }
-        if worktrees
-            .iter()
-            .any(|worktree| worktree.branch.as_deref() == Some(candidate.as_str()))
-        {
-            continue;
-        }
-        if checkout_path(location, project, &candidate).exists() {
-            continue;
-        }
-        return candidate;
     }
     // Every readable name in the window is taken; name it by the folder the
     // person is likely to recognise instead of failing.
-    let base = format!("{prefix}thread-{}", uuid::Uuid::now_v7().simple());
-    base.chars()
-        .take(80)
-        .collect::<String>()
-        .trim_end_matches(['/', '.'])
-        .to_owned()
+    for _ in 0..100 {
+        let unique = format!("thread-{}", uuid::Uuid::now_v7().simple());
+        let with_prefix = format!("{prefix}{unique}");
+        let candidate = with_prefix
+            .chars()
+            .take(80)
+            .collect::<String>()
+            .trim_end_matches(['/', '.'])
+            .to_owned();
+        let candidate = if is_valid_branch_name(&candidate) {
+            candidate
+        } else {
+            unique
+        };
+        let dest = checkout_path(location, project, &candidate);
+        if claim_dir(&dest)? {
+            return Ok((candidate, true, dest));
+        }
+    }
+    Err("could not find a free name for the new worktree".to_owned())
+}
+
+/// Whether `candidate` is a name git accepts and no branch or checkout uses.
+fn free_branch_name(
+    candidate: &str,
+    branches: &std::collections::HashSet<&str>,
+    worktrees: &[git::GitWorktree],
+) -> bool {
+    is_valid_branch_name(candidate)
+        && !branches.contains(candidate)
+        && worktrees
+            .iter()
+            .all(|worktree| worktree.branch.as_deref() != Some(candidate))
+}
+
+/// Claims `dest` for this call, creating its parent first.
+///
+/// `create_dir` is atomic, so exactly one of two concurrent creates for the
+/// same folder sees it created and the other sees `AlreadyExists`. Returns
+/// `Ok(false)` when the folder was already there; git accepts an empty folder,
+/// but an existing one may hold another call's checkout, so it is never reused.
+fn claim_dir(dest: &Path) -> Result<bool, String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "could not create the worktree folder {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    match std::fs::create_dir(dest) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(format!(
+            "could not create the worktree folder {}: {error}",
+            dest.display()
+        )),
+    }
 }
 
 /// Normalises the configured prefix: invalid characters become hyphens, the
@@ -425,7 +473,10 @@ fn valid_branch(repo: &Path, name: &str) -> Result<bool, String> {
 
 /// Generated names are built from safe pieces; this is the final guard that
 /// the result is still a name git will accept.
-fn is_valid_branch_name(name: &str) -> bool {
+///
+/// Settings validation uses it too, so a saved prefix is refused at the point
+/// the person can still fix it instead of failing at creation.
+pub(crate) fn is_valid_branch_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
         && !name.starts_with('/')
@@ -708,6 +759,177 @@ mod tests {
             created.path.join("sub").join("inner.txt").is_file(),
             "the submodule is checked out in the worktree"
         );
+    }
+
+    #[test]
+    fn a_missing_git_program_is_reported_as_not_installed() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let missing = data.path().join("no-such-git");
+        git::GIT_PROGRAM.with(|slot| *slot.borrow_mut() = Some(missing));
+        let result = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Generated(true),
+            "task",
+            &settings(None),
+            data.path(),
+            None,
+        );
+        git::GIT_PROGRAM.with(|slot| *slot.borrow_mut() = None);
+        let error = result.expect_err("git cannot be run");
+        assert_eq!(
+            error,
+            "git is not installed or could not be run on this host"
+        );
+    }
+
+    #[test]
+    fn an_invalid_prefix_never_generates_an_invalid_branch() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        for (suffix, prefix) in [("dot", ".hidden"), ("dots", "v1..2")] {
+            let created = create_blocking(
+                repo.path(),
+                &WorktreeRequest::Generated(true),
+                &format!("prefix {suffix}"),
+                &h4rn_protocol::WorktreeSettings {
+                    branch_prefix: prefix.into(),
+                    ..h4rn_protocol::WorktreeSettings::default()
+                },
+                data.path(),
+                None,
+            )
+            .expect("create with a prefix the generator must not trust");
+            assert!(
+                is_valid_branch_name(&created.branch),
+                "`{prefix}` produced `{}`",
+                created.branch
+            );
+            assert!(
+                !created.branch.starts_with('.') && !created.branch.contains(".."),
+                "`{prefix}` produced `{}`",
+                created.branch
+            );
+            assert!(created.path.is_dir());
+        }
+    }
+
+    /// Two creates that pick the same folder never delete each other's
+    /// checkout: the loser refuses, or moves to the next generated suffix.
+    #[test]
+    fn concurrent_creates_for_one_folder_leave_the_winners_checkout_intact() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let settings = settings(None);
+
+        // A named branch has one folder; exactly one call can own it.
+        for round in 0..30 {
+            let branch = format!("shared-topic-{round}");
+            let barrier = std::sync::Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..2)
+                    .map(|_| {
+                        let barrier = &barrier;
+                        let branch = branch.as_str();
+                        let repo = repo.path();
+                        let data = data.path();
+                        let settings = &settings;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            create_blocking(
+                                repo,
+                                &WorktreeRequest::Named(branch.into()),
+                                "same task",
+                                settings,
+                                data,
+                                None,
+                            )
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("join"))
+                    .collect::<Vec<_>>()
+            });
+
+            let (winners, losers): (Vec<_>, Vec<_>) = results.into_iter().partition(Result::is_ok);
+            assert_eq!(
+                winners.len(),
+                1,
+                "round {round}: exactly one create owns the folder"
+            );
+            let winner = winners.into_iter().next().expect("winner").expect("ok");
+            assert!(winner.path.is_dir(), "round {round}: the checkout exists");
+            assert!(
+                winner.path.join("README.md").is_file(),
+                "round {round}: the checkout still has its files"
+            );
+            let loser = losers
+                .into_iter()
+                .next()
+                .expect("loser")
+                .expect_err("the loser is refused");
+            assert!(
+                loser.contains("a folder already exists"),
+                "round {round}: {loser}"
+            );
+        }
+
+        // A generated name may use the next suffix instead of failing, but no
+        // successful call may lose the checkout another call made.
+        for round in 0..30 {
+            let barrier = std::sync::Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..2)
+                    .map(|_| {
+                        let barrier = &barrier;
+                        let repo = repo.path();
+                        let data = data.path();
+                        let settings = &settings;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            create_blocking(
+                                repo,
+                                &WorktreeRequest::Generated(true),
+                                "same task",
+                                settings,
+                                data,
+                                None,
+                            )
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("join"))
+                    .collect::<Vec<_>>()
+            });
+
+            let winners: Vec<_> = results
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+                .collect();
+            assert!(
+                !winners.is_empty(),
+                "round {round}: one create must win: {results:?}"
+            );
+            for winner in &winners {
+                assert!(
+                    winner.path.join("README.md").is_file(),
+                    "round {round}: {} lost its files: {results:?}",
+                    winner.path.display()
+                );
+            }
+            let mut paths: Vec<_> = winners.iter().map(|winner| winner.path.clone()).collect();
+            paths.sort();
+            paths.dedup();
+            assert_eq!(
+                paths.len(),
+                winners.len(),
+                "round {round}: each create owns a distinct checkout"
+            );
+        }
     }
 
     #[test]
