@@ -13,31 +13,49 @@ settled; it is unavailable while that turn is still running or its queued
 message has not started. A turn that is still running, or a message still
 waiting to run, is refused with a message to let it finish first.
 
+A turn is offered only on the journal's evidence that it ended: it was copied
+from a finished conversation, or the daemon saw it start and saw it end (a
+restart records the turn it lost as interrupted). A prompt that never started
+is not a turn: it is left out of a later turn's copy and cannot itself be
+forked. A turn that started but never settled — with a later turn behind it —
+is refused rather than copied half-written.
+
 The fork keeps:
 
 - the same project, workspace, harness, agent instance, model, runtime mode,
   reasoning effort and fast-tier setting;
 - a title of `<original title> (fork)`;
 - everything the source showed through the chosen turn, inclusive, with each
-  record's own time and in the same order: messages and their attachments, tool
-  calls, delegated subagent rows in their final state, the plan, error and
-  usage-limit rows, and an assistant reply that was still streaming when h4rn
-  stopped (rebuilt from its streamed text). A prompt is shown before the turn
-  it started, as in the live thread, so every copied prompt sits above its own
-  reply;
+  record's own time and in the same order, by the journal's own sequence:
+  messages and their attachments, tool calls, delegated subagent rows in their
+  final state, the plan, error and usage-limit rows, and an assistant reply
+  that was still streaming when h4rn stopped (rebuilt from its streamed text).
+  A prompt is shown before the turn it started, as in the live thread, so every
+  copied prompt sits above its own reply — including two prompts queued behind
+  one running turn, which stay above that turn's reply where the source showed
+  them;
+- each turn's start at that turn's own first record's time, including turns
+  that came from an import;
 - the turn's own completion: its token usage, its file-change list for the
   "N files changed" card, and its real status. A turn the daemon lost to a
   restart copies as **interrupted**; copied history was already finished and
   stays finished;
 - its own copy of every attachment blob. The fork retains the blob and gets its
   own per-thread file, so deleting the source never removes a file the fork
-  still shows.
+  still shows. Adoption is all or nothing: if any attachment is gone, the fork
+  is refused with a message, and every retain it already made is rolled back.
 
 A queued message is its own turn from the moment it arrives; it is never part of
-the turn it waits behind, and a fork at that turn does not copy it. Journals
-written before queued prompts had their own turn id are read the same way: the
-prompt moves to the next turn that starts. A prompt that never started cannot be
-forked, and a turn interrupted by a restart is settled as interrupted.
+the turn it waits behind, and a fork at that turn does not copy it. A turn
+interrupted by a restart is settled as interrupted.
+
+Journals written before queued prompts had their own turn id are read the same
+way: a prompt filed under the running turn goes to the next turn that starts and
+has no prompt of its own. A prompt that never became a turn — the daemon stopped
+before it could run — is never attached to a later turn that already has its
+own. Its row cannot name a real turn, so no fork is offered from it, and a fork
+at that point or any later one is refused with a clear message instead of
+copying a transcript the source did not have.
 
 The original thread is read, never changed. Deleting, archiving or settling it
 afterwards does not affect the fork.
@@ -58,14 +76,19 @@ conversation over:
   copies the whole saved conversation, so it is used only while the chosen turn
   is still the source session's tip; h4rn re-checks that when the fork starts.
   While that provider reads the source's saved session, the source's next message
-  waits, bounded, so it cannot be copied into the fork; the copy is over when
-  the fork reports its session or the startup fails. Only a thread that started
-  a session of its own offers its session id: a fork that has not sent anything
-  yet still points at the conversation it was made from, so a fork of that fork
-  uses the handoff instead. If the source has moved on by then, or the fork
-  cannot be bounded, the native intent is cleared and the fork hands off
-  instead. The provider keeps its own context, including tool work h4rn never
-  journaled, and the source session keeps running untouched.
+  is accepted at once — it already has its turn and its durable row — but it
+  cannot reach the harness until the copy is over. The copy is over when
+  the fork reports its session or the startup fails. The copy has its own
+  deadline: a provider still reading the source after it is abandoned, any
+  session it produces later is shut down without being used, and the fork
+  continues on the handoff. Only then is the source released, so a message sent
+  after the deadline can never reach something the fork shows. Only a thread
+  that started a session of its own offers its session id: a fork that has not
+  sent anything yet still points at the conversation it was made from, so a
+  fork of that fork uses the handoff instead. If the source has moved on by
+  then, or the fork cannot be bounded, the native intent is cleared and the
+  fork hands off instead. The provider keeps its own context, including tool
+  work h4rn never journaled, and the source session keeps running untouched.
 - **Portable handoff.** For a harness with no native fork, a source that moved
   on, or a native fork that dies before it reports a session, h4rn starts a
   fresh session and sends a bounded handoff of the copied transcript ahead of
@@ -102,3 +125,10 @@ The source and the fork share no live state:
 
 A fork that has not yet sent a message has no live session, so it costs nothing
 until you write.
+
+## Publishing a fork
+
+Creating a fork publishes only the new thread's summary on the live feed. Its
+transcript is durable history and arrives through the same paged history as any
+other thread, so forking hundreds of turns never fills the event feed or makes a
+slow client miss a later completion on another thread.

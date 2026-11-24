@@ -245,6 +245,23 @@ pub struct JournaledTurn {
     pub started_at: Option<DateTime<Utc>>,
     /// Every visible record, oldest first.
     pub items: Vec<JournaledItem>,
+    /// The journal sequence of each entry in `items`, in the same order.
+    ///
+    /// A queued prompt's row is written when the message arrives, long before
+    /// the turn it belongs to starts, so the sequence — not the turn list — is
+    /// what keeps a copy in the order the source showed.
+    pub item_seqs: Vec<u64>,
+    /// The journal sequence of the turn's own `TurnStarted`, when recorded.
+    pub started_seq: Option<u64>,
+    /// The journal sequence of its `TurnCompleted`, when recorded.
+    pub completed_seq: Option<u64>,
+    /// Whether an older journal's queued prompt was shown before this turn and
+    /// never became a turn of its own.
+    ///
+    /// Such a prompt cannot be copied with any turn, so a fork at this turn or
+    /// any later one is refused rather than shown a transcript the source did
+    /// not have.
+    pub lost_prompt: bool,
     /// How the turn finished, when it reported a completion.
     ///
     /// An imported transcript's history has none: it was already finished when
@@ -271,6 +288,50 @@ impl JournaledTurn {
     /// Whether the journal recorded the turn's end.
     pub fn completed(&self) -> bool {
         self.status.is_some()
+    }
+
+    /// Whether a fork may copy this turn.
+    ///
+    /// Copied history was already finished when it was written. A live turn
+    /// needs evidence of its own both ways: the journal saw it start and saw it
+    /// end (interrupted counts). A prompt whose turn never started — a queued
+    /// message, or one an interruption lost — is not a turn with a transcript
+    /// to show.
+    pub fn forkable(&self) -> bool {
+        self.copied || (self.started_at.is_some() && self.status.is_some())
+    }
+
+    /// Appends one record and its journal sequence together.
+    fn push_item(&mut self, seq: u64, item: JournaledItem) {
+        self.item_seqs.push(seq);
+        self.items.push(item);
+    }
+
+    /// Inserts one record and its journal sequence together.
+    fn insert_item(&mut self, position: usize, seq: u64, item: JournaledItem) {
+        self.item_seqs.insert(position, seq);
+        self.items.insert(position, item);
+    }
+
+    /// Removes the record at `position` and its sequence.
+    fn remove_item(&mut self, position: usize) {
+        self.item_seqs.remove(position);
+        self.items.remove(position);
+    }
+
+    /// Every item with its journal sequence, oldest first by that sequence.
+    ///
+    /// The turn's own records keep their relative order even when a later
+    /// queued prompt was written first.
+    pub fn items_with_seqs(&self) -> Vec<(u64, &JournaledItem)> {
+        let mut pairs: Vec<(u64, &JournaledItem)> = self
+            .item_seqs
+            .iter()
+            .copied()
+            .zip(self.items.iter())
+            .collect();
+        pairs.sort_by_key(|(seq, _)| *seq);
+        pairs
     }
 
     /// The turn's messages, oldest first.
@@ -957,6 +1018,28 @@ async fn append_wire_on(
     Ok(seqs)
 }
 
+/// Whether one record is a message the person wrote.
+fn is_user_prompt(item: &JournaledItem) -> bool {
+    matches!(
+        item,
+        JournaledItem::Item {
+            item,
+            ..
+        } if is_user_message(item)
+    )
+}
+
+/// Whether one streamed item is a message the person wrote.
+fn is_user_message(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::Message {
+            role: h4rn_protocol::MessageRole::User,
+            ..
+        }
+    )
+}
+
 /// The turn a thread-only row belongs to: the open turn when there is one,
 /// otherwise the newest turn the journal holds.
 fn attach_turn(turns: &mut [JournaledTurn], open: Option<usize>) -> Option<&mut JournaledTurn> {
@@ -1005,6 +1088,10 @@ fn turn_index(turns: &mut Vec<JournaledTurn>, turn_id: &h4rn_protocol::TurnId) -
                 turn_id: turn_id.clone(),
                 started_at: None,
                 items: Vec::new(),
+                item_seqs: Vec::new(),
+                started_seq: None,
+                completed_seq: None,
+                lost_prompt: false,
                 status: None,
                 usage: None,
                 changes: None,
@@ -1272,7 +1359,7 @@ impl Journal for SqliteJournal {
         thread_id: &ThreadId,
     ) -> Result<Vec<JournaledTurn>, JournalError> {
         let rows = sqlx::query(
-            "SELECT event_json, recorded_at FROM daemon_wire_events
+            "SELECT seq, event_json, recorded_at FROM daemon_wire_events
              WHERE thread_id = ? ORDER BY seq ASC",
         )
         .bind(thread_id.as_str())
@@ -1292,15 +1379,23 @@ impl Journal for SqliteJournal {
         // newest turn the reader happens to hold.
         let mut open_turn: Option<usize> = None;
         // Prompts an older journal wrote under the running turn instead of the
-        // queued turn they belong to. Each one is given to the next turn that
-        // starts; anything left over never ran and belongs to no turn.
-        let mut held_prompts: Vec<JournaledItem> = Vec::new();
+        // queued turn they belong to, with the sequence they were shown at. Each
+        // one is given to the next turn that starts and has no prompt of its
+        // own; a turn that already has its own prompt keeps it, and the held
+        // prompt never became a turn.
+        let mut held_prompts: Vec<(u64, JournaledItem)> = Vec::new();
+        // Set once a held prompt could not be recovered. It is a message the
+        // source showed and no turn owns, so every turn from here on is an
+        // ambiguous fork point: copying one would drop a row the source had.
+        let mut lost_prompt = false;
         // The item each streaming assistant reply is filling, by item id. A
         // reply that never finished stays here and is rebuilt from its deltas
         // once every event has been read.
         let mut streaming: std::collections::HashMap<String, (usize, usize)> =
             std::collections::HashMap::new();
         for row in rows {
+            let seq: i64 = row.try_get("seq")?;
+            let seq = u64::try_from(seq).unwrap_or(0);
             let event_json: String = row.try_get("event_json")?;
             let recorded_at: String = row.try_get("recorded_at")?;
             let recorded_at = DateTime::parse_from_rfc3339(&recorded_at)
@@ -1316,12 +1411,25 @@ impl Journal for SqliteJournal {
                     let previous_open = open_turn;
                     let index = turn_index(&mut turns, &turn_id);
                     turns[index].started_at = Some(started_at);
+                    turns[index].started_seq = Some(seq);
                     // An older journal wrote a queued prompt under the turn it
                     // waited behind. The next turn that starts is the one it
-                    // was waiting to become, so hand it the oldest such prompt.
+                    // was waiting to become, so hand it the oldest such prompt —
+                    // but only when this turn has no prompt of its own. A turn
+                    // that already sent one is a later message, and attaching
+                    // the held prompt to it would put a message it never sent
+                    // into its transcript.
                     if previous_open != Some(index) && !held_prompts.is_empty() {
-                        let prompt = held_prompts.remove(0);
-                        turns[index].items.insert(0, prompt);
+                        let has_own_prompt = turns[index].items.iter().any(is_user_prompt);
+                        if has_own_prompt {
+                            lost_prompt = true;
+                        } else {
+                            let (prompt_seq, prompt) = held_prompts.remove(0);
+                            turns[index].insert_item(0, prompt_seq, prompt);
+                        }
+                    }
+                    if lost_prompt {
+                        turns[index].lost_prompt = true;
                     }
                     open_turn = Some(index);
                 }
@@ -1339,27 +1447,11 @@ impl Journal for SqliteJournal {
                     // after that turn's own prompt, is a prompt an older journal
                     // stored under the turn it was queued behind. It belongs to
                     // the next turn that starts, never to this one.
-                    if matches!(
-                        &item,
-                        Item::Message {
-                            role: h4rn_protocol::MessageRole::User,
-                            ..
-                        }
-                    ) && open_turn == Some(index)
-                        && turns[index].items.iter().any(|existing| {
-                            matches!(
-                                existing,
-                                JournaledItem::Item {
-                                    item: Item::Message {
-                                        role: h4rn_protocol::MessageRole::User,
-                                        ..
-                                    },
-                                    ..
-                                }
-                            )
-                        })
+                    if is_user_message(&item)
+                        && open_turn == Some(index)
+                        && turns[index].items.iter().any(is_user_prompt)
                     {
-                        held_prompts.push(JournaledItem::Item { item, at });
+                        held_prompts.push((seq, JournaledItem::Item { item, at }));
                         continue;
                     }
                     // The daemon finishes a streamed reply with one item that
@@ -1391,7 +1483,7 @@ impl Journal for SqliteJournal {
                         }
                         continue;
                     }
-                    turns[index].items.push(JournaledItem::Item { item, at });
+                    turns[index].push_item(seq, JournaledItem::Item { item, at });
                 }
                 Event::MessageDelta {
                     turn_id,
@@ -1410,15 +1502,18 @@ impl Journal for SqliteJournal {
                         }
                     } else {
                         let position = turns[index].items.len();
-                        turns[index].items.push(JournaledItem::Item {
-                            item: Item::Message {
-                                item_id: item_id.clone(),
-                                role: h4rn_protocol::MessageRole::Assistant,
-                                text,
-                                attachments: Vec::new(),
+                        turns[index].push_item(
+                            seq,
+                            JournaledItem::Item {
+                                item: Item::Message {
+                                    item_id: item_id.clone(),
+                                    role: h4rn_protocol::MessageRole::Assistant,
+                                    text,
+                                    attachments: Vec::new(),
+                                },
+                                at: recorded_at,
                             },
-                            at: recorded_at,
-                        });
+                        );
                         streaming.insert(item_id, (index, position));
                     }
                 }
@@ -1426,9 +1521,7 @@ impl Journal for SqliteJournal {
                     turn_id, tool_call, ..
                 } => {
                     let index = turn_index(&mut turns, &turn_id);
-                    turns[index]
-                        .items
-                        .push(JournaledItem::ToolCall { tool_call });
+                    turns[index].push_item(seq, JournaledItem::ToolCall { tool_call });
                 }
                 Event::Plan {
                     turn_id, entries, ..
@@ -1444,7 +1537,7 @@ impl Journal for SqliteJournal {
                         Some(JournaledItem::Plan {
                             entries: current, ..
                         }) => *current = entries,
-                        _ => turns[index].items.push(JournaledItem::Plan { entries }),
+                        _ => turns[index].push_item(seq, JournaledItem::Plan { entries }),
                     }
                 }
                 // These name a thread but not a turn: the stream attaches them
@@ -1459,12 +1552,15 @@ impl Journal for SqliteJournal {
                     ..
                 } => {
                     if let Some(turn) = attach_turn(&mut turns, open_turn) {
-                        turn.items.push(JournaledItem::Error {
-                            message,
-                            hint,
-                            retryable,
-                            at: recorded_at,
-                        });
+                        turn.push_item(
+                            seq,
+                            JournaledItem::Error {
+                                message,
+                                hint,
+                                retryable,
+                                at: recorded_at,
+                            },
+                        );
                     }
                 }
                 Event::UsageLimitHit {
@@ -1473,11 +1569,14 @@ impl Journal for SqliteJournal {
                     ..
                 } => {
                     if let Some(turn) = attach_turn(&mut turns, open_turn) {
-                        turn.items.push(JournaledItem::Limit {
-                            reset_at,
-                            auto_resume,
-                            at: recorded_at,
-                        });
+                        turn.push_item(
+                            seq,
+                            JournaledItem::Limit {
+                                reset_at,
+                                auto_resume,
+                                at: recorded_at,
+                            },
+                        );
                     }
                 }
                 Event::SubagentSpawned { subagent, .. }
@@ -1496,6 +1595,7 @@ impl Journal for SqliteJournal {
                     turns[index].status = Some(status);
                     turns[index].usage = Some(usage);
                     turns[index].changes = changes;
+                    turns[index].completed_seq = Some(seq);
                     if open_turn == Some(index) {
                         open_turn = turns
                             .iter()
@@ -1524,7 +1624,7 @@ impl Journal for SqliteJournal {
             .collect();
         empty.sort_unstable_by(|left, right| right.cmp(left));
         for (turn, position) in empty {
-            turns[turn].items.remove(position);
+            turns[turn].remove_item(position);
         }
 
         let mut native: std::collections::HashMap<String, String> =

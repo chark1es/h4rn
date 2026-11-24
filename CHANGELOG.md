@@ -171,32 +171,50 @@ All notable changes to h4rn are recorded here. The format follows
   reasoning settings, titled `<original> (fork)`, and its transcript is
   everything the source showed through the one turn you chose — messages with
   their attachments, tool calls, delegated rows, plans, error and limit rows,
-  and a reply that was still streaming — each with its own time and in the order
-  the source showed it, so a prompt sits above its reply. A copied turn keeps
-  its completion's token usage, change set and real status: a turn the daemon
-  lost to a restart copies as interrupted, not as a success, and a delegated
-  row shows its child's final state. The copy owns its attachment blobs, so
-  deleting the source leaves the fork's files readable. A prompt that has an
-  answerless finished turn can be forked too. The provider keeps its own
-  conversation where it can copy the chosen turn: Codex's `thread/fork` copies
-  through that provider turn, so an earlier turn is still exact after the
-  source carries on, and Claude Code's `--resume <id> --fork-session` is used
-  only while the chosen turn is still the source session's tip, re-checked when
-  the fork starts. While Claude Code reads that file, the source's next send
-  waits (bounded) so it cannot land in the copy, and a thread that has not
-  started a session of its own never lends a borrowed session id to another
-  fork. Any other case — a harness without native forks, a source that moved
-  on, or a native fork that dies before it starts — sends a bounded handoff of
-  the copied history instead, stopping before the current turn so a message
-  queued during the startup is never sent twice. A fork shares no live session,
-  queued message, approval, parked prompt or rate-limit schedule with its
-  source; a queued message is its own turn (including prompts an older journal
-  filed under the turn they waited behind), so it is never copied into that
-  turn. A fork of a worktree thread starts in the same workspace path. The
-  thread header says **Forked from** with a link back, and the lineage survives
-  a restart; deleting or archiving the source never affects the fork. A turn
-  that is still running or waiting in the queue is refused with a message to
-  wait for it. New request: `ForkThread`. See [docs/fork.md](docs/fork.md).
+  and a reply that was still streaming — each with its own time and in the
+  order the source showed it, by the journal's own sequence, so a prompt sits
+  above its reply and a prompt queued behind a running turn stays above that
+  turn's reply. Each copied turn starts at its own first record's time. A
+  copied turn keeps its completion's token usage, change set and real status: a
+  turn the daemon lost to a restart copies as interrupted, not as a success,
+  and a delegated row shows its child's final state. A turn is only offered
+  when the journal has evidence it ended: copied history, or a turn that
+  really started and settled (or was interrupted by a restart). A prompt that
+  never started is not a turn, so it is left out of a later turn's copy and
+  cannot itself be forked. The copy owns its attachment blobs and adopts them
+  all or nothing: if any file is gone, the fork fails and the retains made so
+  far are rolled back, instead of a transcript pointing at the source's files.
+  A prompt that has an answerless finished turn can be forked too. The provider
+  keeps its own conversation where it can copy the chosen turn: Codex's
+  `thread/fork` copies through that provider turn, so an earlier turn is still
+  exact after the source carries on, and Claude Code's `--resume <id>
+  --fork-session` is used only while the chosen turn is still the source
+  session's tip, re-checked when the fork starts. While Claude Code reads that
+  saved conversation, the source's next send is acknowledged at once (it has a
+  turn and a durable row) but its dispatch waits, so it cannot land in the
+  copy. The copy itself has a deadline: a provider still reading the source
+  after it is abandoned, its result is never adopted, and the fork continues on
+  the handoff — only then is the source released, so a message sent afterwards
+  can never reach the fork. A thread that has not started a session of its own
+  never lends a borrowed session id to another fork. Any other case — a harness
+  without native forks, a source that moved on, or a native fork that dies
+  before it starts — sends a bounded handoff of the copied history instead,
+  stopping before the current turn so a message queued during the startup is
+  never sent twice. A fork shares no live session, queued message, approval,
+  parked prompt or rate-limit schedule with its source; a queued message is its
+  own turn, so it is never copied into the turn it waited behind. An older
+  journal that filed a queued prompt under the running turn keeps the prompt
+  with the next turn that starts and has no prompt of its own; one that never
+  became a turn is not given to a later turn, and a fork at or after that point
+  is refused with a clear message rather than copied without a row the source
+  showed. Only the new thread's summary is published on the live feed, so a
+  fork of hundreds of turns never stalls other threads; the copied transcript
+  arrives through the same paged history as any thread. A fork of a worktree
+  thread starts in the same workspace path. The thread header says **Forked
+  from** with a link back, and the lineage survives a restart; deleting or
+  archiving the source never affects the fork. A turn that is still running or
+  waiting in the queue is refused with a message to wait for it. New request:
+  `ForkThread`. See [docs/fork.md](docs/fork.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a

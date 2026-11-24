@@ -1811,13 +1811,18 @@ address and a hosted agent has no path in this phase.
 A fork is a new thread, not a view over the source. It copies the source's
 project, workspace, harness, agent instance and settings, and its transcript is
 everything the source showed through the chosen turn, inclusive, journaled as
-the events that showed it with each record's own time: messages with their
-attachments, tool calls, delegated rows, plans, error and usage-limit rows, and
-a reply that only ever streamed. Only a turn the journal knows to be finished
-can be forked; the source's active turn and any message still waiting in its
-queue are refused. A message queued behind a running turn is its own turn, with
-its own id from the moment it arrives, so forking the running turn cannot copy
-it. The source is only read.
+the events that showed it with each record's own time and in the journal's own
+sequence: messages with their attachments, tool calls, delegated rows, plans,
+error and usage-limit rows, and a reply that only ever streamed. Only a turn the
+journal has evidence ended can be forked: copied history, or a turn it saw start
+and saw end (interrupted counts). A prompt whose turn never started — queued at
+the crash, or lost with it — is not a turn: it is left out of a later turn's
+copy and cannot itself be forked, so a fork at a later turn never inherits it.
+The source's active turn and any message still waiting in its queue are refused,
+and a turn that started without settling refuses the fork the same way. A
+message queued behind a running turn is its own turn with its own id from the
+moment it arrives, so forking the running turn cannot copy it. The source is
+only read.
 
 The first message continues the conversation one of two ways. A native fork is
 a copy of the provider's own conversation, so it must be bounded to the chosen
@@ -1828,22 +1833,45 @@ turn is exact even after the source carries on; Claude Code's
 `--resume <id> --fork-session` copies the whole session, so it is only used while
 the chosen turn is still the source session's tip, re-checked under the
 source's record lock when the fork starts. That check opens a per-source gate
-before the lock is released: the source's next dispatch waits, bounded, until
-the fork reports `SessionStarted` or its startup fails, so a message sent in
-that window cannot be read into the copy. A session id is offered only by a
-thread that started that session itself; an unused fork still points at the
-conversation it was made from and hands off instead. Otherwise — a harness
-without native forks, a source that moved on, or a failed start — the fork
-starts a fresh session and sends a bounded handoff of its copied history. This
-reuses the import's one-attempt machinery (ADR-045): the native intent is
-cleared when a session reports `SessionStarted`, or when it cannot be bounded or
-dies before that report, and the same turn is retried with the handoff. The
-handoff reads only the journaled turns before the dispatch it replaces, so a
+before the lock is released: the source's next dispatch waits until the fork
+reports `SessionStarted`, its startup fails, or the copy's own deadline passes,
+so a message sent in that window cannot be read into the copy. The source's Send
+is answered at once — its turn and prompt are already durable — and only its
+dispatch waits, so the UI's deadline never reports a failure for a prompt that
+will run. The deadline belongs to the copy, not the source: a provider still
+reading the source after it is abandoned, any session it produces is shut down
+without being used, the fork switches to the handoff, and only then is the source
+released. Each startup claims the thread's one session slot (its generation)
+before anything slow is awaited, and a gate hold is owned by that generation, so
+a second startup spawned for the same fork can neither copy nor release the
+source's gate. A session id is offered only by a thread that started that
+session itself; an unused fork still points at the conversation it was made from
+and hands off instead. Otherwise — a harness without native forks, a source that
+moved on, a copy past its deadline, or a failed start — the fork starts a fresh
+session and sends a bounded handoff of its copied history. This reuses the
+import's one-attempt machinery (ADR-045): the native intent is cleared when a
+session reports `SessionStarted`, or when it cannot be bounded, dies before that
+report, or misses its deadline, and the same turn is retried with the handoff.
+The handoff reads only the journaled turns before the dispatch it replaces, so a
 message queued during a pending startup is not part of the history and is not
 sent twice when it runs.
 
-Lineage is a `forked_from { thread_id, turn_id }` in the thread row, projected on
-the summary; the origin title is read from the thread list so a rename needs no
-rewrite. No cascade exists in either direction, so deleting or archiving the
-source cannot take the fork with it. A fork in a worktree keeps the source's
-workspace path; per-fork worktrees are a later feature.
+An older journal filed a queued prompt under the running turn. The replay gives
+it to the next turn that starts and has no prompt of its own; a turn that already
+has one never inherits it. A held prompt that never became a turn is shown in no
+copy, and the fork at that point or later is refused with a clear message rather
+than copying a transcript that silently drops a row the source showed. The same
+rule runs in the client projection, where such a prompt's row is given no turn
+to fork.
+
+A fork's attachment blobs are adopted all or nothing: every blob is resolved for
+the new thread before it is journaled, and a failure rolls back every retain the
+attempt made and fails the fork. A transcript that pointed at the source's files,
+or at half its attachments, is not a fork. Only the new thread's summary is
+published on the live feed; the copied transcript is durable history read through
+the ordinary paged replay, so a long fork cannot fill the feed and stall other
+threads. Lineage is a `forked_from { thread_id, turn_id }` in the thread row,
+projected on the summary; the origin title is read from the thread list so a
+rename needs no rewrite. No cascade exists in either direction, so deleting or
+archiving the source cannot take the fork with it. A fork in a worktree keeps the
+source's workspace path; per-fork worktrees are a later feature.
