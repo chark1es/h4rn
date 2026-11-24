@@ -21,7 +21,10 @@
 //!
 //! The persisted turn boundaries (`turn_context`, `turn_aborted`, and the
 //! `task_*` events) end the pending window: a canonical prompt and its copy
-//! belong to the turn they were written in, never to a later one.
+//! belong to the turn they were written in, never to a later one. A boundary
+//! that names the turn already open is not a boundary, because Codex writes
+//! the turn's generated context between `task_started` and `turn_context` with
+//! the same turn id.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -218,13 +221,20 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
                         model = Some(value.to_owned());
                     }
                 }
-                flush_turn(&mut history, &mut turn);
-                turn.current_id = payload
+                let turn_id = payload
                     .turn_id
                     .as_deref()
                     .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned);
+                    .filter(|id| !id.is_empty());
+                // A boundary that names the turn already open marks no new
+                // turn: Codex writes `task_started`, the turn's generated
+                // context, and then `turn_context` with the same id, and
+                // flushing there would commit that context as response-only
+                // before the prompt's canonical event arrives.
+                if !turn.names_current(turn_id) {
+                    flush_turn(&mut history, &mut turn);
+                    turn.current_id = turn_id.map(str::to_owned);
+                }
                 continue;
             }
             "event_msg" => match payload.kind.as_deref() {
@@ -257,9 +267,16 @@ pub(crate) fn parse(path: &Path) -> Result<ParsedConversation, SkipReason> {
                 }
                 // Codex writes these boundaries, and a turn ends where it says.
                 Some("task_started") => {
-                    flush_turn(&mut history, &mut turn);
-                    if let Some(id) = payload.turn_id.as_deref() {
-                        turn.current_id = Some(id.trim().to_owned());
+                    let turn_id = payload
+                        .turn_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty());
+                    if !turn.names_current(turn_id) {
+                        flush_turn(&mut history, &mut turn);
+                        if let Some(id) = turn_id {
+                            turn.current_id = Some(id.to_owned());
+                        }
                     }
                 }
                 Some("task_complete" | "turn_aborted") => {
@@ -363,6 +380,19 @@ struct TurnState {
 }
 
 impl TurnState {
+    /// Whether a boundary record names the turn already open.
+    ///
+    /// The real rollout order writes `task_started` with the turn id, then that
+    /// turn's generated context, then `turn_context` with the same id, then the
+    /// prompt. A boundary that repeats the open turn's id therefore marks no
+    /// new turn, and flushing on it would keep the setup context.
+    fn names_current(&self, turn_id: Option<&str>) -> bool {
+        match (self.current_id.as_deref(), turn_id) {
+            (Some(current), Some(named)) => current == named,
+            _ => false,
+        }
+    }
+
     /// Queues one user record, bounding the pending window as it grows.
     fn push(&mut self, user: PendingUser, history: &mut History) {
         if self.overflow {
@@ -548,6 +578,22 @@ mod tests {
         })
     }
 
+    fn event_user_with_id(text: &str, turn_id: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": text, "turn_id": turn_id},
+        })
+    }
+
+    fn task_started(turn_id: &str) -> serde_json::Value {
+        json!({
+            "timestamp": "2026-11-20T10:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": turn_id},
+        })
+    }
+
     fn response_user(text: &str, turn_id: Option<&str>) -> serde_json::Value {
         let mut payload = json!({
             "type": "message",
@@ -599,6 +645,44 @@ mod tests {
             .filter(|message| message.role == MessageRole::User)
             .map(|message| message.text.as_str())
             .collect()
+    }
+
+    #[test]
+    fn the_real_rollout_order_drops_the_context_written_before_turn_context() {
+        // This machine's rollouts: `task_started` names the turn, the generated
+        // environment and AGENTS.md context follow with that turn id, then
+        // `turn_context` with the same id, then the prompt. The boundary
+        // repeats the open turn, so it must not flush the context into a
+        // response-only turn of its own.
+        let (_dir, path) = write_rollout(&[
+            meta(),
+            task_started("turn-1"),
+            response_user(
+                "<environment_context>\n<cwd>/tmp/project</cwd>\n<shell>zsh</shell>\n</environment_context>",
+                Some("turn-1"),
+            ),
+            response_user(
+                "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nPrivate project rules\n</INSTRUCTIONS>",
+                Some("turn-1"),
+            ),
+            turn_context("turn-1"),
+            event_user_with_id("Do it", "turn-1"),
+            response_user("Do it", Some("turn-1")),
+            assistant("done"),
+        ]);
+        let parsed = parse(&path).expect("parse");
+        let texts: Vec<&str> = parsed
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert_eq!(texts, ["Do it", "done"]);
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("Private project rules")),
+            "the private instructions never reach the import"
+        );
     }
 
     #[test]
