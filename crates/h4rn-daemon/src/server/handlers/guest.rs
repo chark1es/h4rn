@@ -528,6 +528,7 @@ mod tests {
             tx,
             origin: SessionOrigin::relay(Some("dev_remote_owner".into()), None),
             watches: HashMap::new(),
+            chunks: HashMap::new(),
             overflowed: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
         };
@@ -681,6 +682,7 @@ mod tests {
             tx,
             origin: SessionOrigin::local(),
             watches: HashMap::new(),
+            chunks: HashMap::new(),
             overflowed: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
         };
