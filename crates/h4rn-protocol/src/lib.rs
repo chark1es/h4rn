@@ -40,6 +40,7 @@ mod git_actions;
 mod guest;
 mod harness;
 mod ids;
+pub mod import;
 pub mod issues;
 pub mod mcp;
 pub mod projects;
@@ -95,6 +96,10 @@ pub use harness::{
 pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, QueuedMessageId, ScheduleTaskId, SubagentId,
     TerminalId, ThreadId, TurnId,
+};
+pub use import::{
+    ImportEvent, ImportProgress, ImportProject, ImportScan, ImportSource, ImportedSource,
+    path_source_key, source_key,
 };
 pub use issues::*;
 pub use mcp::{

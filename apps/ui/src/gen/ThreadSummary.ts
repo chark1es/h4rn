@@ -48,6 +48,14 @@ title: string,
  */
 workspace_path: string, 
 /**
+ * Checkout this thread belongs to for grouping, when it differs from the
+ * workspace it runs in.
+ *
+ * A conversation imported from a linked worktree still runs in that
+ * worktree, but it belongs beside the main checkout in the sidebar.
+ */
+project_path?: string, 
+/**
  * Current git branch of the workspace, when it has one.
  */
 branch?: string, 

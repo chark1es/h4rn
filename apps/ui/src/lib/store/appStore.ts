@@ -966,39 +966,42 @@ export async function loadThread(threadId: ThreadId, sinceSeq = 0): Promise<void
   });
 
   try {
-    const response = await getClient().request({
-      type: "get_thread",
-      thread_id: threadId,
-      since_seq: sinceSeq,
-    });
-    if (response.type !== "thread") return;
-
     let log = getState().logs[threadId] ?? createThreadLog();
-    for (const { seq, event } of response.events) {
-      // The global replay may already have applied an event while this
-      // request was in flight; sequence numbers make the load idempotent.
-      if (seq <= log.nextSeq) continue;
-      log = foldEvent(log, event);
-      log = { ...log, nextSeq: seq };
+    let pages = 0;
+    // A paired session receives a long replay in pages that each fit one
+    // transport frame. Keep asking from the last sequence until the daemon
+    // says there is nothing more; an older daemon answers everything at once.
+    for (;;) {
+      const page = await getClient().request({
+        type: "get_thread",
+        thread_id: threadId,
+        since_seq: pages === 0 ? sinceSeq : log.nextSeq,
+      });
+      for (const { seq, event } of page.events) {
+        // The global replay may already have applied an event while this
+        // request was in flight; sequence numbers make the load idempotent.
+        if (seq <= log.nextSeq) continue;
+        log = foldEvent(log, event);
+        log = { ...log, nextSeq: seq };
+      }
+      log = { ...log, nextSeq: Math.max(log.nextSeq, page.next_seq) };
+      pages += 1;
+      if (!page.more || pages > 10_000) {
+        log = { ...log, loading: false, loaded: true };
+        const current = getState();
+        setState({
+          ...current,
+          threads: { ...current.threads, [threadId]: page.summary },
+          threadSeqs: {
+            ...current.threadSeqs,
+            [threadId]: Math.max(current.threadSeqs[threadId] ?? 0, log.nextSeq),
+          },
+          logs: { ...current.logs, [threadId]: log },
+          threadErrors: omitKey(current.threadErrors, threadId),
+        });
+        return;
+      }
     }
-    log = {
-      ...log,
-      loading: false,
-      loaded: true,
-      nextSeq: Math.max(log.nextSeq, response.next_seq),
-    };
-
-    const current = getState();
-    setState({
-      ...current,
-      threads: { ...current.threads, [threadId]: response.summary },
-      threadSeqs: {
-        ...current.threadSeqs,
-        [threadId]: Math.max(current.threadSeqs[threadId] ?? 0, response.next_seq),
-      },
-      logs: { ...current.logs, [threadId]: log },
-      threadErrors: omitKey(current.threadErrors, threadId),
-    });
   } catch (error) {
     const current = getState();
     const proto = toProtoError(error);

@@ -10,7 +10,13 @@ import type {
 } from "@/gen";
 
 import { H4rnRequestError, protoError } from "./errors";
-import { emitHarnessFrame, emitProxyFrame, emitScheduleFrame, emitUsageFrame } from "./frames";
+import {
+  emitHarnessFrame,
+  emitImportFrame,
+  emitProxyFrame,
+  emitScheduleFrame,
+  emitUsageFrame,
+} from "./frames";
 import type {
   ClientOptions,
   ConnectionSnapshot,
@@ -402,6 +408,15 @@ function isIdempotent(body: ClientRequest): boolean {
  */
 const WAKE_MIN_ATTEMPT_MS = 1_000;
 
+/**
+ * Characters of one outgoing frame sent per chunk.
+ *
+ * 96K characters stay below a framed transport's 512 KiB even when every one
+ * is three UTF-8 bytes; JSON escaping in the envelope adds at most a factor of
+ * two on ASCII text.
+ */
+const OUTBOUND_CHUNK_CHARS = 96 * 1024;
+
 const DEFAULT_DEVICE: DeviceInfo = {
   device_id: "web",
   name: "h4rn web",
@@ -424,6 +439,26 @@ const FATAL_CLOSE_CODES = new Map<number, { message: string; hint: string }>([
  * All protocol knowledge lives here and in `projection.ts`; components only
  * consume the store.
  */
+/**
+ * Splits `text` into pieces of at most `size` UTF-16 code units, never
+ * between the two halves of a surrogate pair: a lone half would serialise as
+ * an unpaired `\ud83d` escape that the daemon's JSON parser rejects.
+ */
+export function chunkText(text: string, size: number): Array<[number, string, boolean]> {
+  const pieces: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(text.length, start + size);
+    if (end < text.length && end - start > 1) {
+      const code = text.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    }
+    pieces.push(text.slice(start, end));
+    start = end;
+  }
+  return pieces.map((piece, index) => [index, piece, index === pieces.length - 1]);
+}
+
 export class H4rnClient {
   private readonly options: Required<
     Pick<ClientOptions, "url" | "transportLabel" | "requestTimeoutMs">
@@ -436,6 +471,8 @@ export class H4rnClient {
   private readonly terminalListeners = new Set<(notice: TerminalExitNotice) => void>();
   private readonly readyListeners = new Set<(info: ReadyInfo) => void>();
   private readonly pending = new Map<number, Pending>();
+  /** The server frame being joined from chunks, if any. */
+  private receivedChunk: { index: number; text: string } | null = null;
 
   private transport: Transport | null = null;
   private frameId = 0;
@@ -606,6 +643,27 @@ export class H4rnClient {
     this.transport.send(data);
   }
 
+  /**
+   * Sends one JSON frame, split into `chunk` envelopes when it is too large
+   * for one transport frame.
+   *
+   * A long prompt is the reason this exists: the paired transport refuses a
+   * frame over 512 KiB and closes the session. The daemon joins the pieces
+   * back into the exact original text and handles it once, so nothing is
+   * shortened or sent twice.
+   */
+  private sendFrame(text: string, id: number): void {
+    const transport = this.transport;
+    if (!transport) return;
+    if (text.length <= OUTBOUND_CHUNK_CHARS) {
+      transport.send(text);
+      return;
+    }
+    for (const [index, piece, last] of chunkText(text, OUTBOUND_CHUNK_CHARS)) {
+      transport.send(JSON.stringify({ id, chunk: { index, last, data: piece } }));
+    }
+  }
+
   onReady(listener: (info: ReadyInfo) => void): () => void {
     this.readyListeners.add(listener);
     return () => this.readyListeners.delete(listener);
@@ -748,7 +806,7 @@ export class H4rnClient {
     this.pending.set(id, pending);
 
     try {
-      this.transport.send(JSON.stringify(frame));
+      this.sendFrame(JSON.stringify(frame), id);
     } catch (error) {
       clearTimeout(pending.timer);
       this.pending.delete(id);
@@ -773,6 +831,7 @@ export class H4rnClient {
     if (this.stopped || this.fatal) return;
 
     this.socketOpen = false;
+    this.receivedChunk = null;
     this.attemptStartedAt = Date.now();
     const handlers: TransportHandlers = {
       onOpen: () => {
@@ -926,7 +985,55 @@ export class H4rnClient {
     for (const listener of this.binaryListeners) listener(data);
   }
 
+  /**
+   * Joins a frame the daemon split for the paired transport.
+   *
+   * A frame over one transport frame arrives as `chunk` envelopes; they carry
+   * the exact text of the original frame, so joining them loses nothing. Any
+   * other frame returns false and is parsed normally.
+   */
+  private receiveChunk(data: string): boolean {
+    if (!data.includes('"chunk"')) return false;
+    let frame: { kind?: unknown; index?: unknown; last?: unknown; data?: unknown };
+    try {
+      frame = JSON.parse(data) as typeof frame;
+    } catch {
+      return false;
+    }
+    if (
+      frame.kind !== "chunk" ||
+      typeof frame.index !== "number" ||
+      typeof frame.last !== "boolean" ||
+      typeof frame.data !== "string"
+    ) {
+      return false;
+    }
+    if (frame.index === 0) {
+      this.receivedChunk = { index: 0, text: frame.data };
+    } else if (this.receivedChunk === null || frame.index !== this.receivedChunk.index + 1) {
+      this.receivedChunk = null;
+      this.patchSnapshot({
+        error: protoError(
+          "internal",
+          "The daemon's chunked frame arrived out of order.",
+          "The connection will retry.",
+        ),
+      });
+      return true;
+    } else {
+      this.receivedChunk.index = frame.index;
+      this.receivedChunk.text += frame.data;
+    }
+    if (frame.last && this.receivedChunk !== null) {
+      const joined = this.receivedChunk.text;
+      this.receivedChunk = null;
+      this.handleMessage(joined);
+    }
+    return true;
+  }
+
   private handleMessage(data: string): void {
+    if (this.receiveChunk(data)) return;
     this.patchSnapshot({ lastEventAt: Date.now() });
 
     let frame: ServerFrame;
@@ -1008,6 +1115,13 @@ export class H4rnClient {
     // reconnecting view re-reads the list instead of replaying this.
     if (frame.kind === "schedule_event") {
       emitScheduleFrame(frame.event);
+      return;
+    }
+
+    // An import run's progress; a reconnecting client asks the daemon for the
+    // current run instead of replaying this.
+    if (frame.kind === "import_event") {
+      emitImportFrame(frame.event);
       return;
     }
 

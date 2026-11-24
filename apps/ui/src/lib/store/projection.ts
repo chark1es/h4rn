@@ -97,6 +97,13 @@ export type StreamTurn = {
   usage: Usage | null;
   /** Files this turn changed, when the daemon was able to snapshot them. */
   changes: FsTurnChanges | null;
+  /**
+   * True for a turn that came from an imported conversation.
+   *
+   * Its messages carry the time they were written there, and none of them is
+   * live: an imported thread has no session until the person writes again.
+   */
+  imported?: boolean;
 };
 
 export type PendingMessage = {
@@ -269,6 +276,12 @@ export function foldEvent(
 
     case "item_completed": {
       const { item, turn_id } = event;
+      // An imported message carries when it was written in its own
+      // conversation; a live one has no source time and keeps the journal's.
+      const itemAt = event.at ?? at;
+      // Imported history was already finished when it was written, and no
+      // turn completion will follow it, so its turn settles here.
+      const imported = event.at != null;
       if (item.kind === "message") {
         if (item.role === "user") {
           if (messageExists(log, item.item_id)) return log;
@@ -277,9 +290,9 @@ export function foldEvent(
           );
           if (pendingIndex >= 0) log.pending.splice(pendingIndex, 1);
           log.pending = log.pending.filter((message) => message.id !== item.item_id);
-          log.turns.push({
+          const cue: StreamTurn = {
             id: `cue:user:${item.item_id}`,
-            startedAt: at,
+            startedAt: itemAt,
             status: "completed",
             items: [
               {
@@ -293,11 +306,17 @@ export function foldEvent(
             ],
             usage: null,
             changes: null,
-          });
+          };
+          if (imported) cue.imported = true;
+          log.turns.push(cue);
           return log;
         }
 
-        const turn = ensureTurn(log, turn_id, at);
+        const turn = ensureTurn(log, turn_id, itemAt);
+        if (imported) {
+          turn.imported = true;
+          turn.status = "completed";
+        }
         const existing = turn.items.find(
           (candidate): candidate is MessageItem =>
             candidate.kind === "message" && candidate.itemId === item.item_id,
@@ -318,7 +337,11 @@ export function foldEvent(
         return log;
       }
 
-      const turn = ensureTurn(log, turn_id, at);
+      const turn = ensureTurn(log, turn_id, itemAt);
+      if (imported) {
+        turn.imported = true;
+        turn.status = "completed";
+      }
       if (item.kind === "tool_call") {
         upsertTool(turn, item.tool_call);
       } else {

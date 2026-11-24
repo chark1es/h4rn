@@ -1588,4 +1588,20 @@ request_id: string, } | { "type": "get_guest_settings" } | { "type": "set_guest_
 /**
  * New setting. Turning it off disables every live link at once.
  */
-enabled: boolean, };
+enabled: boolean, } | { "type": "scan_session_imports", 
+/**
+ * Host to scan.
+ */
+host: HostId, } | { "type": "import_sessions", 
+/**
+ * Host to import on.
+ */
+host: HostId, 
+/**
+ * `ImportProject::key` values the person checked.
+ */
+projects: Array<string>, } | { "type": "session_import_status", 
+/**
+ * Host to ask.
+ */
+host: HostId, };

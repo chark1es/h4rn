@@ -366,6 +366,14 @@ pub struct ThreadSummary {
     pub title: String,
     /// Workspace path on the host.
     pub workspace_path: String,
+    /// Checkout this thread belongs to for grouping, when it differs from the
+    /// workspace it runs in.
+    ///
+    /// A conversation imported from a linked worktree still runs in that
+    /// worktree, but it belongs beside the main checkout in the sidebar.
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_path: Option<String>,
     /// Current git branch of the workspace, when it has one.
     #[serde(default)]
     #[ts(optional)]
@@ -819,6 +827,7 @@ mod tests {
             agent_id: None,
             title: "usage limit".into(),
             workspace_path: "/tmp/work".into(),
+            project_path: None,
             branch: Some("h4rn/usage-limit".into()),
             model: "claude-sonnet-5".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,

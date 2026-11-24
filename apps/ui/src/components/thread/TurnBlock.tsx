@@ -15,7 +15,7 @@ import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import { ChangeSetCard } from "@/features/changes/ChangeSetCard";
 import type { PlanStep, ThreadSummary } from "@/gen";
 import { useSmoothText } from "@/hooks/use-smooth-text";
-import { glyphForAgentState } from "@/lib/agent";
+import { agentStateIsActive, glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { absoluteTime, countdown } from "@/lib/format";
 import type {
@@ -186,7 +186,8 @@ export function TurnBlock({
     .find((item) => item.kind === "tool" && item.toolCall.status === "running");
   const toolName = runningTool?.kind === "tool" ? runningTool.toolCall.name : undefined;
   const glyph = glyphForAgentState(summary.agent_state, toolName);
-  const live = turn.status === "running" && summary.agent_state !== "awaiting_approval";
+  const live =
+    turn.status === "running" && !turn.imported && agentStateIsActive(summary.agent_state);
   const stopped = stoppedNotice(turn.status);
   const failed = turn.status === "failed" || turn.status === "interrupted";
 
@@ -261,7 +262,7 @@ export function TurnBlock({
         <ChangeSetCard turn={turn} summary={summary} />
       ) : null}
 
-      {staleAt !== null && turn.status === "running" ? (
+      {staleAt !== null && turn.status === "running" && !turn.imported ? (
         <div className="q-live-line">
           <PauseIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>

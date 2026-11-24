@@ -6221,6 +6221,155 @@ fieldset.q-seg-fs {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Import: discovered projects, selection and run progress. */
+.q-imp {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.q-imp-bar,
+.q-imp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.q-imp-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.q-imp-link {
+  padding: 2px 4px;
+  border-radius: 5px;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+
+.q-imp-link:hover,
+.q-imp-link:focus-visible {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.q-imp-link.on {
+  color: var(--fg);
+}
+
+.q-imp-list {
+  max-height: 224px;
+  overflow: auto;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  padding: 4px;
+}
+
+.q-imp-group + .q-imp-group {
+  margin-top: 4px;
+}
+
+.q-imp-group-h {
+  padding: 6px 8px 2px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.q-imp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+
+.q-imp-row:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.q-imp-row.done {
+  color: var(--fg-3);
+  cursor: default;
+}
+
+.q-imp-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.q-imp-nm {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.q-imp-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.q-imp-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.q-imp-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.q-imp-progress {
+  height: 2px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.q-imp-progress-bar {
+  display: block;
+  height: 100%;
+  background: var(--fg-3);
+  transition: width 160ms ease;
+}
+
+.q-imp-note {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* Limits a scan hit, in the same quiet voice as the list's metadata. */
+.q-imp-warn {
+  display: grid;
+  gap: 3px;
+  padding: 2px 2px 0;
+}
+.q-imp .q-imp-warn p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--fg-3);
+  text-wrap: pretty;
+}
+
+.q-imp-row:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
 .q-pg-rename {
   height: 28px;
   margin: 0 4px 0 6px;
