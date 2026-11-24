@@ -2452,13 +2452,17 @@ mod watch_grant {
 
     #[derive(Default)]
     struct WatchSource {
-        failing: std::sync::Mutex<bool>,
+        failures: std::sync::Mutex<usize>,
     }
 
     impl WatchSource {
-        /// The PR's only check starts failing, which the watch reports.
+        /// One more check starts failing, which the watch reports.
         fn bump(&self) {
-            *self.failing.lock().expect("failing") = true;
+            *self.failures.lock().expect("failures") += 1;
+        }
+
+        fn failing(&self) -> usize {
+            *self.failures.lock().expect("failures")
         }
 
         fn checks(
@@ -2466,34 +2470,46 @@ mod watch_grant {
             repo: &h4rn_protocol::ForgeRepoRef,
             number: u32,
         ) -> h4rn_protocol::ForgeChecks {
-            let failing = *self.failing.lock().expect("failing");
-            h4rn_protocol::ForgeChecks {
-                repo: repo.clone(),
-                number,
-                head_sha: "sha-1".into(),
-                state: if failing {
-                    h4rn_protocol::ForgeChecksState::Failing
-                } else {
-                    h4rn_protocol::ForgeChecksState::Passing
-                },
-                total: 1,
-                passed: u32::from(!failing),
-                failed: u32::from(failing),
-                pending: 0,
-                checks: vec![h4rn_protocol::ForgeCheck {
-                    name: "ci".into(),
-                    status: if failing {
-                        h4rn_protocol::ForgeCheckStatus::Failure
-                    } else {
-                        h4rn_protocol::ForgeCheckStatus::Success
-                    },
+            let failures = self.failing();
+            let checks = if failures == 0 {
+                vec![h4rn_protocol::ForgeCheck {
+                    name: "ci-0".into(),
+                    status: h4rn_protocol::ForgeCheckStatus::Success,
                     details_url: None,
                     description: None,
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
                     required: Some(true),
-                }],
+                }]
+            } else {
+                (0..failures)
+                    .map(|index| h4rn_protocol::ForgeCheck {
+                        name: format!("ci-{index}"),
+                        status: h4rn_protocol::ForgeCheckStatus::Failure,
+                        details_url: None,
+                        description: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                        required: Some(true),
+                    })
+                    .collect()
+            };
+            h4rn_protocol::ForgeChecks {
+                repo: repo.clone(),
+                number,
+                head_sha: "sha-1".into(),
+                state: if failures > 0 {
+                    h4rn_protocol::ForgeChecksState::Failing
+                } else {
+                    h4rn_protocol::ForgeChecksState::Passing
+                },
+                total: checks.len() as u32,
+                passed: u32::from(failures == 0),
+                failed: failures as u32,
+                pending: 0,
+                checks,
                 rerun: h4rn_protocol::ForgeRerunSupport {
                     supported: false,
                     reason: Some("scripted forge".into()),
@@ -2523,8 +2539,8 @@ mod watch_grant {
             repo: &h4rn_protocol::ForgeRepoRef,
             number: u32,
         ) -> Result<h4rn_protocol::ForgePullRequest, PrSourceError> {
-            let failing = *self.failing.lock().expect("failing");
-            let head_sha = if failing { "sha-2" } else { "sha-1" }.to_owned();
+            let failing = self.failing();
+            let head_sha = format!("sha-{failing}");
             Ok(h4rn_protocol::ForgePullRequest {
                 summary: h4rn_protocol::ForgePrSummary {
                     repo: repo.clone(),
@@ -2537,7 +2553,7 @@ mod watch_grant {
                     head_sha: Some(head_sha),
                     updated_at: chrono::Utc::now(),
                     web_url: format!("{}/pull/{number}", repo.web_url()),
-                    checks: if failing {
+                    checks: if failing > 0 {
                         h4rn_protocol::ForgeChecksState::Failing
                     } else {
                         h4rn_protocol::ForgeChecksState::Passing
