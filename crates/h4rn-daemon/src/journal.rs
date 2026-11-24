@@ -927,9 +927,16 @@ impl Journal for SqliteJournal {
         max_bytes: usize,
     ) -> Result<WirePage, JournalError> {
         // The recursive walk takes one row at a time over the (thread_id, seq)
-        // index and stops as soon as the page's text would pass the budget, so
-        // the database reads one page instead of the whole replay. The first
-        // row is taken unconditionally, which keeps an oversized event whole.
+        // index and stops as soon as the page's stored text would pass the
+        // budget, so the database reads one page instead of the whole replay.
+        // The first row is taken unconditionally, which keeps an oversized
+        // event whole.
+        //
+        // The budget counts each row's stored `event_json` bytes, not the
+        // event re-serialized by this build. A page boundary for history
+        // written by an older protocol version can therefore land elsewhere
+        // than a re-serialized count would put it; nothing is lost either way,
+        // because the next page starts at the following seq.
         let rows = sqlx::query(
             "WITH RECURSIVE page(seq, event_json, used) AS (
                  SELECT seq, event_json, length(CAST(event_json AS BLOB))
@@ -2146,25 +2153,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_long_thread_pages_exactly_where_it_did_before() {
+    async fn a_thread_with_gaps_pages_where_the_old_pager_did() {
         const PAGE: usize = 64 * 1024;
         let journal = SqliteJournal::in_memory().await.unwrap();
-        let thread_id = ThreadId::new("th_long");
-        journal.upsert_thread(&meta("th_long")).await.unwrap();
-        let mut wire = Vec::new();
+        let first = ThreadId::new("th_gaps_a");
+        let second = ThreadId::new("th_gaps_b");
+        journal.upsert_thread(&meta("th_gaps_a")).await.unwrap();
+        journal.upsert_thread(&meta("th_gaps_b")).await.unwrap();
+        // Both threads share one AUTOINCREMENT sequence, as real threads do,
+        // so each thread's own seqs have gaps wherever the other wrote.
         for index in 0..60 {
-            wire.push(page_event(&thread_id, index, 4 * 1024 + index));
+            let thread_id = if index % 2 == 0 { &first } else { &second };
+            journal
+                .append_wire(thread_id, &[page_event(thread_id, index, 4 * 1024 + index)])
+                .await
+                .unwrap();
         }
-        journal.append_wire(&thread_id, &wire).await.unwrap();
+        // A deleted row leaves a second kind of hole, deeper than a single
+        // missing neighbour, that `seq + 1` stepping cannot cross.
+        let before_delete = journal.read_wire_since(&first, 0).await.unwrap();
+        let removed = before_delete[10].seq;
+        sqlx::query("DELETE FROM daemon_wire_events WHERE thread_id = ? AND seq = ?")
+            .bind(first.as_str())
+            .bind(removed as i64)
+            .execute(&journal.pool)
+            .await
+            .unwrap();
 
-        let all = journal.read_wire_since(&thread_id, 0).await.unwrap();
+        let all = journal.read_wire_since(&first, 0).await.unwrap();
+        assert!(
+            all.iter().any(|event| event.seq > removed),
+            "events continue after the deleted row"
+        );
+        assert!(
+            all.windows(2).any(|pair| pair[1].seq > pair[0].seq + 1),
+            "the thread's seqs are not contiguous"
+        );
         let expected = old_pages(&all, PAGE);
 
         let mut after = 0;
         let mut actual = Vec::new();
         loop {
             let page = journal
-                .read_wire_page(&thread_id, after, 4096, PAGE)
+                .read_wire_page(&first, after, 4096, PAGE)
                 .await
                 .unwrap();
             assert!(!page.events.is_empty(), "a non-final page is never empty");
@@ -2176,6 +2207,46 @@ mod tests {
             }
         }
         assert_eq!(actual, expected, "pages and cursors match the old pager");
+    }
+
+    #[tokio::test]
+    async fn a_page_takes_the_event_that_exactly_fills_its_budget() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_exact");
+        journal.upsert_thread(&meta("th_exact")).await.unwrap();
+        journal
+            .append_wire(
+                &thread_id,
+                &[
+                    page_event(&thread_id, 0, 6 * 1024),
+                    page_event(&thread_id, 1, 5 * 1024),
+                    page_event(&thread_id, 2, 6 * 1024),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // The budget counts the stored text, so read those exact lengths: the
+        // first two events have to fit it to the byte.
+        let stored: Vec<i64> = sqlx::query_scalar(
+            "SELECT length(CAST(event_json AS BLOB)) FROM daemon_wire_events
+              WHERE thread_id = ? ORDER BY seq",
+        )
+        .bind(thread_id.as_str())
+        .fetch_all(&journal.pool)
+        .await
+        .unwrap();
+        let budget = (stored[0] + stored[1]) as usize;
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, budget)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.events.len(),
+            2,
+            "an event that exactly fills the remaining budget is included"
+        );
+        assert!(page.more, "the third event does not fit");
     }
 
     #[tokio::test]
