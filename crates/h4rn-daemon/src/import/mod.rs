@@ -998,8 +998,14 @@ impl ImportedSources {
     }
 
     /// Whether the claim stored for this path is one this daemon made.
+    ///
+    /// Only a session-id claim is matched by path. A path-keyed claim pins the
+    /// file's size and content fingerprint, so a transcript that kept growing
+    /// is a new conversation and must be offered again, just as the scan did
+    /// before it looked at paths at all.
     fn contains_path(&self, path: &Path) -> bool {
         self.key_for_path(path)
+            .filter(|key| !h4rn_protocol::path_keyed_source_key(key))
             .is_some_and(|key| self.contains(key))
     }
 

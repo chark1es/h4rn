@@ -101,7 +101,9 @@ again only adds conversations h4rn has not seen. The id used for the claim comes
 from the full parse, not the scan's head, so two differently named copies whose
 session id sits in a later record still import once. The scan also checks the
 identity stored for each transcript, not only the one its head revealed, so an
-already imported conversation is never listed again. A source is claimed and its
+already imported conversation is not listed again. A transcript that named no
+id keeps its path, size and content fingerprint as its identity, so one that
+keeps growing is offered again as a new conversation. A source is claimed and its
 thread written in one transaction: two copies of a conversation in one run, two
 runs at once, or a crash between the claim and the write cannot produce a second
 thread. Progress appears in the dialog, with any limit a scan hit, and the import
