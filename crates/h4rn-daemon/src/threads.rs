@@ -5912,6 +5912,7 @@ impl Inner {
                                 text: active.text.clone(),
                                 attachments: Vec::new(),
                             },
+                            at: None,
                         });
                     }
                     // The transport report belongs to the cancel, not to a

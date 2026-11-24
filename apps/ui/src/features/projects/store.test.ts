@@ -41,6 +41,7 @@ function thread(
     context_fill_percent: null,
     resume_at: null,
     limit: null,
+    pending_guest_requests: 0,
   } as ThreadSummary;
   return { ...base, ...overrides } as ThreadSummary;
 }
