@@ -148,7 +148,8 @@ pub use transport::{
 };
 pub use usage::*;
 pub use worktrees::{
-    SkippedWorktree, TrackedWorktree, WorktreeAccess, WorktreeOrigin, WorktreeStatus,
+    DEFAULT_BRANCH_PREFIX, SkippedWorktree, TrackedWorktree, WorktreeAccess, WorktreeOrigin,
+    WorktreeSettings, WorktreeStatus,
 };
 
 /// Version of the wire protocol implemented by this crate.

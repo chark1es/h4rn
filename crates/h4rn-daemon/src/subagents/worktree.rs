@@ -7,28 +7,12 @@
 //! branch too, because nobody asked for that work.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use h4rn_protocol::SubagentFileChange;
 
-/// A `git` command that ignores inherited repository-location variables
-/// (`GIT_DIR`, `GIT_INDEX_FILE`, ...), so it always acts on the repository it
-/// names with `-C` (a daemon started from a hook would otherwise inherit them).
-fn git_command() -> Command {
-    let mut command = Command::new("git");
-    crate::worktrees::git::sanitize(&mut command);
-    command
-}
-
 /// Whether `path` is inside a git work tree.
 pub fn is_git_repo(path: &Path) -> bool {
-    git_command()
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    crate::worktrees::git::is_git_repo(path)
 }
 
 /// Creates a worktree at `dest` on a new `branch` from `repo`'s `HEAD`.
@@ -41,7 +25,7 @@ pub fn create(repo: &Path, dest: &Path, branch: &str) -> Result<(), String> {
             )
         })?;
     }
-    let output = git_command()
+    let output = crate::worktrees::git::git_command()
         .arg("-C")
         .arg(repo)
         .args(["worktree", "add", "-b", branch])

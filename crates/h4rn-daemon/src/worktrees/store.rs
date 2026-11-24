@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use h4rn_protocol::WorktreeOrigin;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row as _, SqlitePool};
 
@@ -31,6 +32,9 @@ pub struct StoredWorktree {
     pub repo: String,
     /// Branch when last seen.
     pub branch: Option<String>,
+    /// Who created it. A thread worktree h4rn made is `thread`, so it stays
+    /// listed after its thread is deleted.
+    pub origin: WorktreeOrigin,
     /// First observation.
     pub first_seen: DateTime<Utc>,
     /// Latest observation.
@@ -43,6 +47,22 @@ pub struct StoredWorktree {
 #[derive(Clone, Debug)]
 pub struct WorktreeStore {
     pool: SqlitePool,
+}
+
+fn origin_slug(origin: WorktreeOrigin) -> &'static str {
+    match origin {
+        WorktreeOrigin::Subagent => "subagent",
+        WorktreeOrigin::Thread => "thread",
+        WorktreeOrigin::Harness => "harness",
+    }
+}
+
+fn origin_from_slug(slug: &str) -> WorktreeOrigin {
+    match slug {
+        "subagent" => WorktreeOrigin::Subagent,
+        "thread" => WorktreeOrigin::Thread,
+        _ => WorktreeOrigin::Harness,
+    }
 }
 
 fn parse_time(text: &str) -> DateTime<Utc> {
@@ -111,11 +131,15 @@ impl WorktreeStore {
     }
 
     /// Records that `thread_id` used the worktree at `path`.
+    // Every column is written together in one transaction; a struct would only
+    // move the argument list to the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record(
         &self,
         path: &str,
         repo: &str,
         branch: Option<&str>,
+        origin: WorktreeOrigin,
         thread_id: &str,
         subagent_id: Option<&str>,
         now: DateTime<Utc>,
@@ -124,15 +148,24 @@ impl WorktreeStore {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO worktrees (path, repo, branch, origin, first_seen, last_seen)
-             VALUES (?, ?, ?, 'harness', ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(path) DO UPDATE SET
                 repo = excluded.repo,
                 branch = excluded.branch,
+                -- A thread's own checkout must never be relabelled as a
+                -- harness-made one; the stronger owner wins whichever arrived
+                -- first.
+                origin = CASE
+                    WHEN worktrees.origin = 'harness' AND excluded.origin <> 'harness'
+                    THEN excluded.origin
+                    ELSE worktrees.origin
+                END,
                 last_seen = excluded.last_seen",
         )
         .bind(path)
         .bind(repo)
         .bind(branch)
+        .bind(origin_slug(origin))
         .bind(&now)
         .bind(&now)
         .execute(&mut *tx)
@@ -156,7 +189,7 @@ impl WorktreeStore {
     /// Loads every observed worktree with its accesses.
     pub async fn load(&self) -> Result<Vec<StoredWorktree>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT path, repo, branch, first_seen, last_seen FROM worktrees
+            "SELECT path, repo, branch, origin, first_seen, last_seen FROM worktrees
              ORDER BY last_seen DESC",
         )
         .fetch_all(&self.pool)
@@ -167,6 +200,7 @@ impl WorktreeStore {
                 path: row.try_get("path")?,
                 repo: row.try_get("repo")?,
                 branch: row.try_get("branch")?,
+                origin: origin_from_slug(&row.try_get::<String, _>("origin")?),
                 first_seen: parse_time(&row.try_get::<String, _>("first_seen")?),
                 last_seen: parse_time(&row.try_get::<String, _>("last_seen")?),
                 accesses: Vec::new(),
@@ -215,18 +249,127 @@ mod tests {
         let store = WorktreeStore::in_memory().await.expect("store");
         let now = Utc::now();
         store
-            .record("/r/wt", "/r", Some("feat"), "th_1", None, now)
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Thread,
+                "th_1",
+                None,
+                now,
+            )
             .await
             .expect("record");
         store
-            .record("/r/wt", "/r", Some("feat"), "th_2", Some("sa_1"), now)
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Harness,
+                "th_2",
+                Some("sa_1"),
+                now,
+            )
             .await
             .expect("record again");
         let loaded = store.load().await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].accesses.len(), 2);
         assert_eq!(loaded[0].branch.as_deref(), Some("feat"));
+        // The first origin wins, so a thread's own worktree stays `thread`.
+        assert_eq!(loaded[0].origin, WorktreeOrigin::Thread);
         store.delete("/r/wt").await.expect("delete");
         assert!(store.load().await.expect("load").is_empty());
+    }
+
+    /// A worktree first seen while an agent worked in it becomes the thread's
+    /// own as soon as the thread's workspace names it; a later harness touch
+    /// never takes that back.
+    #[tokio::test]
+    async fn a_thread_origin_beats_a_harness_origin_whichever_is_recorded_first() {
+        let now = Utc::now();
+        let store = WorktreeStore::in_memory().await.expect("store");
+
+        store
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Harness,
+                "th_1",
+                None,
+                now,
+            )
+            .await
+            .expect("harness first");
+        store
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Thread,
+                "th_1",
+                None,
+                now,
+            )
+            .await
+            .expect("thread second");
+        let loaded = store.load().await.expect("load");
+        assert_eq!(
+            loaded[0].origin,
+            WorktreeOrigin::Thread,
+            "a thread's own checkout is not relabelled by an earlier harness sighting"
+        );
+
+        store
+            .record(
+                "/r/wt",
+                "/r",
+                Some("feat"),
+                WorktreeOrigin::Harness,
+                "th_1",
+                None,
+                now,
+            )
+            .await
+            .expect("harness third");
+        assert_eq!(
+            store.load().await.expect("load")[0].origin,
+            WorktreeOrigin::Thread,
+            "a later harness sighting never takes the thread origin back"
+        );
+
+        store
+            .record(
+                "/r/sub",
+                "/r",
+                Some("h4rn/sa-1"),
+                WorktreeOrigin::Harness,
+                "th_1",
+                Some("sa_1"),
+                now,
+            )
+            .await
+            .expect("harness");
+        store
+            .record(
+                "/r/sub",
+                "/r",
+                Some("h4rn/sa-1"),
+                WorktreeOrigin::Subagent,
+                "th_1",
+                Some("sa_1"),
+                now,
+            )
+            .await
+            .expect("subagent");
+        let subagent = store
+            .load()
+            .await
+            .expect("load")
+            .into_iter()
+            .find(|worktree| worktree.path == "/r/sub")
+            .expect("subagent worktree");
+        assert_eq!(subagent.origin, WorktreeOrigin::Subagent);
     }
 }

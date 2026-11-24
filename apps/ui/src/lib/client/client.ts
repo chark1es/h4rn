@@ -351,7 +351,9 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktr
     ? Extract<ResponseBody, { type: "worktrees_cleared" }>
     : T extends "switch_thread_harness"
       ? Extract<ResponseBody, { type: "thread_switched" }>
-      : ResponseOfRest<T>;
+      : T extends "get_worktree_settings" | "set_worktree_settings"
+        ? Extract<ResponseBody, { type: "worktree_settings" }>
+        : ResponseOfRest<T>;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

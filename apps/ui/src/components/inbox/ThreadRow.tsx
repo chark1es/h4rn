@@ -1,4 +1,4 @@
-import { MoreHorizontalIcon, PlayIcon } from "lucide-react";
+import { GitBranchIcon, MoreHorizontalIcon, PlayIcon } from "lucide-react";
 import type { MouseEvent } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
@@ -140,6 +140,12 @@ export function ThreadRow({
               ? harnessLabel(thread.harness)
               : `${host?.name ?? thread.host} · ${harnessLabel(thread.harness)}`}
           </span>
+          {thread.branch ? (
+            <span className="q-row-branch" title={thread.branch}>
+              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              <span className="q-mono">{thread.branch}</span>
+            </span>
+          ) : null}
           <span className={cn("q-row-status", status.tone)}>{statusText}</span>
         </span>
         {isDone ? (

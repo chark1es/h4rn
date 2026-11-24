@@ -329,4 +329,5 @@ export type * from "./UsageTotals";
 export type * from "./WorktreeAccess";
 export type * from "./WorktreeOrigin";
 export type * from "./WorktreeRequest";
+export type * from "./WorktreeSettings";
 export type * from "./WorktreeStatus";

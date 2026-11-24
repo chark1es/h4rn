@@ -769,6 +769,11 @@ pub enum ResponseBody {
         /// The fresh list after clearing.
         worktrees: Vec<crate::TrackedWorktree>,
     },
+    /// This machine's settings for new thread worktrees.
+    WorktreeSettings {
+        /// Current settings, as saved.
+        settings: crate::WorktreeSettings,
+    },
     /// Registered projects on one host, oldest first.
     Projects {
         /// Projects.

@@ -700,6 +700,16 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// Whether one configured instance ignores the thread's workspace because
+    /// its directory is fixed (an ACP agent configured with a fixed folder).
+    ///
+    /// A thread asking for a new worktree cannot give such an agent the new
+    /// checkout, so the daemon refuses the request instead of creating a
+    /// checkout nothing runs in. Built-in adapters answer `false`.
+    fn instance_fixes_workspace(&self, _instance: &str) -> bool {
+        false
+    }
+
     /// Resolves one configured instance, for a thread whose workspace is
     /// `workspace`, into the fingerprint a thread stores beside its resume id
     /// and the exact configuration a start must launch.

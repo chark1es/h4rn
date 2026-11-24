@@ -75,6 +75,7 @@ import type {
   UsageReport,
   UsageSeries,
   UsageTotals,
+  WorktreeSettings,
 } from "@/gen";
 import { decodeBinaryFrame, encodeBinaryFrame, BinaryKind as TerminalBinaryKind } from "./binary";
 import { MockForge } from "./mockForge";
@@ -1945,6 +1946,7 @@ class MockDaemon {
   private acpSpecs = new Map<string, AcpAgentSpec>();
   private harnessUpdating = new Set<HarnessKind>();
   private worktrees: TrackedWorktree[] = mockWorktrees();
+  private worktreeSettings: WorktreeSettings = { location: null, branch_prefix: "h4rn/" };
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
   private networkAccess = { enabled: false };
   /** Devices paired directly; seeded so Settings shows a realistic list. */
@@ -3043,6 +3045,13 @@ class MockDaemon {
       }
       case "list_worktrees":
         this.ok(frame.id, { type: "worktrees", worktrees: this.worktrees });
+        return;
+      case "get_worktree_settings":
+        this.ok(frame.id, { type: "worktree_settings", settings: this.worktreeSettings });
+        return;
+      case "set_worktree_settings":
+        this.worktreeSettings = body.settings;
+        this.ok(frame.id, { type: "worktree_settings", settings: this.worktreeSettings });
         return;
       case "clear_worktrees": {
         const { removed, skipped } = clearMockWorktrees(

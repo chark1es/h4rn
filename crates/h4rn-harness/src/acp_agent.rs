@@ -101,6 +101,11 @@ impl Harness for GenericAcpHarness {
         })
     }
 
+    fn instance_fixes_workspace(&self, instance: &str) -> bool {
+        self.config(instance)
+            .is_some_and(|agent| matches!(agent.working_dir, AcpWorkingDir::FixedPath { .. }))
+    }
+
     fn resolve_instance(&self, instance: &str, workspace: &Path) -> Option<InstanceSnapshot> {
         self.config(instance)
             .map(|agent| InstanceSnapshot::new(command_fingerprint(&agent, workspace), agent))

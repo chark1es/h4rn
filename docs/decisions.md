@@ -562,9 +562,10 @@ orphaned harnesses.
 
 **Implementation note.** Subagent isolation ships today: `spawn_subagent` creates a worktree at
 `<data_dir>/subagents/<id>/worktree` on branch `h4rn/sa-<short id>`, and removes it at
-settlement. Top-level thread creation does not: `CreateThread` with `worktree` set returns
-`NotImplemented`, so a new thread runs in the absolute `workspace_path` it was given. This ADR
-stays Proposed until checkpoints and CreateThread worktrees land.
+settlement. Top-level thread creation also creates one: `CreateThread` with `worktree` set makes a
+checkout from the project's current `HEAD`, on a generated or named branch, and the thread's
+workspace becomes that checkout (see [docs/worktrees.md](worktrees.md)). This ADR stays Proposed
+only because checkpoints have not landed.
 
 Before and after each turn the daemon writes a checkpoint as a git commit object under
 `refs/h4rn/checkpoints/<scope>/<ordinal>`, built with a temporary index (`write-tree`,

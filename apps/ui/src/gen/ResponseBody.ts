@@ -102,6 +102,7 @@ import type { TurnId } from "./TurnId";
 import type { UploadState } from "./UploadState";
 import type { UploadTicket } from "./UploadTicket";
 import type { UsageReport } from "./UsageReport";
+import type { WorktreeSettings } from "./WorktreeSettings";
 
 /**
  * Successful response payloads.
@@ -727,7 +728,11 @@ skipped: Array<SkippedWorktree>,
 /**
  * The fresh list after clearing.
  */
-worktrees: Array<TrackedWorktree>, } | { "type": "projects", 
+worktrees: Array<TrackedWorktree>, } | { "type": "worktree_settings", 
+/**
+ * Current settings, as saved.
+ */
+settings: WorktreeSettings, } | { "type": "projects", 
 /**
  * Projects.
  */
