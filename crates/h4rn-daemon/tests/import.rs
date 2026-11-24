@@ -1232,6 +1232,161 @@ async fn two_differently_named_copies_with_a_late_session_id_import_once() {
 }
 
 #[tokio::test]
+async fn an_imported_session_with_a_late_id_is_not_offered_again() {
+    // The scan's head read stops before the record that names the session, so
+    // its provisional identity is the file name. The import claims the
+    // conversation under the full-parse identity. A later scan has to recognise
+    // the transcript anyway, or the session is offered a second time and only
+    // skipped after the person selects it again.
+    let home = tempfile::tempdir().expect("home");
+    let home_path = home.path().to_path_buf();
+    let workspace = home_path.join("code/api");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let (_, manager, import) = services(
+        &home_path,
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let cwd = workspace.display().to_string();
+    let mut records = Vec::new();
+    for index in 0..250 {
+        let kind = if index % 2 == 0 { "user" } else { "assistant" };
+        let mut record = json!({
+            "type": kind,
+            "cwd": cwd,
+            "timestamp": "2026-11-18T09:00:00Z",
+            "message": {
+                "role": kind,
+                "content": [{"type": "text", "text": format!("message {index}")}],
+            },
+        });
+        if kind == "assistant" {
+            record["message"]["model"] = json!("claude-sonnet-5");
+        }
+        if index == 249 {
+            record["sessionId"] = json!("late-session");
+        }
+        records.push(record);
+    }
+    write_jsonl(
+        &home_path
+            .join(".claude/projects/-code-api")
+            .join("late-id.jsonl"),
+        &records,
+    );
+
+    let scan = import.scan().await;
+    assert_eq!(scan.projects.len(), 1, "{:?}", scan.warnings);
+    assert_eq!(
+        scan.projects[0].importable, 1,
+        "the conversation is offered once"
+    );
+    let mut events = import.subscribe();
+    import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    wait_finished(&mut events).await;
+    assert_eq!(
+        manager
+            .list_threads(&ThreadFilter::default())
+            .await
+            .into_iter()
+            .filter(|thread| thread.harness == HarnessKind::ClaudeCode)
+            .count(),
+        1,
+        "the conversation became one thread"
+    );
+
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].importable, 0,
+        "an imported session is not offered again"
+    );
+    assert_eq!(
+        scan.projects[0].conversations, 1,
+        "the transcript still counts for its project"
+    );
+}
+
+#[tokio::test]
+async fn a_path_keyed_rollout_that_grows_is_offered_again() {
+    // A Codex rollout with no session id is keyed by its path, size and content
+    // fingerprint. Once imported, a later scan must not hide the file by path
+    // forever: a rollout that keeps growing is a new source, exactly as the
+    // pre-path scan treated it.
+    let home = tempfile::tempdir().expect("home");
+    let home_path = home.path().to_path_buf();
+    let workspace = home_path.join("code/api");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let (_, manager, import) = services(
+        &home_path,
+        FakeHarness::new(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let cwd = workspace.display().to_string();
+    let rollout = home_path
+        .join(".codex/sessions/2026/11/21")
+        .join("rollout-2026-11-21T09-00-00.jsonl");
+    let mut records = codex_transcript();
+    records[0]["payload"]
+        .as_object_mut()
+        .expect("session meta")
+        .remove("id");
+    for record in &mut records {
+        if let Some(payload) = record.get_mut("payload")
+            && payload.get("cwd").is_some()
+        {
+            payload["cwd"] = json!(cwd);
+        }
+    }
+    write_jsonl(&rollout, &records);
+
+    let scan = import.scan().await;
+    assert_eq!(scan.projects.len(), 1, "{:?}", scan.warnings);
+    assert_eq!(
+        scan.projects[0].importable, 1,
+        "the id-less rollout is offered"
+    );
+    let mut events = import.subscribe();
+    import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    wait_finished(&mut events).await;
+    assert_eq!(
+        manager.list_threads(&ThreadFilter::default()).await.len(),
+        1,
+        "the rollout became a thread"
+    );
+
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].importable, 0,
+        "an unchanged rollout is not offered again"
+    );
+
+    // The same rollout is still being written to.
+    records.push(json!({
+        "timestamp": "2026-11-21T10:00:00Z",
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": "one more thing"},
+    }));
+    write_jsonl(&rollout, &records);
+    let scan = import.scan().await;
+    assert_eq!(
+        scan.projects[0].importable, 1,
+        "a grown rollout is offered again"
+    );
+    assert_eq!(
+        scan.projects[0].conversations, 1,
+        "the grown file is still one conversation"
+    );
+}
+
+#[tokio::test]
 async fn a_transcript_over_four_gigabytes_is_skipped_with_a_warning() {
     let fixture = fixture(
         FakeHarness::new(),
