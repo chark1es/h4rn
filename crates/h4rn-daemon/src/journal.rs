@@ -226,14 +226,46 @@ pub struct WirePage {
     pub more: bool,
 }
 
-// Rows the page statement yielded, for the one-page assertion.
+// A write a test can land between the page statement and its answer.
 //
-// The statement yields every row its recursive walk visited: the page plus the
-// one lookahead row that ended it. Thread-local so tests running in parallel
-// cannot add to each other's count.
+// The page and its `more` flag come from one statement, so in production there
+// is no window between them. The hook exists to prove that: with the old
+// two-statement probe, an append placed here turns an empty page into
+// `more=true` at an unchanged cursor.
 #[cfg(test)]
-thread_local! {
-    pub(crate) static WIRE_PAGE_ROWS_FETCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+pub(crate) mod page_hook {
+    use std::sync::Mutex;
+
+    use h4rn_protocol::{Event, ThreadId};
+
+    use super::SqliteJournal;
+
+    /// The writer and the event it will append.
+    pub(crate) struct Between {
+        /// A separate connection, standing in for another writer.
+        pub(crate) journal: SqliteJournal,
+        /// Thread the event belongs to.
+        pub(crate) thread_id: ThreadId,
+        /// Event to append.
+        pub(crate) events: Vec<Event>,
+    }
+
+    static BETWEEN: Mutex<Option<Between>> = Mutex::new(None);
+
+    /// Arms the next page read to append just before it answers.
+    pub(crate) fn set(between: Between) {
+        *BETWEEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(between);
+    }
+
+    /// Takes the armed write, if any.
+    pub(crate) fn take() -> Option<Between> {
+        BETWEEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
 }
 
 /// Journal failures.
@@ -941,9 +973,9 @@ impl Journal for SqliteJournal {
         // `more` flag: the answer comes from inside the same statement as the
         // page, inside one implicit read transaction, so an append cannot land
         // between them and turn an empty page into `more=true` with an
-        // unchanged cursor. Every row the statement yields is a row the walk
-        // visited (the page plus that one lookahead), which is what lets a test
-        // count the query's work.
+        // unchanged cursor. The tests check this through `page_hook` and
+        // measure the query's SQLite VM steps, so a walk that scanned the
+        // thread only to trim its output fails them.
         //
         // The budget counts each row's stored `event_json` bytes, not the
         // event re-serialized by this build. A page boundary for history
@@ -982,9 +1014,6 @@ impl Journal for SqliteJournal {
         .fetch_all(&self.pool)
         .await?;
 
-        #[cfg(test)]
-        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(fetched.get() + rows.len()));
-
         let mut more = false;
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
@@ -999,6 +1028,16 @@ impl Journal for SqliteJournal {
                 thread_id: thread_id.clone(),
                 event: serde_json::from_str(&event_json)?,
             });
+        }
+        // A test's append lands where the old two-statement pager would probe
+        // for `more`; the page above is already one snapshot and must not
+        // change because of it.
+        #[cfg(test)]
+        if let Some(between) = page_hook::take() {
+            between
+                .journal
+                .append_wire(&between.thread_id, &between.events)
+                .await?;
         }
         Ok(WirePage { events, more })
     }
@@ -1742,8 +1781,15 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use h4rn_protocol::{AgentState, ThreadSummary};
+
+    /// SQLite virtual-machine instructions run by the measured page query.
+    static PAGE_VM_STEPS: AtomicUsize = AtomicUsize::new(0);
+    /// Serialises measurements: the progress handler is process-wide here.
+    static PAGE_VM_STEPS_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn meta(thread_id: &str) -> ThreadMeta {
         ThreadMeta {
@@ -2162,6 +2208,44 @@ mod tests {
         pages
     }
 
+    /// Reads one page and counts the SQLite VM steps it ran.
+    ///
+    /// The journal's pool holds a single connection, so a progress handler set
+    /// on it is the connection the page query runs on. `num_ops = 1` invokes
+    /// the handler for every virtual-machine instruction; counting the calls
+    /// counts the work, not the rows the statement happened to return.
+    async fn page_with_steps(
+        journal: &SqliteJournal,
+        thread_id: &ThreadId,
+        after: u64,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> (WirePage, usize) {
+        let guard = PAGE_VM_STEPS_GUARD.lock().await;
+        PAGE_VM_STEPS.store(0, Ordering::SeqCst);
+        {
+            let mut connection = journal.pool.acquire().await.expect("connection");
+            let mut handle = connection.lock_handle().await.expect("handle");
+            handle.set_progress_handler(1, || {
+                PAGE_VM_STEPS.fetch_add(1, Ordering::Relaxed);
+                // `true` continues the statement; `false` would interrupt it.
+                true
+            });
+        }
+        let page = journal
+            .read_wire_page(thread_id, after, max_events, max_bytes)
+            .await
+            .expect("page");
+        let steps = PAGE_VM_STEPS.load(Ordering::SeqCst);
+        {
+            let mut connection = journal.pool.acquire().await.expect("connection");
+            let mut handle = connection.lock_handle().await.expect("handle");
+            handle.remove_progress_handler();
+        }
+        drop(guard);
+        (page, steps)
+    }
+
     #[tokio::test]
     async fn a_thread_with_gaps_pages_where_the_old_pager_did() {
         const PAGE: usize = 64 * 1024;
@@ -2347,24 +2431,21 @@ mod tests {
         }
         journal.append_wire(&thread_id, &wire).await.unwrap();
 
-        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(0));
-        let page = journal
-            .read_wire_page(&thread_id, 0, 4096, 8 * 1024)
-            .await
-            .unwrap();
-        let fetched = WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.get());
+        let (page, page_steps) = page_with_steps(&journal, &thread_id, 0, 4096, 8 * 1024).await;
         assert!(
             page.events.len() < 200,
             "the page is a small prefix, not the whole thread"
         );
         assert!(page.more);
-        // The walk yields the page plus the one row that stopped it, so this
-        // is the query's real work, not a count of its output. A walk that
-        // scanned the thread to the end would yield 200 here.
-        assert_eq!(fetched, page.events.len() + 1);
+
+        // The whole thread in one page, as the measure of a full walk. The
+        // paged query must cost a small fraction of it: a walk that scanned
+        // the thread and trimmed with an outer LIMIT costs nearly as much.
+        let (all, all_steps) = page_with_steps(&journal, &thread_id, 0, 4096, 1024 * 1024).await;
+        assert_eq!(all.events.len(), 200);
         assert!(
-            fetched < 20,
-            "{fetched} rows visited for a {} event page out of 200",
+            page_steps.saturating_mul(5) < all_steps,
+            "{page_steps} VM steps for a {} event page, {all_steps} for all 200",
             page.events.len()
         );
     }
@@ -2416,23 +2497,66 @@ mod tests {
         }
         journal.append_wire(&thread_id, &wire).await.unwrap();
 
-        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(0));
-        let page = journal
-            .read_wire_page(&thread_id, 0, 100, 256 * 1024)
-            .await
-            .unwrap();
-        let fetched = WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.get());
+        let (page, page_steps) = page_with_steps(&journal, &thread_id, 0, 100, 256 * 1024).await;
         assert_eq!(page.events.len(), 100, "the cap fills the page");
         assert!(page.more, "the rest follows");
-        assert_eq!(
-            fetched,
-            page.events.len() + 1,
-            "the walk stopped at the first row past the cap"
+
+        let (all, all_steps) =
+            page_with_steps(&journal, &thread_id, 0, EVENTS, 16 * 1024 * 1024).await;
+        assert_eq!(all.events.len(), EVENTS);
+        assert!(
+            page_steps.saturating_mul(5) < all_steps,
+            "{page_steps} VM steps to page 100 of {EVENTS}, {all_steps} for all {EVENTS}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_append_between_the_page_and_its_answer_keeps_the_snapshot() {
+        let dir = tempfile::tempdir().expect("dir");
+        let database = dir.path().join("events.db");
+        let journal = SqliteJournal::connect(&database).await.unwrap();
+        let thread_id = ThreadId::new("th_between");
+        journal.upsert_thread(&meta("th_between")).await.unwrap();
+        journal
+            .append_wire(&thread_id, &[page_event(&thread_id, 0, 8)])
+            .await
+            .unwrap();
+        let cursor = journal
+            .read_wire_since(&thread_id, 0)
+            .await
+            .unwrap()
+            .last()
+            .expect("first event")
+            .seq;
+
+        // A second connection writes just before the read answers, where the
+        // old two-statement pager ran its `more` probe.
+        let writer = SqliteJournal::connect(&database).await.unwrap();
+        page_hook::set(page_hook::Between {
+            journal: writer,
+            thread_id: thread_id.clone(),
+            events: vec![page_event(&thread_id, 1, 8)],
+        });
+        let page = journal
+            .read_wire_page(&thread_id, cursor, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            page.events.is_empty(),
+            "the page was taken before the append"
         );
         assert!(
-            fetched < EVENTS / 10,
-            "{fetched} rows visited to page {EVENTS} tiny events"
+            !page.more,
+            "an empty page must not promise more at an unchanged cursor"
         );
+
+        // The appended event is still there, in the next page.
+        let next = journal
+            .read_wire_page(&thread_id, cursor, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(next.events.len(), 1, "the append is not lost");
+        assert!(!next.more);
     }
 
     /// A page of rows written before `at` existed.

@@ -630,6 +630,163 @@ async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
 }
 
 #[tokio::test]
+async fn legacy_rows_replay_whole_and_in_order_over_the_paired_transport() {
+    // Rows written before `at` existed re-serialize with `"at":null`, so a
+    // page budgeted by stored bytes can carry more text than the budget says.
+    // The paired transport must still deliver every event whole, in order,
+    // with each frame under its limit: an oversized event travels in chunks.
+    let client_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(allowed),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = match client
+        .request(ClientRequest::ListHosts)
+        .await
+        .expect("hosts")
+    {
+        ResponseBody::Hosts { hosts } => hosts[0].host_id.clone(),
+        other => panic!("unexpected host response: {other:?}"),
+    };
+    let thread_id = match client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: daemon.workspace.display().to_string(),
+            model: "fake-model".into(),
+            prompt: "start".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+        })
+        .await
+        .expect("create thread")
+    {
+        ResponseBody::ThreadCreated { thread_id, .. } => thread_id,
+        other => panic!("unexpected CreateThread response: {other:?}"),
+    };
+
+    // The daemon keeps its journal in the test's data directory; a second
+    // connection writes rows the way an older daemon left them.
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(daemon.workspace.join("events.db"))
+                .create_if_missing(true),
+        )
+        .await
+        .expect("journal connection");
+    let cursor: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(seq), 0) FROM daemon_wire_events WHERE thread_id = ?",
+    )
+    .bind(thread_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .expect("last seq");
+
+    // One event larger than the transport's 512 KiB frame limit, alone in its
+    // stored-byte page, then two small ones that follow it.
+    let huge = "l".repeat(700 * 1024);
+    let legacy = |index: usize, text: &str| {
+        serde_json::json!({
+            "type": "item_completed",
+            "thread_id": thread_id.as_str(),
+            "turn_id": "turn_legacy",
+            "item": {
+                "kind": "message",
+                "item_id": format!("legacy-{index}"),
+                "role": "user",
+                "text": text,
+                "attachments": [],
+            },
+        })
+        .to_string()
+    };
+    let mut expected = Vec::new();
+    for (index, text) in [(0, huge.as_str()), (1, "small one"), (2, "small two")] {
+        let seq: i64 = sqlx::query_scalar(
+            "INSERT INTO daemon_wire_events (thread_id, event_json, recorded_at)
+             VALUES (?, ?, '2026-11-20T10:00:00Z') RETURNING seq",
+        )
+        .bind(thread_id.as_str())
+        .bind(legacy(index, text))
+        .fetch_one(&pool)
+        .await
+        .expect("legacy row");
+        expected.push((seq as u64, format!("legacy-{index}"), text.len()));
+    }
+
+    let last_legacy = expected.last().expect("legacy rows").0;
+    let mut since = cursor as u64;
+    let mut seen = Vec::new();
+    let mut chunked_pages = 0;
+    loop {
+        let (frames, result) = client
+            .request_frames(ClientRequest::GetThread {
+                thread_id: thread_id.clone(),
+                since_seq: since,
+            })
+            .await;
+        for frame in &frames {
+            assert!(
+                frame.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+                "a replayed frame is {} bytes, over the transport limit",
+                frame.len()
+            );
+        }
+        if frames.len() > 1 {
+            chunked_pages += 1;
+        }
+        match result {
+            Ok(ResponseBody::Thread {
+                events,
+                next_seq,
+                more,
+                ..
+            }) => {
+                for entry in events {
+                    // The thread's own turn may still write live events; only
+                    // the rows this test wrote are being checked.
+                    if !expected.iter().any(|(seq, _, _)| *seq == entry.seq) {
+                        continue;
+                    }
+                    let Event::ItemCompleted {
+                        item: h4rn_protocol::Item::Message { item_id, text, .. },
+                        ..
+                    } = entry.event
+                    else {
+                        panic!("unexpected replayed legacy event: {:?}", entry.event);
+                    };
+                    seen.push((entry.seq, item_id, text.len()));
+                }
+                since = next_seq;
+                if !more || since >= last_legacy {
+                    break;
+                }
+            }
+            other => panic!("unexpected GetThread answer: {other:?}"),
+        }
+    }
+    assert!(
+        chunked_pages > 0,
+        "the oversized legacy event needed outbound chunks"
+    );
+    assert_eq!(
+        seen, expected,
+        "every legacy event arrives whole, exactly once, in order"
+    );
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn secure_transport_rejects_a_revoked_device() {
     let client_identity = device_identity();
     let client_key = client_identity.public().noise_public;
