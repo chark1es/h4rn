@@ -22,11 +22,9 @@ const mock = vi.hoisted(() => {
     size: number;
     local_path: string;
   }[] = [];
-  const restoreAttachments = vi.fn(
-    (attachments: typeof restoredAttachments) => {
-      restoredAttachments.push(...attachments);
-    },
-  );
+  const restoreAttachments = vi.fn((attachments: typeof restoredAttachments) => {
+    restoredAttachments.push(...attachments);
+  });
   const state: {
     connection: { status: string };
     hosts: Record<string, { online: boolean; name: string }>;
