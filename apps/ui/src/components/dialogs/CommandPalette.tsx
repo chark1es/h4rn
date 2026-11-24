@@ -5,6 +5,7 @@ import {
   CircleDotIcon,
   Code2Icon,
   FileDiffIcon,
+  GitForkIcon,
   GitPullRequestIcon,
   InboxIcon,
   KeyboardIcon,
@@ -43,10 +44,12 @@ import {
 import { openGuestShare } from "@/features/guest/guestStore";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
+import { latestForkableTurn } from "@/lib/fork";
 import { paletteScore } from "@/lib/palette";
 import {
   acknowledgeThread,
   closePalette,
+  forkThread,
   getClient,
   interruptThread,
   navigate,
@@ -68,6 +71,9 @@ import {
   toggleView,
   useApp,
 } from "@/lib/store/appStore";
+import type { StreamTurn } from "@/lib/store/projection";
+
+const NO_TURNS: StreamTurn[] = [];
 
 function projectName(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
@@ -92,6 +98,10 @@ export function CommandPalette() {
 
   const currentId = route.kind === "thread" ? route.threadId : null;
   const current = currentId ? threads[currentId] : undefined;
+  const currentTurns = useApp((state) =>
+    currentId ? (state.logs[currentId]?.turns ?? NO_TURNS) : NO_TURNS,
+  );
+  const forkTurn = latestForkableTurn(currentTurns);
 
   // The palette opens from a shortcut, not a trigger. Track the last element
   // focused outside the dialog so Escape can put focus back where it was.
@@ -221,6 +231,16 @@ export function CommandPalette() {
             <CommandItem value="link pull request pr url" onSelect={() => openLinkPullRequest()}>
               <GitPullRequestIcon aria-hidden />
               Link pull request…
+            </CommandItem>
+            <CommandItem
+              value="fork branch copy latest turn"
+              disabled={!forkTurn}
+              onSelect={() => {
+                if (forkTurn) close(() => void forkThread(current.thread_id, forkTurn));
+              }}
+            >
+              <GitForkIcon aria-hidden />
+              Fork from latest turn
             </CommandItem>
             {current.tab !== "settled" ? (
               <CommandItem

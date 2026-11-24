@@ -1802,3 +1802,30 @@ MCP paths accept one JSON-RPC message per request and refuse a batch, which is w
 transport specifies and what keeps one scope check and one rate-limit hit attached to one call. It
 is loopback-only, and the Connect relay does not yet carry HTTP, so the copied URL is the local
 address and a hosted agent has no path in this phase.
+
+## ADR-047: A fork copies a thread at a turn, natively when the harness can
+
+**Status:** Accepted
+
+A fork is a new thread, not a view over the source. It copies the source's
+project, workspace, harness, agent instance and settings, and its transcript is
+the source turns through the chosen turn, inclusive, journaled as ordinary
+message items with each message's own time. Only a turn the journal knows to be
+finished can be forked; the source's active turn and any message queued behind
+it are refused. The source is only read.
+
+The first message continues the conversation one of two ways. When the chosen
+turn is the source's latest and the adapter advertises `supports_native_fork`,
+the fork stores the source's session id and asks the harness to copy it: Claude
+Code's `--resume <id> --fork-session` and Codex app-server's `thread/fork`.
+Otherwise — an earlier turn, a harness without native forks, or a failed start
+— the fork starts a fresh session and sends a bounded handoff of its copied
+history. This reuses the import's one-attempt machinery (ADR-045): the native
+intent is cleared when a session reports `SessionStarted`, or when a start dies
+before that report, and the same turn is retried with the handoff.
+
+Lineage is a `forked_from { thread_id, turn_id }` in the thread row, projected on
+the summary; the origin title is read from the thread list so a rename needs no
+rewrite. No cascade exists in either direction, so deleting or archiving the
+source cannot take the fork with it. A fork in a worktree keeps the source's
+workspace path; per-fork worktrees are a later feature.

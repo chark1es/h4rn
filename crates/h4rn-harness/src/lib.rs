@@ -69,7 +69,8 @@ pub use codex::{
 };
 pub use fake::{
     EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, McpInjection, SendCount,
-    SessionCount, SessionMcp, SessionModels, SessionSettings, SettingChange, test_spec,
+    SentPrompts, SessionCount, SessionMcp, SessionModels, SessionSettings, SessionStarts,
+    SettingChange, StartSpec, test_spec,
 };
 pub use homes::{HomeError, harness_home, home_variable, resolve_home};
 pub use opencode::{
@@ -125,6 +126,13 @@ pub struct SessionSpec {
     pub fast: bool,
     /// Harness session to resume, when resuming.
     pub resume_id: Option<String>,
+    /// Fork `resume_id` into a new native conversation instead of continuing
+    /// it in place.
+    ///
+    /// Only set for a forked thread's first startup, and only where the
+    /// adapter advertises [`Harness::supports_native_fork`]. The source
+    /// session is read from disk by the harness and is never attached to.
+    pub native_fork: bool,
     /// The single h4rn MCP hub endpoint injected into the session.
     pub mcp_endpoint: Option<String>,
     /// Extra environment variables (never secrets in argv).
@@ -722,6 +730,15 @@ pub trait Harness: Send + Sync {
     fn instance_fingerprint(&self, instance: &str, workspace: &std::path::Path) -> Option<String> {
         self.resolve_instance(instance, workspace)
             .map(|snapshot| snapshot.fingerprint().to_owned())
+    }
+
+    /// Whether this adapter can fork a named native session into a new one.
+    ///
+    /// A native fork keeps the provider's own conversation, including tool
+    /// work h4rn never journaled. Adapters without it answer `false`, and a
+    /// forked thread then starts from a bounded handoff instead.
+    fn supports_native_fork(&self) -> bool {
+        false
     }
 
     /// Starts (or resumes) a session.

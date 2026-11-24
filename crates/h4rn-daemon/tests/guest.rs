@@ -2706,6 +2706,13 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         self.0.read_domain(thread_id).await
     }
 
+    async fn read_journaled_turns(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<h4rn_daemon::journal::JournaledTurn>, h4rn_daemon::journal::JournalError> {
+        self.0.read_journaled_turns(thread_id).await
+    }
+
     async fn upsert_pr_link(
         &self,
         link: &h4rn_daemon::pr_links::PrLinkRecord,

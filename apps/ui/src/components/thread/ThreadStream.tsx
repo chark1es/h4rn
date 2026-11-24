@@ -35,6 +35,9 @@ function PendingTurn({ message }: { message: PendingMessage }) {
  */
 export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turns: StreamTurn[] }) {
   if (summary.tab !== "done" || summary.agent_state !== "done") return null;
+  // A fork's history is a copy of an h4rn thread, not something imported from
+  // another harness; the header's lineage line says where it came from.
+  if (summary.forked_from) return null;
   const imported = turns.length > 0 && turns.every((turn) => turn.imported);
   return (
     <div className="q-col q-receipt">

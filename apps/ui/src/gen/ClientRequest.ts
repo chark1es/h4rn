@@ -122,7 +122,15 @@ fast: boolean,
 /**
  * Run in an isolated git worktree, optionally naming the branch.
  */
-worktree: WorktreeRequest | null, } | { "type": "send_message", 
+worktree: WorktreeRequest | null, } | { "type": "fork_thread", 
+/**
+ * Thread to copy.
+ */
+thread_id: ThreadId, 
+/**
+ * Last turn the fork keeps, inclusive.
+ */
+turn_id: TurnId, } | { "type": "send_message", 
 /**
  * Thread to append to.
  */

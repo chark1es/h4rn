@@ -30,6 +30,7 @@ async fn real_claude_code_round_trip() {
         reasoning_effort: None,
         fast: false,
         resume_id: None,
+        native_fork: false,
         mcp_endpoint: None,
         env_overrides: Default::default(),
         attachments: Vec::new(),

@@ -133,6 +133,10 @@ impl Harness for CodexHarness {
         self.install.clone().or_else(detect_codex)
     }
 
+    fn supports_native_fork(&self) -> bool {
+        true
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -440,15 +444,12 @@ impl CodexSession {
                 }
             }
         }
-        if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
+        let (method, carries_thread_id) = thread_open_method(spec);
+        if carries_thread_id
+            && let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty())
+        {
             params["threadId"] = Value::String(resume_id.to_string());
         }
-
-        let method = if spec.resume_id.as_deref().is_some_and(|id| !id.is_empty()) {
-            "thread/resume"
-        } else {
-            "thread/start"
-        };
         let result = self.request(method, params).await?;
 
         let thread_id = result["thread"]["id"]
@@ -1133,6 +1134,21 @@ fn id_key(id: &Value) -> String {
     }
 }
 
+/// The app-server method that opens this session, and whether it names a
+/// `threadId`.
+///
+/// `thread/fork` is Codex's own fork: it loads the named thread from disk,
+/// copies it into a new one, and leaves the source untouched. `native_fork`
+/// only applies to a resume, because a fresh thread has nothing to fork.
+fn thread_open_method(spec: &SessionSpec) -> (&'static str, bool) {
+    let resuming = spec.resume_id.as_deref().is_some_and(|id| !id.is_empty());
+    match (resuming, spec.native_fork) {
+        (true, true) => ("thread/fork", true),
+        (true, false) => ("thread/resume", true),
+        (false, _) => ("thread/start", false),
+    }
+}
+
 fn model_argument(model: &str) -> Option<&str> {
     let model = model.trim();
     if model.is_empty() || model == "default" {
@@ -1677,6 +1693,29 @@ mod tests {
         assert_eq!(input[2]["type"], "mention");
         assert_eq!(input[2]["name"], "report.csv");
         assert_eq!(input[2]["path"], "/tmp/report.csv");
+    }
+
+    #[test]
+    fn a_native_fork_opens_the_thread_with_thread_fork() {
+        let mut spec = crate::test_spec();
+        spec.resume_id = Some("thread-source".into());
+        spec.native_fork = true;
+        assert_eq!(
+            thread_open_method(&spec),
+            ("thread/fork", true),
+            "a fork names the source thread"
+        );
+
+        spec.native_fork = false;
+        assert_eq!(thread_open_method(&spec), ("thread/resume", true));
+
+        spec.resume_id = None;
+        spec.native_fork = true;
+        assert_eq!(
+            thread_open_method(&spec),
+            ("thread/start", false),
+            "a fresh thread has nothing to fork"
+        );
     }
 
     #[test]

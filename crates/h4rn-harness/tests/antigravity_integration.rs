@@ -34,6 +34,7 @@ fn spec(workspace: &std::path::Path, resume_id: Option<String>) -> SessionSpec {
         reasoning_effort: None,
         fast: false,
         resume_id,
+        native_fork: false,
         mcp_endpoint: None,
         env_overrides,
         attachments: Vec::new(),

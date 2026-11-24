@@ -88,6 +88,7 @@ export type * from "./ForgeReview";
 export type * from "./ForgeReviewComment";
 export type * from "./ForgeReviewState";
 export type * from "./ForgeReviewThread";
+export type * from "./ForkRef";
 export type * from "./FsBranchList";
 export type * from "./FsChangeKind";
 export type * from "./FsCreateKind";

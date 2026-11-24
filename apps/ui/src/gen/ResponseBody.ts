@@ -188,6 +188,14 @@ turn_id: TurnId,
 /**
  * Current projection of the new thread.
  */
+summary: ThreadSummary, } | { "type": "thread_forked", 
+/**
+ * New thread id.
+ */
+thread_id: ThreadId, 
+/**
+ * Current projection of the new thread.
+ */
 summary: ThreadSummary, } | { "type": "message_accepted", 
 /**
  * Thread that accepted the message.

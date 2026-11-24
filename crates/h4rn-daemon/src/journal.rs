@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
 use h4rn_protocol::{
-    Event, ForgeKind, ForgeRepoRef, HarnessKind, HostId, RuntimeMode, ScheduleDestination,
+    Event, ForgeKind, ForgeRepoRef, HarnessKind, HostId, Item, RuntimeMode, ScheduleDestination,
     ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask, ScheduleTaskId, SubagentId,
     ThreadId, Usage, WorktreeRequest,
 };
@@ -118,6 +118,29 @@ pub struct ThreadMeta {
     /// their timestamps, are what its first new turn hands to a fresh session
     /// (or a native resume, when the harness can take one).
     pub imported: Option<ImportedOrigin>,
+    /// The thread and turn this thread was forked from, when it was.
+    ///
+    /// A fork is an ordinary thread with its own session, queue, approvals and
+    /// schedules; only the lineage is recorded here. Nothing cascades from the
+    /// source, so deleting or archiving it never affects the fork.
+    pub forked_from: Option<ForkOrigin>,
+}
+
+/// The source of a forked thread.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ForkOrigin {
+    /// Thread the transcript was copied from.
+    pub thread_id: ThreadId,
+    /// Last turn copied, inclusive.
+    pub turn_id: h4rn_protocol::TurnId,
+    /// The source's sidebar grouping, when it differed from its workspace.
+    #[serde(default)]
+    pub project_path: Option<String>,
+    /// Whether the fork still has one native fork to try on its first start.
+    ///
+    /// Cleared when a session reports `SessionStarted`, so a later restart
+    /// never forks the source again (which would lose turns made in the fork).
+    pub native_fork: bool,
 }
 
 /// The saved conversation a thread was imported from.
@@ -156,6 +179,32 @@ pub struct ImportedMessage {
     pub text: String,
     /// When it was written in the source conversation.
     pub at: DateTime<Utc>,
+}
+
+/// One message of a journaled turn, with the time it was written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournaledMessage {
+    /// Who authored it.
+    pub role: h4rn_protocol::MessageRole,
+    /// Text, already redacted.
+    pub text: String,
+    /// The message's own time when the wire item carried one, otherwise the
+    /// journal time it was written. A fork copies this verbatim.
+    pub at: DateTime<Utc>,
+}
+
+/// One turn as the journal recorded it, in first-seen order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournaledTurn {
+    /// The turn's id.
+    pub turn_id: h4rn_protocol::TurnId,
+    /// Its visible messages, oldest first.
+    pub messages: Vec<JournaledMessage>,
+    /// Whether the turn reported a completion.
+    ///
+    /// An imported transcript's history has none: it was already finished when
+    /// it was written.
+    pub completed: bool,
 }
 
 /// One source conversation already imported, keyed by its identity.
@@ -283,6 +332,15 @@ pub trait Journal: Send + Sync {
 
     /// The domain log for one thread, used to rebuild lifecycle state.
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError>;
+
+    /// The visible turns of one thread, in the order they were journaled.
+    ///
+    /// Forking reads this to copy exactly the transcript through a turn,
+    /// keeping each message's own time.
+    async fn read_journaled_turns(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<JournaledTurn>, JournalError>;
 
     /// Inserts or refreshes one thread → pull request link.
     async fn upsert_pr_link(&self, link: &PrLinkRecord) -> Result<(), JournalError>;
@@ -458,7 +516,8 @@ impl SqliteJournal {
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
                 parked_json    TEXT,
-                imported_json  TEXT
+                imported_json  TEXT,
+                forked_json    TEXT
             )",
         )
         .execute(&self.pool)
@@ -485,6 +544,8 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "imported_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "forked_json", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "reasoning_effort", "TEXT")
             .await?;
@@ -681,10 +742,11 @@ async fn upsert_thread_on(
     let worktree_json = serde_json::to_string(&meta.worktree)?;
     let parked_json = serde_json::to_string(&meta.parked)?;
     let imported_json = serde_json::to_string(&meta.imported)?;
+    let forked_json = serde_json::to_string(&meta.forked_from)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, forked_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -703,7 +765,8 @@ async fn upsert_thread_on(
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json,
-            imported_json = excluded.imported_json",
+            imported_json = excluded.imported_json,
+            forked_json = excluded.forked_json",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -725,6 +788,7 @@ async fn upsert_thread_on(
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
     .bind(imported_json)
+    .bind(forked_json)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -766,7 +830,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, forked_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -819,6 +883,9 @@ impl Journal for SqliteJournal {
                     .and_then(|json| serde_json::from_str(&json).ok()),
                 imported: row
                     .try_get::<Option<String>, _>("imported_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                forked_from: row
+                    .try_get::<Option<String>, _>("forked_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
             });
         }
@@ -925,6 +992,72 @@ impl Journal for SqliteJournal {
             .into_iter()
             .map(|stored| stored.event)
             .collect())
+    }
+
+    async fn read_journaled_turns(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<JournaledTurn>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT event_json, recorded_at FROM daemon_wire_events
+             WHERE thread_id = ? ORDER BY seq ASC",
+        )
+        .bind(thread_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut turns: Vec<JournaledTurn> = Vec::new();
+        for row in rows {
+            let event_json: String = row.try_get("event_json")?;
+            let recorded_at: String = row.try_get("recorded_at")?;
+            let recorded_at = DateTime::parse_from_rfc3339(&recorded_at)
+                .map(|value| value.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let event: Event = serde_json::from_str(&event_json)?;
+            match event {
+                Event::ItemCompleted {
+                    item: Item::Message { role, text, .. },
+                    turn_id,
+                    at,
+                    ..
+                } => {
+                    let message = JournaledMessage {
+                        role,
+                        text,
+                        at: at.unwrap_or(recorded_at),
+                    };
+                    match turns.iter_mut().find(|turn| turn.turn_id == turn_id) {
+                        Some(turn) => turn.messages.push(message),
+                        None => turns.push(JournaledTurn {
+                            turn_id,
+                            messages: vec![message],
+                            completed: false,
+                        }),
+                    }
+                }
+                Event::TurnStarted { turn_id, .. } => {
+                    if !turns.iter().any(|turn| turn.turn_id == turn_id) {
+                        turns.push(JournaledTurn {
+                            turn_id,
+                            messages: Vec::new(),
+                            completed: false,
+                        });
+                    }
+                }
+                Event::TurnCompleted { turn_id, .. } => {
+                    match turns.iter_mut().find(|turn| turn.turn_id == turn_id) {
+                        Some(turn) => turn.completed = true,
+                        None => turns.push(JournaledTurn {
+                            turn_id,
+                            messages: Vec::new(),
+                            completed: true,
+                        }),
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(turns)
     }
 
     async fn upsert_pr_link(&self, link: &PrLinkRecord) -> Result<(), JournalError> {
@@ -1651,6 +1784,7 @@ mod tests {
             agent_fingerprint: None,
             parked: None,
             imported: None,
+            forked_from: None,
         }
     }
 
@@ -1664,6 +1798,7 @@ mod tests {
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
             project_path: None,
+            forked_from: None,
             branch: Some("h4rn/first-prompt".into()),
             model: "test-model".into(),
             runtime_mode: RuntimeMode::ApprovalRequired,
@@ -1796,6 +1931,93 @@ mod tests {
         journal.upsert_thread(&one).await.unwrap();
         let rows = journal.list_threads().await.unwrap();
         assert_eq!(rows, vec![one]);
+    }
+
+    /// A fork's lineage is part of its row, so a restart shows where it came
+    /// from without any other table.
+    #[tokio::test]
+    async fn a_forked_row_round_trips_its_lineage() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let mut one = meta("th_fork");
+        one.forked_from = Some(ForkOrigin {
+            thread_id: ThreadId::new("th_source"),
+            turn_id: h4rn_protocol::TurnId::new("turn_source"),
+            project_path: Some("/code/api".into()),
+            native_fork: true,
+        });
+        journal.upsert_thread(&one).await.unwrap();
+        assert_eq!(journal.list_threads().await.unwrap(), vec![one]);
+    }
+
+    /// The journal reader forks use keeps each message's own time, falls back
+    /// to the journal time for a live item, and knows which turns completed.
+    #[tokio::test]
+    async fn journaled_turns_keep_message_times_and_completion() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_turns");
+        let thread_id = one.thread_id.clone();
+        let first = h4rn_protocol::TurnId::new("turn_1");
+        let second = h4rn_protocol::TurnId::new("turn_2");
+        let imported_at = DateTime::parse_from_rfc3339("2026-02-03T04:05:06Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        journal
+            .append(
+                &one,
+                &[],
+                &[
+                    Event::TurnStarted {
+                        thread_id: thread_id.clone(),
+                        turn_id: first.clone(),
+                        started_at: Utc::now(),
+                    },
+                    Event::ItemCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: first.clone(),
+                        item: Item::Message {
+                            item_id: "i1".into(),
+                            role: h4rn_protocol::MessageRole::User,
+                            text: "a live prompt".into(),
+                            attachments: Vec::new(),
+                        },
+                        at: None,
+                    },
+                    Event::TurnCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: first.clone(),
+                        usage: Usage::default(),
+                        status: h4rn_protocol::TurnStatus::Completed,
+                        changes: None,
+                    },
+                    Event::ItemCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_id: second.clone(),
+                        item: Item::Message {
+                            item_id: "i2".into(),
+                            role: h4rn_protocol::MessageRole::Assistant,
+                            text: "an imported reply".into(),
+                            attachments: Vec::new(),
+                        },
+                        at: Some(imported_at),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let turns = journal.read_journaled_turns(&thread_id).await.unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].turn_id, first);
+        assert!(turns[0].completed);
+        assert_eq!(turns[0].messages.len(), 1);
+        assert_eq!(turns[0].messages[0].text, "a live prompt");
+        assert!(
+            turns[0].messages[0].at > imported_at,
+            "a live item falls back to when the journal wrote it"
+        );
+        assert_eq!(turns[1].turn_id, second);
+        assert!(!turns[1].completed);
+        assert_eq!(turns[1].messages[0].at, imported_at);
     }
 
     #[tokio::test]

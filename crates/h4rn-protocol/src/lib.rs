@@ -67,7 +67,7 @@ pub use binary::{
 pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, UploadTicket};
 pub use client::{ClientFrame, ClientRequest};
 pub use common::{
-    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,
+    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, ForkRef, HarnessKind,
     HostSummary, Item, MatchUnit, MessageRole, PlanStep, RuntimeMode, ThreadFilter, ThreadSummary,
     ThreadTab, ToolCall, ToolCallStatus, ToolStats, Topic, TurnStatus, Usage, WorktreeRequest,
 };

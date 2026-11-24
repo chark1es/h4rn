@@ -197,12 +197,20 @@ pub struct FakeHarness {
     /// before it reports a session, the way a real adapter's bad `--resume`
     /// fails after `start_session` returned `Ok`.
     resume_death: Option<String>,
+    /// A test-only message: a startup asked to fork a native session starts
+    /// and then dies before it reports a new session, the way a provider that
+    /// cannot find the source conversation fails after the spawn.
+    native_fork_death: Option<String>,
     /// How many startups fail before one succeeds; `None` fails every one.
     start_failure_budget: Option<usize>,
     /// Startups attempted so far, so a budget can count down.
     start_attempts: Option<Arc<AtomicUsize>>,
     /// The model of every session this harness actually started.
     session_models: Option<SessionModels>,
+    /// Every startup's resume and fork intent, when a test asked for it.
+    session_starts: Option<SessionStarts>,
+    /// Every prompt a session was asked to write, when a test asked for it.
+    sent_prompts: Option<SentPrompts>,
     /// A test-only latch between a `send`'s prompt and its completion.
     completion_gate: Option<Gate>,
     /// Whether the completion gate also holds the session's first send. Off
@@ -408,6 +416,43 @@ impl SessionModels {
     }
 }
 
+/// One session startup a test can inspect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartSpec {
+    /// The native session the startup asked to resume, when it did.
+    pub resume_id: Option<String>,
+    /// Whether the startup asked to fork that session.
+    pub native_fork: bool,
+}
+
+/// The session startups one fake harness saw, in order.
+#[derive(Clone, Debug, Default)]
+pub struct SessionStarts(Arc<Mutex<Vec<StartSpec>>>);
+
+impl SessionStarts {
+    /// Every startup so far, oldest first.
+    pub fn get(&self) -> Vec<StartSpec> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// The prompts one fake harness was asked to write, in order.
+#[derive(Clone, Debug, Default)]
+pub struct SentPrompts(Arc<Mutex<Vec<String>>>);
+
+impl SentPrompts {
+    /// Every prompt written so far, oldest first.
+    pub fn get(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
 /// One setting change a fake thread went through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingChange {
@@ -591,9 +636,12 @@ impl Default for FakeHarness {
             start_failure: None,
             resume_failure: None,
             resume_death: None,
+            native_fork_death: None,
             start_failure_budget: None,
             start_attempts: None,
             session_models: None,
+            session_starts: None,
+            sent_prompts: None,
             session_settings: None,
             session_mcp: None,
             advertised_models: None,
@@ -802,6 +850,30 @@ impl FakeHarness {
         let models = SessionModels::default();
         self.session_models = Some(models.clone());
         (self, models)
+    }
+
+    /// Records each startup's resume id and native-fork intent.
+    pub fn with_session_starts(mut self) -> (Self, SessionStarts) {
+        let starts = SessionStarts::default();
+        self.session_starts = Some(starts.clone());
+        (self, starts)
+    }
+
+    /// Records every prompt the daemon writes to a session.
+    pub fn with_sent_prompts(mut self) -> (Self, SentPrompts) {
+        let prompts = SentPrompts::default();
+        self.sent_prompts = Some(prompts.clone());
+        (self, prompts)
+    }
+
+    /// Starts a native fork, then kills it before it reports a session.
+    ///
+    /// Models a provider that cannot load the source conversation: the
+    /// adapter returns `Ok`, and the only report the daemon sees is the death.
+    /// A fresh startup (no resume, no fork) still succeeds.
+    pub fn with_native_fork_death(mut self, message: impl Into<String>) -> Self {
+        self.native_fork_death = Some(message.into());
+        self
     }
 
     /// Records each session's starting settings and every live switch it
@@ -1093,6 +1165,12 @@ impl Harness for FakeHarness {
         self.install.clone()
     }
 
+    fn supports_native_fork(&self) -> bool {
+        // A test chooses a harness whose native fork it wants to exercise; the
+        // fake can always model one, including its death before SessionStarted.
+        true
+    }
+
     fn has_instance(&self, instance: &str) -> bool {
         self.instance.as_deref() == Some(instance)
     }
@@ -1119,6 +1197,16 @@ impl Harness for FakeHarness {
                 endpoint: spec.mcp_endpoint.clone(),
                 token: spec.env_overrides.get(crate::ENV_MCP_AUTH_TOKEN).cloned(),
             });
+        }
+        if let Some(starts) = &self.session_starts {
+            starts
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(StartSpec {
+                    resume_id: spec.resume_id.clone(),
+                    native_fork: spec.native_fork,
+                });
         }
         if let Some(settings) = &self.session_settings {
             settings.note(SettingChange::Started {
@@ -1167,14 +1255,24 @@ impl Harness for FakeHarness {
                     (EventSink::Unbounded(sender), receiver.boxed())
                 }
             };
-        let session_id = spec
-            .resume_id
-            .clone()
-            .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
+        // A native fork starts a new conversation, so it never reuses the
+        // source's session id; a plain resume keeps it, as the real adapters do.
+        let session_id = if spec.native_fork {
+            format!("fake-fork-{}", uuid_like(&spec.workspace))
+        } else {
+            spec.resume_id
+                .clone()
+                .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)))
+        };
         let dies_on_start = self
-            .resume_death
+            .native_fork_death
             .as_ref()
-            .filter(|_| spec.resume_id.is_some())
+            .filter(|_| spec.native_fork)
+            .or_else(|| {
+                self.resume_death
+                    .as_ref()
+                    .filter(|_| spec.resume_id.is_some())
+            })
             .cloned();
         if let Some(message) = &dies_on_start {
             // The adapter returned `Ok` and the agent then exited before it
@@ -1252,6 +1350,7 @@ impl Harness for FakeHarness {
                 .clone()
                 .map(|gate| (self.send_gate_after, gate)),
             send_count: self.send_count.clone(),
+            sent_prompts: self.sent_prompts.clone(),
             interrupt_count: self.interrupt_count.clone(),
             interrupt_failures: self.interrupt_failures.clone(),
             dead_sends_after: self.dead_sends_after,
@@ -1309,6 +1408,8 @@ pub struct FakeSession {
     send_gate: Option<(usize, Gate)>,
     /// A shared count of prompts this session was asked to write.
     send_count: Option<SendCount>,
+    /// Every prompt this session was asked to write, when a test asked for it.
+    sent_prompts: Option<SentPrompts>,
     /// A shared count of cancels this session received.
     interrupt_count: Option<InterruptCount>,
     /// Cancels still due to fail with a transient error.
@@ -1403,6 +1504,13 @@ impl HarnessSession for FakeSession {
         self.sends += 1;
         if let Some(count) = &self.send_count {
             count.note();
+        }
+        if let Some(prompts) = &self.sent_prompts {
+            prompts
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(input.text.clone());
         }
 
         // The first send starts the thread; a test gates later turns so a
@@ -1881,6 +1989,7 @@ pub fn test_spec() -> SessionSpec {
         reasoning_effort: None,
         fast: false,
         resume_id: None,
+        native_fork: false,
         mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
         env_overrides: BTreeMap::new(),
         attachments: Vec::new(),

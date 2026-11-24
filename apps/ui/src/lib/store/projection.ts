@@ -104,6 +104,14 @@ export type StreamTurn = {
    * live: an imported thread has no session until the person writes again.
    */
   imported?: boolean;
+  /**
+   * The daemon turn a user-message cue really belongs to.
+   *
+   * A live user message is shown as its own row with a `cue:` id, while the
+   * agent's work is a second row with the real turn id. Imported history has
+   * no such second row, so the cue keeps the real id for a fork to name.
+   */
+  forkTurnId?: TurnId;
 };
 
 export type PendingMessage = {
@@ -307,7 +315,10 @@ export function foldEvent(
             usage: null,
             changes: null,
           };
-          if (imported) cue.imported = true;
+          if (imported) {
+            cue.imported = true;
+            cue.forkTurnId = turn_id;
+          }
           log.turns.push(cue);
           return log;
         }

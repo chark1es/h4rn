@@ -2301,6 +2301,7 @@ fn idle_thread_meta(
         agent_fingerprint: None,
         parked: None,
         imported: None,
+        forked_from: None,
     }
 }
 

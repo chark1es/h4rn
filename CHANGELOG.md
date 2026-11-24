@@ -140,6 +140,23 @@ All notable changes to h4rn are recorded here. The format follows
   is split into chunks the client joins, so no message is shortened to fit.
   Message text is never logged and
   token shapes are redacted before storage. See [docs/import.md](docs/import.md).
+- **Fork a thread at any finished turn and carry on separately.** Each finished
+  turn has a **Fork from here** action, and the thread menu and command palette
+  can fork from the latest turn. The fork is an ordinary thread with the same
+  project, workspace, harness, model, permissions and reasoning settings, titled
+  `<original> (fork)`, and its transcript is the source's turns through the one
+  you chose, with their original times; the original is read, never changed. A
+  fork from the session's latest turn keeps the provider's own conversation
+  where the harness can copy it (Claude Code's `--resume <id> --fork-session`,
+  Codex's `thread/fork`), and otherwise — an earlier turn, a harness without
+  native forks, or a native fork that dies before it starts — its first message
+  carries a bounded handoff of the copied history. A fork shares no live
+  session, queued message, approval, parked prompt or rate-limit schedule with
+  its source, and a fork of a worktree thread starts in the same workspace path.
+  The thread header says **Forked from** with a link back, and the lineage
+  survives a restart; deleting or archiving the source never affects the fork.
+  A turn that is still running or queued is refused with a message to wait for
+  it. New request: `ForkThread`. See [docs/fork.md](docs/fork.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a
