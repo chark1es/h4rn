@@ -80,7 +80,8 @@ grow memory toward the size of its file. Each import attempt reads at most 100
 conversations and 4 GiB per project, newest first, and only counts conversations
 that are not already imported and whose head showed a visible message. Once a
 project's quota is full, the rest of that project's Claude Code transcripts are
-not read at all; one already imported is still recognised. That shortcut is per
+not read at all; one already imported is still recognised and keeps its place in
+the project's count, including one that names no session id. That shortcut is per
 Claude Code folder, because its folder names the working directory. Codex
 rollouts live in date folders shared by every project, so each rollout is still
 peeked at its head to learn which project it belongs to, and its full transcript
@@ -103,7 +104,11 @@ session id sits in a later record still import once. The scan also checks the
 identity stored for each transcript, not only the one its head revealed, so an
 already imported conversation is not listed again. A transcript that named no
 id keeps its path, size and content fingerprint as its identity, so one that
-keeps growing is offered again as a new conversation. A source is claimed and its
+keeps growing is offered again as a new conversation. The stored identity hides
+a transcript by path only when the head names no session of its own, or names the
+same one. A path that now holds a transcript with a different explicit session id
+is offered as a new conversation, so replacing a file in place never hides what
+it became. A source is claimed and its
 thread written in one transaction: two copies of a conversation in one run, two
 runs at once, or a crash between the claim and the write cannot produce a second
 thread. Progress appears in the dialog, with any limit a scan hit, and the import
@@ -117,8 +122,11 @@ A long replay crosses a paired connection without shortening anything: the
 daemon sends a thread's history in bounded pages, and a frame too large for the
 secure transport is split into chunks the client joins before reading it, so a
 600 KiB prompt stays whole. The journal decides where each page ends from its
-byte budget, so asking for the next page reads one page rather than the rest of
-the thread.
+stored byte budget and its event cap, and one statement returns both the page and
+whether anything follows it, so a replay is a consistent snapshot and asking for
+the next page reads one page rather than the rest of the thread. A page of
+history written by an older daemon can therefore end at a different event than it
+used to, but every event still arrives once and in order.
 
 ## Continuing an imported thread
 

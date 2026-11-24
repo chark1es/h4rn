@@ -226,9 +226,11 @@ pub struct WirePage {
     pub more: bool,
 }
 
-// Rows a test reader actually fetched, for the one-page assertion.
+// Rows the page statement yielded, for the one-page assertion.
 //
-// Thread-local so tests running in parallel cannot add to each other's count.
+// The statement yields every row its recursive walk visited: the page plus the
+// one lookahead row that ended it. Thread-local so tests running in parallel
+// cannot add to each other's count.
 #[cfg(test)]
 thread_local! {
     pub(crate) static WIRE_PAGE_ROWS_FETCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -289,10 +291,12 @@ pub trait Journal: Send + Sync {
     /// At most one page of a thread's projected events with `seq > after`.
     ///
     /// The database stops after `max_events` rows or as soon as the page's
-    /// serialized text would pass `max_bytes`, so a long replay never loads
-    /// the whole thread to hand back its first page. The first event is always
-    /// included even when it alone is larger than the budget: an oversized
-    /// event is carried whole in its own page rather than dropped or cut.
+    /// stored text would pass `max_bytes`, so a long replay never loads the
+    /// whole thread to hand back its first page. The page and its `more` flag
+    /// come from one statement, so they are one snapshot. The first event is
+    /// always included even when it alone is larger than the budget: an
+    /// oversized event is carried whole in its own page rather than dropped or
+    /// cut.
     async fn read_wire_page(
         &self,
         thread_id: &ThreadId,
@@ -927,34 +931,49 @@ impl Journal for SqliteJournal {
         max_bytes: usize,
     ) -> Result<WirePage, JournalError> {
         // The recursive walk takes one row at a time over the (thread_id, seq)
-        // index and stops as soon as the page's stored text would pass the
-        // budget, so the database reads one page instead of the whole replay.
+        // index and stops as soon as the page would pass its byte budget or its
+        // row cap, so the database reads one page instead of the whole replay.
         // The first row is taken unconditionally, which keeps an oversized
         // event whole.
+        //
+        // The walk also yields the first row that did not fit, marked
+        // `stopped`. That row is dropped here, and its presence is the page's
+        // `more` flag: the answer comes from inside the same statement as the
+        // page, inside one implicit read transaction, so an append cannot land
+        // between them and turn an empty page into `more=true` with an
+        // unchanged cursor. Every row the statement yields is a row the walk
+        // visited (the page plus that one lookahead), which is what lets a test
+        // count the query's work.
         //
         // The budget counts each row's stored `event_json` bytes, not the
         // event re-serialized by this build. A page boundary for history
         // written by an older protocol version can therefore land elsewhere
         // than a re-serialized count would put it; nothing is lost either way,
-        // because the next page starts at the following seq.
+        // because the next page starts at the following seq, and the outbound
+        // frame of a paired session is chunked below the transport's frame
+        // limit regardless of its size.
         let rows = sqlx::query(
-            "WITH RECURSIVE page(seq, event_json, used) AS (
-                 SELECT seq, event_json, length(CAST(event_json AS BLOB))
+            "WITH RECURSIVE page(seq, event_json, used, n, stopped) AS (
+                 SELECT seq, event_json, length(CAST(event_json AS BLOB)), 1, 0
                    FROM daemon_wire_events
                   WHERE thread_id = ?1
                     AND seq = (SELECT MIN(seq) FROM daemon_wire_events
                                 WHERE thread_id = ?1 AND seq > ?2)
                  UNION ALL
                  SELECT next.seq, next.event_json,
-                        page.used + length(CAST(next.event_json AS BLOB))
+                        page.used + length(CAST(next.event_json AS BLOB)),
+                        page.n + 1,
+                        CASE WHEN page.n >= ?4
+                                  OR page.used + length(CAST(next.event_json AS BLOB)) > ?3
+                             THEN 1 ELSE 0 END
                    FROM page
                    JOIN daemon_wire_events AS next
                      ON next.thread_id = ?1
                     AND next.seq = (SELECT MIN(seq) FROM daemon_wire_events
                                      WHERE thread_id = ?1 AND seq > page.seq)
-                  WHERE page.used + length(CAST(next.event_json AS BLOB)) <= ?3
+                  WHERE page.stopped = 0
              )
-             SELECT seq, event_json FROM page ORDER BY seq LIMIT ?4",
+             SELECT seq, event_json, stopped FROM page ORDER BY seq",
         )
         .bind(thread_id.as_str())
         .bind(after as i64)
@@ -966,8 +985,13 @@ impl Journal for SqliteJournal {
         #[cfg(test)]
         WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(fetched.get() + rows.len()));
 
+        let mut more = false;
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
+            if row.try_get::<i64, _>("stopped")? != 0 {
+                more = true;
+                continue;
+            }
             let seq: i64 = row.try_get("seq")?;
             let event_json: String = row.try_get("event_json")?;
             events.push(WireEvent {
@@ -976,21 +1000,7 @@ impl Journal for SqliteJournal {
                 event: serde_json::from_str(&event_json)?,
             });
         }
-        // One indexed probe says whether anything follows the page; this keeps
-        // the `more` flag exact even when the row cap ended the page.
-        let last = events.last().map(|event| event.seq).unwrap_or(after);
-        let more: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM daemon_wire_events
-                            WHERE thread_id = ? AND seq > ?)",
-        )
-        .bind(thread_id.as_str())
-        .bind(last as i64)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(WirePage {
-            events,
-            more: more != 0,
-        })
+        Ok(WirePage { events, more })
     }
 
     async fn read_wire_since_global(&self, after: u64) -> Result<Vec<WireEvent>, JournalError> {
@@ -2343,16 +2353,176 @@ mod tests {
             .await
             .unwrap();
         let fetched = WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.get());
-        assert_eq!(
-            fetched,
-            page.events.len(),
-            "the query returned only the page"
-        );
         assert!(
             page.events.len() < 200,
             "the page is a small prefix, not the whole thread"
         );
         assert!(page.more);
+        // The walk yields the page plus the one row that stopped it, so this
+        // is the query's real work, not a count of its output. A walk that
+        // scanned the thread to the end would yield 200 here.
+        assert_eq!(fetched, page.events.len() + 1);
+        assert!(
+            fetched < 20,
+            "{fetched} rows visited for a {} event page out of 200",
+            page.events.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_that_ends_at_the_last_event_has_nothing_more() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_last");
+        journal.upsert_thread(&meta("th_last")).await.unwrap();
+        journal
+            .append_wire(
+                &thread_id,
+                &[
+                    page_event(&thread_id, 0, 1024),
+                    page_event(&thread_id, 1, 1024),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // A budget that carries both events: the walk ends with the thread, so
+        // no lookahead row and no `more`.
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, 4 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert!(!page.more, "nothing follows the last event");
+
+        // The same two events split by a one-event budget: the page always has
+        // its first event and `more` is true, never an empty page with more.
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 1, "the oversized event is carried whole");
+        assert!(page.more, "the second event follows");
+    }
+
+    #[tokio::test]
+    async fn the_row_cap_stops_the_walk_instead_of_trimming_it() {
+        const EVENTS: usize = 5_000;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_cap");
+        journal.upsert_thread(&meta("th_cap")).await.unwrap();
+        let mut wire = Vec::new();
+        for index in 0..EVENTS {
+            wire.push(page_event(&thread_id, index, 8));
+        }
+        journal.append_wire(&thread_id, &wire).await.unwrap();
+
+        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(0));
+        let page = journal
+            .read_wire_page(&thread_id, 0, 100, 256 * 1024)
+            .await
+            .unwrap();
+        let fetched = WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.get());
+        assert_eq!(page.events.len(), 100, "the cap fills the page");
+        assert!(page.more, "the rest follows");
+        assert_eq!(
+            fetched,
+            page.events.len() + 1,
+            "the walk stopped at the first row past the cap"
+        );
+        assert!(
+            fetched < EVENTS / 10,
+            "{fetched} rows visited to page {EVENTS} tiny events"
+        );
+    }
+
+    /// A page of rows written before `at` existed.
+    ///
+    /// Their stored text omits `at`, so re-serializing them adds `"at":null`.
+    /// That makes the page boundary land elsewhere than the pre-SQL pager's
+    /// did, but every event still arrives exactly once and in order.
+    #[tokio::test]
+    async fn a_legacy_page_may_differ_but_delivers_every_event_once() {
+        const BUDGET: usize = 256 * 1024;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_legacy");
+
+        // Two rows whose stored text exactly fills the budget between them.
+        let mut seqs = Vec::new();
+        for (index, target) in [BUDGET / 2, BUDGET / 2].into_iter().enumerate() {
+            let mut value = serde_json::json!({
+                "type": "item_completed",
+                "thread_id": thread_id.as_str(),
+                "turn_id": "turn_page",
+                "item": {
+                    "kind": "message",
+                    "item_id": format!("legacy-{index}"),
+                    "role": "user",
+                    "text": "",
+                    "attachments": [],
+                },
+            });
+            let empty = value.to_string().len();
+            value["item"]["text"] = serde_json::Value::String("l".repeat(target - empty));
+            let text = value.to_string();
+            assert_eq!(text.len(), target, "the row is exactly the target size");
+            let seq: i64 = sqlx::query_scalar(
+                "INSERT INTO daemon_wire_events (thread_id, event_json, recorded_at)
+                 VALUES (?, ?, '2026-11-20T10:00:00Z') RETURNING seq",
+            )
+            .bind(thread_id.as_str())
+            .bind(text)
+            .fetch_one(&journal.pool)
+            .await
+            .unwrap();
+            seqs.push(seq as u64);
+        }
+
+        let all = journal.read_wire_since(&thread_id, 0).await.unwrap();
+        let before = old_pages(&all, BUDGET);
+        assert_eq!(before.len(), 2, "the old pager split the two rows");
+        assert_eq!(before[0].0, vec![seqs[0]], "one event in the first page");
+        assert!(before[0].1, "the old pager had more to send");
+
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, BUDGET)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            seqs,
+            "the stored-byte budget carries both rows in one page"
+        );
+        assert!(!page.more, "nothing is left after the page");
+        let serialized: usize = page
+            .events
+            .iter()
+            .map(|event| serde_json::to_string(&event.event).unwrap().len())
+            .sum();
+        assert!(
+            serialized > BUDGET,
+            "the re-serialized page ({serialized}) passes the stored-byte budget"
+        );
+
+        // Walking a smaller budget delivers every event exactly once, in
+        // order, with an exact `more` each time.
+        let mut after = 0;
+        let mut walked = Vec::new();
+        loop {
+            let page = journal
+                .read_wire_page(&thread_id, after, 4096, BUDGET / 2)
+                .await
+                .unwrap();
+            assert!(!page.events.is_empty(), "a page with more is never empty");
+            walked.extend(page.events.iter().map(|event| event.seq));
+            after = *walked.last().unwrap();
+            if !page.more {
+                break;
+            }
+        }
+        assert_eq!(walked, seqs, "every legacy event arrives once, in order");
     }
 
     #[tokio::test]
