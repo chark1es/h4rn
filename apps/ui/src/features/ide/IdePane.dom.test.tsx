@@ -749,6 +749,37 @@ describe("the diff pane stays on the file the person picked", () => {
     expect(screen.getByText("3 files")).toBeTruthy();
   });
 
+  it("asks once when the source picker starts a review on a moved tab", async () => {
+    await mount();
+    await openDiff();
+
+    // Close the pane, then move the editor to another tab.
+    fireEvent.click(screen.getByRole("tab", { name: "Edit" }));
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+
+    // Picking Branch from the path bar starts the review for the tab in front
+    // of the editor; the pane's follow effect must not read it a second time.
+    const before = diffRequests().length;
+    const filesBefore = mock.requests.filter((request) => request.type === "fs_diff_files").length;
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Branch/ }));
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew branch/ })).toBeTruthy(),
+    );
+    await settle();
+
+    expect(diffRequests()).toHaveLength(before + 1);
+    expect(mock.requests.filter((request) => request.type === "fs_diff_files")).toHaveLength(
+      filesBefore + 1,
+    );
+  });
+
   it("names the base Commit mode reuses", async () => {
     await mount();
     await openDiff();
@@ -1022,6 +1053,133 @@ describe("a branch review resumed after a workspace round-trip", () => {
     });
     await waitFor(() => expect(filesRequests().length).toBeGreaterThan(before));
     expect(filesRequests().at(-1)?.against).toEqual({ kind: "base", base: "release" });
+    // One read, not two: the resumed load already opens the tab's file, so the
+    // pane's follow must not ask for the same list again.
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+    await settle();
+    expect(filesRequests()).toHaveLength(before + 1);
+  });
+});
+
+describe("a review that was still loading when its workspace left", () => {
+  /**
+   * Starts the Branch or Commits review from the source picker with its first
+   * read held back. The returned release answers that read.
+   */
+  async function startHeldReview(source: "Branch" | "Commits", type: string): Promise<() => void> {
+    const release = holdNext(type);
+    openChip(screen.getByRole("button", { name: "Diff source: Uncommitted" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: new RegExp(source) }));
+    await waitFor(() =>
+      expect(mock.requests.filter((request) => request.type === type).length).toBeGreaterThan(0),
+    );
+    return release;
+  }
+
+  /** Leaves for another task's workspace mid-load. */
+  async function leave(): Promise<void> {
+    const other = "th_2" as ThreadId;
+    mock.state.threads = {
+      ...mock.state.threads,
+      [other]: threadRow(other, `${workspacePath}-empty`, "Another task"),
+    };
+    act(() => {
+      mock.state.ui.selectedThreadId = other;
+      mock.notify();
+    });
+    await waitFor(() => expect(pathBar().textContent).toBe(`${workspacePath}-empty`));
+  }
+
+  /** Comes back to this task's workspace. */
+  async function comeBack(): Promise<void> {
+    act(() => {
+      mock.state.ui.selectedThreadId = thread;
+      mock.notify();
+    });
+  }
+
+  const reads = (type: string) => mock.requests.filter((request) => request.type === type).length;
+
+  it("reopens the tab the Branch load was started for, reading the list once", async () => {
+    await mount();
+    await openDiff();
+
+    // Close the pane, then move the editor on to another tab. The diff stays
+    // on a.ts: nothing follows the tab while the pane is closed.
+    fireEvent.click(screen.getByRole("tab", { name: "Edit" }));
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+
+    // Starting Branch opens the review for b.ts; its file list is held, and the
+    // person leaves before it lands.
+    const releaseFiles = await startHeldReview("Branch", "fs_diff_files");
+    await leave();
+    await releaseHold(releaseFiles);
+    const before = reads("fs_diff_files");
+
+    // The resumed load reopens the file the load was started for, and the tab
+    // follow leaves that one read alone.
+    await comeBack();
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew branch/ })).toBeTruthy(),
+    );
+    await settle();
+    expect(reads("fs_diff_files")).toBe(before + 1);
+    expect(pathBar().textContent).toBe("b.ts");
+  });
+
+  it("reopens the tab the Commits load was started for, listing commits once", async () => {
+    await mount();
+    await openDiff();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Edit" }));
+    act(() => {
+      mock.state.ui.pendingIdePath = "b.ts";
+      mock.notify();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "b.ts" }).getAttribute("aria-selected")).toBe("true"),
+    );
+
+    const releaseCommits = await startHeldReview("Commits", "fs_diff_commits");
+    await leave();
+    await releaseHold(releaseCommits);
+    const before = reads("fs_diff_commits");
+
+    await comeBack();
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: bnew commit/ })).toBeTruthy(),
+    );
+    await settle();
+    expect(reads("fs_diff_commits")).toBe(before + 1);
+    expect(pathBar().textContent).toBe("b.ts");
+  });
+
+  it("reopens the active tab's Branch review when no diff had opened yet", async () => {
+    await mount();
+
+    // Branch is picked straight from Edit, before any diff has named a file:
+    // `diffPath` is still null, so only the load's own preferred file can say
+    // what to reopen.
+    const releaseFiles = await startHeldReview("Branch", "fs_diff_files");
+    await leave();
+    await releaseHold(releaseFiles);
+    const before = reads("fs_diff_files");
+
+    await comeBack();
+    await waitFor(() =>
+      expect(within(diffLines()).getByRole("button", { name: /Line 1: anew branch/ })).toBeTruthy(),
+    );
+    await settle();
+    expect(reads("fs_diff_files")).toBe(before + 1);
+    expect(pathBar().textContent).toBe("a.ts");
   });
 });
 
