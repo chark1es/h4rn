@@ -351,6 +351,11 @@ async fn a_failed_native_resume_falls_back_to_a_bounded_handoff() {
         "the fallback sends the saved history: {echo}"
     );
     assert!(echo.contains("Implement the feature and keep it quiet"));
+    assert_eq!(
+        echo.matches(request).count(),
+        1,
+        "the retry sends the request once, not as history and again as the request: {echo}"
+    );
     assert!(echo.ends_with(request), "the new request is untouched");
     let limit =
         DEFAULT_HANDOFF_BYTES + "My next message:\n".len() + request.len() + "echo: ".len() + 2;
@@ -370,6 +375,70 @@ async fn a_failed_native_resume_falls_back_to_a_bounded_handoff() {
     let echo = wait_for_echo(&mut events).await;
     assert!(!echo.contains("Earlier conversation history"));
     assert!(echo.ends_with(second));
+}
+
+#[tokio::test]
+async fn a_large_request_still_hands_off_the_recent_history_once() {
+    let fixture = fixture(
+        FakeHarness::new().with_resume_failure("no such session"),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    )
+    .await;
+    let scan = fixture.import.scan().await;
+    fixture
+        .import
+        .start(vec![scan.projects[0].key.clone()])
+        .await
+        .expect("start");
+    let threads = wait_for_threads(&fixture, 2).await;
+    let claude = threads
+        .iter()
+        .find(|thread| thread.harness == HarnessKind::ClaudeCode)
+        .expect("claude thread")
+        .clone();
+
+    // Most of the default 16 KB budget. The journaled copy of this request is
+    // the newest message in the thread; it must not be read back as history
+    // and push the recent messages out.
+    let request = format!("{}please also add structured logs", "detail ".repeat(1_800));
+    assert!(
+        request.len() > 12_000 && request.len() < 15_000,
+        "the request takes most of the budget: {} bytes",
+        request.len()
+    );
+    let mut events = fixture.manager.subscribe();
+    fixture
+        .manager
+        .send_message(&claude.thread_id, request.clone(), Vec::new())
+        .await
+        .expect("send");
+    let echo = wait_for_echo(&mut events).await;
+    assert!(
+        echo.contains("Earlier conversation history"),
+        "a large request still leaves room for the history: {echo}"
+    );
+    assert!(
+        echo.contains("Implement the feature and keep it quiet"),
+        "the original request survives a large new one"
+    );
+    assert!(
+        echo.contains("follow-up 29") && echo.contains("step 29"),
+        "the recent messages survive a large new one: {}",
+        &echo[..echo.len().min(400)]
+    );
+    assert_eq!(
+        echo.matches(&request).count(),
+        1,
+        "the request appears once, not as history and again as the request"
+    );
+    assert!(echo.ends_with(&request), "the new request is untouched");
+    let limit =
+        DEFAULT_HANDOFF_BYTES + "My next message:\n".len() + request.len() + "echo: ".len() + 2;
+    assert!(
+        echo.len() <= limit,
+        "the handoff stayed within the default budget: {} > {limit}",
+        echo.len()
+    );
 }
 
 #[tokio::test]
@@ -739,6 +808,11 @@ async fn a_resume_that_dies_before_its_session_falls_back_to_the_handoff() {
     assert!(
         echo.contains("Earlier conversation history"),
         "the retry sends the saved history: {echo}"
+    );
+    assert_eq!(
+        echo.matches(request).count(),
+        1,
+        "the retry sends the request once, not as history and again as the request: {echo}"
     );
     assert!(echo.ends_with(request), "the new request is untouched");
 

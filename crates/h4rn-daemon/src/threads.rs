@@ -3190,7 +3190,7 @@ impl ThreadManager {
         }
 
         let handoff = if record.needs_imported_history() {
-            let history = self.inner.imported_history(thread_id).await;
+            let history = self.inner.imported_history(thread_id, None).await;
             record.handoff_block(&text, &history)
         } else {
             None
@@ -5046,7 +5046,16 @@ impl Inner {
     /// This is the one copy of an imported conversation's text: the journaled
     /// items every client replays. The imported origin stores only the facts a
     /// handoff needs, so an upsert never rewrites a transcript.
-    async fn imported_history(&self, thread_id: &ThreadId) -> Vec<crate::journal::ImportedMessage> {
+    ///
+    /// `exclude` names the turn the handoff is being built for. Its prompt is
+    /// already journaled by the time a fallback hands off, so leaving it in the
+    /// history block would send the same request twice: once as history and
+    /// once as the request that follows it.
+    async fn imported_history(
+        &self,
+        thread_id: &ThreadId,
+        exclude: Option<&TurnId>,
+    ) -> Vec<crate::journal::ImportedMessage> {
         let events = match self.journal.read_wire_since(thread_id, 0).await {
             Ok(events) => events,
             Err(error) => {
@@ -5060,13 +5069,19 @@ impl Inner {
             .filter_map(|wire| match wire.event {
                 Event::ItemCompleted {
                     item: Item::Message { role, text, .. },
+                    turn_id,
                     at,
                     ..
-                } => Some(crate::journal::ImportedMessage {
-                    role,
-                    text,
-                    at: at.unwrap_or(fallback),
-                }),
+                } => {
+                    if exclude == Some(&turn_id) {
+                        return None;
+                    }
+                    Some(crate::journal::ImportedMessage {
+                        role,
+                        text,
+                        at: at.unwrap_or(fallback),
+                    })
+                }
                 _ => None,
             })
             .collect()
@@ -7655,7 +7670,9 @@ impl Inner {
         if let Err(error) = self.journal.upsert_thread(&meta).await {
             tracing::warn!(%error, "could not clear a failed imported resume id");
         }
-        let history = self.imported_history(&meta.thread_id).await;
+        let history = self
+            .imported_history(&meta.thread_id, Some(&turn.turn_id))
+            .await;
         let block = {
             let messages: Vec<crate::handoff::HandoffMessage<'_>> = history
                 .iter()
