@@ -654,7 +654,9 @@ All notable changes to h4rn are recorded here. The format follows
 - **A base or commit change keeps the tab its review was started for.** When a
   Branch or Commits list is still loading, changing the base or the commit now
   reopens the tab that list was started for instead of the file from before it,
-  and leaving and returning mid-read still reads that list once.
+  and leaving and returning mid-read still reads that list once. Pressing
+  **Refresh** while a list is still out does the same, so the review never
+  jumps back to the file it was on before the load began.
 - **A replaced transcript is offered as the new conversation it is.** When a
   session's path now holds a transcript with a different explicit session id, the
   scan offers it instead of hiding it behind the old path claim. The stored claim
