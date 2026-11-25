@@ -697,7 +697,13 @@ All notable changes to h4rn are recorded here. The format follows
   leaves no phantom running turn, and a settlement whose write fails keeps the waiting message queued
   rather than handing the agent a prompt storage still lists as waiting. A delayed summary with an
   older queue revision no longer clears loaded rows or ends an edit, and a late Save reply only
-  closes the edit that submitted it. Long unbroken text in a queued row wraps at phone width.
+  closes the edit that submitted it. Long unbroken text in a queued row wraps at phone width. Every
+  path into a turn now uses one delivery claim: a promoted prompt re-checks its sender's grant under
+  the session lock just before the write, a timeout after the frame was written stays **May have been
+  delivered** instead of being retried as unsent, a direct steer keeps a durable copy even though it
+  never had a queue row (and the composer keeps the draft until the recovered row appears), and a
+  prompt parked by a rate limit keeps its claim so a crash between the release and the write still
+  recovers it.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

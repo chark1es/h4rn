@@ -1455,14 +1455,23 @@ export type SendOptions = {
   steer?: boolean;
 };
 
+/**
+ * What the daemon could say about a send.
+ *
+ * `unclear` means the frame was written and the adapter never answered: the
+ * turn may hold the text, so the composer keeps the draft instead of clearing
+ * it while the person decides.
+ */
+export type SendResult = "sent" | "unclear" | "failed";
+
 export async function sendMessage(
   threadId: ThreadId,
   text: string,
   attachments: Attachment[] = [],
   options: SendOptions = {},
-): Promise<boolean> {
+): Promise<SendResult> {
   const body = text.trim();
-  if (!body && attachments.length === 0) return false;
+  if (!body && attachments.length === 0) return "failed";
   const state = getState();
   const log = state.logs[threadId] ?? createThreadLog();
   const localId = `local-${++localCounter}`;
@@ -1521,13 +1530,14 @@ export async function sendMessage(
         },
       });
     }
-    return true;
+    return "sent";
   } catch (error) {
     const proto = toProtoError(error);
     if (proto.code === "delivery_unclear") {
       // The daemon wrote the steer before the connection failed, so the turn
-      // may already hold it. The row stays sent and the person is told, because
-      // offering a resend could put the same words in the turn twice.
+      // may already hold it. The composer keeps the draft (it is the person's
+      // only other copy until the recovered row appears), and the row stays
+      // sent here so the transcript never invites a resend automatically.
       const current = getState();
       const currentLog = current.logs[threadId];
       if (currentLog) {
@@ -1547,9 +1557,9 @@ export async function sendMessage(
       pushToast({
         variant: "info",
         title: "Delivered, or maybe not.",
-        description: `${proto.message} Check the turn before sending it again.`,
+        description: `${proto.message} Your draft is still in the composer until the queue row appears.`,
       });
-      return true;
+      return "unclear";
     }
     const current = getState();
     const currentLog = current.logs[threadId];
@@ -1570,7 +1580,7 @@ export async function sendMessage(
       title: `Couldn't send the reply to ${current.threads[threadId]?.host ?? "the host"}.`,
       description: `${proto.message} Your draft is still in the composer.`,
     });
-    return false;
+    return "failed";
   }
 }
 

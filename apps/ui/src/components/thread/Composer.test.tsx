@@ -47,7 +47,7 @@ const mock = vi.hoisted(() => {
           text: string,
           attachments: unknown[],
           options?: { steer?: boolean },
-        ) => Promise<boolean>
+        ) => Promise<"sent" | "unclear" | "failed">
       >(),
     editQueuedMessage: vi.fn(async () => true),
     interruptThread: vi.fn(),
@@ -419,7 +419,7 @@ describe("Composer drafts and history", () => {
   });
 
   it("clears the draft after a successful send", async () => {
-    mock.sendMessage.mockResolvedValue(true);
+    mock.sendMessage.mockResolvedValue("sent");
     renderComposer();
     const input = textarea();
 
@@ -434,7 +434,7 @@ describe("Composer drafts and history", () => {
   it("clears the draft it loaded, before any typing", async () => {
     writeThreadDraft(HOST, THREAD, "loaded draft");
     flushDrafts();
-    mock.sendMessage.mockResolvedValue(true);
+    mock.sendMessage.mockResolvedValue("sent");
     renderComposer();
     const input = textarea();
     expect(input.value).toBe("loaded draft");
@@ -446,9 +446,9 @@ describe("Composer drafts and history", () => {
   });
 
   it("clears against the revision it showed, not a newer one in storage", async () => {
-    let finish: (ok: boolean) => void = () => undefined;
+    let finish: (ok: "sent" | "unclear" | "failed") => void = () => undefined;
     mock.sendMessage.mockReturnValue(
-      new Promise<boolean>((resolve) => {
+      new Promise<"sent" | "unclear" | "failed">((resolve) => {
         finish = resolve;
       }),
     );
@@ -472,14 +472,14 @@ describe("Composer drafts and history", () => {
     );
 
     await act(async () => {
-      finish(true);
+      finish("sent");
     });
 
     expect(readThreadDraft(HOST, THREAD)).toBe("newer from elsewhere");
   });
 
   it("keeps the draft when the send fails", async () => {
-    mock.sendMessage.mockResolvedValue(false);
+    mock.sendMessage.mockResolvedValue("failed");
     renderComposer();
     const input = textarea();
 
@@ -489,6 +489,19 @@ describe("Composer drafts and history", () => {
     await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
     expect(input.value).toBe("keep me");
     expect(readThreadDraft(HOST, THREAD)).toBe("keep me");
+  });
+
+  it("keeps the draft when the send may already have reached the turn", async () => {
+    mock.sendMessage.mockResolvedValue("unclear");
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "maybe delivered" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
+    expect(input.value).toBe("maybe delivered");
+    expect(readThreadDraft(HOST, THREAD)).toBe("maybe delivered");
   });
 
   it("leaves history mode when the user types after a recall", () => {
@@ -512,7 +525,7 @@ describe("Composer drafts and history", () => {
 
   it("restores the preserved draft after sending a recalled prompt", async () => {
     mock.state.logs[THREAD] = log(["earlier prompt"]);
-    mock.sendMessage.mockResolvedValue(true);
+    mock.sendMessage.mockResolvedValue("sent");
     renderComposer();
     const input = textarea();
 
@@ -534,9 +547,9 @@ describe("Composer drafts and history", () => {
 
   it("keeps a newer recall on screen when a recalled send finishes", async () => {
     mock.state.logs[THREAD] = log(["older prompt", "newer prompt"]);
-    let finish: (ok: boolean) => void = () => undefined;
+    let finish: (ok: "sent" | "unclear" | "failed") => void = () => undefined;
     mock.sendMessage.mockReturnValue(
-      new Promise<boolean>((resolve) => {
+      new Promise<"sent" | "unclear" | "failed">((resolve) => {
         finish = resolve;
       }),
     );
@@ -561,7 +574,7 @@ describe("Composer drafts and history", () => {
     expect(input.value).toBe("older prompt");
 
     await act(async () => {
-      finish(true);
+      finish("sent");
     });
 
     expect(input.value).toBe("older prompt");
@@ -601,9 +614,9 @@ describe("Composer drafts and history", () => {
   });
 
   it("keeps a newer draft from another tab when the send finishes", async () => {
-    let finish: (ok: boolean) => void = () => undefined;
+    let finish: (ok: "sent" | "unclear" | "failed") => void = () => undefined;
     mock.sendMessage.mockReturnValue(
-      new Promise<boolean>((resolve) => {
+      new Promise<"sent" | "unclear" | "failed">((resolve) => {
         finish = resolve;
       }),
     );
@@ -622,7 +635,7 @@ describe("Composer drafts and history", () => {
     await waitFor(() => expect(input.value).toBe("written elsewhere"));
 
     await act(async () => {
-      finish(true);
+      finish("sent");
     });
 
     expect(readThreadDraft(HOST, THREAD)).toBe("written elsewhere");
@@ -630,9 +643,9 @@ describe("Composer drafts and history", () => {
   });
 
   it("does not clear the next thread's box when a late send finishes", async () => {
-    let finish: (ok: boolean) => void = () => undefined;
+    let finish: (ok: "sent" | "unclear" | "failed") => void = () => undefined;
     mock.sendMessage.mockReturnValue(
-      new Promise<boolean>((resolve) => {
+      new Promise<"sent" | "unclear" | "failed">((resolve) => {
         finish = resolve;
       }),
     );
@@ -654,7 +667,7 @@ describe("Composer drafts and history", () => {
     await waitFor(() => expect(textarea().value).toBe("second thread draft"));
 
     await act(async () => {
-      finish(true);
+      finish("sent");
     });
 
     expect(textarea().value).toBe("second thread draft");
@@ -825,7 +838,7 @@ describe("Composer @ file picker", () => {
   });
 
   it("closes on Escape, leaves the typed text, then normal keys work again", async () => {
-    mock.sendMessage.mockResolvedValue(true);
+    mock.sendMessage.mockResolvedValue("sent");
     renderComposer();
     const input = textarea();
     typeInto(input, "@comp");
@@ -1433,7 +1446,7 @@ describe("follow-up behaviour and queued messages", () => {
   };
 
   beforeEach(() => {
-    mock.sendMessage.mockResolvedValue(true);
+    mock.sendMessage.mockResolvedValue("sent");
     mock.editQueuedMessage.mockResolvedValue(true);
     setFollowUpBehavior("queue");
     setMultilineEnter(false);

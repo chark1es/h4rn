@@ -701,7 +701,7 @@ describe("queued messages", () => {
     expect(fake.request).not.toHaveBeenCalled();
   });
 
-  it("reports an unclear steer as possibly delivered instead of offering a resend", async () => {
+  it("reports an unclear steer as possibly delivered and keeps the draft", async () => {
     fake.request.mockRejectedValueOnce(
       new H4rnRequestError(
         protoError("delivery_unclear", "the message may have reached the agent: timed out"),
@@ -709,9 +709,11 @@ describe("queued messages", () => {
       ),
     );
 
-    const ok = await sendMessage("queue_thread", "do not send this twice", [], { steer: true });
+    const outcome = await sendMessage("queue_thread", "do not send this twice", [], {
+      steer: true,
+    });
 
-    expect(ok).toBe(true);
+    expect(outcome).toBe("unclear");
     const toasts = getState().toasts;
     expect(toasts.at(-1)?.title).toBe("Delivered, or maybe not.");
     expect(toasts.at(-1)?.variant).toBe("info");

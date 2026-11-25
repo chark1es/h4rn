@@ -375,9 +375,12 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     // request is not hidden behind this tab's pending write.
     flushDrafts();
     setSending(true);
-    const ok = await sendMessage(submittedThread, value, attachments.attachments, { steer });
+    const outcome = await sendMessage(submittedThread, value, attachments.attachments, { steer });
     setSending(false);
-    if (!ok) return;
+    // A send the daemon could not confirm may already be in the turn. Keep the
+    // draft until the recovered "May have been delivered" row appears, so the
+    // person's text is never lost while they decide.
+    if (outcome === "failed" || outcome === "unclear") return;
     // Clear only the draft that was sent. If this tab typed again, or another
     // tab saved newer text, that text stays in the box and in storage.
     const cleared = recalled

@@ -1878,9 +1878,19 @@ steer uses: `claimed` (the row is gone, the adapter has not been called), `sendi
 started, so delivery is unknown) and `delivered` (the adapter took it, after which the claim is
 cleared). At startup a `claimed` promotion goes back to the queue at the position it was taken from,
 a `sending` one is shown as **May have been delivered**, and a `delivered` one is dropped — unless
-the pause already holds that exact prompt for its resume. A turn that ends drops its promoted claim,
-so ending a turn never leaves work behind to be revived by a restart. Without this record a daemon
-that stopped between the dequeue and the adapter write lost the only copy of the message.
+the pause already holds that exact prompt for its resume. A turn that ends drops a promoted claim
+whose delivery is known (`claimed`, `refused` or `delivered`); a `sending` one stays, because the
+adapter may already hold the text. Without this record a daemon that stopped between the dequeue and
+the adapter write lost the only copy of the message. The promoted write re-checks the sender's grant
+under the session lock, after the `sending` write and immediately before the adapter call, exactly
+as a steer does: a family revoked after the delivery claim never receives the prompt, and the
+message goes back to the queue as known unsent. A definite pre-write refusal (`NotSent`) puts the
+claim back to `claimed`; any other failure keeps `sending`, because a timeout after the frame was
+written may already be in the turn. A direct steer writes the same claim before its adapter call
+even though it has no queue row, so an unclear result survives as a **May have been delivered** row.
+A parked prompt keeps its promoted claim: the parked record and the claim name the same dispatch,
+and the write that releases the pause carries both changes, so a crash between the release and the
+write still recovers the text.
 
 **An uncertain row does not block the queue.** Only the person's Send now or Steer may retry a row
 marked **May have been delivered**; automatic promotion skips past such rows and starts the next
@@ -1896,9 +1906,10 @@ state back, so there is no phantom Working turn and the message is still deliver
 A steer the harness already took is **reported as delivered even when its transcript row could not
 be written**: `MessageAccepted.unrecorded` says the words are in the turn and only the row is
 missing. Reporting that as a failure would invite a resend, and the running turn would hold the same
-words twice. A direct steer whose outcome is unclear is reported the same way, as
-`ProtoErrorCode::DeliveryUnclear`: the client says the message may have landed instead of offering a
-resend.
+words twice. A direct steer writes the same `sending` claim before `guard.steer`, so the text has a
+durable copy even though it never had a queue row; an unclear outcome is reported as
+`ProtoErrorCode::DeliveryUnclear` and the recovered row says **May have been delivered**, while the
+composer keeps the draft until that row exists instead of clearing the only other copy.
 
 
 Queue edits, removals, moves and Send now are one daemon request (`QueueMessage`). Every mutation
