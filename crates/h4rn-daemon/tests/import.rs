@@ -350,6 +350,11 @@ async fn a_failed_native_resume_falls_back_to_a_bounded_handoff() {
         echo.contains("Earlier conversation history"),
         "the fallback sends the saved history: {echo}"
     );
+    assert_eq!(
+        echo.matches("Earlier conversation history").count(),
+        1,
+        "the history is sent exactly once, not wrapped by the retry and the claim: {echo}"
+    );
     assert!(echo.contains("Implement the feature and keep it quiet"));
     assert_eq!(
         echo.matches(request).count(),
