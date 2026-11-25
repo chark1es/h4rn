@@ -2126,15 +2126,20 @@ turn is exact even after the source carries on; Claude Code's
 the chosen turn is still the source session's tip, re-checked under the
 source's record lock when the fork starts. That check opens a per-source gate
 before the lock is released: the source's next dispatch waits until the fork
-reports `SessionStarted`, its startup fails, or the copy's own deadline passes,
-so a message sent in that window cannot be read into the copy. The fork's prompt
-is written before its copy is waited on, and the deadline runs from that write:
-Claude Code reports its init frame only after the first user frame, so a fork
-that waited for the report first would never receive one. A provider still
-reading the source when the deadline passes has its process shut down and fenced,
-the source is released there — after the copy is stopped, before the handoff
-session starts — and the fork switches to the handoff. The source's Send is
-answered at once — its turn and prompt are already
+reports `SessionStarted`, shows its first real output, its startup fails, or the
+copy's one absolute deadline passes, so a message sent in that window cannot be
+read into the copy. The deadline starts when the gate opens and the same
+instant bounds both the start and the wait for confirmation, so a slow start
+eats into the time left rather than earning a second budget; the source's
+backstop stays strictly longer. The fork's prompt is written before its copy is
+waited on, because Claude Code reports its init frame only after the first user
+frame, so a fork that waited for the report first would never receive one. A
+provider still reading the source when the deadline passes has its process shut
+down and fenced, the source is released there — after the copy is stopped,
+before the handoff session starts — and the fork switches to the handoff. A Stop
+that lands after the native start returns but before the prompt is written
+leaves nothing to confirm: the copy session is shut down and the source released
+at once. The source's Send is answered at once — its turn and prompt are already
 durable — and only its dispatch waits, in the background delivery, never while
 holding the per-thread switch lock, so the UI's deadline never reports a failure
 for a prompt that will run and a Send after the queue moved on is still answered
@@ -2144,14 +2149,22 @@ a second startup spawned for the same fork can neither copy nor release the
 source's gate. A session id is offered only by a thread that started that
 session itself; an unused fork still points at the conversation it was made from
 and hands off instead. Otherwise — a harness without native forks, a source that
-moved on, a copy past its deadline, or a failed start — the fork starts a fresh
-session and sends a bounded handoff of its copied history. This reuses the
-import's one-attempt machinery (ADR-045): the native intent is cleared when a
-session reports `SessionStarted`, or when it cannot be bounded, dies before that
-report, or misses its deadline, and the same turn is retried with the handoff.
-The handoff reads only the journaled turns before the dispatch it replaces, so a
-message queued during a pending startup is not part of the history and is not
-sent twice when it runs.
+moved on, a copy past its deadline, a failed start, or a native fork whose first
+answer is an error or a failed result before it ever reported a session — the
+fork starts a fresh session and sends a bounded handoff of its copied history.
+This reuses the import's one-attempt machinery (ADR-045): the native intent is
+cleared when a session reports `SessionStarted`, or when it cannot be bounded,
+dies before that report, or misses its deadline, and the same turn is retried
+with the handoff. A copy confirmed by its first output without ever naming a
+session is spent there too — the borrowed source id is cleared durably and the
+next session carries the handoff, including the turn that output answered — so
+a restart can never fork the source again and drop that turn. A failed
+completion or an `Error` while the native origin is
+still pending is that death, not the turn's own failure, so the person's request
+still runs and later sends use the fork's own session instead of retrying the
+dead copy. The handoff reads only the journaled turns before the dispatch it
+replaces, so a message queued during a pending startup is not part of the
+history and is not sent twice when it runs.
 
 The copy gate holds a source's next work, whichever way that work starts. A Send
 waits in its background delivery, and a queued message that a settlement promotes
@@ -2162,12 +2175,15 @@ advance.
 
 An older journal filed a queued prompt under the running turn. The replay gives
 it to the next turn that starts and has no prompt of its own; a turn that already
-has one never inherits it. A held prompt that never became a turn is shown in no
-copy, and the fork at that point or later is refused with a clear message rather
-than copying a transcript that silently drops a row the source showed; that
-refusal advises forking from an earlier turn or starting a new thread, because no
-later fork point can include the lost row. The same rule runs in the client
-projection, where such a prompt's row is given no turn to fork.
+has one never inherits it. A steer is not such a prompt: its journal mark is
+copied under the fork's own thread id in the same append as the copied row, so a
+fork of that fork still reads it in the turn it was written into. A held prompt
+that never became a turn is shown in no copy, and the fork at that point or
+later is refused with a clear message rather than copying a transcript that
+silently drops a row the source showed; that refusal advises forking from an
+earlier turn or starting a new thread, because no later fork point can include
+the lost row. The same rule runs in the client projection, where such a prompt's
+row is given no turn to fork.
 
 A fork's attachment blobs are adopted all or nothing: every blob is resolved for
 the new thread before it is journaled, and a failure rolls back every retain the
@@ -2176,9 +2192,12 @@ journal append that fails after adoption rolls back the same way. A transcript
 that pointed at the source's files, or at half its attachments, is not a fork.
 Only the new thread's summary is published on the live feed, in the same append
 lock scope as the copy, so no event with a later sequence can be delivered before
-it and make a client drop it as stale; the copied transcript is durable history
-read through the ordinary paged replay, so a long fork cannot fill the feed and
-stall other threads. Lineage is a `forked_from { thread_id, turn_id }` in the
+it and make a client drop it as stale; the fork's handle is installed before that
+summary is broadcast, so a client that reacts to it can send at once, and it is
+installed with the summary's own signature so the periodic refresh never
+publishes a fork whose append then fails. The copied
+transcript is durable history read through the ordinary paged replay, so a long
+fork cannot fill the feed and stall other threads. Lineage is a `forked_from { thread_id, turn_id }` in the
 thread row,
 projected on the summary; the origin title is read from the thread list so a
 rename needs no rewrite. No cascade exists in either direction, so deleting or
