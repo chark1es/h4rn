@@ -91,21 +91,50 @@ pub struct ActivityThread {
 
 impl ActivityThread {
     /// Reads the fields the payload may carry from a summary.
-    pub fn from_summary(summary: &ThreadSummary) -> Self {
+    ///
+    /// A thread running in a worktree lives under `<worktrees_root>/<project>/
+    /// <branch>`, so its own folder is the branch, not the project. Naming the
+    /// branch folder would tell the person the wrong project, so the folder
+    /// under the root is used; without a known root the workspace's own folder
+    /// is the best answer available.
+    pub fn from_summary(summary: &ThreadSummary, worktrees_root: Option<&Path>) -> Self {
         let path = summary
             .project_path
             .as_deref()
             .unwrap_or(&summary.workspace_path);
-        let project = Path::new(path)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let project = project_name(path, worktrees_root);
         Self {
             id: summary.thread_id.clone(),
             title: summary.title.clone(),
             project,
         }
     }
+}
+
+/// The project folder to show for a thread's checkout.
+///
+/// `project_path` (an import or fork) already names the project, so the caller
+/// resolves that first. A worktree checkout is identified by living below the
+/// daemon's worktree root with a branch folder under a project folder;
+/// everything else keeps today's behaviour: the workspace's own folder name.
+fn project_name(path: &str, worktrees_root: Option<&Path>) -> String {
+    if let Some(root) = worktrees_root
+        && let Ok(relative) = Path::new(path).strip_prefix(root)
+    {
+        let mut parts = relative.components().filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        });
+        let project = parts.next();
+        let branch = parts.next();
+        if let (Some(project), Some(_), None) = (project, branch, parts.next()) {
+            return project;
+        }
+    }
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Which alertable state a finished turn is, if any.
@@ -196,6 +225,8 @@ pub struct AgentAlertService {
     settings: Arc<AgentAlertSettingsStore>,
     manager: Option<Arc<dyn ThreadLookup>>,
     publisher: Arc<dyn ActivityPublisher>,
+    /// Where this daemon creates worktree checkouts, when known.
+    worktrees_root: Option<PathBuf>,
     published: Mutex<HashMap<ThreadId, ThreadAlerts>>,
     watcher: Mutex<Option<JoinHandle<()>>>,
 }
@@ -214,11 +245,13 @@ impl AgentAlertService {
         settings: Arc<AgentAlertSettingsStore>,
         manager: Option<Arc<dyn ThreadLookup>>,
         publisher: Arc<dyn ActivityPublisher>,
+        worktrees_root: Option<PathBuf>,
     ) -> Self {
         Self {
             settings,
             manager,
             publisher,
+            worktrees_root,
             published: Mutex::new(HashMap::new()),
             watcher: Mutex::new(None),
         }
@@ -350,7 +383,10 @@ impl AgentAlertService {
         if summary.parent_thread_id.is_some() {
             return None;
         }
-        Some(ActivityThread::from_summary(&summary))
+        Some(ActivityThread::from_summary(
+            &summary,
+            self.worktrees_root.as_deref(),
+        ))
     }
 
     /// Publishes one transition if the switch is on and it is new.
@@ -494,6 +530,7 @@ mod tests {
             store,
             Some(Arc::new(lookup) as Arc<dyn ThreadLookup>),
             recorder as Arc<dyn ActivityPublisher>,
+            None,
         ))
     }
 
@@ -559,7 +596,7 @@ mod tests {
     /// A service with no manager: these tests drive `publish` directly.
     fn service(_settings: AgentAlertSettings, recorder: Arc<Recorder>) -> AgentAlertService {
         let store = Arc::new(AgentAlertSettingsStore::in_memory());
-        AgentAlertService::new(store, None, recorder as Arc<dyn ActivityPublisher>)
+        AgentAlertService::new(store, None, recorder as Arc<dyn ActivityPublisher>, None)
     }
 
     #[tokio::test]
@@ -775,5 +812,32 @@ mod tests {
         observe(&service, completion(TurnStatus::Interrupted)).await;
 
         assert!(recorder.sent.lock().await.is_empty());
+    }
+
+    #[test]
+    fn a_worktree_thread_alerts_with_its_project_name() {
+        let mut summary = summary(&ThreadId::new("th_worktree"), None);
+        summary.workspace_path = "/data/worktrees/h4rn/fix-the-login".into();
+        let root = Path::new("/data/worktrees");
+
+        let worktree = ActivityThread::from_summary(&summary, Some(root));
+        assert_eq!(
+            worktree.project, "h4rn",
+            "the alert named the branch folder instead of the project"
+        );
+
+        // A project_path (an import or fork) is already the checkout itself.
+        summary.project_path = Some("/code/h4rn".into());
+        assert_eq!(
+            ActivityThread::from_summary(&summary, Some(root)).project,
+            "h4rn"
+        );
+
+        // Without a known root there is nothing better than the folder name.
+        summary.project_path = None;
+        assert_eq!(
+            ActivityThread::from_summary(&summary, None).project,
+            "fix-the-login"
+        );
     }
 }

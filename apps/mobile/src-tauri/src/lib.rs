@@ -59,6 +59,12 @@ struct PushForegroundArgs<'a> {
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
+#[derive(serde::Serialize)]
+struct PushEnabledArgs {
+    enabled: bool,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(serde::Deserialize)]
 struct PushTokenValue {
     token: String,
@@ -271,6 +277,26 @@ fn push_set_foreground_thread(
     }
 }
 
+/// Mirrors the phone's own switch into the notification service, so a data
+/// message that still arrives while Off never reaches the tray.
+#[tauri::command]
+fn push_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<()>("pushSetEnabled", PushEnabledArgs { enabled })
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
 /// Returns the `h4rn://` URLs that launched this process, if any.
 ///
 /// Android delivers a cold-start deep link through the launching intent rather
@@ -357,6 +383,7 @@ pub fn run() {
             push_request_permission,
             push_token,
             push_set_foreground_thread,
+            push_set_enabled,
             deep_link_current,
             preview::preview_capabilities,
             preview::preview_prepare,

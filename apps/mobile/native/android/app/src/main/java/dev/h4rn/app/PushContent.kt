@@ -26,14 +26,26 @@ data class PushContent(
     }
 
     /**
-     * Whether this alert is for the thread already on screen.
+     * Whether this alert must be dropped.
      *
-     * Only the foreground with that exact thread is quiet. Any other screen,
-     * or a backgrounded app, still alerts; suppressing by visibility on some
-     * other device would hide work the person is not looking at.
+     * The local switch off means drop: Connect's row may still exist after a
+     * failed removal, so the phone must not alert while its own switch reads
+     * Off. A grouped alert (more than one thread) is never dropped for the
+     * foreground: naming one thread would lose the other agents in the group.
+     * Otherwise only the foreground with that exact thread is quiet. Any other
+     * screen, or a backgrounded app, still alerts; suppressing by visibility on
+     * some other device would hide work the person is not looking at.
      */
-    fun isSuppressed(data: Map<String, String>, foreground: Boolean, openThread: String?): Boolean {
+    fun shouldDrop(
+      data: Map<String, String>,
+      enabled: Boolean,
+      foreground: Boolean,
+      openThread: String?,
+    ): Boolean {
+      if (!enabled) return true
       if (!foreground) return false
+      val count = data["count"]?.trim()?.toIntOrNull() ?: 1
+      if (count > 1) return false
       val thread = data["thread_id"].orEmpty().trim()
       return thread.isNotEmpty() && thread == openThread
     }

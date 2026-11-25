@@ -6,7 +6,9 @@
 //! queue, while a later transition that repeats the same state still alerts.
 //! Transitions that arrive together are grouped: several agents asking for a
 //! person become one "N agents need attention" alert, and several finishing
-//! become one "N agents finished" alert.
+//! become one "N agents finished" alert. A grouped alert names no single
+//! thread, so a phone cannot mistake it for the thread already on screen and
+//! mute the other agents in the group.
 //!
 //! The selection functions are pure so the dedupe, cutoff and grouping rules
 //! are tested without a database or a network.
@@ -35,7 +37,11 @@ pub struct PushAlert {
     pub body: String,
     /// State that drove it; a grouped finish keeps `failed` when any failed.
     pub state: AgentAlertState,
-    /// Thread the tap opens.
+    /// Thread the tap opens; empty for a grouped alert.
+    ///
+    /// A group can name several threads, so it names none: the tap opens h4rn
+    /// instead of one thread, and the phone never treats the group as an alert
+    /// for whichever thread happens to be on screen.
     pub thread_id: String,
     /// Number of threads represented.
     pub count: usize,
@@ -162,10 +168,9 @@ fn grouped(activities: &[AgentActivity]) -> PushAlert {
         title,
         body: titles.join(" · "),
         state,
-        thread_id: activities
-            .first()
-            .map(|activity| activity.thread_id.to_string())
-            .unwrap_or_default(),
+        // Naming the first thread would let a phone that has that thread open
+        // drop the whole group, losing the other threads' alerts.
+        thread_id: String::new(),
         count,
     }
 }
@@ -448,6 +453,18 @@ mod tests {
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].title, "2 agents finished");
         assert_eq!(alerts[0].state, AgentAlertState::Failed);
+    }
+
+    #[test]
+    fn a_grouped_alert_names_no_single_thread() {
+        let alerts = group_activities(&[
+            activity(AgentAlertState::Approval, "one"),
+            activity(AgentAlertState::Approval, "two"),
+        ]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].count, 2);
+        assert_eq!(alerts[0].thread_id, "", "a group named one thread");
+        assert_eq!(alerts[0].data()["thread_id"], "");
     }
 
     #[test]

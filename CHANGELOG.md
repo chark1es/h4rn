@@ -15,8 +15,11 @@ All notable changes to h4rn are recorded here. The format follows
   so a replayed frame is not sent twice while a thread's second completion or second approval still
   alerts. A turn you stopped yourself does not alert, and a usage or turn limit that will not resume
   by itself asks you to come back. Connect groups agents that need attention or finish together into
-  one alert, drops transitions it already sent and ignores completions older than two minutes.
-  Tapping an alert opens its thread; only the thread already on screen stays quiet. Revoking a
+  one alert, drops transitions it already sent and ignores completions older than two minutes. A
+  grouped alert names no single thread, so it is never quiet for the thread already on screen;
+  tapping it opens h4rn. Tapping a single alert opens its thread; only that exact thread already on
+  screen stays quiet. Turning Device notifications off retries the removal until Connect confirms
+  the row is gone, and the Android service drops data messages while the switch is off. Revoking a
   phone deletes its registration, so a lost device stops receiving thread titles at once, and
   Settings reports this phone's own registration rather than the account's device count. Operators
   configure one Firebase service account on Connect and supply `google-services.json` only when

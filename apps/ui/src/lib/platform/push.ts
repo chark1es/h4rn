@@ -96,10 +96,29 @@ export async function nativePushToken(): Promise<string> {
 }
 
 /**
+ * Mirrors the local switch to the Android notification service.
+ *
+ * The service runs without the WebView, so it reads this persisted flag before
+ * showing a data message: an Off switch keeps the phone quiet even when its
+ * relay row could not be removed.
+ */
+export async function nativeSetPushEnabled(enabled: boolean): Promise<void> {
+  const api = internals();
+  if (!api || !deviceAlertsShell()) return;
+  try {
+    await api.invoke<null>("push_set_enabled", { enabled });
+  } catch {
+    // An older shell without the command still registers and deregisters;
+    // the relay row remains the first line of defence.
+  }
+}
+
+/**
  * Names the thread currently on screen, or null.
  *
  * The notification service suppresses an alert only when this thread matches
- * and the app is in front; every other thread still alerts.
+ * and the app is in front; every other thread still alerts, and a grouped
+ * alert is never suppressed.
  */
 export async function setForegroundThread(threadId: string | null): Promise<void> {
   const api = internals();

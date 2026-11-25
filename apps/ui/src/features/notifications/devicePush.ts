@@ -16,11 +16,13 @@ import {
   nativePushStatus,
   nativePushToken,
   nativeRequestPushPermission,
+  nativeSetPushEnabled,
   setForegroundThread,
 } from "@/lib/platform/push";
 import { store } from "@/lib/store/appStore";
 
 const ENABLED_KEY = "h4rn.push.deviceAlerts";
+const DEREGISTER_PENDING_KEY = "h4rn.push.deregisterPending";
 const PACKAGE_NAME = "dev.h4rn.app";
 
 export type DeviceAlertsState = {
@@ -104,6 +106,33 @@ function rememberEnabled(enabled: boolean): void {
   } catch {
     // A locked-down webview still keeps the in-memory registration.
   }
+  // The notification service cannot read localStorage; mirror the switch so a
+  // data message that still arrives while Off is dropped on the phone.
+  void nativeSetPushEnabled(enabled);
+}
+
+/**
+ * A removal the relay has not confirmed yet.
+ *
+ * Turning the switch off while the phone is offline, or a relay error, must not
+ * leave a row that keeps alerting. The marker survives a restart and is retried
+ * whenever this app is signed in until Connect answers.
+ */
+function deregistrationPending(): boolean {
+  try {
+    return window.localStorage.getItem(DEREGISTER_PENDING_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberDeregistrationPending(pending: boolean): void {
+  try {
+    if (pending) window.localStorage.setItem(DEREGISTER_PENDING_KEY, "1");
+    else window.localStorage.removeItem(DEREGISTER_PENDING_KEY);
+  } catch {
+    // Without storage, the next signed-in call still retries once per session.
+  }
 }
 
 function describe(error: unknown): string {
@@ -180,6 +209,8 @@ export async function registerDeviceAlerts(): Promise<void> {
     packageName: PACKAGE_NAME,
     appVersion: result.status.appVersion,
   });
+  // A fresh registration supersedes any removal that was still pending.
+  rememberDeregistrationPending(false);
   lastRegistered = true;
 }
 
@@ -219,14 +250,39 @@ export async function disableDeviceAlerts(): Promise<DeviceAlertsState> {
   rememberEnabled(false);
   const client = currentConnectClient();
   if (client) {
+    // Mark the removal before trying it: a failed request must leave a note
+    // that the next signed-in visit retries, not a phone that keeps alerting
+    // while its switch reads Off.
+    rememberDeregistrationPending(true);
     try {
       await client.deregisterPushDevice(client.device.id);
+      rememberDeregistrationPending(false);
     } catch {
-      // Signing out removes it server-side too; the local switch still wins.
+      // Connect did not confirm; `reconcileDeviceDeregistration` retries.
     }
   }
   lastRegistered = false;
   return readDeviceAlerts();
+}
+
+/**
+ * Retries a removal Connect has not confirmed.
+ *
+ * Called on launch, when the app becomes visible and when the account syncs,
+ * so an offline switch-off is finished as soon as the relay is reachable. A
+ * successful delete, or a relay that no longer has the row, clears the marker.
+ */
+export async function reconcileDeviceDeregistration(): Promise<void> {
+  if (!deregistrationPending()) return;
+  const client = currentConnectClient();
+  if (!client) return;
+  try {
+    await client.deregisterPushDevice(client.device.id);
+    rememberDeregistrationPending(false);
+    lastRegistered = false;
+  } catch {
+    // Still unreachable: the next launch or visibility change tries again.
+  }
 }
 
 /**
@@ -268,8 +324,10 @@ export function startDevicePush(): void {
     const { phase } = remoteStore.getState();
     if (phase === lastPhase) return;
     lastPhase = phase;
-    if (phase !== "signed_in" || !devicePushEnabled()) return;
+    if (phase !== "signed_in") return;
     void (async () => {
+      await reconcileDeviceDeregistration();
+      if (!devicePushEnabled()) return;
       const result = await nativePushStatus();
       if (result.kind !== "checked" || result.status.permission !== "granted") return;
       await registerDeviceAlerts();
@@ -278,11 +336,20 @@ export function startDevicePush(): void {
   syncAccount();
   remoteStore.subscribe(syncAccount);
 
-  // An FCM token can rotate while the app is in the background. Re-register
-  // when the app comes back, so the relay stops sending to the dead token.
+  // A switch-off while offline waits for a signed-in visit to finish removing
+  // the row, and a token can rotate while the app is in the background.
+  // Reconcile and re-register when the app comes back.
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
-    if (!devicePushEnabled() || remoteStore.getState().phase !== "signed_in") return;
-    void registerDeviceAlerts().catch(() => undefined);
+    if (remoteStore.getState().phase !== "signed_in") return;
+    void (async () => {
+      await reconcileDeviceDeregistration();
+      if (!devicePushEnabled()) return;
+      await registerDeviceAlerts();
+    })().catch(() => undefined);
   });
+
+  // Launch is one of the signed-in moments a pending removal is retried.
+  void reconcileDeviceDeregistration().catch(() => undefined);
+  void nativeSetPushEnabled(devicePushEnabled());
 }

@@ -20,6 +20,11 @@ internal class PushForegroundArgs {
   var threadId: String? = null
 }
 
+@InvokeArg
+internal class PushEnabledArgs {
+  var enabled: Boolean = true
+}
+
 /**
  * Android push bridge (ADR-050).
  *
@@ -33,6 +38,15 @@ class PushPlugin(private val activity: android.app.Activity) : Plugin(activity) 
     const val PREFERENCES = "h4rn_push"
     const val TOKEN_KEY = "fcm_token"
     const val ASKED_KEY = "permission_asked"
+
+    /**
+     * The person's local switch, persisted for the notification service.
+     *
+     * The service runs even when the shared UI is not, so it cannot ask React;
+     * this is the second line of defence for a relay row that survived a failed
+     * removal.
+     */
+    const val ENABLED_KEY = "alerts_enabled"
   }
 
   private val preferences by lazy {
@@ -108,6 +122,14 @@ class PushPlugin(private val activity: android.app.Activity) : Plugin(activity) 
   fun pushSetForegroundThread(invoke: Invoke) {
     val args = invoke.parseArgs(PushForegroundArgs::class.java)
     H4rnPushState.threadId = args.threadId?.trim()?.ifEmpty { null }
+    invoke.resolve()
+  }
+
+  /** Mirrors the shared UI's switch so the service can drop alerts when off. */
+  @Command
+  fun pushSetEnabled(invoke: Invoke) {
+    val args = invoke.parseArgs(PushEnabledArgs::class.java)
+    preferences.edit().putBoolean(ENABLED_KEY, args.enabled).apply()
     invoke.resolve()
   }
 }

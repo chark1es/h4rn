@@ -9,11 +9,13 @@
 //!
 //! The relay is deliberately dumb. A [`RelayFrame`] carries an opaque payload
 //! for one Noise session; connect routes it by `conn_id` and never inspects it
-//! (ADR-010). Only [`RelayFrameKind::Open`] and the guest control frames
-//! ([`RelayFrameKind::GuestHttp`], [`RelayFrameKind::GuestHttpChunk`],
-//! [`RelayFrameKind::GuestHttpAdmit`], [`RelayFrameKind::GuestHttpCancel`],
-//! [`RelayFrameKind::Hello`]) have a payload
-//! the relay parses; everything else is opaque.
+//! (ADR-010). Only [`RelayFrameKind::Open`], [`RelayFrameKind::Activity`] and
+//! the guest control frames ([`RelayFrameKind::GuestHttp`],
+//! [`RelayFrameKind::GuestHttpChunk`], [`RelayFrameKind::GuestHttpAdmit`],
+//! [`RelayFrameKind::GuestHttpCancel`], [`RelayFrameKind::Hello`]) have a
+//! payload the relay parses; everything else is opaque. An `Activity` payload
+//! is read only to gate it (a daemon may publish, a phone may not) and to hand
+//! the transition to Connect's alert service.
 //!
 //! Payload bytes travel as base64 in JSON because control frames and data
 //! frames share one WebSocket. The relay is the fallback path, so the

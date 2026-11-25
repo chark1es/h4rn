@@ -25,7 +25,17 @@ iOS alerts are not part of this feature; Android is first.
 
 Alerts are quiet only when the app is in the foreground **and** that exact
 thread is on screen. Every other thread still alerts, as does the same thread
-while the app is in the background.
+while the app is in the background. A grouped alert names no single thread, so
+it is never quiet for the thread you happen to have open: the other agents in
+the group still need you. Tapping a grouped alert opens h4rn instead of one
+thread.
+
+Turning **Device notifications** off removes this phone's registration from
+Connect. If that request cannot reach Connect (the phone is offline, or the
+relay errors), the app remembers the removal and retries it the next time it is
+signed in and opened, so the row does not linger and the phone does not keep
+alerting. While the switch is off the Android notification service also drops
+any data message that still arrives, as a second line of defence.
 
 ## What leaves the daemon
 
@@ -81,11 +91,12 @@ that state in `/v1/push/status`; it never pretends to send.
 The sender signs an RS256 JWT-bearer assertion with the service account key,
 caches the OAuth2 access token until shortly before it expires, and posts a
 data message to `https://fcm.googleapis.com/v1/projects/<project>/messages:send`.
-A token that FCM reports as `UNREGISTERED` or `NOT_FOUND` in its error body is
-deleted; 429 and 5xx responses are retried with backoff. A bare 404 is not
-enough evidence: a wrong `H4RN_CONNECT_FCM_URL` or project id also answers 404,
-and deleting every token on that would silence the whole account because of an
-operator typo. Those answers leave the token in place and only log the failure.
+A token is deleted only when FCM's error body names `UNREGISTERED` in its
+`details[].errorCode`; 429 and 5xx responses are retried with backoff. A bare
+top-level `NOT_FOUND`, or a 404 with no such detail, is not enough evidence: a
+wrong `H4RN_CONNECT_FCM_URL` or project id also answers 404, and deleting every
+token on that would silence the whole account because of an operator typo.
+Those answers leave the token in place and only log the failure.
 
 A device row belongs to the account that registered it. Registration accepts
 only the caller's own Connect device id, rotation replaces the old token,
@@ -119,9 +130,11 @@ on the relay, never in the APK or an EAS/build environment for the app.
 - Android needs Google Play services. A device without them cannot receive FCM.
 - If the app is force-stopped in Android Settings, delivery stops until it is
   opened again. Android's battery modes can also delay a message.
-- Turning the app switch off removes the registration; turning off the daemon
-  switch stops publishing for every phone at once. Revoking the phone from the
-  desktop removes its registration too.
+- Turning the app switch off removes the registration; if Connect cannot be
+  reached, the app retries until it confirms the row is gone, and the Android
+  service stays silent meanwhile. Turning off the daemon switch stops publishing
+  for every phone at once. Revoking the phone from the desktop removes its
+  registration too.
 - A thread moved to Done by hand is a placement, not a finished turn, so it
   does not alert. A turn you stopped yourself does not alert either.
 - A turn stopped by a usage, token or turn limit asks for you only when

@@ -1207,6 +1207,27 @@ async fn handle_socket(state: AppState, socket: WebSocket, authed: Authed, annou
     }
 }
 
+/// Reads one activity frame, or decides it must publish nothing.
+///
+/// Only a machine's daemon observes a thread, so a phone or desktop frame is
+/// ignored rather than turned into an alert for an account it may share. A
+/// daemon's payload must be the fixed [`h4rn_protocol::AgentActivity`] shape;
+/// anything else is a bad request, not a partial alert.
+fn activity_payload(
+    device_kind: &str,
+    payload: &[u8],
+) -> Result<Option<h4rn_protocol::AgentActivity>> {
+    if device_kind != "daemon" {
+        return Ok(None);
+    }
+    serde_json::from_slice(payload).map(Some).map_err(|_| {
+        AppError::bad_request(
+            "activity_invalid",
+            "the activity payload must be AgentActivity JSON",
+        )
+    })
+}
+
 async fn dispatch(
     state: &AppState,
     authed: &Authed,
@@ -1358,17 +1379,9 @@ async fn dispatch(
             // Only the machine's daemon observes a thread, and only a daemon
             // may wake a phone. A client device's frame is ignored rather than
             // treated as an alert for an account it may share.
-            if authed.device.kind != "daemon" {
-                return Ok(());
+            if let Some(activity) = activity_payload(&authed.device.kind, &frame.payload)? {
+                state.alerts.ingest(authed.user.id, activity).await;
             }
-            let activity: h4rn_protocol::AgentActivity = serde_json::from_slice(&frame.payload)
-                .map_err(|_| {
-                    AppError::bad_request(
-                        "activity_invalid",
-                        "the activity payload must be AgentActivity JSON",
-                    )
-                })?;
-            state.alerts.ingest(authed.user.id, activity).await;
             Ok(())
         }
         RelayFrameKind::GuestHttp => {
@@ -2381,6 +2394,35 @@ mod tests {
             waiter.await.expect("waiter"),
             GuestAdmission::Announced,
             "a hello visible at the deadline was reported as a timeout"
+        );
+    }
+
+    #[test]
+    fn a_client_activity_frame_publishes_nothing_and_a_bad_payload_is_refused() {
+        let activity = h4rn_protocol::AgentActivity {
+            thread_id: h4rn_protocol::ThreadId::new("th_test"),
+            thread_title: "Fix the thing".into(),
+            project_name: "h4rn".into(),
+            state: h4rn_protocol::AgentAlertState::Approval,
+            at: chrono::Utc::now(),
+            transition: "t1".into(),
+        };
+        let payload = serde_json::to_vec(&activity).expect("serialise activity");
+
+        // A phone's Activity frame is gated before anything can be alerted.
+        assert_eq!(
+            activity_payload("mobile", &payload).expect("a client frame is not an error"),
+            None
+        );
+
+        // A daemon's malformed frame is refused with the wire error.
+        let error = activity_payload("daemon", b"{ not json").unwrap_err();
+        assert_eq!(error.body().code, "activity_invalid");
+
+        // A daemon's valid frame is the one transition handed to the alerts.
+        assert_eq!(
+            activity_payload("daemon", &payload).expect("a daemon frame is read"),
+            Some(activity)
         );
     }
 }

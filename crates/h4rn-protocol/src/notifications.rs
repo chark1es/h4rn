@@ -3,9 +3,11 @@
 //! The daemon publishes a small, closed set of state transitions over its
 //! existing relay connection. Connect turns a new transition into an FCM data
 //! message; nothing else about a thread leaves the machine. The payload is
-//! deliberately fixed: a thread id, its title, the project name, one of four
-//! states and the time. Message text, tool output, file paths and credentials
-//! have no field to travel in.
+//! deliberately fixed: a thread id, its title, the project name, one of five
+//! states (`completed`, `failed`, `approval`, `input`, `limit`) and the time,
+//! plus the transition id that tells a replay from a later event — six fields
+//! in all. Message text, tool output, file paths and credentials have no field
+//! to travel in.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

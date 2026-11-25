@@ -2212,7 +2212,11 @@ and `Failed` alert; `TokenLimit` and `TurnLimit` ask the person to come back wit
 the `limit` state, as does a usage limit whose auto-resume is off. Alerting is
 skipped for finishing states older than two minutes, and transitions that
 arrive together are grouped into one "N agents need attention" or "N agents
-finished" notification.
+finished" notification. A grouped alert carries no thread id, so a phone that
+has one of its threads open cannot mute the whole group; the tap opens h4rn.
+The phone's switch is mirrored to the Android notification service, which drops
+data messages while it is off, and a removal that Connect did not confirm is
+retried on the next signed-in visit.
 
 This is stricter than ADR-027's wake-signal shape, because it includes a title
 and a project name so the phone can say which thread needs the person without

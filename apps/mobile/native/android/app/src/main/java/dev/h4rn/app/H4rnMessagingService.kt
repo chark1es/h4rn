@@ -16,8 +16,11 @@ import com.google.firebase.messaging.RemoteMessage
  *
  * A data message is used rather than a notification payload so the app can
  * decide about the foreground: the thread already on screen stays quiet, and
- * every other thread still alerts. Tapping opens `h4rn://thread/<id>` through
- * the deep-link plugin, which the shared React app already follows.
+ * every other thread still alerts. The local switch is checked here too, from
+ * a flag the plugin persists, so a phone whose removal from Connect failed
+ * stays silent while its switch reads Off. Tapping opens
+ * `h4rn://thread/<id>` through the deep-link plugin, which the shared React app
+ * already follows.
  */
 class H4rnMessagingService : FirebaseMessagingService() {
   override fun onNewToken(token: String) {
@@ -29,7 +32,11 @@ class H4rnMessagingService : FirebaseMessagingService() {
 
   override fun onMessageReceived(message: RemoteMessage) {
     val data = message.data
-    if (PushContent.isSuppressed(data, H4rnPushState.foreground, H4rnPushState.threadId)) {
+    // A process started by a message has no UI to ask, so no explicit Off is
+    // an on switch: only a stored Off silences delivery here.
+    val enabled = getSharedPreferences(PushPlugin.PREFERENCES, Context.MODE_PRIVATE)
+      .getBoolean(PushPlugin.ENABLED_KEY, true)
+    if (PushContent.shouldDrop(data, enabled, H4rnPushState.foreground, H4rnPushState.threadId)) {
       return
     }
     val content = PushContent.from(data)

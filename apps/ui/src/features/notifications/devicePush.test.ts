@@ -10,8 +10,10 @@ import {
   deviceAvailabilityNote,
   deviceStatusLine,
   deviceToggleUsable,
+  disableDeviceAlerts,
   enableDeviceAlerts,
   readDeviceAlerts,
+  reconcileDeviceDeregistration,
 } from "./devicePush";
 
 function state(patch: Partial<DeviceAlertsState> = {}): DeviceAlertsState {
@@ -161,6 +163,71 @@ describe("reading this phone's real alert state", () => {
     expect(device.error).toContain("bridge busy");
     expect(deviceStatusLine(device, true)).toContain("Try again");
     expect(deviceStatusLine(device, true)).not.toContain("Unavailable in this build");
+  });
+});
+
+describe("turning device notifications off", () => {
+  it("retries a failed removal until Connect confirms the row is gone", async () => {
+    stubAndroidShell();
+    window.localStorage.setItem("h4rn.push.deviceAlerts", "1");
+    const deregisterPushDevice = vi.fn(async (): Promise<void> => {
+      throw new Error("connect is unreachable");
+    });
+    const pushStatus = vi.fn(async () => ({ configured: true, devices: 1, registered: true }));
+    setConnectClient({
+      device: { id: "device-1" },
+      deregisterPushDevice,
+      pushStatus,
+    } as unknown as ConnectClient);
+
+    const off = await disableDeviceAlerts();
+
+    expect(off.enabled).toBe(false);
+    expect(deregisterPushDevice).toHaveBeenCalledOnce();
+    expect(window.localStorage.getItem("h4rn.push.deregisterPending")).toBe("1");
+
+    // The next signed-in visit (launch or visibility change) finishes it.
+    deregisterPushDevice.mockImplementation(async () => undefined);
+    await reconcileDeviceDeregistration();
+
+    expect(deregisterPushDevice).toHaveBeenCalledTimes(2);
+    expect(window.localStorage.getItem("h4rn.push.deregisterPending")).toBeNull();
+
+    // Connect confirmed the row is gone; nothing more to do.
+    await reconcileDeviceDeregistration();
+    expect(deregisterPushDevice).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the removal pending while the relay stays unreachable", async () => {
+    stubAndroidShell();
+    window.localStorage.setItem("h4rn.push.deregisterPending", "1");
+    const deregisterPushDevice = vi.fn(async () => {
+      throw new Error("connect is unreachable");
+    });
+    const pushStatus = vi.fn(async () => ({ configured: true, devices: 1, registered: true }));
+    setConnectClient({
+      device: { id: "device-1" },
+      deregisterPushDevice,
+      pushStatus,
+    } as unknown as ConnectClient);
+
+    await reconcileDeviceDeregistration();
+
+    expect(deregisterPushDevice).toHaveBeenCalledOnce();
+    expect(window.localStorage.getItem("h4rn.push.deregisterPending")).toBe("1");
+  });
+
+  it("does not try to remove anything without a pending marker", async () => {
+    stubAndroidShell();
+    const deregisterPushDevice = vi.fn(async () => undefined);
+    setConnectClient({
+      device: { id: "device-1" },
+      deregisterPushDevice,
+    } as unknown as ConnectClient);
+
+    await reconcileDeviceDeregistration();
+
+    expect(deregisterPushDevice).not.toHaveBeenCalled();
   });
 });
 

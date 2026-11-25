@@ -751,7 +751,6 @@ impl Store {
         Ok(machine_ids)
     }
 
-    /// Marks a device seen.
     /// Registers or rotates one install's FCM token.
     ///
     /// A token names one install on Google's side, so a token seen on another
@@ -898,6 +897,7 @@ impl Store {
         Ok(claimed.unwrap_or(false))
     }
 
+    /// Marks a device seen.
     pub async fn touch_device(&self, device_id: Uuid) -> Result<()> {
         sqlx::query("UPDATE devices SET last_seen = now() WHERE id = $1")
             .bind(device_id)
