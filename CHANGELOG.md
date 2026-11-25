@@ -732,6 +732,13 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **An idle paired device can resume its session after its path drops.** The
+  resume grace was counted from the last application frame, so a device that
+  had been quiet for longer than four path timeouts (8 s by default) — and had
+  only been sending health probes — was evicted before its resume token was
+  checked, and refused as unpaired. The grace now counts from the last
+  authenticated record, probes included, so reconnecting from a dead LAN path
+  to the relay still resumes the same session.
 - **A native fork starts by sending its own prompt.** Claude Code prints nothing
   for a natively forked session until the first user frame arrives, so waiting
   for its session report before writing the prompt made every Claude fork wait
