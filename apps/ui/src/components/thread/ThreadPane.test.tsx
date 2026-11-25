@@ -33,6 +33,8 @@ const mock = vi.hoisted(() => {
     needs_attention: false,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
   };
   const state = {
@@ -84,6 +86,15 @@ vi.mock("@/lib/store/appStore", () => ({
   openInIde: mock.openInIde,
   openThread: mock.openThread,
   sendMessage: mock.sendMessage,
+  rewindRefusal: () => null,
+  filesRewindAvailable: () => false,
+  planRewind: vi.fn(async () => ({
+    method: "handoff",
+    files_enabled: false,
+    files_available: false,
+  })),
+  rewindThread: vi.fn(),
+  consumeComposerRestore: vi.fn(),
   editQueuedMessage: async () => true,
   setUi: () => undefined,
   getClient: () => {
@@ -110,6 +121,7 @@ vi.mock("@/features/attachments/use-attachments", () => ({
     remove: () => undefined,
     retry: () => undefined,
     clear: () => undefined,
+    restore: () => undefined,
   }),
   useAttachShortcut: () => undefined,
 }));

@@ -20,6 +20,11 @@ turn_id: TurnId,
  */
 files: Array<FsTurnFile>, 
 /**
+ * Whether the turn has a complete pre-turn checkpoint that can restore
+ * the whole worktree, not only the files a tool call named.
+ */
+complete: boolean, 
+/**
  * Why the list may be incomplete, when snapshots were missing.
  */
 note: string | null, };

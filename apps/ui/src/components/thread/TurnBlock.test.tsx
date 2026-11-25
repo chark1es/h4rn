@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Event, ThreadSummary, Usage } from "@/gen";
 import { createThreadLog, foldEvent, type StreamTurn } from "@/lib/store/projection";
@@ -42,6 +42,8 @@ const summary: ThreadSummary = {
   pending_guest_requests: 0,
   unread: false,
   resume_at: null,
+  rewind: "handoff",
+  file_rewind: false,
   limit: null,
   queued_count: 0,
   queue_revision: 0,
@@ -310,5 +312,81 @@ describe("TurnBlock", () => {
       />,
     );
     expect(markup).toContain("· live");
+  });
+});
+
+describe("Edit from here", () => {
+  it("sits under a sent message and names the message it would rewind", () => {
+    const onEdit = vi.fn();
+    const markup = renderToStaticMarkup(
+      <TurnBlock
+        turn={userOnlyTurn("completed")}
+        turns={[]}
+        threadId="thread_1"
+        summary={summary}
+        onReply={() => {}}
+        onEditFromHere={onEdit}
+      />,
+    );
+    expect(markup).toContain("Edit from here");
+    expect(markup).not.toContain("disabled");
+  });
+
+  it("is disabled with its reason while the thread cannot rewind", () => {
+    const markup = renderToStaticMarkup(
+      <TurnBlock
+        turn={userOnlyTurn("completed")}
+        turns={[]}
+        threadId="thread_1"
+        summary={summary}
+        onReply={() => {}}
+        onEditFromHere={() => {}}
+        editDisabledReason="Wait for the current turn to finish, or stop it first."
+      />,
+    );
+    expect(markup).toContain("Wait for the current turn to finish");
+    expect(markup).toContain("disabled");
+  });
+
+  it("is offered on a turn's cue, never on a steered message inside it", () => {
+    const markup = renderToStaticMarkup(
+      <TurnBlock
+        turn={{
+          ...userOnlyTurn("completed"),
+          items: [
+            {
+              kind: "message",
+              itemId: "item_cue",
+              role: "user",
+              text: "send B",
+              attachments: [],
+              streaming: false,
+            },
+            {
+              kind: "message",
+              itemId: "item_steer",
+              role: "user",
+              text: "steer C",
+              attachments: [],
+              streaming: false,
+            },
+            {
+              kind: "message",
+              itemId: "item_reply",
+              role: "assistant",
+              text: "reply",
+              attachments: [],
+              streaming: false,
+            },
+          ],
+        }}
+        turns={[]}
+        threadId="thread_1"
+        summary={summary}
+        onReply={() => {}}
+        onEditFromHere={() => {}}
+      />,
+    );
+    expect(markup.match(/Edit from here/g)).toHaveLength(1);
   });
 });

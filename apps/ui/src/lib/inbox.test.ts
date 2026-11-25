@@ -54,6 +54,8 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     pending_guest_requests: 0,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
     ttft_ms: null,
     context_window: null,

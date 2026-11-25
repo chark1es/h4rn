@@ -992,3 +992,57 @@ describe("totalTokens", () => {
     expect(totalTokens(USAGE)).toBe(150);
   });
 });
+describe("thread_rewound", () => {
+  it("drops the edited message and every later turn but keeps earlier ones", () => {
+    let log = createThreadLog();
+    for (const [index, text] of ["one", "two", "three"].entries()) {
+      log = foldEvent(log, {
+        type: "item_completed",
+        thread_id: "t1",
+        turn_id: `turn_${index}`,
+        item: {
+          kind: "message",
+          item_id: `item_user_${index}`,
+          role: "user",
+          text,
+          attachments: [],
+        },
+      });
+      log = foldEvent(log, {
+        type: "item_completed",
+        thread_id: "t1",
+        turn_id: `turn_${index}`,
+        item: {
+          kind: "message",
+          item_id: `assistant_${index}`,
+          role: "assistant",
+          text: `answer ${index}`,
+          attachments: [],
+        },
+      });
+    }
+    expect(log.turns).toHaveLength(6);
+
+    log = foldEvent(log, {
+      type: "thread_rewound",
+      thread_id: "t1",
+      before_item_id: "item_user_1",
+      files_restored: false,
+      at: "2026-01-01T00:00:01.000Z",
+    });
+
+    const items = log.turns.flatMap((turn) => turn.items.map((item) => item.itemId));
+    expect(items).toEqual(["item_user_0", "assistant_0"]);
+  });
+
+  it("leaves a log that never held the message alone", () => {
+    const log = foldEvent(createThreadLog(), {
+      type: "thread_rewound",
+      thread_id: "t1",
+      before_item_id: "missing",
+      files_restored: true,
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    expect(log.turns).toHaveLength(0);
+  });
+});

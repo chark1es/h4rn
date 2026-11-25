@@ -756,7 +756,8 @@ pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
         // the parent of a common dir named `.git`, which a metadata directory
         // can carry while the real checkout lives elsewhere, so it counts
         // only when that folder proves it holds the working tree.
-        *repo == common || holds_working_tree(repo, workspace, &common, OBSERVATION_GIT_TIMEOUT)
+        *repo == common
+            || holds_working_tree(repo, workspace, &common, &snapshot, OBSERVATION_GIT_TIMEOUT)
     }) {
         repo
     } else if let Some(worktree) = core_worktree(&common, OBSERVATION_GIT_TIMEOUT)? {
@@ -795,9 +796,17 @@ pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
 /// metadata directory is not a working tree, so the inference counts only when
 /// the workspace is itself the main checkout (a shortcut), or `core.worktree`
 /// is unset and the candidate holds the working tree: its `.git` resolves to
-/// the common dir, or a path tracked in `HEAD` exists there. A linked worktree
-/// nested inside its own main checkout passes on the tracked path.
-fn holds_working_tree(candidate: &Path, workspace: &Path, common: &Path, limit: Duration) -> bool {
+/// the common dir, or a tracked path exists there as the candidate's own file.
+/// A linked worktree nested inside its own main checkout passes on the tracked
+/// path; a metadata parent with a linked worktree below it does not, because
+/// the tracked name resolves into that worktree.
+fn holds_working_tree(
+    candidate: &Path,
+    workspace: &Path,
+    common: &Path,
+    snapshot: &RegistrationSnapshot,
+    limit: Duration,
+) -> bool {
     // Being inside the candidate proves nothing by itself: a linked worktree
     // can sit inside the metadata directory's parent, which `repo_of` names
     // after the common dir's `.git`. The workspace being the main worktree
@@ -822,7 +831,7 @@ fn holds_working_tree(candidate: &Path, workspace: &Path, common: &Path, limit: 
     if gitdir_points_at(candidate, common) {
         return true;
     }
-    tracked_path_exists(candidate, common, limit)
+    tracked_path_exists(candidate, workspace, snapshot, common, limit)
 }
 
 /// Whether `workspace` is the repository's main worktree: its own git dir is
@@ -834,11 +843,28 @@ fn workspace_is_main(workspace: &Path, common: &Path, limit: Duration) -> bool {
     }
 }
 
-/// Whether any path tracked by the repository's `HEAD` exists in `candidate`.
+/// Whether a path tracked by the repository's `HEAD` exists in `candidate` as
+/// the candidate's own file.
 ///
 /// The last proof that a folder holds a working tree: a metadata directory
 /// named `.git` holds none of the repository's files beside its git directory.
-fn tracked_path_exists(candidate: &Path, common: &Path, limit: Duration) -> bool {
+/// A tracked name can also resolve into a checkout that merely sits below the
+/// candidate: with the metadata dir at `meta/.git` and a linked worktree at
+/// `meta/docs`, the tracked `docs/README.md` is the worktree's own
+/// `meta/docs/README.md`. Such a match says nothing about the candidate, so a
+/// name counts only when it resolves inside the candidate and outside the
+/// workspace and every registered worktree that lies strictly below the
+/// candidate. The candidate itself, and a worktree that contains it, are not
+/// excluded: its own tracked files still prove it, as for a linked worktree
+/// nested inside its main checkout (`repo/.worktrees/one`) or a main checkout
+/// moved inside its own linked worktree.
+fn tracked_path_exists(
+    candidate: &Path,
+    workspace: &Path,
+    snapshot: &RegistrationSnapshot,
+    common: &Path,
+    limit: Duration,
+) -> bool {
     let Ok(listing) = run_bytes_with_timeout(
         common,
         ["--git-dir=.", "ls-tree", "-r", "-z", "--name-only", "HEAD"],
@@ -846,10 +872,38 @@ fn tracked_path_exists(candidate: &Path, common: &Path, limit: Duration) -> bool
     ) else {
         return false;
     };
+    let candidate = norm(candidate);
+    let workspace = norm(workspace);
+    // Only a worktree strictly below the candidate can lend it a file. The
+    // candidate itself and any worktree that contains it (a main checkout
+    // moved inside its own linked worktree) are not excluded, or the
+    // candidate's own tree could never count. Registration paths are already
+    // normalised as listings are (see `norm_listed`).
+    let below_candidate = |path: &Path| path != candidate && path.starts_with(&candidate);
+    let excluded: Vec<&Path> = std::iter::once(workspace.as_path())
+        .chain(
+            snapshot
+                .iter()
+                .map(|registration| registration.path.as_path()),
+        )
+        .filter(|path| below_candidate(path))
+        .collect();
     listing.split(|byte| *byte == 0).any(|name| {
-        std::str::from_utf8(name)
-            .ok()
-            .is_some_and(|name| !name.is_empty() && candidate.join(name).exists())
+        let Ok(name) = std::str::from_utf8(name) else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+        let path = candidate.join(name);
+        if !path.exists() {
+            return false;
+        }
+        // Resolve the match before asking where it lives, so a symlink cannot
+        // smuggle a link to another checkout in as the candidate's own file.
+        let resolved = norm(&path);
+        resolved.starts_with(&candidate)
+            && !excluded.iter().any(|other| resolved.starts_with(other))
     })
 }
 
@@ -1026,6 +1080,89 @@ pub fn is_linked_worktree(workspace: &Path) -> bool {
         return false;
     };
     norm(&workspace.join(dir)) != norm(&workspace.join(common))
+}
+
+/// A commit whose tree is the whole tracked worktree at this instant.
+///
+/// `git stash create` records staged and unstaged changes without touching the
+/// worktree or the stash list. A clean tree has no commit, so `HEAD` is the
+/// checkpoint. `None` when the repository has no commit yet or git fails: such
+/// a turn then has no complete checkpoint to rewind to.
+pub fn checkpoint_commit(workspace: &Path) -> Option<String> {
+    if !is_linked_worktree(workspace) {
+        return None;
+    }
+    let created = run_with_timeout(
+        workspace,
+        [
+            "-c",
+            "user.name=h4rn",
+            "-c",
+            "user.email=h4rn@localhost",
+            "stash",
+            "create",
+        ],
+        OBSERVATION_GIT_TIMEOUT,
+    )
+    .ok()?;
+    if !created.is_empty() {
+        return Some(created);
+    }
+    run_with_timeout(workspace, ["rev-parse", "HEAD"], OBSERVATION_GIT_TIMEOUT)
+        .ok()
+        .filter(|head| !head.is_empty())
+}
+
+/// One tracked path's checkpoint state: its relative path and the bytes it had,
+/// or `None` when it did not exist then.
+pub type CheckpointChange = (String, Option<Vec<u8>>);
+
+/// Every tracked path that differs from `commit`, with the commit's bytes.
+///
+/// `None` bytes mean the path did not exist at the checkpoint and the restore
+/// deletes it. Untracked files are outside git's view; the per-tool-call
+/// snapshots still cover the ones a turn reported creating.
+pub fn checkpoint_changes(workspace: &Path, commit: &str) -> Result<Vec<CheckpointChange>, String> {
+    let names = run_bytes_with_timeout(
+        workspace,
+        ["diff", "--name-only", "-z", commit, "--"],
+        OBSERVATION_GIT_TIMEOUT,
+    )?;
+    let mut changes = Vec::new();
+    for raw in names.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let Ok(path) = std::str::from_utf8(raw) else {
+            continue;
+        };
+        let target = run_bytes_with_timeout(
+            workspace,
+            ["show", &format!("{commit}:{path}")],
+            OBSERVATION_GIT_TIMEOUT,
+        )
+        .ok();
+        changes.push((path.to_owned(), target));
+    }
+    Ok(changes)
+}
+
+/// The exact registration of `workspace` inside its repository, when it is a
+/// linked worktree.
+///
+/// Both paths are kept: a moved worktree that left a different checkout at the
+/// old path has a different git dir even when its common dir is unchanged.
+pub fn linked_identity(workspace: &Path) -> Option<crate::journal::WorktreeIdentity> {
+    let (dir, common) = (
+        observed_path(workspace, "--git-dir")?,
+        observed_path(workspace, "--git-common-dir")?,
+    );
+    let git_dir = norm(&workspace.join(dir));
+    let common_dir = norm(&workspace.join(common));
+    (git_dir != common_dir).then(|| crate::journal::WorktreeIdentity {
+        git_dir: git_dir.display().to_string(),
+        common_dir: common_dir.display().to_string(),
+    })
 }
 
 /// Linked worktrees of `repo`, excluding its main worktree.

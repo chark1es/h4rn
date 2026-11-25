@@ -16,6 +16,7 @@
 //!   snooze expiry.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -619,6 +620,22 @@ struct Inner {
     options: ThreadManagerOptions,
     events: broadcast::Sender<WireEvent>,
     emit_lock: Arc<Mutex<()>>,
+    /// Serialises rewinds: one durable edit at a time, and a restore never
+    /// races another restore in the same checkout.
+    rewind_lock: Arc<Mutex<()>>,
+    /// Workspace paths a restore is currently writing.
+    ///
+    /// A thread or agent session that would start inside one waits until the
+    /// rewind has committed, so nothing can change the tree mid-restore.
+    restore_reservations: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    /// The machine-wide Labs switch for "Rewind files with Edit from here".
+    ///
+    /// Off by default. The conversation rewind never consults it; only the
+    /// file restore does. Each record holds the same handle, so a summary
+    /// reflects a saved change without touching every open thread.
+    file_rewind: Arc<AtomicBool>,
+    /// A test-only failure the next journal append reports.
+    append_failure: std::sync::Mutex<Option<String>>,
     threads: Mutex<HashMap<String, ThreadHandle>>,
     ticker: std::sync::Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
@@ -690,6 +707,13 @@ struct Inner {
     /// it instead of sleeping).
     #[cfg(test)]
     fork_copy_waiting: tokio::sync::Notify,
+    /// Message ids whose steer write is on the adapter's wire right now.
+    ///
+    /// A steer's claim stays `sending` until its write returns. If the turn
+    /// settles in that window, no other path may turn the claim into a visible
+    /// "may have been delivered" row: the write is still ours to resolve, and
+    /// the text would then appear both delivered and uncertain.
+    in_flight_claims: std::sync::Mutex<HashSet<QueuedMessageId>>,
     /// A shortened native-copy deadline for tests.
     #[cfg(test)]
     fork_copy_timeout_override: std::sync::Mutex<Option<Duration>>,
@@ -810,10 +834,12 @@ impl AppendPause {
     /// summaries, and a test that wants the request's own window must not be
     /// woken by one of those.
     async fn hold(&self, domain: &[ThreadEvent]) {
-        if !domain
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::TurnQueued { .. }))
-        {
+        if !domain.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::TurnQueued { .. } | ThreadEvent::Rewound { .. }
+            )
+        }) {
             return;
         }
         if self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1022,6 +1048,8 @@ impl SwitchSnapshot {
 }
 
 struct ThreadRecord {
+    /// The machine-wide Labs switch for file restore, shared with the manager.
+    file_rewind: Arc<AtomicBool>,
     meta: ThreadMeta,
     state: ThreadState,
     active: Option<ActiveTurn>,
@@ -1049,8 +1077,9 @@ struct ThreadRecord {
     /// borrowed id is cleared and `handoff_pending` is set. That history is
     /// still in front of the session that answered, though, so the next turn
     /// on it must not send the handoff again. This names the generation that
-    /// holds the copy; once that session is detached the marker clears and the
-    /// durable flag gives the next startup its handoff.
+    /// holds the copy. `needs_history_handoff` compares it with the live
+    /// session's generation, which is what keeps a respawned session from
+    /// being exempt; clearing it on detach is only tidiness.
     handoff_satisfied_by: Option<u64>,
     pump: Option<JoinHandle<()>>,
     pending_approvals: BTreeMap<String, PendingApproval>,
@@ -1106,6 +1135,16 @@ struct ThreadRecord {
     /// and refetches; it is not durable, because a client refetches from an
     /// empty cache after a restart anyway.
     queue_revision: u64,
+    /// Rows a settlement restored to the queue, which that same settlement
+    /// must not promote.
+    ///
+    /// A refused prompt goes back as a known-unsent row, but the work it
+    /// carries was just turned away; promoting it in the settlement that
+    /// restored it would run the refusal again at once. Cleared once the
+    /// settlement's append succeeds, so a later advance may promote it if the
+    /// person asks for it. Not durable: a restart never promotes queue rows on
+    /// its own, and the row itself lives in `meta.queued`.
+    held_promotions: Vec<QueuedMessageId>,
     /// Effort values the live session advertised.
     advertised_efforts: Vec<String>,
     /// Model ids the live session reported, when it named a catalogue.
@@ -1148,6 +1187,9 @@ struct ThreadRecord {
     context_window: Option<u64>,
     /// Git branch of the workspace, cached for the thread header.
     branch: Option<String>,
+    /// Whether the workspace is a linked git worktree rather than the project's
+    /// main checkout. Only then can a rewind restore files (ADR-050).
+    linked_worktree: bool,
     /// Whether the active turn was rebuilt from the journal at startup.
     ///
     /// Such a turn is the prompt a pause was holding when the daemon stopped.
@@ -1217,6 +1259,7 @@ struct StartSnapshot {
     claimed: Vec<QueuedClaim>,
     state: ThreadState,
     queue_revision: u64,
+    held_promotions: Vec<QueuedMessageId>,
     resume_at: Option<DateTime<Utc>>,
     limit: Option<LimitBrief>,
     scheduled_limit: Option<ScheduledLimit>,
@@ -2302,6 +2345,14 @@ struct SummarySignature {
     snoozed_until: Option<DateTime<Utc>>,
     resume_at: Option<DateTime<Utc>>,
     limit: Option<LimitBrief>,
+    /// What the harness can do about history, and whether files can follow it.
+    ///
+    /// Both change without a turn: the Labs switch moves `file_rewind`, and a
+    /// thread's method follows the harness. A signature that left them out
+    /// would keep publishing a thread row whose Edit from here promise is
+    /// stale.
+    rewind: h4rn_protocol::RewindMethod,
+    file_rewind: bool,
 }
 
 impl SummarySignature {
@@ -2316,11 +2367,222 @@ impl SummarySignature {
             snoozed_until: summary.snoozed_until,
             resume_at: summary.resume_at,
             limit: summary.limit.clone(),
+            rewind: summary.rewind,
+            file_rewind: summary.file_rewind,
         }
     }
 }
 
+/// What one thread record says about sharing its workspace, read briefly.
+struct ThreadFact {
+    thread_id: ThreadId,
+    parent_thread_id: Option<ThreadId>,
+    workspace: std::path::PathBuf,
+    active: bool,
+    queued: bool,
+    approvals: bool,
+    guest_requests: bool,
+    questions: bool,
+    background: bool,
+    scheduled: bool,
+    phase_active: bool,
+}
+
+impl ThreadFact {
+    /// Whether nothing about this thread could still write to its workspace.
+    fn idle(&self) -> bool {
+        !self.active
+            && !self.queued
+            && !self.approvals
+            && !self.guest_requests
+            && !self.questions
+            && !self.background
+            && !self.scheduled
+            && !self.phase_active
+    }
+}
+
+/// The provider boundary a rewind of the prompt at `index` would record.
+///
+/// `None` when only a bounded handoff can honestly be used: an imported
+/// conversation whose provider ids h4rn never chose, a thread that has no
+/// provider session yet, a prompt recorded before its provider boundary was
+/// kept, or a harness that cannot truncate at all.
+///
+/// A boundary belongs to the session that recorded it. A kept prompt whose
+/// boundary names an abandoned session (a handoff fallback, or any other fresh
+/// session) cannot be used: resuming it would pair a message id with a
+/// `resume_id` that never saw it.
+fn native_rewind(
+    record: &ThreadRecord,
+    prompts: &[crate::rewind::LivePrompt],
+    index: usize,
+    advertised: h4rn_protocol::RewindMethod,
+) -> Option<h4rn_protocol::PendingRewind> {
+    let own_boundary = |turn: &TurnId| {
+        record
+            .meta
+            .provider_turns
+            .get(turn.as_str())
+            .filter(|boundary| {
+                boundary.provider_session.is_some()
+                    && boundary.provider_session == record.meta.resume_id
+            })
+    };
+    let target = prompts.get(index)?;
+    match (advertised, record.meta.harness) {
+        // An imported conversation's provider message ids were not chosen by
+        // h4rn, so a native boundary cannot name them reliably.
+        _ if record.meta.imported.is_some() => None,
+        (h4rn_protocol::RewindMethod::Native, _) if record.meta.resume_id.is_none() => None,
+        (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::ClaudeCode) => {
+            own_boundary(&target.turn_id)
+                .and_then(|boundary| boundary.last_message_id.clone())
+                .map(|message| h4rn_protocol::PendingRewind::Native {
+                    session: h4rn_protocol::SessionRewind::ResumeAtMessage { message },
+                })
+        }
+        // Only the target prompt's own boundary counts. A later prompt's turn
+        // belongs to a message the person wants to keep, so borrowing it would
+        // revert before the kept message and silently keep the edited one.
+        (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::Codex) => {
+            own_boundary(&target.turn_id)
+                .and_then(|boundary| boundary.turn_id.clone())
+                .map(|turn| h4rn_protocol::PendingRewind::Native {
+                    session: h4rn_protocol::SessionRewind::BeforeTurn { turn },
+                })
+        }
+        _ => None,
+    }
+}
+
+/// Every thread below `root`, however deep.
+fn descendants_of(root: &ThreadId, facts: &[ThreadFact]) -> HashSet<ThreadId> {
+    let mut descendants = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for fact in facts {
+            let Some(parent) = &fact.parent_thread_id else {
+                continue;
+            };
+            if (parent == root || descendants.contains(parent))
+                && descendants.insert(fact.thread_id.clone())
+            {
+                changed = true;
+            }
+        }
+    }
+    descendants
+}
+
+/// Holds a restore's workspace reservation until the cut commits or aborts.
+struct RestoreReservation {
+    inner: Arc<Inner>,
+    workspace: std::path::PathBuf,
+}
+
+/// Keeps a claim's adapter write marked in flight until it returns.
+///
+/// Dropping it on every path — a success, a refusal, or a cancelled task —
+/// is what lets a settlement surface the claim again once nobody is writing.
+struct InFlightClaim<'a> {
+    inner: &'a Inner,
+    message_id: QueuedMessageId,
+}
+
+impl<'a> InFlightClaim<'a> {
+    fn new(inner: &'a Inner, message_id: &QueuedMessageId) -> Self {
+        inner.note_claim_in_flight(message_id);
+        Self {
+            inner,
+            message_id: message_id.clone(),
+        }
+    }
+}
+
+impl Drop for InFlightClaim<'_> {
+    fn drop(&mut self) {
+        self.inner.claim_write_settled(&self.message_id);
+    }
+}
+
+impl Drop for RestoreReservation {
+    fn drop(&mut self) {
+        self.inner.release_restore(&self.workspace);
+    }
+}
+
 impl Inner {
+    /// A brief, consistent-enough view of every thread for a rewind's safety
+    /// checks. Each record is locked on its own, never two at once.
+    async fn thread_facts(&self, except: &ThreadId) -> Vec<ThreadFact> {
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.threads.lock().await;
+            threads
+                .iter()
+                .filter(|(id, _)| id.as_str() != except.as_str())
+                .map(|(_, handle)| handle.clone())
+                .collect()
+        };
+        let mut facts = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let record = handle.lock().await;
+            facts.push(ThreadFact {
+                thread_id: record.meta.thread_id.clone(),
+                parent_thread_id: record.meta.parent_thread_id.clone(),
+                workspace: std::path::PathBuf::from(&record.meta.workspace_path),
+                active: record.active.is_some(),
+                queued: !record.meta.queued.is_empty(),
+                approvals: !record.pending_approvals.is_empty(),
+                guest_requests: record.state.pending_guest_requests > 0,
+                questions: record.state.pending_question,
+                background: record.state.pr_watch,
+                scheduled: record.scheduled_limit.is_some() || record.meta.parked.is_some(),
+                phase_active: record.state.phase.is_active(),
+            });
+        }
+        facts
+    }
+
+    /// The workspace a restore is writing through, when one overlaps `workspace`.
+    fn restore_conflict(&self, workspace: &Path) -> Option<std::path::PathBuf> {
+        self.restore_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|reserved| crate::rewind::paths_overlap(reserved, workspace))
+            .cloned()
+    }
+
+    /// Reserves `workspace` until the returned guard drops.
+    ///
+    /// A restore holds it from before the first file write through the journal
+    /// commit, so no thread or agent session can start inside the tree.
+    fn reserve_restore(self: &Arc<Self>, workspace: &Path) -> RestoreReservation {
+        self.restore_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(workspace.to_path_buf());
+        RestoreReservation {
+            inner: Arc::clone(self),
+            workspace: workspace.to_path_buf(),
+        }
+    }
+
+    fn release_restore(&self, workspace: &Path) {
+        let mut reservations = self
+            .restore_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = reservations
+            .iter()
+            .position(|reserved| reserved == workspace)
+        {
+            reservations.remove(index);
+        }
+    }
+
     /// How long a native fork may spend copying before its result is fenced.
     ///
     /// Tests shorten it; production always uses [`FORK_COPY_TIMEOUT`].
@@ -2462,6 +2724,30 @@ impl Inner {
                 .is_some_and(|authority| authority.family_is_live(&grant.family)),
         }
     }
+
+    /// Marks a claim's steer write as in flight.
+    fn note_claim_in_flight(&self, message_id: &QueuedMessageId) {
+        self.in_flight_claims
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(message_id.clone());
+    }
+
+    /// Clears the in-flight mark once the adapter write has returned.
+    fn claim_write_settled(&self, message_id: &QueuedMessageId) {
+        self.in_flight_claims
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(message_id);
+    }
+
+    /// The claims whose adapter write is still in flight.
+    fn in_flight_claim_ids(&self) -> HashSet<QueuedMessageId> {
+        self.in_flight_claims
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 impl ThreadRecord {
@@ -2526,6 +2812,23 @@ impl ThreadRecord {
             unread: tab == ThreadTab::Done && !self.state.acknowledged,
             resume_at: self.resume_at,
             limit: self.limit.clone(),
+            rewind: {
+                let advertised = h4rn_harness::rewind_method(self.meta.harness);
+                // The summary advertises the method the request will really
+                // use: an imported conversation or a thread with no provider
+                // session yet cannot name a native boundary.
+                if advertised == h4rn_protocol::RewindMethod::Native
+                    && (self.meta.imported.is_some() || self.meta.resume_id.is_none())
+                {
+                    h4rn_protocol::RewindMethod::Handoff
+                } else {
+                    advertised
+                }
+            },
+            // File restore is a Labs feature, off by default: the summary must
+            // never offer it while the switch is off.
+            file_rewind: self.linked_worktree
+                && self.file_rewind.load(std::sync::atomic::Ordering::SeqCst),
             queued_count: self.meta.queued.len() as u32,
             queue_revision: self.queue_revision,
             active_turn_id: self.active.as_ref().map(|active| active.turn_id.clone()),
@@ -2549,10 +2852,18 @@ impl ThreadRecord {
         request: &str,
         history: &[&crate::journal::ImportedMessage],
     ) -> Option<String> {
+        let rewound = matches!(
+            self.meta.pending_rewind,
+            Some(h4rn_protocol::PendingRewind::Handoff)
+        );
         if !self.needs_history_handoff() {
             return None;
         }
-        let kind = self.handoff_kind();
+        let kind = if rewound {
+            crate::handoff::HandoffKind::Rewound
+        } else {
+            self.handoff_kind()
+        };
         let messages: Vec<crate::handoff::HandoffMessage<'_>> = history
             .iter()
             .map(|message| crate::handoff::HandoffMessage {
@@ -2601,15 +2912,22 @@ impl ThreadRecord {
     /// report its id before the first prompt is delivered, and that turn still
     /// has to carry the history. The flag is cleared only once a session accepts
     /// the prompt that carried it.
+    ///
+    /// A rewind that has no native resume to spend asks for the same thing
+    /// through its own pending rewind, which also decides the handoff header.
     fn needs_history_handoff(&self) -> bool {
         // A native fork confirmed by its first output already has its copied
         // conversation in the session that answered: that session must keep
         // using it, without the journaled history in front of every prompt.
         // The durable flag still owns the handoff for the session after it.
-        self.meta.handoff_pending
+        // A pending rewind handoff is never exempt: it cuts that conversation.
+        matches!(
+            self.meta.pending_rewind,
+            Some(h4rn_protocol::PendingRewind::Handoff)
+        ) || (self.meta.handoff_pending
             && !self
                 .handoff_satisfied_by
-                .is_some_and(|generation| self.session.generation() == Some(generation))
+                .is_some_and(|generation| self.session.generation() == Some(generation)))
     }
 
     /// Drops approvals no session on this thread can answer any more.
@@ -2741,6 +3059,23 @@ impl ThreadRecord {
         self.queue_revision = self.queue_revision.saturating_add(1);
     }
 
+    /// Removes any queue row carrying `message_id`.
+    ///
+    /// A steer that succeeded is in the running turn, not in the queue. A
+    /// rewind that ran while its write was in flight may have surfaced the same
+    /// text as an uncertain row; that row must not outlive the delivery.
+    fn drop_queued_row(&mut self, message_id: &QueuedMessageId) -> bool {
+        let before = self.meta.queued.len();
+        self.meta
+            .queued
+            .retain(|entry| &entry.message.message_id != message_id);
+        let changed = self.meta.queued.len() != before;
+        if changed {
+            self.note_queue_change();
+        }
+        changed
+    }
+
     /// Finds a claim by the message it holds.
     fn claim_position(&self, message_id: &QueuedMessageId) -> Option<usize> {
         self.meta
@@ -2773,18 +3108,89 @@ impl ThreadRecord {
             .retain(|claim| !(claim.promoted && &claim.turn_id == turn_id));
     }
 
-    /// Removes a settled turn's promoted claim when its delivery is known.
+    /// Ends a settled turn's promoted claim.
     ///
-    /// A `sending` claim is the one exception: the adapter was called, so it
-    /// may already hold the text even though the turn ended with an error. It
-    /// stays for recovery to show as **May have been delivered** instead of
-    /// disappearing when the turn settles.
-    fn clear_settled_promoted_claim(&mut self, turn_id: &TurnId) {
-        self.meta.claimed.retain(|claim| {
-            !(claim.promoted
-                && &claim.turn_id == turn_id
-                && claim.state != QueuedClaimState::Sending)
-        });
+    /// A `sending` claim means the adapter was called, so its text may already
+    /// be in the provider conversation even though the turn ended with an
+    /// error. Nothing would ever show it again on this daemon: the turn is
+    /// over, so it becomes the same **May have been delivered** queue row a
+    /// restart would produce, instead of staying hidden until one. The row is
+    /// never sent automatically, and the person can resend or discard it.
+    ///
+    /// A `refused` claim was definitely turned away before the adapter saw it,
+    /// so it goes back as a normal known-unsent row. The settlement that
+    /// carries it also holds it out of the promotion it is about to make: the
+    /// work was refused, and running it again on our own would repeat the
+    /// failure. The row stays in the queue for the person to resend or discard.
+    ///
+    /// A `claimed` or `delivered` claim is dropped: its turn ended with no
+    /// delivery to recover.
+    ///
+    /// Returns whether the queue changed, so the settlement that carries this
+    /// publishes it.
+    fn settle_promoted_claim(&mut self, turn_id: &TurnId) -> bool {
+        let Some(position) = self.promoted_claim_position(turn_id) else {
+            return false;
+        };
+        let claim = self.meta.claimed.remove(position);
+        match claim.state {
+            QueuedClaimState::Sending => {
+                let index = (claim.index as usize).min(self.meta.queued.len());
+                let mut message = claim.message;
+                message.message.delivery_unknown = true;
+                self.meta.queued.insert(index, message);
+                self.note_queue_change();
+                true
+            }
+            QueuedClaimState::Refused => {
+                let index = (claim.index as usize).min(self.meta.queued.len());
+                self.held_promotions
+                    .push(claim.message.message.message_id.clone());
+                self.meta.queued.insert(index, claim.message);
+                self.note_queue_change();
+                true
+            }
+            QueuedClaimState::Claimed | QueuedClaimState::Delivered => false,
+        }
+    }
+
+    /// Turns every leftover `sending` claim whose turn is over into the visible
+    /// row it would become after a restart.
+    ///
+    /// A claim in `sending` was written before the adapter was called, so its
+    /// text may already be in the provider conversation. Once its turn is no
+    /// longer the active one no delivery path will finish it, and leaving it
+    /// hidden would let the UI offer an edit the daemon then refuses for a row
+    /// the person cannot see. A claim whose turn is still active stays: that
+    /// turn is the one meant to resolve it.
+    ///
+    /// A claim whose adapter write is still in flight stays too: its steer is
+    /// still being written, and surfacing the text now would show it both
+    /// delivered and uncertain.
+    ///
+    /// Returns whether the queue changed.
+    fn surface_settled_claims(&mut self, in_flight: &HashSet<QueuedMessageId>) -> bool {
+        let active = self.active.as_ref().map(|active| active.turn_id.clone());
+        let claims = std::mem::take(&mut self.meta.claimed);
+        let mut changed = false;
+        for claim in claims {
+            if claim.state != QueuedClaimState::Sending
+                || active.as_ref().is_some_and(|id| id == &claim.turn_id)
+                || in_flight.contains(&claim.message.message.message_id)
+            {
+                self.meta.claimed.push(claim);
+                continue;
+            }
+            let mut message = claim.message;
+            message.message.delivery_unknown = true;
+            let index = (claim.index as usize).min(self.meta.queued.len());
+            self.meta.queued.insert(index, message);
+            changed = true;
+        }
+        if changed {
+            self.note_queue_change();
+        }
+        changed
     }
 
     /// Records a promoted prompt's delivery state durably, before it changes.
@@ -2876,6 +3282,7 @@ impl ThreadRecord {
             claimed: self.meta.claimed.clone(),
             state: self.state.clone(),
             queue_revision: self.queue_revision,
+            held_promotions: self.held_promotions.clone(),
             resume_at: self.resume_at,
             limit: self.limit.clone(),
             scheduled_limit: self.scheduled_limit.clone(),
@@ -2894,6 +3301,7 @@ impl ThreadRecord {
         self.meta.claimed = snapshot.claimed;
         self.state = snapshot.state;
         self.queue_revision = snapshot.queue_revision;
+        self.held_promotions = snapshot.held_promotions;
         self.resume_at = snapshot.resume_at;
         self.limit = snapshot.limit;
         self.scheduled_limit = snapshot.scheduled_limit;
@@ -3639,6 +4047,10 @@ impl ThreadManager {
             local_host,
             options,
             events,
+            rewind_lock: Arc::new(Mutex::new(())),
+            restore_reservations: std::sync::Mutex::new(Vec::new()),
+            file_rewind: Arc::new(AtomicBool::new(false)),
+            append_failure: std::sync::Mutex::new(None),
             emit_lock: Arc::new(Mutex::new(())),
             threads: Mutex::new(HashMap::new()),
             ticker: std::sync::Mutex::new(None),
@@ -3662,6 +4074,7 @@ impl ThreadManager {
             append_pause: std::sync::Mutex::new(None),
             fork_copies: Mutex::new(HashMap::new()),
             fork_copies_open: AtomicUsize::new(0),
+            in_flight_claims: std::sync::Mutex::new(HashSet::new()),
             #[cfg(test)]
             fork_copy_waiting: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -3858,6 +4271,20 @@ impl ThreadManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
         gate
+    }
+
+    /// Makes the next journal append fail with `message`.
+    ///
+    /// An integration test uses it to prove a rewind whose cut cannot be
+    /// recorded puts its files and in-memory history back. Not read by the
+    /// production path.
+    #[doc(hidden)]
+    pub fn fail_next_append(&self, message: impl Into<String>) {
+        *self
+            .inner
+            .append_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message.into());
     }
 
     /// The outside grant whose turn is running, with that turn's ceiling.
@@ -4245,6 +4672,16 @@ impl ThreadManager {
         grant: Option<WorkGrant>,
     ) -> Result<CreatedThread, ManagerError> {
         request.workspace_path = expand_home(&request.workspace_path);
+        if let Some(conflict) = self
+            .inner
+            .restore_conflict(Path::new(&request.workspace_path))
+        {
+            return Err(ManagerError::Conflict(format!(
+                "{} is being rewound; wait for that to finish before starting work there",
+                conflict.display()
+            )));
+        }
+
         if !self.inner.harnesses.get(request.harness).is_some() {
             return Err(ManagerError::Unsupported(format!(
                 "no {:?} adapter is available in this daemon build",
@@ -4379,7 +4816,7 @@ impl ThreadManager {
         // The default title mode uses this thread's own harness, so a prompt is
         // never handed to a different provider unasked.
         let title_harness = request.harness;
-        let meta = ThreadMeta {
+        let mut meta = ThreadMeta {
             thread_id: thread_id.clone(),
             parent_thread_id: request.parent_thread_id.clone(),
             subagent_id: request.subagent_id.clone(),
@@ -4399,6 +4836,9 @@ impl ThreadManager {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            pending_rewind: None,
+            worktree_identity: None,
+            provider_turns: Default::default(),
             queued: Vec::new(),
             claimed: Vec::new(),
             imported: None,
@@ -4406,9 +4846,15 @@ impl ThreadManager {
             handoff_pending: false,
             switch_generation: 0,
         };
+        meta.worktree_identity =
+            crate::worktrees::git::linked_identity(std::path::Path::new(&meta.workspace_path));
         let title_workspace = meta.workspace_path.clone();
 
         let mut record = ThreadRecord {
+            file_rewind: Arc::clone(&self.inner.file_rewind),
+            linked_worktree: crate::worktrees::git::is_linked_worktree(std::path::Path::new(
+                &meta.workspace_path,
+            )),
             meta,
             state: ThreadState::new(now),
             active: None,
@@ -4422,6 +4868,7 @@ impl ThreadManager {
             last_signature: None,
             transport_error_reported: None,
             queue_revision: 0,
+            held_promotions: Vec::new(),
             transport_report: None,
             dying_sessions: BTreeMap::new(),
             #[cfg(test)]
@@ -4582,6 +5029,9 @@ impl ThreadManager {
             resume_id: request.resume_id.clone(),
             agent_fingerprint: None,
             parked: None,
+            pending_rewind: None,
+            worktree_identity: None,
+            provider_turns: Default::default(),
             queued: Vec::new(),
             claimed: Vec::new(),
             imported: Some(crate::journal::ImportedOrigin {
@@ -4638,6 +5088,10 @@ impl ThreadManager {
             });
         }
         let record = ThreadRecord {
+            file_rewind: Arc::clone(&self.inner.file_rewind),
+            linked_worktree: crate::worktrees::git::is_linked_worktree(std::path::Path::new(
+                &meta.workspace_path,
+            )),
             meta,
             state,
             active: None,
@@ -4651,6 +5105,7 @@ impl ThreadManager {
             last_signature: None,
             transport_error_reported: None,
             queue_revision: 0,
+            held_promotions: Vec::new(),
             transport_report: None,
             dying_sessions: BTreeMap::new(),
             #[cfg(test)]
@@ -4878,6 +5333,9 @@ impl ThreadManager {
             resume_id: native_fork.then(|| meta.resume_id.clone()).flatten(),
             agent_fingerprint: None,
             parked: None,
+            pending_rewind: None,
+            worktree_identity: None,
+            provider_turns: Default::default(),
             queued: Vec::new(),
             claimed: Vec::new(),
             imported: None,
@@ -5096,6 +5554,7 @@ impl ThreadManager {
                         turn_id: turn.turn_id.clone(),
                         files: changes.files.clone(),
                         note: changes.note.clone(),
+                        complete: changes.complete,
                     }),
                 },
             ));
@@ -5110,6 +5569,10 @@ impl ThreadManager {
             .flat_map(|turn| turn.steers.iter().map(String::as_str))
             .collect();
         let mut record = ThreadRecord {
+            file_rewind: Arc::clone(&self.inner.file_rewind),
+            linked_worktree: crate::worktrees::git::is_linked_worktree(std::path::Path::new(
+                &fork_meta.workspace_path,
+            )),
             meta: fork_meta,
             state,
             active: None,
@@ -5123,6 +5586,7 @@ impl ThreadManager {
             last_signature: None,
             transport_error_reported: None,
             queue_revision: 0,
+            held_promotions: Vec::new(),
             transport_report: None,
             dying_sessions: BTreeMap::new(),
             #[cfg(test)]
@@ -5237,6 +5701,435 @@ impl ThreadManager {
         record.meta.title_source = TitleSource::Renamed;
         let (summary, _) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
         Ok(summary)
+    }
+
+    /// Edits an earlier prompt: removes it and everything after it.
+    ///
+    /// The prompt and its attachments come back for the composer. With
+    /// `restore_files` the workspace also goes back to the snapshot taken
+    /// before the edited message; that needs the thread's own worktree and no
+    /// other thread or agent session sharing it (ADR-050).
+    ///
+    /// The file restore happens before the journal write: a restore that fails
+    /// leaves the conversation exactly as it was. The provider boundary is
+    /// recorded for the next session start, so a daemon restart cannot resume
+    /// the history the person just removed.
+    pub async fn rewind_thread(
+        &self,
+        thread_id: &ThreadId,
+        before_item_id: &str,
+        restore_files: bool,
+    ) -> Result<h4rn_protocol::RewoundPrompt, ManagerError> {
+        let _rewind = self.inner.rewind_lock.lock().await;
+        let handle = self.inner.handle(thread_id).await?;
+        let mut record = handle.lock().await;
+        if record.closed {
+            return Err(ManagerError::NotFound(format!(
+                "thread {thread_id} is closed"
+            )));
+        }
+        // A claim left in `sending` by a turn that is no longer active may
+        // already be in the provider conversation. Surface it as the row a
+        // restart would show before the checks below, so the refusal names a
+        // message the person can actually see and resolve.
+        let in_flight = self.inner.in_flight_claim_ids();
+        if record.surface_settled_claims(&in_flight)
+            && let Err(error) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await
+        {
+            tracing::warn!(%error, "a rewind could not publish an uncertain delivery");
+        }
+
+        let events = self
+            .inner
+            .journal
+            .read_wire_since(thread_id, 0)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        let prompts = crate::rewind::live_prompts(&events);
+        let Some(index) = prompts
+            .iter()
+            .position(|prompt| prompt.item_id == before_item_id)
+        else {
+            return Err(ManagerError::InvalidRequest(
+                "that message is not in the thread's current history".into(),
+            ));
+        };
+        let target = prompts[index].clone();
+        // A steer is journaled as another user item inside its turn, so editing
+        // it would remove the cue that came before it — a message the person
+        // did not choose. Only a turn's first prompt can be edited.
+        if !target.cue {
+            return Err(ManagerError::InvalidRequest(
+                "only the first message of a turn can be edited; this message was steered into a turn that already started"
+                    .into(),
+            ));
+        }
+        // Only turns that are still part of this conversation are restored: a
+        // prompt an earlier rewind removed (and whose files were kept) must not
+        // be reverted by a later edit.
+        let removed = crate::rewind::removed_turns(&prompts, index);
+        if !record.pending_approvals.is_empty() {
+            return Err(ManagerError::Conflict(
+                "an approval is waiting; answer it before editing an earlier prompt".into(),
+            ));
+        }
+        // A message whose delivery is unclear may already be in the provider
+        // conversation. Removing its turn would leave text the person can no
+        // longer see, so the row must be resolved first. Only a claim whose
+        // turn is still active reaches this branch: a leftover claim from a
+        // finished turn was surfaced as a queue row above.
+        let active_turn = record.active.as_ref().map(|active| active.turn_id.clone());
+        if record
+            .meta
+            .queued
+            .iter()
+            .any(|entry| entry.message.delivery_unknown)
+            || record.meta.claimed.iter().any(|claim| {
+                claim.state == QueuedClaimState::Sending
+                    && active_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn == &claim.turn_id)
+            })
+        {
+            return Err(ManagerError::Conflict(
+                "a message may have reached the agent; resend or discard it first".into(),
+            ));
+        }
+        if !record.meta.queued.is_empty() {
+            return Err(ManagerError::Conflict(
+                "a message is waiting to run; let it finish before editing an earlier prompt"
+                    .into(),
+            ));
+        }
+        if record.active.is_some() {
+            return Err(ManagerError::Conflict(
+                "a turn is still running; stop it before editing an earlier prompt".into(),
+            ));
+        }
+        // Only a real armed resume or a parked prompt blocks the edit. A stale
+        // RateLimited phase after the person cancelled the resume does not.
+        if record.scheduled_limit.is_some()
+            || record.meta.parked.is_some()
+            || record.resume_at.is_some()
+        {
+            return Err(ManagerError::Conflict(
+                "an automatic resume is armed; cancel it before editing an earlier prompt".into(),
+            ));
+        }
+        if matches!(record.session, SessionSlot::Starting(_)) {
+            return Err(ManagerError::Conflict(
+                "the harness session is starting; try again in a moment".into(),
+            ));
+        }
+        let adapter = self.inner.harnesses.get(record.meta.harness);
+        let advertised = adapter
+            .as_ref()
+            .map(|adapter| adapter.rewind_method())
+            .unwrap_or(h4rn_protocol::RewindMethod::Unsupported);
+        if advertised == h4rn_protocol::RewindMethod::Unsupported {
+            return Err(ManagerError::Unsupported(format!(
+                "{:?} cannot rewind a conversation",
+                record.meta.harness
+            )));
+        }
+
+        let mut prepared = None;
+        let mut reservation = None;
+        if restore_files {
+            // File restore is behind Settings → Labs and off by default: the
+            // conversation rewind is ready, the file restore is still being
+            // hardened. The daemon enforces the switch, not only the dialog.
+            if !self.file_rewind_enabled() {
+                return Err(ManagerError::Refused {
+                    message: "restoring files is a Labs feature and is turned off on this machine"
+                        .into(),
+                    hint: Some(
+                        "Turn on Settings → Labs → Rewind files with Edit from here, or rewind only the conversation"
+                            .into(),
+                    ),
+                });
+            }
+            if !record.linked_worktree {
+                return Err(ManagerError::Conflict(
+                    "this thread runs in the project's main folder, so only its conversation can be rewound"
+                        .into(),
+                ));
+            }
+            let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
+            // The path must still be the checkout this thread was created in:
+            // a moved worktree whose old path now holds another checkout must
+            // never receive its files.
+            let current = crate::worktrees::git::linked_identity(&workspace);
+            match (&record.meta.worktree_identity, current) {
+                (Some(expected), Some(actual)) if expected == &actual => {}
+                (Some(_), _) => {
+                    return Err(ManagerError::Conflict(
+                        "this worktree has moved or been replaced; reopening the thread in its real checkout is required before its files can be restored"
+                            .into(),
+                    ));
+                }
+                (None, _) => {
+                    return Err(ManagerError::Conflict(
+                        "this checkout has no recorded worktree identity, so its files cannot be restored safely"
+                            .into(),
+                    ));
+                }
+            }
+            let Some(store) = self.inner.snapshots.get().cloned() else {
+                return Err(ManagerError::Unsupported(
+                    "file snapshots are not available in this daemon build".into(),
+                ));
+            };
+            // Revert files too needs a checkpoint that covers the whole tree,
+            // not only the paths a tool call named. A turn without one (an
+            // older thread, or a harness that never recorded it) is refused
+            // before anything is written.
+            for turn in &removed {
+                if store.checkpoint(thread_id, turn).is_none() {
+                    return Err(ManagerError::Conflict(
+                        "this message has no complete file checkpoint, so its files cannot be restored"
+                            .into(),
+                    ));
+                }
+            }
+            let facts = self.inner.thread_facts(thread_id).await;
+            let descendants = descendants_of(thread_id, &facts);
+            for fact in &facts {
+                if &fact.thread_id == thread_id || !fact.workspace.is_dir() {
+                    continue;
+                }
+                if !crate::rewind::paths_overlap(&workspace, &fact.workspace) {
+                    continue;
+                }
+                if descendants.contains(&fact.thread_id) && fact.idle() {
+                    continue;
+                }
+                return Err(ManagerError::Refused {
+                    message: format!(
+                        "another thread or agent session uses {}; restoring would erase its work",
+                        fact.workspace.display()
+                    ),
+                    hint: Some(
+                        "Close the other thread or stop its agent session, then try again".into(),
+                    ),
+                });
+            }
+            // Reserve the tree from before the first write through the commit,
+            // so no thread or agent session can start inside it meanwhile.
+            reservation = Some(self.inner.reserve_restore(&workspace));
+            let workspace = workspace.clone();
+            let thread = thread_id.clone();
+            let turns = removed.clone();
+            let prepare_store = Arc::clone(&store);
+            let prepared_restore = match tokio::task::spawn_blocking(move || {
+                crate::rewind::prepare_restore(&prepare_store, &workspace, &thread, &turns)
+            })
+            .await
+            {
+                Ok(Ok(prepared)) => prepared,
+                Ok(Err(message)) => {
+                    return Err(ManagerError::Refused {
+                        message,
+                        hint: Some(
+                            "Check that the worktree is writable and try again; nothing was changed"
+                                .into(),
+                        ),
+                    });
+                }
+                Err(error) => {
+                    return Err(ManagerError::Internal(format!(
+                        "the file restore did not finish: {error}"
+                    )));
+                }
+            };
+            let (prepared_restore, applied) = match tokio::task::spawn_blocking(move || {
+                let applied = crate::rewind::apply_restore(&prepared_restore);
+                (prepared_restore, applied)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(ManagerError::Internal(format!(
+                        "the file restore did not finish: {error}"
+                    )));
+                }
+            };
+            if let Err(message) = applied {
+                return Err(ManagerError::Refused {
+                    message,
+                    hint: Some(
+                        "Check that the worktree is writable and try again; nothing was changed"
+                            .into(),
+                    ),
+                });
+            }
+            prepared = Some(prepared_restore);
+        }
+
+        // The provider boundary is the last kept message the provider really
+        // recorded, never a local prompt index. A boundary that cannot be named
+        // falls back to the handoff rather than sending a resume the CLI
+        // refuses.
+        let native = native_rewind(&record, &prompts, index, advertised);
+        let (pending, method) = match native {
+            Some(pending) => (pending, h4rn_protocol::RewindMethod::Native),
+            None => (
+                h4rn_protocol::PendingRewind::Handoff,
+                h4rn_protocol::RewindMethod::Handoff,
+            ),
+        };
+
+        let generation = match &record.session {
+            SessionSlot::Live { generation, .. } => Some(*generation),
+            SessionSlot::None | SessionSlot::Starting(_) => None,
+        };
+        // The journal row is written with the cut. If that write fails, the
+        // in-memory record must not be left describing a rewind that never
+        // happened, and the files must go back.
+        let old_pending = record.meta.pending_rewind.clone();
+        let old_resume = record.meta.resume_id.clone();
+        let old_fingerprint = record.meta.agent_fingerprint.clone();
+        let old_provider = record.meta.provider_turns.clone();
+        // The lifecycle transition (`Rewound`) is staged with the cut: if the
+        // append fails, the summary must describe the conversation that is
+        // still in the journal, not an edit that never happened.
+        let old_state = record.state.clone();
+        if matches!(pending, h4rn_protocol::PendingRewind::Handoff) {
+            record.meta.resume_id = None;
+            record.meta.agent_fingerprint = None;
+        }
+        record.meta.pending_rewind = Some(pending);
+        for turn in &removed {
+            record.meta.provider_turns.remove(turn.as_str());
+        }
+        let now = self.now();
+        let domain = vec![h4rn_core::ThreadEvent::Rewound {
+            removed_turns: removed.len() as u32,
+            at: now,
+        }];
+        let wire = vec![Event::ThreadRewound {
+            thread_id: thread_id.clone(),
+            before_item_id: before_item_id.to_owned(),
+            files_restored: restore_files,
+            restore_id: prepared.as_ref().map(|p| p.restore_id().to_owned()),
+            at: now,
+        }];
+        if let Err(error) = self.inner.emit(&mut record, domain, wire).await {
+            record.meta.pending_rewind = old_pending;
+            record.meta.resume_id = old_resume;
+            record.meta.agent_fingerprint = old_fingerprint;
+            record.meta.provider_turns = old_provider;
+            record.state = old_state;
+            if let Some(prepared) = &prepared {
+                crate::rewind::abort_restore(prepared);
+            }
+            return Err(error);
+        }
+        if let Some(prepared) = &prepared {
+            crate::rewind::finish_restore(prepared);
+        }
+        let detached = generation.and_then(|generation| record.detach_session(generation));
+        drop(record);
+        drop(reservation);
+        if let Some(session) = detached {
+            tokio::spawn(async move {
+                let _ = session.lock().await.shutdown().await;
+            });
+        }
+        Ok(h4rn_protocol::RewoundPrompt {
+            thread_id: thread_id.clone(),
+            before_item_id: before_item_id.to_owned(),
+            prompt: target.text,
+            attachments: target.attachments,
+            files_restored: restore_files,
+            method,
+        })
+    }
+
+    /// What rewinding one prompt would really do.
+    ///
+    /// The thread row only advertises what the harness can do. A prompt
+    /// recorded before its provider boundary was kept, a conversation with no
+    /// provider session, and an imported conversation can only use a handoff,
+    /// so the dialog asks for the plan of the message the person selected.
+    /// File restore additionally needs the Labs switch, a linked worktree with
+    /// its recorded identity, and a complete checkpoint for every removed turn.
+    pub async fn rewind_plan(
+        &self,
+        thread_id: &ThreadId,
+        before_item_id: &str,
+    ) -> Result<h4rn_protocol::RewindPlan, ManagerError> {
+        let _rewind = self.inner.rewind_lock.lock().await;
+        let handle = self.inner.handle(thread_id).await?;
+        let record = handle.lock().await;
+        if record.closed {
+            return Err(ManagerError::NotFound(format!(
+                "thread {thread_id} is closed"
+            )));
+        }
+        let advertised = self
+            .inner
+            .harnesses
+            .get(record.meta.harness)
+            .map(|adapter| adapter.rewind_method())
+            .unwrap_or(h4rn_protocol::RewindMethod::Unsupported);
+        if advertised == h4rn_protocol::RewindMethod::Unsupported {
+            return Ok(h4rn_protocol::RewindPlan {
+                method: h4rn_protocol::RewindMethod::Unsupported,
+                files_enabled: self.file_rewind_enabled(),
+                files_available: false,
+            });
+        }
+        let events = self
+            .inner
+            .journal
+            .read_wire_since(thread_id, 0)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        let prompts = crate::rewind::live_prompts(&events);
+        let Some(index) = prompts
+            .iter()
+            .position(|prompt| prompt.item_id == before_item_id)
+        else {
+            return Err(ManagerError::InvalidRequest(
+                "that message is not in the thread's current history".into(),
+            ));
+        };
+        if !prompts[index].cue {
+            return Err(ManagerError::InvalidRequest(
+                "only the first message of a turn can be edited; this message was steered into a turn that already started"
+                    .into(),
+            ));
+        }
+        let method = match native_rewind(&record, &prompts, index, advertised) {
+            Some(_) => h4rn_protocol::RewindMethod::Native,
+            None => h4rn_protocol::RewindMethod::Handoff,
+        };
+        let removed = crate::rewind::removed_turns(&prompts, index);
+        let mut files_available = self.file_rewind_enabled() && record.linked_worktree;
+        if files_available {
+            let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
+            files_available = record.meta.worktree_identity.is_some()
+                && crate::worktrees::git::linked_identity(&workspace).is_some_and(|current| {
+                    record.meta.worktree_identity.as_ref() == Some(&current)
+                });
+            if files_available {
+                match self.inner.snapshots.get() {
+                    Some(store) => {
+                        files_available = removed
+                            .iter()
+                            .all(|turn| store.checkpoint(thread_id, turn).is_some());
+                    }
+                    None => files_available = false,
+                }
+            }
+        }
+        Ok(h4rn_protocol::RewindPlan {
+            method,
+            files_enabled: self.file_rewind_enabled(),
+            files_available,
+        })
     }
 
     /// Appends a user message and starts or queues its turn.
@@ -5565,6 +6458,13 @@ impl ThreadManager {
                         }
                         direct_claim = Some((message_id, claimed));
                     }
+                    // From the durable `sending` write until the adapter
+                    // answers, a settlement must not surface this claim as
+                    // uncertain: the write is still ours to resolve. The guard
+                    // clears the mark on every outcome.
+                    let _in_flight = direct_claim
+                        .as_ref()
+                        .map(|(message_id, _)| InFlightClaim::new(&self.inner, message_id));
                     #[cfg(test)]
                     self.inner.pause_direct_steer().await;
                     let steered = guard
@@ -5632,6 +6532,10 @@ impl ThreadManager {
                             .meta
                             .claimed
                             .retain(|claim| &claim.message.message.message_id != message_id);
+                        // The text is in the turn now. A rewind that saw the
+                        // claim in flight may have queued the same row; it is
+                        // delivered once, not twice.
+                        record.drop_queued_row(message_id);
                     }
                     let mut domain = Vec::new();
                     // A steer means the person is working the thread by hand, so a
@@ -6306,6 +7210,10 @@ impl ThreadManager {
                     "the message could not be marked as sending, so nothing was sent".into(),
                 ));
             }
+            // From the durable `sending` write until the adapter answers, the
+            // claim is in flight: a settlement in this window must not surface
+            // the text as uncertain while the write is still ours.
+            let _in_flight = InFlightClaim::new(&self.inner, message_id);
             let steered = {
                 let mut guard = session.lock().await;
                 // The grant is checked again here, under the session lock and
@@ -6398,6 +7306,9 @@ impl ThreadManager {
                 .meta
                 .claimed
                 .retain(|claim| &claim.message.message.message_id != message_id);
+            // The text is in the turn now. A rewind that saw the claim in flight
+            // may have queued the same row; it is delivered once, not twice.
+            record.drop_queued_row(message_id);
             let mut domain = Vec::new();
             let released = self
                 .inner
@@ -7391,6 +8302,17 @@ impl ThreadManager {
             record.meta.resume_id = None;
             record.meta.agent_fingerprint = None;
             record.meta.handoff_pending = true;
+            // A native rewind boundary names a conversation in the old
+            // provider's session, which the new harness can neither resume nor
+            // apply. The handoff already carries the kept history, so the
+            // boundary becomes that handoff instead of failing the first turn.
+            let rewind_fell_back = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            );
+            if rewind_fell_back {
+                record.meta.pending_rewind = Some(h4rn_protocol::PendingRewind::Handoff);
+            }
             // The new durable row belongs to this switch. A late write from
             // the session the thread is about to leave names the old value and
             // is refused instead of restoring that harness's metadata.
@@ -7414,11 +8336,17 @@ impl ThreadManager {
                 to: plan.harness,
                 at: now,
             }];
-            let wire = vec![Event::HarnessSwitched {
+            let mut wire = vec![Event::HarnessSwitched {
                 thread_id: thread_id.clone(),
                 from,
                 to: plan.harness,
             }];
+            if rewind_fell_back {
+                wire.push(Event::RewindFellBack {
+                    thread_id: thread_id.clone(),
+                    at: now,
+                });
+            }
             // The metadata row and the divider are one transaction: the switch
             // is either durable in full or not at all. Nothing was detached and
             // nothing was shut down before this point.
@@ -7827,6 +8755,71 @@ impl ThreadManager {
     /// never observes two stores.
     pub fn set_snapshot_store(&self, store: Arc<crate::fs::SnapshotStore>) {
         let _ = self.inner.snapshots.set(store);
+    }
+
+    /// The snapshot store this daemon records pre-turn checkpoints in.
+    ///
+    /// `None` for an embedder that never installed one. Exposed so a caller
+    /// that owns the worktree can check whether a turn has a complete
+    /// checkpoint without guessing from the summary.
+    pub fn snapshot_store(&self) -> Option<Arc<crate::fs::SnapshotStore>> {
+        self.inner.snapshots.get().cloned()
+    }
+
+    /// Applies the machine-wide Labs switch for file restore.
+    ///
+    /// The daemon calls this at startup and whenever Settings → Labs saves a
+    /// new value. While it is off, [`Self::rewind_thread`] refuses
+    /// `restore_files` and the summary reports file rewind as unavailable.
+    pub fn set_file_rewind_enabled(&self, enabled: bool) {
+        self.inner
+            .file_rewind
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether **Revert files too** is turned on for this machine.
+    pub fn file_rewind_enabled(&self) -> bool {
+        self.inner
+            .file_rewind
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Finishes file restores a crash interrupted between the apply and the
+    /// journal commit.
+    ///
+    /// A restore whose `ThreadRewound` event reached the journal keeps its
+    /// files; every other one is put back from its durable backup. Runs once at
+    /// startup, after the snapshot store is installed.
+    pub async fn recover_pending_restores(&self) -> Result<(), ManagerError> {
+        let Some(store) = self.inner.snapshots.get().cloned() else {
+            return Ok(());
+        };
+        for restore_id in crate::rewind::pending_restore_ids(&store) {
+            let committed = match crate::rewind::restore_thread(&store, &restore_id) {
+                Some(thread_id) => self
+                    .inner
+                    .journal
+                    .read_wire_since(&thread_id, 0)
+                    .await
+                    .map(|events| {
+                        events.iter().any(|wire| {
+                            matches!(
+                                &wire.event,
+                                Event::ThreadRewound {
+                                    restore_id: Some(id),
+                                    ..
+                                } if id == &restore_id
+                            )
+                        })
+                    })
+                    .unwrap_or(false),
+                None => false,
+            };
+            if let Err(error) = crate::rewind::recover_restore(&store, &restore_id, committed) {
+                tracing::warn!(%restore_id, %error, "could not recover an interrupted file restore");
+            }
+        }
+        Ok(())
     }
 
     /// Every distinct workspace path any thread has used.
@@ -8823,6 +9816,14 @@ impl Inner {
         // it is durable, to close a socket in that exact window.
         self.pause_append(&domain).await;
         let _guard = self.emit_lock.lock().await;
+        if let Some(message) = self
+            .append_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            return Err(ManagerError::Internal(message));
+        }
         let appended = match (pending_item, steer_item) {
             (Some(item_id), _) => {
                 self.journal
@@ -9099,9 +10100,20 @@ impl Inner {
             .into_iter()
             .collect();
         let fallback = self.now();
-        Ok(events
-            .into_iter()
-            .filter_map(|wire| match wire.event {
+        // A message is grouped by the turn that delivered it, and turns are
+        // ordered by when they were first seen. A message queued while another
+        // turn runs is journaled under its own turn id before the running
+        // turn's reply arrives; cutting by arrival order would then drop the
+        // kept reply and keep the removed prompt's context. The turn id folds
+        // the queued prompt back to its real position.
+        let mut entries: Vec<(usize, HistoryMessage)> = Vec::new();
+        let mut ranks: HashMap<TurnId, usize> = HashMap::new();
+        let mut next_rank = 0usize;
+        // Which turn each sent user message belongs to, so a rewind can cut the
+        // gathered history at exactly the edited prompt.
+        let mut prompts: Vec<(String, TurnId)> = Vec::new();
+        for wire in events {
+            match wire.event {
                 Event::ItemCompleted {
                     item:
                         Item::Message {
@@ -9113,18 +10125,50 @@ impl Inner {
                     turn_id,
                     at,
                     ..
-                } if !pending.contains(&item_id) => Some(HistoryMessage {
-                    turn_id,
-                    item_id,
-                    message: crate::journal::ImportedMessage {
-                        role,
-                        text,
-                        at: at.unwrap_or(fallback),
-                    },
-                }),
-                _ => None,
-            })
-            .collect())
+                } if !pending.contains(&item_id) => {
+                    let rank = *ranks.entry(turn_id.clone()).or_insert_with(|| {
+                        let rank = next_rank;
+                        next_rank += 1;
+                        rank
+                    });
+                    if role == MessageRole::User {
+                        prompts.push((item_id.clone(), turn_id.clone()));
+                    }
+                    entries.push((
+                        rank,
+                        HistoryMessage {
+                            turn_id,
+                            item_id,
+                            message: crate::journal::ImportedMessage {
+                                role,
+                                text,
+                                at: at.unwrap_or(fallback),
+                            },
+                        },
+                    ));
+                }
+                Event::ThreadRewound { before_item_id, .. } => {
+                    // The edited message and everything after it left the
+                    // thread, so a later handoff must not bring them back. A
+                    // kept turn whose reply arrived after the edited prompt was
+                    // journaled stays: the cut is by delivered turn, not by
+                    // message arrival.
+                    let cut = prompts
+                        .iter()
+                        .find(|(item_id, _)| item_id == &before_item_id)
+                        .and_then(|(_, turn)| ranks.get(turn).copied());
+                    if let Some(cut) = cut {
+                        prompts.retain(|(_, turn)| ranks.get(turn).is_some_and(|rank| *rank < cut));
+                        entries.retain(|(rank, _)| *rank < cut);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // A stable sort keeps arrival order inside one turn, so a queued
+        // prompt never jumps ahead of the reply it queued behind.
+        entries.sort_by_key(|(rank, _)| *rank);
+        Ok(entries.into_iter().map(|(_, message)| message).collect())
     }
 
     /// The newest turn the wire rows saw start and never saw end.
@@ -9186,7 +10230,12 @@ impl Inner {
                 .map_err(|error| ManagerError::Internal(error.to_string()))?;
             let state = apply_all(ThreadState::new(meta.created_at), &domain);
             let branch = crate::fs::git::branch(std::path::Path::new(&meta.workspace_path));
+            let linked_worktree: bool = crate::worktrees::git::is_linked_worktree(
+                std::path::Path::new(&meta.workspace_path),
+            );
             let mut record = ThreadRecord {
+                file_rewind: Arc::clone(&self.file_rewind),
+                linked_worktree,
                 meta,
                 state,
                 active: None,
@@ -9200,6 +10249,7 @@ impl Inner {
                 last_signature: None,
                 transport_error_reported: None,
                 queue_revision: 0,
+                held_promotions: Vec::new(),
                 transport_report: None,
                 dying_sessions: BTreeMap::new(),
                 #[cfg(test)]
@@ -9420,9 +10470,11 @@ impl Inner {
             return false;
         }
         // The turn is over, so no known delivery is left to recover. A claim the
-        // adapter may have taken (`sending`) stays for its own recovery row:
-        // settling the turn must not hide text the harness could already hold.
-        record.clear_settled_promoted_claim(turn_id);
+        // adapter may have taken (`sending`) becomes the visible "may have been
+        // delivered" row now, inside this settlement's own append: waiting for
+        // a restart would hide the row while the UI offers an edit the daemon
+        // refuses.
+        record.settle_promoted_claim(turn_id);
 
         let now = self.now();
         let TurnEnd {
@@ -9597,14 +10649,16 @@ impl Inner {
         // A row that may already have been delivered is never auto-sent: only
         // the person's Send now or Steer may try it again. It does not block the
         // rows behind it, though: the next known-safe message runs and the
-        // uncertain one stays visible for the person.
+        // uncertain one stays visible for the person. A row this settlement
+        // itself restored after a refusal is held the same way for this one
+        // promotion: it was just turned away, so running it again on our own
+        // would repeat the failure.
         let promotable = (!record.closed && record.scheduled_limit.is_none())
             .then(|| {
-                record
-                    .meta
-                    .queued
-                    .iter()
-                    .position(|entry| !entry.message.delivery_unknown)
+                record.meta.queued.iter().position(|entry| {
+                    !entry.message.delivery_unknown
+                        && !record.held_promotions.contains(&entry.message.message_id)
+                })
             })
             .flatten();
         if let Some(position) = promotable {
@@ -9668,7 +10722,12 @@ impl Inner {
             )
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                // The restored rows are durable now, so the hold that kept this
+                // settlement from promoting them is spent.
+                record.held_promotions.clear();
+                Ok(())
+            }
             Err(error) => {
                 // Nothing was delivered: the promotion is undone so the message
                 // is still first in line, and the settlement's own events are
@@ -10011,7 +11070,7 @@ impl Inner {
 
     /// Releases a native copy whose turn was stopped before its prompt.
     ///
-    /// A Stop (or a pause that parks the turn) between the native start
+    /// A Stop between the native start
     /// returning and the fork's prompt being written leaves nothing to confirm
     /// the copy or fence it: no prompt is sent, so neither the pump nor the
     /// confirmation wait will ever run. The copy exists only to hold the
@@ -10102,6 +11161,24 @@ impl Inner {
                 self.release_fork_copy(&thread_id, generation).await;
                 return;
             };
+            // The checkout is being restored by another thread's rewind. No
+            // agent may start inside it until that cut commits, or its files
+            // would change under the restore.
+            if let Some(conflict) = self.restore_conflict(Path::new(&record.meta.workspace_path)) {
+                let end = TurnEnd::failed(
+                    format!(
+                        "{} is being rewound; wait for that to finish before starting this turn",
+                        conflict.display()
+                    ),
+                    Some("Send the message again once the rewind finishes.".into()),
+                    true,
+                );
+                self.settle_turn_locked(&mut record, &turn.turn_id, end)
+                    .await;
+                drop(record);
+                self.spawn_advance(handle);
+                return;
+            }
             // Before a harness process is launched for this work: the grant
             // that asked for it must still be live. Refusing here is what makes
             // a revoked resume start nothing at all, rather than start an agent
@@ -10211,6 +11288,10 @@ impl Inner {
                 env_overrides,
                 attachments: Vec::new(),
                 agent_id: record.meta.agent_id.clone(),
+                rewind: match record.meta.pending_rewind.as_ref() {
+                    Some(h4rn_protocol::PendingRewind::Native { session }) => Some(session.clone()),
+                    _ => None,
+                },
             };
             (harness, snapshot, spec, generation, turn, started_settings)
         };
@@ -10408,9 +11489,11 @@ impl Inner {
             // unconfirmed when it passes is shut down and fenced here, and the
             // turn is handed off.
             if let Some(confirmed) = fork_confirmed {
-                // `deliver` can return without writing anything: a Stop (or a
-                // pause) can settle the turn while the claim waits, or the
-                // session the start produced may be replaced before the write.
+                // `deliver` can return without writing anything: a Stop can
+                // settle the turn while the claim waits, or the session the
+                // start produced may be replaced before the write. (A limit
+                // pause parks the turn without settling it, so that copy waits
+                // out its deadline and is fenced there instead.)
                 // Nothing will ever confirm the copy then, and neither the wait
                 // below nor the pump will release it, so the source would stay
                 // gated until its backstop. The confirmation and the turn are
@@ -10602,10 +11685,15 @@ impl Inner {
             {
                 return false;
             }
-            // Only an imported or forked thread still holding its one native
-            // attempt falls back; every other startup failure keeps the
-            // ordinary path.
-            if !record.native_origin_pending() {
+            // An imported or forked thread still holding its one native
+            // attempt falls back, and so does a pending native rewind the
+            // adapter refused; every other startup failure keeps the ordinary
+            // path.
+            let applies = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            ) || record.native_origin_pending();
+            if !applies {
                 return false;
             }
         }
@@ -10642,7 +11730,7 @@ impl Inner {
         // just before this path records the failure. Under one scope it either
         // runs before this startup (and sees its `Starting` slot) or after the
         // turn has ended (and starts nothing).
-        let (settled, advance) = {
+        let (settled, advance, fell_back) = {
             let mut record = handle.lock().await;
             if let Some(generation) = generation {
                 if !record.session.is_starting(generation) {
@@ -10655,6 +11743,20 @@ impl Inner {
             let captured = record
                 .dispatch_for(&turn.turn_id)
                 .map(|_| turn.turn_id.clone());
+            // The native boundary was not applied (the adapter refused it, or
+            // the session never started). Keep the thread usable: later sends
+            // retry through the bounded handoff instead of the same refused
+            // boundary. The fallback is told to every client, exactly as the
+            // retry path does.
+            let fell_back = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            );
+            if fell_back {
+                record.meta.pending_rewind = Some(h4rn_protocol::PendingRewind::Handoff);
+                record.meta.resume_id = None;
+                record.meta.agent_fingerprint = None;
+            }
             let settled = match captured {
                 Some(turn_id) => {
                     self.settle_turn_locked(
@@ -10672,8 +11774,24 @@ impl Inner {
             };
             // A settlement spawns its own advance; only a turn this failure
             // leaves alone (or a turn the settlement promoted) needs one here.
-            (settled, record.active.is_some())
+            (settled, record.active.is_some(), fell_back)
         };
+        if fell_back {
+            let meta = handle.lock().await.meta.clone();
+            if let Err(error) = self.journal.upsert_thread(&meta).await {
+                tracing::warn!(%error, "could not record a rewound conversation's fallback");
+            }
+            let wire = vec![Event::RewindFellBack {
+                thread_id: meta.thread_id.clone(),
+                at: self.now(),
+            }];
+            match self.journal.append_wire(&meta.thread_id, &wire).await {
+                Ok(seqs) => self.broadcast(&meta.thread_id, &wire, &seqs),
+                Err(error) => {
+                    tracing::warn!(%error, "could not record a rewind fallback");
+                }
+            }
+        }
         if let Some(generation) = generation {
             self.release_fork_copy(&thread_id, generation).await;
         }
@@ -11325,6 +12443,35 @@ impl Inner {
                 }
             }
         };
+        // A complete pre-turn checkpoint covers every tracked file, including
+        // ones a shell command changes without a tool call naming them. It is
+        // captured before the prompt reaches the agent, so "revert files too"
+        // can put the whole worktree back. Capturing it costs a whole-tree git
+        // write per turn, so it only runs while the Labs switch is on: a turn
+        // sent while the switch was off has no checkpoint and can only rewind
+        // its conversation.
+        if self.file_rewind.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(store) = self.snapshots.get().cloned()
+        {
+            let checkpoint = {
+                let record = handle.lock().await;
+                record.linked_worktree.then(|| {
+                    (
+                        std::path::PathBuf::from(&record.meta.workspace_path),
+                        record.meta.thread_id.clone(),
+                    )
+                })
+            };
+            if let Some((workspace, thread)) = checkpoint {
+                let turn = dispatch.turn_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Some(commit) = crate::worktrees::git::checkpoint_commit(&workspace) {
+                        let _ = store.record_checkpoint(&workspace, &thread, &turn, &commit);
+                    }
+                })
+                .await;
+            }
+        }
         let mut guard = session.lock().await;
         let generation = match self
             .claim_delivery(&handle, &dispatch, &session, handoff)
@@ -11404,10 +12551,52 @@ impl Inner {
         // until the write returns `Ok`, because until then the adapter could
         // still be draining the finished turn's output into this stream.
         let attempt = dispatch.begin_write();
-        let sent = guard.send(dispatch.input()).await;
+        // Claude Code records its own uuid for every user message; the turn id
+        // is the message id a later truncating resume can name. Adapters that
+        // record no prompt id ignore the tag.
+        let prompt_tag = turn_suffix(&turn_id).to_owned();
+        let sent = guard.send_tagged(dispatch.input(), Some(&prompt_tag)).await;
         drop(guard);
         match sent {
             Ok(()) => {
+                // Record which provider message or turn this prompt really
+                // became, so a rewind names the provider's boundary instead of
+                // counting local prompts. This happens before the write is
+                // accepted, because accepting it releases the output the pump
+                // was holding: a fast completion can settle the turn at once,
+                // and a settlement followed by a restart must still name this
+                // boundary. The boundary gets its own durable write for the
+                // same reason; the next append would otherwise be the only
+                // copy, and there may be no next append.
+                let (provider, provider_session) = {
+                    let session = session.lock().await;
+                    (session.provider_turn(), session.session_id())
+                };
+                if provider.turn_id.is_some() || provider.last_message_id.is_some() {
+                    let mut record = handle.lock().await;
+                    // The boundary belongs to the session that recorded it. A
+                    // fresh session's id can arrive just after its prompt was
+                    // written, so adopt it here too: a later rewind must never
+                    // pair this boundary with a different session.
+                    if record.meta.resume_id.is_none() {
+                        record.meta.resume_id = provider_session.clone();
+                    }
+                    record.meta.provider_turns.insert(
+                        turn_id.as_str().to_owned(),
+                        crate::journal::ProviderTurnRecord {
+                            turn_id: provider.turn_id,
+                            last_message_id: provider.last_message_id,
+                            provider_session,
+                        },
+                    );
+                    if let Err(error) = self.journal.upsert_thread(&record.meta).await {
+                        tracing::warn!(
+                            %error,
+                            thread = %record.meta.thread_id,
+                            "could not record the provider boundary of a prompt"
+                        );
+                    }
+                }
                 // The harness took the prompt: everything it reported during the
                 // write belongs to this turn. Its acceptance is recorded here,
                 // and its *durability* below, before any of it is published: a
@@ -11439,6 +12628,21 @@ impl Inner {
                     record.clear_promoted_claim(&turn_id);
                     self.save_claim_change(&mut record, "a cleared promoted claim")
                         .await;
+                }
+                // The accepted prompt carried the rewind's handoff, so a later
+                // turn resumes the new session instead of sending it again.
+                if matches!(
+                    record.meta.pending_rewind,
+                    Some(h4rn_protocol::PendingRewind::Handoff)
+                ) {
+                    record.meta.pending_rewind = None;
+                    if let Err(error) = self.journal.upsert_thread(&record.meta).await {
+                        tracing::warn!(
+                            %error,
+                            thread = %record.meta.thread_id,
+                            "could not clear a delivered rewind handoff"
+                        );
+                    }
                 }
             }
             Err(error) => {
@@ -11483,8 +12687,13 @@ impl Inner {
     /// so the text is known not to have been delivered. The turn ends failed,
     /// and a promoted prompt goes back to the queue as a normal known-unsent
     /// row: the person sees where it went, and `sending` is not left behind to
-    /// look like a possible delivery. The claim is taken after the settlement so
-    /// the settlement cannot promote the very row it just refused.
+    /// look like a possible delivery.
+    ///
+    /// The claim is marked `refused` and written before the settlement, so the
+    /// settlement's own append carries the text: the settlement puts such a
+    /// claim back as a normal known-unsent row and holds it out of its own
+    /// promotion. A crash between that append and anything later therefore
+    /// restores the prompt from the claim instead of losing it.
     async fn refuse_revoked_delivery(
         self: &Arc<Self>,
         handle: ThreadHandle,
@@ -11492,25 +12701,20 @@ impl Inner {
     ) {
         let turn_id = dispatch.turn_id.clone();
         let mut record = handle.lock().await;
+        // The revocation is definite: nothing reached the adapter, so the
+        // prompt is known unsent. Record that durably before settling, so the
+        // settlement cannot turn it into "may have been delivered" and a crash
+        // right after the settlement append still has the text.
+        if record.mark_promoted_claim(&turn_id, QueuedClaimState::Refused) {
+            self.save_claim_change(&mut record, "a refused promoted prompt")
+                .await;
+        }
         let end = TurnEnd::failed(
             REVOKED_GRANT_MESSAGE.into(),
             Some(REVOKED_GRANT_HINT.into()),
             false,
         );
         let settled = self.settle_turn_locked(&mut record, &turn_id, end).await;
-        let claimed = record.promoted_claim_position(&turn_id).map(|position| {
-            let mut claim = record.meta.claimed.remove(position);
-            claim.message.message.delivery_unknown = false;
-            claim
-        });
-        if let Some(claim) = claimed {
-            let index = (claim.index as usize).min(record.meta.queued.len());
-            record.meta.queued.insert(index, claim.message);
-            record.note_queue_change();
-            if let Err(error) = self.emit(&mut record, Vec::new(), Vec::new()).await {
-                tracing::error!(%error, "the refused promoted prompt was not saved back to the queue");
-            }
-        }
         drop(record);
         if settled {
             self.spawn_advance(handle);
@@ -12361,6 +13565,17 @@ impl Inner {
                         .as_ref()
                         .is_some_and(|forked| forked.native_fork);
                     record.meta.resume_id = Some(session_id);
+                    // The native boundary this start carried has been applied;
+                    // a later start resumes the already-rewound history. A
+                    // handoff stays pending until the prompt that carries it is
+                    // accepted: the claim still has to build the preface, and a
+                    // restart before that must not lose it.
+                    if matches!(
+                        record.meta.pending_rewind,
+                        Some(h4rn_protocol::PendingRewind::Native { .. })
+                    ) {
+                        record.meta.pending_rewind = None;
+                    }
                     record.started_generation = Some(generation);
                     // An imported thread has one native resume to spend. Once a
                     // session has started, the thread has a live conversation
@@ -13046,6 +14261,10 @@ impl Inner {
             // not honour that resume: drop the dead id and retry the same turn
             // once with the bounded handoff instead of failing it.
             let mut retry: Option<Arc<TurnDispatch>> = None;
+            let rewinding = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            );
             let retryable = !started
                 && record.active.as_ref().is_some_and(|active| {
                     !matches!(
@@ -13055,7 +14274,7 @@ impl Inner {
                             | DispatchState::Settled
                     )
                 })
-                && record.native_origin_pending();
+                && (rewinding || record.native_origin_pending());
             if retryable && let Some(active) = record.active.as_ref() {
                 let turn_id = active.turn_id.clone();
                 retry = Some(Arc::clone(&active.dispatch));
@@ -13197,6 +14416,7 @@ impl Inner {
         turn: &Arc<TurnDispatch>,
         generation: u64,
     ) -> HandoffRetry {
+        let mut fell_back = false;
         let (thread_id, switch_generation) = {
             let mut record = handle.lock().await;
             // Only the turn this pump's startup carried can be retried; a turn
@@ -13208,7 +14428,12 @@ impl Inner {
             if !owns {
                 return HandoffRetry::Declined;
             }
-            if !record.native_origin_pending() {
+            let rewinding = matches!(
+                record.meta.pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            );
+            let applies = rewinding || record.native_origin_pending();
+            if !applies {
                 return HandoffRetry::Declined;
             }
             // Test-only interleaving point: a Stop can land between the retry
@@ -13225,6 +14450,14 @@ impl Inner {
                 RecoveryOutcome::Settled => return HandoffRetry::Declined,
             }
             record.meta.resume_id = None;
+            record.meta.agent_fingerprint = None;
+            if rewinding {
+                // The native boundary could not be applied. The turn is retried
+                // as a bounded handoff, and later turns keep using the handoff
+                // until a session starts from it.
+                record.meta.pending_rewind = Some(h4rn_protocol::PendingRewind::Handoff);
+                fell_back = true;
+            }
             record.meta.handoff_pending = true;
             if let Some(imported) = record.meta.imported.as_mut() {
                 imported.native_resume = false;
@@ -13244,13 +14477,30 @@ impl Inner {
         // upserted it after releasing the lock, so a Stop and a switch in that
         // window were undone: the durable row went back to the harness the
         // person had just left. A switch that lands after this read names a
-        // newer generation and the row is left alone.
+        // newer generation and the row is left alone. The rewind flag is part
+        // of the same statement when this fallback replaces a refused native
+        // boundary.
         if let Err(error) = self
             .journal
-            .fall_back_from_native_resume(&thread_id, switch_generation)
+            .fall_back_from_native_resume(&thread_id, switch_generation, fell_back)
             .await
         {
             tracing::warn!(%error, "could not record a fallback from a dead native resume");
+        }
+        if fell_back {
+            // The dialog planned a native rewind; the provider refused the
+            // boundary. Say so wherever the person is, and keep the news in the
+            // journal so a client that reloads still folds it.
+            let wire = vec![Event::RewindFellBack {
+                thread_id: thread_id.clone(),
+                at: self.now(),
+            }];
+            match self.journal.append_wire(&thread_id, &wire).await {
+                Ok(seqs) => self.broadcast(&thread_id, &wire, &seqs),
+                Err(error) => {
+                    tracing::warn!(%error, "could not record a rewind fallback");
+                }
+            }
         }
         // The next claim builds the one handoff for this prompt. Doing it here
         // too would wrap a prompt the claim is already wrapping: the delivery
@@ -15471,6 +16721,10 @@ mod tests {
         /// Fails appends that record `TurnCompleted` (a settlement), so a test
         /// can hold the promotion without guessing how many other writes ran.
         fail_next_settlements: std::sync::atomic::AtomicUsize,
+        /// 0 off, 1 armed, 2 failing: lets the next settlement append through,
+        /// then fails every later append. Models a crash right after the
+        /// settlement's own write.
+        fail_after_settlement: std::sync::atomic::AtomicU8,
         clear_gate: std::sync::Mutex<Option<Arc<ClearGate>>>,
         fallback_gate: std::sync::Mutex<Option<Arc<FallbackGate>>>,
         accept_gate: std::sync::Mutex<Option<Arc<AcceptGate>>>,
@@ -15527,6 +16781,7 @@ mod tests {
                 fail_next_reads: std::sync::atomic::AtomicUsize::new(0),
                 skip_next_appends: std::sync::atomic::AtomicUsize::new(0),
                 fail_next_settlements: std::sync::atomic::AtomicUsize::new(0),
+                fail_after_settlement: std::sync::atomic::AtomicU8::new(0),
                 clear_gate: std::sync::Mutex::new(None),
                 fallback_gate: std::sync::Mutex::new(None),
                 accept_gate: std::sync::Mutex::new(None),
@@ -15553,6 +16808,16 @@ mod tests {
         /// Makes the next `count` settlement append fail.
         fn fail_next_settlements(&self, count: usize) {
             self.fail_next_settlements.store(count, Ordering::SeqCst);
+        }
+
+        /// Lets the next settlement append through, then fails every append
+        /// after it.
+        ///
+        /// The settlement's own write is the last one a crash right after it
+        /// would leave behind; a second write that recovered the prompt would
+        /// never happen.
+        fn fail_appends_after_next_settlement(&self) {
+            self.fail_after_settlement.store(1, Ordering::SeqCst);
         }
 
         /// Holds the next fallback write after the record already changed.
@@ -15619,6 +16884,21 @@ mod tests {
             domain: &[ThreadEvent],
             wire: &[Event],
         ) -> Result<Vec<u64>, crate::journal::JournalError> {
+            match self.fail_after_settlement.load(Ordering::SeqCst) {
+                1 if domain
+                    .iter()
+                    .any(|event| matches!(event, ThreadEvent::TurnCompleted { .. })) =>
+                {
+                    self.fail_after_settlement.store(2, Ordering::SeqCst);
+                    return self.inner.append(meta, domain, wire).await;
+                }
+                2 => {
+                    return Err(crate::journal::JournalError::Io(std::io::Error::other(
+                        "injected post-settlement write failure",
+                    )));
+                }
+                _ => {}
+            }
             if self.skip_next_appends.load(Ordering::SeqCst) > 0 {
                 self.skip_next_appends.fetch_sub(1, Ordering::SeqCst);
                 return self.inner.append(meta, domain, wire).await;
@@ -15801,6 +17081,7 @@ mod tests {
             &self,
             thread_id: &ThreadId,
             switch_generation: u64,
+            rewind_fallback: bool,
         ) -> Result<bool, crate::journal::JournalError> {
             let gate = self
                 .fallback_gate
@@ -15812,13 +17093,13 @@ mod tests {
                 gate.resume.notified().await;
                 let result = self
                     .inner
-                    .fall_back_from_native_resume(thread_id, switch_generation)
+                    .fall_back_from_native_resume(thread_id, switch_generation, rewind_fallback)
                     .await;
                 gate.done.notify_one();
                 return result;
             }
             self.inner
-                .fall_back_from_native_resume(thread_id, switch_generation)
+                .fall_back_from_native_resume(thread_id, switch_generation, rewind_fallback)
                 .await
         }
 
@@ -16498,7 +17779,7 @@ mod tests {
         );
         assert_eq!(
             queued.turn_id, created.turn_id,
-            "a queued message is not a turn of its own"
+            "a queued message waits behind the running turn, it has no turn yet"
         );
 
         manager
@@ -16959,7 +18240,7 @@ mod tests {
         );
         assert_eq!(
             queued.turn_id, created.turn_id,
-            "a queued message is not a turn of its own"
+            "a queued message waits behind the running turn, it has no turn yet"
         );
         manager
             .interrupt(&created.thread_id)
@@ -17646,6 +18927,197 @@ mod tests {
             matches!(record.session, SessionSlot::None),
             "the slot stays free for the next turn"
         );
+    }
+
+    /// A startup that fails after planning a native rewind is the second
+    /// fallback path: the retry declined or never ran, so `fail_session` turns
+    /// the pending boundary into a handoff. It must publish that fallback just
+    /// like the retry path does, never silently.
+    #[tokio::test]
+    async fn a_failed_startup_of_a_native_rewind_reports_the_fallback() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(HostId::new("host_test"), workspace.path(), "A"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        while events.try_recv().is_ok() {}
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (turn, generation) = {
+            let mut record = handle.lock().await;
+            record.meta.pending_rewind = Some(h4rn_protocol::PendingRewind::Native {
+                session: h4rn_protocol::SessionRewind::BeforeTurn {
+                    turn: "provider-turn".into(),
+                },
+            });
+            record.meta.resume_id = Some("abandoned-session".into());
+            let generation = record.next_session_gen();
+            record.session = SessionSlot::Starting(generation);
+            let turn = record.begin_turn(
+                manager.now(),
+                UserInput {
+                    text: "B".into(),
+                    attachments: Vec::new(),
+                },
+            );
+            (turn, generation)
+        };
+        manager
+            .inner
+            .fail_session(
+                handle.clone(),
+                Some(generation),
+                turn,
+                "the harness could not start".into(),
+            )
+            .await;
+
+        let record = handle.lock().await;
+        assert_eq!(
+            record.meta.pending_rewind,
+            Some(h4rn_protocol::PendingRewind::Handoff),
+            "the refused boundary became a handoff"
+        );
+        drop(record);
+        let meta = manager.thread_meta(&created.thread_id).await.expect("meta");
+        assert_eq!(
+            meta.pending_rewind,
+            Some(h4rn_protocol::PendingRewind::Handoff),
+            "the handoff is durable"
+        );
+        let wires = manager
+            .inner
+            .journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire log");
+        assert!(
+            wires
+                .iter()
+                .any(|wire| matches!(wire.event, Event::RewindFellBack { .. })),
+            "the fallback is journaled"
+        );
+        let mut told = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(wire) = events.recv().await {
+                if matches!(wire.event, Event::RewindFellBack { .. }) {
+                    told = true;
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the fallback was published");
+        assert!(told, "a live client is told about the fallback");
+        manager.shutdown().await;
+    }
+
+    /// A message whose delivery is unclear may already be in the provider
+    /// conversation, so a rewind must refuse until it is resent or discarded.
+    /// A promoted claim still in flight is the same uncertainty.
+    #[tokio::test]
+    async fn a_rewind_refuses_a_message_whose_delivery_is_unknown() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(HostId::new("host_test"), workspace.path(), "A"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        let item = snapshot
+            .events
+            .iter()
+            .find_map(|wire| match &wire.event {
+                Event::ItemCompleted {
+                    item:
+                        Item::Message {
+                            item_id,
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                } if text == "A" => Some(item_id.clone()),
+                _ => None,
+            })
+            .expect("A's item");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        {
+            let mut record = handle.lock().await;
+            record
+                .meta
+                .queued
+                .push(crate::journal::StoredQueuedMessage {
+                    message: h4rn_protocol::QueuedMessage {
+                        message_id: h4rn_protocol::QueuedMessageId::new("qm_uncertain"),
+                        text: "maybe delivered".into(),
+                        attachments: Vec::new(),
+                        queued_at: manager.now(),
+                        steerable: false,
+                        delivery_unknown: true,
+                    },
+                    ceiling: None,
+                    grant: None,
+                    item_id: None,
+                });
+        }
+        let refused = manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect_err("an uncertain queue row blocks the rewind");
+        assert!(
+            refused.to_string().contains("resend or discard it first"),
+            "{refused}"
+        );
+
+        {
+            let mut record = handle.lock().await;
+            record.meta.queued.clear();
+            record.meta.claimed.push(crate::journal::QueuedClaim {
+                message: crate::journal::StoredQueuedMessage {
+                    message: h4rn_protocol::QueuedMessage {
+                        message_id: h4rn_protocol::QueuedMessageId::new("qm_sending"),
+                        text: "in flight".into(),
+                        attachments: Vec::new(),
+                        queued_at: manager.now(),
+                        steerable: false,
+                        delivery_unknown: false,
+                    },
+                    ceiling: None,
+                    grant: None,
+                    item_id: None,
+                },
+                index: 0,
+                turn_id: created.turn_id.clone(),
+                state: crate::journal::QueuedClaimState::Sending,
+                promoted: true,
+            });
+        }
+        let refused = manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect_err("a promoted claim still in flight blocks the rewind");
+        assert!(
+            refused.to_string().contains("resend or discard it first"),
+            "{refused}"
+        );
+        manager.shutdown().await;
     }
 
     /// A harness whose sessions all exit right after the handshake fails each
@@ -22069,7 +23541,7 @@ mod tests {
         );
         assert_eq!(
             third.turn_id, second.turn_id,
-            "a queued message is not a turn of its own"
+            "the new message queues behind the parked turn"
         );
         let summary = manager.thread_summary(&thread_id).await.expect("summary");
         assert_eq!(
@@ -23598,7 +25070,7 @@ mod tests {
         );
         assert_eq!(
             third.turn_id, second.turn_id,
-            "a queued message is not a turn of its own"
+            "a Send while a turn is running waits behind that turn"
         );
         let domain = manager
             .inner
@@ -24959,6 +26431,62 @@ mod tests {
             manager.inner.resync_pending.load(Ordering::Relaxed),
             "the test's ledger unexpectedly recovered"
         );
+    }
+
+    /// The Labs switch is part of a thread's summary signature: toggling it
+    /// republishes the row instead of leaving a stale Edit from here promise
+    /// behind.
+    #[tokio::test]
+    async fn toggling_file_rewind_republishes_the_thread_summary() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(HostId::new("host_test"), workspace.path(), "A"))
+            .await
+            .expect("create");
+        let (_, status) = next_turn_completion(&mut events).await;
+        assert_eq!(status, TurnStatus::Completed);
+        while events.try_recv().is_ok() {}
+        // File restore is only offered in a thread's own linked worktree; the
+        // test's tempdir is not one, so mark the record the way such a thread
+        // is created.
+        {
+            let handle = manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("thread handle");
+            handle.lock().await.linked_worktree = true;
+        }
+        assert!(
+            !manager
+                .thread_summary(&created.thread_id)
+                .await
+                .expect("summary")
+                .file_rewind,
+            "the switch starts off in this test"
+        );
+
+        manager.set_file_rewind_enabled(true);
+        manager.inner.tick().await;
+        let published = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::ThreadUpserted(summary) = wire.event
+                    && summary.file_rewind
+                {
+                    return summary;
+                }
+            }
+        })
+        .await
+        .expect("the switch change was never published");
+        assert!(
+            published.file_rewind,
+            "the republished row still hides file restore"
+        );
+        manager.shutdown().await;
     }
 
     /// A failing ledger read does not rewrite every summary on every tick.
@@ -29679,6 +31207,157 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A steer whose adapter write is still in flight is never also shown as a
+    /// row that may have been delivered.
+    ///
+    /// The turn can settle while the write is on the wire. An edit in that
+    /// window must not surface the claim as uncertain: the write is still ours
+    /// to finish, and the same text would then be both delivered and queued.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_steer_in_flight_is_never_also_an_uncertain_queue_row() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let host = HostId::new("host_test");
+        let manager = Arc::new(open_test_manager(harness, host.clone()).await);
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "A");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        // Hold the steer after its `sending` claim is durable and before the
+        // adapter sees the text.
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        let steering = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let thread_id = created.thread_id.clone();
+            let turn_id = created.turn_id.clone();
+            async move {
+                manager
+                    .send_message_with(
+                        &thread_id,
+                        "go left".into(),
+                        Vec::new(),
+                        SendMode::Steer,
+                        Some(turn_id),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), pause.checked.notified())
+            .await
+            .expect("the steer reached its write");
+
+        // The turn settles while that write is still held.
+        completion.release();
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                settled_turn(&mut events, &created.turn_id)
+            )
+            .await
+            .expect("the steered turn completed"),
+            TurnStatus::Completed
+        );
+
+        // An edit in this window runs the claim surfacing. The in-flight steer
+        // is not a row to resolve, and it is not shown as one.
+        let wire = manager
+            .inner
+            .journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire");
+        let a_item = wire
+            .iter()
+            .find_map(|wire| match &wire.event {
+                Event::ItemCompleted {
+                    item:
+                        Item::Message {
+                            item_id,
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                } if text == "A" => Some(item_id.clone()),
+                _ => None,
+            })
+            .expect("A's item");
+        manager
+            .rewind_thread(&created.thread_id, &a_item, false)
+            .await
+            .expect("the edit is not blocked by the steer in flight");
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert!(
+            !queue.queued.iter().any(|row| row.text == "go left"),
+            "the in-flight steer became an uncertain row: {:?}",
+            queue
+                .queued
+                .iter()
+                .map(|row| (row.text.as_str(), row.delivery_unknown))
+                .collect::<Vec<_>>()
+        );
+
+        // Finish the write. The text is in the turn once, and no row is left.
+        pause.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), steering)
+            .await
+            .expect("the steer finished")
+            .expect("the steer task")
+            .expect("the steer was written");
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert!(
+            queue.queued.is_empty(),
+            "the delivered steer left a queue row: {:?}",
+            queue
+                .queued
+                .iter()
+                .map(|row| (row.text.as_str(), row.delivery_unknown))
+                .collect::<Vec<_>>()
+        );
+        let wire = manager
+            .inner
+            .journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire");
+        let delivered = wire
+            .iter()
+            .filter(|wire| {
+                matches!(
+                    &wire.event,
+                    Event::ItemCompleted {
+                        item: Item::Message {
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                        ..
+                    } if text == "go left"
+                )
+            })
+            .count();
+        assert_eq!(
+            delivered, 1,
+            "the steered text appears exactly once in the transcript"
+        );
+        manager.shutdown().await;
+    }
+
     /// A direct steer with no observed turn id never lands in a turn the client
     /// did not see: the message waits in the queue instead.
     #[tokio::test]
@@ -30668,6 +32347,122 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A refused prompt survives a crash right after its settlement's append.
+    ///
+    /// The settlement carries the refused claim back to the queue in its own
+    /// write. A separate requeue write would leave a window where the journal
+    /// held neither the claim nor the queue row, and a restart in that window
+    /// would lose the person's text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_prompt_survives_a_crash_after_the_settlement_append() {
+        /// Live until the first check reads it; the check at the write runs
+        /// after the revocation and must see it gone.
+        struct RevokeAfterFirstRead {
+            live: std::sync::atomic::AtomicBool,
+            checked: std::sync::Barrier,
+            revoked: std::sync::Barrier,
+        }
+
+        impl GrantAuthority for RevokeAfterFirstRead {
+            fn family_is_live(&self, _: &str) -> bool {
+                let observed = self.live.load(Ordering::SeqCst);
+                if observed {
+                    self.checked.wait();
+                    self.revoked.wait();
+                }
+                observed
+            }
+        }
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let authority = Arc::new(RevokeAfterFirstRead {
+            live: std::sync::atomic::AtomicBool::new(true),
+            checked: std::sync::Barrier::new(2),
+            revoked: std::sync::Barrier::new(2),
+        });
+        manager.set_grant_authority(authority.clone());
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        sends.wait_for(1).await;
+        manager
+            .send_message_for_work(
+                &created.thread_id,
+                "refused outside work".into(),
+                Vec::new(),
+                None,
+                Some(work_grant("family-a")),
+            )
+            .await
+            .expect("queue the message while the first turn runs");
+
+        let revoke = std::thread::spawn({
+            let authority = Arc::clone(&authority);
+            move || {
+                authority.checked.wait();
+                authority.live.store(false, Ordering::SeqCst);
+                authority.revoked.wait();
+            }
+        });
+        // Every write after the refusal's settlement fails, so the journal
+        // keeps exactly what a crash at that instant would leave.
+        journal.fail_appends_after_next_settlement();
+        completion.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the promoted turn was settled");
+        revoke.join().expect("the revoking thread");
+        assert_eq!(status, TurnStatus::Failed);
+
+        // Restart on that journal image. The prompt is in the queue and known
+        // unsent, and nothing sends it on its own.
+        let meta = persisted_meta(&journal.inner, &created.thread_id).await;
+        assert!(
+            meta.queued
+                .iter()
+                .any(|entry| entry.message.text == "refused outside work"),
+            "the settlement's own write kept the refused prompt: {:?}",
+            meta.queued
+                .iter()
+                .map(|entry| entry.message.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        let (fresh, restarted_sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted = open_test_manager_with_journal(fresh, host, journal.inner.clone()).await;
+        let queue = restarted
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue after the restart");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("refused outside work", false)],
+            "the restarted daemon lost the refused prompt"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), restarted_sends.wait_for(1))
+                .await
+                .is_err(),
+            "the restart sent the refused prompt on its own"
+        );
+        restarted.shutdown().await;
+        manager.shutdown().await;
+    }
+
     /// Send now selects its session through the live mode-switch gate.
     ///
     /// A switch that has already changed the live session but not recorded it
@@ -31061,14 +32856,23 @@ mod tests {
             .into_iter()
             .find(|meta| meta.thread_id == created.thread_id)
             .expect("the thread's metadata");
+        assert!(
+            stored.claimed.is_empty(),
+            "a settled turn kept a claim nothing would ever finish"
+        );
         assert_eq!(
             stored
-                .claimed
+                .queued
                 .iter()
-                .map(|claim| (claim.state, claim.promoted))
+                .map(|message| {
+                    (
+                        message.message.text.as_str(),
+                        message.message.delivery_unknown,
+                    )
+                })
                 .collect::<Vec<_>>(),
-            [(QueuedClaimState::Sending, true)],
-            "an ambiguous promoted write was recorded as known unsent"
+            [("only copy", true)],
+            "an ambiguous promoted write stayed hidden until a restart"
         );
 
         manager.shutdown().await;
@@ -31132,6 +32936,108 @@ mod tests {
             "the unsure row must stay visible for the person"
         );
         restarted.shutdown().await;
+    }
+
+    /// A promoted prompt whose write failed after the adapter was called is
+    /// shown as "may have been delivered" as soon as its turn settles, not only
+    /// after a restart.
+    ///
+    /// Until then the row was invisible while the UI enabled Edit from here,
+    /// and the daemon refused the edit for a row the person could not see. Once
+    /// the row is discarded, editing the earlier prompt works.
+    #[tokio::test]
+    async fn an_ambiguous_promoted_write_is_a_visible_row_before_any_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let harness = harness.with_send_failure_after(1, "transport died");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "A");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        sends.wait_for(1).await;
+        manager
+            .send_message(&created.thread_id, "B".into(), Vec::new())
+            .await
+            .expect("queue B while A runs");
+        completion.release();
+
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("B's turn settled");
+        assert_eq!(status, TurnStatus::Failed);
+        assert_eq!(sends.get(), 2, "B's prompt was written once");
+
+        // The row is visible on this daemon, with no restart in between.
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("B", true)],
+            "the uncertain promoted prompt stayed hidden until a restart"
+        );
+
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        let item = snapshot
+            .events
+            .iter()
+            .find_map(|wire| match &wire.event {
+                Event::ItemCompleted {
+                    item:
+                        Item::Message {
+                            item_id,
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                } if text == "A" => Some(item_id.clone()),
+                _ => None,
+            })
+            .expect("A's item");
+
+        // Both refusals name the row the person can now see.
+        let refused = manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect_err("an uncertain delivery blocks the edit");
+        assert!(
+            refused.to_string().contains("resend or discard it first"),
+            "{refused}"
+        );
+
+        // Discarding the row clears the way.
+        manager
+            .queue_message(
+                &created.thread_id,
+                &queue.queued[0].message_id,
+                QueueAction::Remove,
+            )
+            .await
+            .expect("discard the uncertain row");
+        let rewound = manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect("after the row is gone, the edit works");
+        assert_eq!(rewound.before_item_id, item);
+        assert_eq!(rewound.prompt, "A");
+        manager.shutdown().await;
     }
 
     /// A promoted prompt the adapter accepted is never sent again after a
@@ -33883,6 +35789,176 @@ mod tests {
         manager.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn an_accepted_provider_boundary_is_written_before_the_turn_can_settle() {
+        let journal = FlakyJournal::in_memory().await;
+        let manager = open_test_manager_with_journal(
+            FakeHarness::new().with_native_rewind(),
+            HostId::new("host_test"),
+            journal.clone(),
+        )
+        .await;
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(HostId::new("host_test"), workspace.path(), "A"))
+            .await
+            .expect("create");
+        next_turn_completion(&mut events).await;
+
+        // Hold B's delivery before its prompt is written, then refuse every
+        // journal append from that point on. The streaming output and the
+        // settlement can no longer write the boundary as a side effect: it must
+        // have a write of its own.
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        manager
+            .send_message(&created.thread_id, "B".into(), Vec::new())
+            .await
+            .expect("send B");
+        tokio::time::timeout(Duration::from_secs(5), pause.checked.notified())
+            .await
+            .expect("B never reached its delivery");
+        journal.fail_next_appends(usize::MAX);
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        pause.resume.notify_one();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let metas = journal.list_threads().await.expect("metas");
+            let meta = metas
+                .into_iter()
+                .find(|meta| meta.thread_id == created.thread_id)
+                .expect("the thread's meta");
+            if meta
+                .provider_turns
+                .values()
+                .any(|turn| turn.turn_id.is_some() || turn.last_message_id.is_some())
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the accepted boundary reached no write of its own"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_handoff_orders_messages_by_delivered_turn_not_arrival() {
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        let thread_id = ThreadId::new("th_handoff_order");
+        let a = TurnId::new("turn_a");
+        let b = TurnId::new("turn_b");
+        let message =
+            |turn: &TurnId, item: &str, role: MessageRole, text: &str| Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: turn.clone(),
+                item: Item::Message {
+                    item_id: item.into(),
+                    role,
+                    text: text.into(),
+                    attachments: Vec::new(),
+                },
+                at: None,
+            };
+        // An older build journaled a queued prompt before the running turn's
+        // reply arrived. The handoff groups by delivered turn, so A and its
+        // reply stay together and B follows them.
+        let wire = vec![
+            message(&a, "item_a", MessageRole::User, "A"),
+            message(&b, "item_b", MessageRole::User, "B"),
+            message(&a, "item_reply", MessageRole::Assistant, "reply to A"),
+        ];
+        manager
+            .inner
+            .journal
+            .append_wire(&thread_id, &wire)
+            .await
+            .expect("seed the wire log");
+        let history = manager
+            .inner
+            .journaled_history(&thread_id)
+            .await
+            .expect("read the handoff history");
+        let texts: Vec<&str> = history
+            .iter()
+            .map(|entry| entry.message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["A", "reply to A", "B"],
+            "the kept prompt and its reply stay together, and the cut is by turn"
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_handoff_cut_between_a_queued_prompt_and_its_kept_reply_drops_the_removed_turn() {
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        let thread_id = ThreadId::new("th_handoff_cut");
+        let a = TurnId::new("turn_a");
+        let b = TurnId::new("turn_b");
+        let message =
+            |turn: &TurnId, item: &str, role: MessageRole, text: &str| Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: turn.clone(),
+                item: Item::Message {
+                    item_id: item.into(),
+                    role,
+                    text: text.into(),
+                    attachments: Vec::new(),
+                },
+                at: None,
+            };
+        // B was queued behind A and journaled before A's reply arrived. The
+        // person then rewound B, which arrives before the reply that is kept.
+        // The handoff must drop B and its turn, and keep A with its reply.
+        let wire = vec![
+            message(&a, "item_a", MessageRole::User, "A"),
+            message(&b, "item_b", MessageRole::User, "B"),
+            Event::ThreadRewound {
+                thread_id: thread_id.clone(),
+                before_item_id: "item_b".into(),
+                files_restored: false,
+                restore_id: None,
+                at: manager.now(),
+            },
+            message(&a, "item_reply", MessageRole::Assistant, "reply to A"),
+        ];
+        manager
+            .inner
+            .journal
+            .append_wire(&thread_id, &wire)
+            .await
+            .expect("seed the wire log");
+        let history = manager
+            .inner
+            .journaled_history(&thread_id)
+            .await
+            .expect("read the handoff history");
+        let texts: Vec<&str> = history
+            .iter()
+            .map(|entry| entry.message.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["A", "reply to A"],
+            "the removed prompt and its turn are absent, and the kept reply is not"
+        );
+        manager.shutdown().await;
+    }
+
     /// Runs two completed turns and returns the first and second turn ids.
     async fn two_completed_turns(
         manager: &ThreadManager,
@@ -35523,6 +37599,7 @@ mod tests {
                 before_etag: None,
                 after_etag: Some("etag".into()),
             }],
+            complete: false,
             note: None,
         };
         manager
@@ -39515,6 +41592,133 @@ mod tests {
     }
 
     /// A manager with two built-in harnesses, for a provider switch.
+    /// A switch cannot apply the old provider's native rewind boundary.
+    ///
+    /// The boundary names a message in a conversation the new harness never
+    /// saw. The switch turns it into the handoff the kept history already
+    /// needs, so the first turn on the new harness succeeds instead of being
+    /// started with a boundary its adapter rejects.
+    #[tokio::test]
+    async fn a_switch_turns_a_native_rewind_into_the_handoff() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let (claude, claude_specs) = FakeHarness::new().with_native_rewind().with_rewind_specs();
+        let (codex, codex_specs) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_rewind_specs();
+        let (codex, prompts) = codex.with_sent_prompts();
+        let manager = open_switch_manager(claude, codex).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "A"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        manager
+            .send_message(&created.thread_id, "B".into(), Vec::new())
+            .await
+            .expect("send B");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let wire = manager
+            .inner
+            .journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire");
+        let b_item = wire
+            .iter()
+            .find_map(|wire| match &wire.event {
+                Event::ItemCompleted {
+                    item:
+                        Item::Message {
+                            item_id,
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                } if text == "B" => Some(item_id.clone()),
+                _ => None,
+            })
+            .expect("B's item");
+        let rewound = manager
+            .rewind_thread(&created.thread_id, &b_item, false)
+            .await
+            .expect("rewind B");
+        assert_eq!(rewound.method, h4rn_protocol::RewindMethod::Native);
+        assert!(
+            matches!(
+                manager
+                    .thread_meta(&created.thread_id)
+                    .await
+                    .expect("meta")
+                    .pending_rewind,
+                Some(h4rn_protocol::PendingRewind::Native { .. })
+            ),
+            "B's own provider boundary is pending"
+        );
+
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("switch to Codex");
+        assert_eq!(
+            manager
+                .thread_meta(&created.thread_id)
+                .await
+                .expect("meta")
+                .pending_rewind,
+            Some(h4rn_protocol::PendingRewind::Handoff),
+            "the old provider's boundary became the handoff"
+        );
+        let wire = manager
+            .inner
+            .journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire");
+        assert!(
+            wire.iter()
+                .any(|wire| matches!(wire.event, Event::RewindFellBack { .. })),
+            "the switch tells the person the boundary fell back"
+        );
+
+        let c = manager
+            .send_message(&created.thread_id, "C".into(), Vec::new())
+            .await
+            .expect("send C");
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                settled_turn(&mut events, &c.turn_id)
+            )
+            .await
+            .expect("C completed on the first try"),
+            TurnStatus::Completed
+        );
+        assert_eq!(
+            codex_specs.get(),
+            vec![None],
+            "Codex started without the old provider's resume boundary"
+        );
+        assert_eq!(
+            claude_specs.get(),
+            vec![None],
+            "the Claude turns ran on one session with no boundary of their own: {:?}",
+            claude_specs.get()
+        );
+        assert!(
+            prompts
+                .get()
+                .iter()
+                .any(|prompt| prompt.contains("after an earlier message was edited")),
+            "C continued from the rewound history: {:?}",
+            prompts.get()
+        );
+        manager.shutdown().await;
+    }
+
     async fn open_switch_manager(claude: FakeHarness, codex: FakeHarness) -> Arc<ThreadManager> {
         let journal: Arc<dyn Journal> =
             Arc::new(SqliteJournal::in_memory().await.expect("journal"));
@@ -40791,6 +42995,23 @@ mod tests {
                 .contains(&user_item_id(&promoted)),
             "the prompt the provider never took was recorded as delivered"
         );
+
+        // The uncertain prompt is now a visible row, so it must be resolved
+        // before a switch. This test sends it again below, so discard it.
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(queue.queued.len(), 1, "the uncertain row is visible");
+        assert!(queue.queued[0].delivery_unknown);
+        manager
+            .queue_message(
+                &created.thread_id,
+                &queue.queued[0].message_id,
+                QueueAction::Remove,
+            )
+            .await
+            .expect("discard the uncertain row");
 
         manager
             .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
