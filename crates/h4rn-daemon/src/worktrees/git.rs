@@ -756,7 +756,8 @@ pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
         // the parent of a common dir named `.git`, which a metadata directory
         // can carry while the real checkout lives elsewhere, so it counts
         // only when that folder proves it holds the working tree.
-        *repo == common || holds_working_tree(repo, workspace, &common, OBSERVATION_GIT_TIMEOUT)
+        *repo == common
+            || holds_working_tree(repo, workspace, &common, &snapshot, OBSERVATION_GIT_TIMEOUT)
     }) {
         repo
     } else if let Some(worktree) = core_worktree(&common, OBSERVATION_GIT_TIMEOUT)? {
@@ -795,9 +796,17 @@ pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
 /// metadata directory is not a working tree, so the inference counts only when
 /// the workspace is itself the main checkout (a shortcut), or `core.worktree`
 /// is unset and the candidate holds the working tree: its `.git` resolves to
-/// the common dir, or a path tracked in `HEAD` exists there. A linked worktree
-/// nested inside its own main checkout passes on the tracked path.
-fn holds_working_tree(candidate: &Path, workspace: &Path, common: &Path, limit: Duration) -> bool {
+/// the common dir, or a tracked path exists there as the candidate's own file.
+/// A linked worktree nested inside its own main checkout passes on the tracked
+/// path; a metadata parent with a linked worktree below it does not, because
+/// the tracked name resolves into that worktree.
+fn holds_working_tree(
+    candidate: &Path,
+    workspace: &Path,
+    common: &Path,
+    snapshot: &RegistrationSnapshot,
+    limit: Duration,
+) -> bool {
     // Being inside the candidate proves nothing by itself: a linked worktree
     // can sit inside the metadata directory's parent, which `repo_of` names
     // after the common dir's `.git`. The workspace being the main worktree
@@ -822,7 +831,7 @@ fn holds_working_tree(candidate: &Path, workspace: &Path, common: &Path, limit: 
     if gitdir_points_at(candidate, common) {
         return true;
     }
-    tracked_path_exists(candidate, common, limit)
+    tracked_path_exists(candidate, workspace, snapshot, common, limit)
 }
 
 /// Whether `workspace` is the repository's main worktree: its own git dir is
@@ -834,11 +843,26 @@ fn workspace_is_main(workspace: &Path, common: &Path, limit: Duration) -> bool {
     }
 }
 
-/// Whether any path tracked by the repository's `HEAD` exists in `candidate`.
+/// Whether a path tracked by the repository's `HEAD` exists in `candidate` as
+/// the candidate's own file.
 ///
 /// The last proof that a folder holds a working tree: a metadata directory
 /// named `.git` holds none of the repository's files beside its git directory.
-fn tracked_path_exists(candidate: &Path, common: &Path, limit: Duration) -> bool {
+/// A tracked name can also resolve into a checkout that merely sits below the
+/// candidate: with the metadata dir at `meta/.git` and a linked worktree at
+/// `meta/docs`, the tracked `docs/README.md` is the worktree's own
+/// `meta/docs/README.md`. Such a match says nothing about the candidate, so a
+/// name is skipped when it falls inside the workspace or any other registered
+/// worktree. The candidate itself is not "another worktree": its own tracked
+/// files still prove it, as for a linked worktree nested inside its main
+/// checkout (`repo/.worktrees/one`).
+fn tracked_path_exists(
+    candidate: &Path,
+    workspace: &Path,
+    snapshot: &RegistrationSnapshot,
+    common: &Path,
+    limit: Duration,
+) -> bool {
     let Ok(listing) = run_bytes_with_timeout(
         common,
         ["--git-dir=.", "ls-tree", "-r", "-z", "--name-only", "HEAD"],
@@ -846,10 +870,33 @@ fn tracked_path_exists(candidate: &Path, common: &Path, limit: Duration) -> bool
     ) else {
         return false;
     };
+    let candidate = norm(candidate);
+    let workspace = norm(workspace);
+    // Registration paths are already normalised as listings are (see
+    // `norm_listed`); the candidate is excluded so its own tree still counts.
+    let other_worktrees: Vec<&Path> = snapshot
+        .iter()
+        .map(|registration| registration.path.as_path())
+        .filter(|path| *path != candidate)
+        .collect();
     listing.split(|byte| *byte == 0).any(|name| {
-        std::str::from_utf8(name)
-            .ok()
-            .is_some_and(|name| !name.is_empty() && candidate.join(name).exists())
+        let Ok(name) = std::str::from_utf8(name) else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+        let path = candidate.join(name);
+        if !path.exists() {
+            return false;
+        }
+        // Resolve the match before asking where it lives, so a symlink cannot
+        // smuggle a link to another checkout in as the candidate's own file.
+        let resolved = norm(&path);
+        !resolved.starts_with(&workspace)
+            && !other_worktrees
+                .iter()
+                .any(|other| resolved.starts_with(other))
     })
 }
 

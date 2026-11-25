@@ -3749,6 +3749,98 @@ mod tests {
         );
     }
 
+    /// A metadata parent proves nothing from a tracked name that resolves
+    /// inside a worktree below it. With the metadata dir at `meta/.git`, the
+    /// real checkout at `code/api` and a linked worktree at `meta/docs`, the
+    /// tracked `docs/README.md` exists as `meta/docs/README.md` — inside the
+    /// worktree, not in the metadata parent — so `meta` must not pass as the
+    /// main checkout. A create is refused and nothing lands in the real main
+    /// checkout.
+    #[test]
+    fn a_metadata_parent_never_passes_on_a_tracked_path_inside_the_workspace() {
+        let root = tempfile::tempdir().expect("root");
+        let meta = root.path().join("meta");
+        std::fs::create_dir(&meta).expect("meta");
+        let main = root.path().join("code").join("api");
+        std::fs::create_dir_all(&main).expect("api");
+        run(
+            root.path(),
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--separate-git-dir",
+                meta.join(".git").to_str().unwrap(),
+                main.to_str().unwrap(),
+            ],
+        );
+        run(&main, &["config", "user.email", "wt@example.invalid"]);
+        run(&main, &["config", "user.name", "worktree test"]);
+        std::fs::write(main.join(".gitignore"), "vendor/\n").expect("ignore");
+        std::fs::write(main.join("README.md"), "hello\n").expect("readme");
+        std::fs::create_dir(main.join("docs")).expect("docs");
+        std::fs::write(main.join("docs").join("README.md"), "docs\n").expect("docs readme");
+        run(&main, &["add", ".gitignore", "README.md", "docs/README.md"]);
+        run(&main, &["commit", "-q", "-m", "init"]);
+        let workspace = meta.join("docs");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "docs",
+                workspace.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            git::repo_of(&workspace),
+            Some(meta.clone()),
+            "git names the metadata parent as the main worktree"
+        );
+        assert!(
+            workspace.join("README.md").is_file(),
+            "the tracked `docs/README.md` is the workspace's own file"
+        );
+
+        // An ignored repository nested inside the real main checkout keeps the
+        // destination's deepest existing ancestor out of this repository, so
+        // only the main-checkout proof can refuse the location.
+        let nested = main.join("vendor").join("lib");
+        std::fs::create_dir_all(&nested).expect("nested repository");
+        init_repo(&nested);
+
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &workspace,
+            &WorktreeRequest::Named("nested/x".into()),
+            "nested",
+            &settings(Some(&nested)),
+            data.path(),
+            None,
+        )
+        .expect_err("the location is inside the real main checkout");
+        assert!(
+            error.contains("main checkout could not be found"),
+            "the refusal says the main checkout is unknown: {error}"
+        );
+        assert!(
+            !nested.join("meta").exists(),
+            "nothing was created under the location"
+        );
+        assert!(
+            git::run_with_timeout(
+                &main,
+                ["rev-parse", "--verify", "refs/heads/nested/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "no branch was made"
+        );
+    }
+
     /// A linked worktree nested inside its own main checkout (`repo/.wt/one`,
     /// the common `.worktrees/` layout) still resolves the real main checkout:
     /// being inside it is not proof enough on its own, but the main checkout
