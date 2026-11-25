@@ -2488,15 +2488,26 @@ async fn worktree_settings_refuse_a_separate_git_dir_main_checkout() {
 /// parent leaves nothing that proves the main checkout when the project is a
 /// linked worktree. Saving a location that could hold it is refused, and the
 /// refusal never names the metadata directory.
+///
+/// The metadata dir is tried under its own name and under `.git`: git reports
+/// the parent of a metadata dir called `.git` as the main worktree, and saving
+/// a location inside the real checkout must still be refused.
 #[tokio::test]
 async fn worktree_settings_refuse_an_unprovable_main_checkout() {
+    refuse_an_unprovable_main_checkout("admin-meta").await;
+    refuse_an_unprovable_main_checkout(".git").await;
+}
+
+/// [`worktree_settings_refuse_an_unprovable_main_checkout`] for one metadata
+/// directory name.
+async fn refuse_an_unprovable_main_checkout(metadata: &str) {
     let daemon = boot().await;
     let host = host_id_for(&daemon).await;
     let root = tempfile::tempdir().expect("root");
     std::fs::create_dir(root.path().join("meta")).expect("meta");
     let main = root.path().join("code").join("api");
     std::fs::create_dir_all(&main).expect("api");
-    let gitdir = root.path().join("meta").join("admin-meta");
+    let gitdir = root.path().join("meta").join(metadata);
     git_in(
         root.path(),
         &[
@@ -2557,7 +2568,7 @@ async fn worktree_settings_refuse_an_unprovable_main_checkout() {
             "{error:?}"
         );
         assert!(
-            !error.message.contains("admin-meta") && !error.message.contains("api.git"),
+            !error.message.contains(metadata) && !error.message.contains("api.git"),
             "the refusal never names the metadata directory: {error:?}"
         );
     }
@@ -2571,6 +2582,59 @@ async fn worktree_settings_refuse_an_unprovable_main_checkout() {
                 settings.location, None,
                 "the refused location was not saved"
             );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+/// A registered project whose folder was deleted (or whose git repository is
+/// gone) must not block every save: the location is checked against the
+/// projects that are still there, and the save succeeds.
+#[tokio::test]
+async fn worktree_settings_save_succeeds_when_a_registered_project_is_gone() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let project = root.path().join("api");
+    std::fs::create_dir(&project).expect("api");
+    git_in(&project, &["init", "-q", "-b", "main"]);
+    git_in(&project, &["config", "user.name", "h4rn test"]);
+    git_in(&project, &["config", "user.email", "test@example.invalid"]);
+    git_in(&project, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(project.join("a.txt"), "one\n").expect("write");
+    git_in(&project, &["add", "a.txt"]);
+    git_in(&project, &["commit", "-m", "Initial commit"]);
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: project.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the project");
+    std::fs::remove_dir_all(&project).expect("delete the project folder");
+
+    let location = root.path().join("checkouts");
+    let location_text = location.to_string_lossy().into_owned();
+    match client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(location_text.clone()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect("a project whose folder is gone does not block the save")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(settings.location, Some(location_text));
         }
         other => panic!("unexpected settings response: {other:?}"),
     }

@@ -70,6 +70,11 @@ struct PendingRecord {
     /// made it and this create has marked it.
     #[serde(default)]
     admin: Option<PathBuf>,
+    /// Whether the checkout's removal has started. Written before
+    /// `git worktree remove` runs, so a kill between the removal and the flag
+    /// below still tells the next startup the checkout is gone.
+    #[serde(default)]
+    removing: bool,
     /// Whether the checkout and its registration are gone.
     #[serde(default)]
     checkout_removed: bool,
@@ -327,7 +332,11 @@ impl CreatedWorktree {
             );
             return Cleanup::NONE;
         };
-        if !registration_proves(&admin, &self.path, owner, &self.branch) {
+        // A kill between `git worktree add` and the marker leaves no marker in
+        // the admin dir; the claim this create wrote into the destination's
+        // lock file before the add is then the ownership proof.
+        let claim_owner = claim_names_owner(&self.path, owner);
+        if !registration_proves(&admin, &self.path, owner, &self.branch, claim_owner) {
             if self.replacement_now(&admin) {
                 // A different checkout lives here now; this attempt has
                 // nothing left to remove.
@@ -347,7 +356,7 @@ impl CreatedWorktree {
         test_hooks::before_cleanup_removal(&self.path);
         // Re-check after any hook and immediately before the destructive step:
         // the path or its registration may have been replaced in between.
-        if !registration_proves(&admin, &self.path, owner, &self.branch) {
+        if !registration_proves(&admin, &self.path, owner, &self.branch, claim_owner) {
             if self.replacement_now(&admin) {
                 self.retire();
                 return Cleanup::FINISHED;
@@ -356,6 +365,13 @@ impl CreatedWorktree {
         }
         let mut removed_checkout = false;
         if !self.checkout_removed() {
+            // The removal is marked before git runs: a kill between
+            // `git worktree remove` and the progress write below must still
+            // let the next start finish the branch step instead of retiring
+            // the record and leaking the branch.
+            if !self.save_removing(&admin) {
+                return Cleanup::NONE;
+            }
             let removed = git::run_with_timeout(
                 &self.repo,
                 [
@@ -455,9 +471,20 @@ impl CreatedWorktree {
     }
 
     fn checkout_removed(&self) -> bool {
-        self.record
-            .as_ref()
-            .is_some_and(|record| record.data.checkout_removed)
+        let Some(record) = &self.record else {
+            return false;
+        };
+        record.data.checkout_removed
+            // The removal was marked before git ran. If it was killed, or the
+            // progress write failed, right after `git worktree remove`, the
+            // record still says the checkout exists while both paths are gone.
+            || (record.data.removing
+                && !self.path.exists()
+                && record
+                    .data
+                    .admin
+                    .as_ref()
+                    .is_some_and(|admin| !admin.exists()))
     }
 
     fn branch_removed(&self) -> bool {
@@ -481,6 +508,32 @@ impl CreatedWorktree {
                     %error,
                     path = %record.path.display(),
                     "could not record worktree cleanup progress"
+                );
+                false
+            }
+        }
+    }
+
+    /// Marks the checkout's removal before `git worktree remove` runs, and
+    /// records the admin dir it is about to remove.
+    ///
+    /// A failed write keeps the record and skips the removal: a crash after an
+    /// unmarked removal would leave a record that says the checkout still
+    /// exists, and the branch would leak.
+    fn save_removing(&self, admin: &Path) -> bool {
+        let Some(record) = &self.record else {
+            return true;
+        };
+        let mut data = record.data.clone();
+        data.removing = true;
+        data.admin = Some(admin.to_path_buf());
+        match write_pending_record(&record.path, &data) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %record.path.display(),
+                    "could not record the start of a worktree removal"
                 );
                 false
             }
@@ -519,11 +572,30 @@ impl CreatedWorktree {
 }
 
 /// Whether `admin` is still the registration this create made for `checkout`.
-fn registration_proves(admin: &Path, checkout: &Path, owner: &str, branch: &str) -> bool {
-    if registration_owner(admin).as_deref() != Some(owner) {
-        return false;
+///
+/// `claim_owner` says the destination's claim file names this create's owner
+/// token; it covers a kill between `git worktree add` and the marker, when the
+/// admin dir has no marker yet. A marker that is there but names another owner
+/// is a replacement and never falls back to the claim.
+fn registration_proves(
+    admin: &Path,
+    checkout: &Path,
+    owner: &str,
+    branch: &str,
+    claim_owner: bool,
+) -> bool {
+    match registration_owner(admin) {
+        Some(marker) if marker != owner => return false,
+        Some(_) => {}
+        None if claim_owner => {}
+        None => return false,
     }
-    if worktree_gitdir(checkout).as_deref() != Some(admin) {
+    // While the checkout exists, its own `.git` must name this admin dir: that
+    // is the live proof the registration is still the one this create made. A
+    // folder that is gone (deleted by hand, or a kill inside
+    // `git worktree remove`) is proved from the admin dir alone: its `gitdir`
+    // naming this path and its `HEAD` naming this branch, below.
+    if checkout.exists() && worktree_gitdir(checkout).as_deref() != Some(admin) {
         return false;
     }
     let Some(target) = git::read_bounded_following(&admin.join("gitdir")) else {
@@ -595,6 +667,28 @@ fn registration_owner(admin: &Path) -> Option<String> {
         .filter(|owner| !owner.is_empty())
 }
 
+/// Whether the destination's claim file names `owner`.
+///
+/// A create writes its owner token into the claim file before `git worktree
+/// add` runs, so a kill between the add and the owner marker leaves a fact the
+/// next start can match: this create made the folder, and the registration at
+/// it is the one the add made. The claim file is rewritten only by a create
+/// holding the folder's lock, and a folder that exists cannot be claimed
+/// again, so a match always names the create that made this checkout.
+fn claim_names_owner(dest: &Path, owner: &str) -> bool {
+    let Some(project_dir) = dest.parent() else {
+        return false;
+    };
+    let Some(location) = project_dir.parent() else {
+        return false;
+    };
+    let Some(project) = project_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    std::fs::read_to_string(claim_path(location, project, dest))
+        .is_ok_and(|token| token.trim() == owner)
+}
+
 /// The folder, under the daemon's data, that one file per unadopted create is
 /// written to.
 fn pending_dir(data_dir: &Path) -> PathBuf {
@@ -626,6 +720,7 @@ fn new_pending_record(
         head: head.map(str::to_owned),
         owner: owner.to_owned(),
         admin: None,
+        removing: false,
         checkout_removed: false,
         branch_removed: !created_branch,
     };
@@ -741,11 +836,14 @@ pub fn sweep_pending(data_dir: &Path, in_use: &[String]) -> Vec<PathBuf> {
         };
         // A record that says its own checkout is gone proves itself: there is
         // no registration left to check, only a branch this create made. Any
-        // other record needs the registration marker this create wrote.
-        let proven = record.checkout_removed
+        // other record needs the owner marker this create wrote, or — for a
+        // kill between the add and the marker — the token it wrote into the
+        // destination's claim before the add.
+        let proven = created.checkout_removed()
             || created.registration.as_deref().is_some_and(|admin| {
                 registration_owner(admin).as_deref() == Some(record.owner.as_str())
-            });
+            })
+            || claim_names_owner(&record.path, &record.owner);
         if !proven {
             tracing::warn!(
                 path = %record_file.display(),
@@ -1116,6 +1214,11 @@ pub fn create_blocking(
         }
     };
     let dest_text = dest.to_string_lossy().into_owned();
+    // The owner token goes into the claim, which exists before the add, so a
+    // kill between `git worktree add` and the marker below still leaves proof
+    // this create made the checkout. Failing to write it only loses that
+    // recovery window; the marker still covers every later crash.
+    claim.record_owner(&owner);
     // `--no-checkout` splits registration from checkout: the owner marker is
     // written while the registration exists, and only then does the checkout
     // (and its post-checkout hook) run. A kill in that hook leaves both the
@@ -1526,6 +1629,16 @@ impl Claim {
     fn still_ours(&self) -> bool {
         self.identity.is_some() && dir_identity(&self.dest) == self.identity
     }
+
+    /// Remembers `owner` in the claim file, before `git worktree add` runs.
+    ///
+    /// A kill between the add and the owner marker leaves a registration this
+    /// create made but cannot prove from the admin dir; the token written here
+    /// is the durable fact the next start matches instead (see
+    /// [`claim_names_owner`]).
+    fn record_owner(&self, owner: &str) -> bool {
+        self._lock.record_owner(owner)
+    }
 }
 
 /// One destination's lock file, held for the life of a [`Claim`].
@@ -1551,6 +1664,33 @@ impl ClaimLock {
     fn acquire(location: &Path, project: &str, dest: &Path) -> Result<Self, String> {
         Self::acquire_with(location, project, dest, true)?
             .ok_or_else(|| format!("another worktree create is still using {}", dest.display()))
+    }
+
+    /// Writes `owner` into the claim file, durably.
+    ///
+    /// The os lock is on the file itself, so rewriting its contents keeps the
+    /// claim held. A reader only uses the token when `git worktree add` has
+    /// already registered the checkout and no owner marker names another
+    /// create, so a stale token from an earlier create is never proof.
+    fn record_owner(&self, owner: &str) -> bool {
+        #[cfg(any(unix, windows))]
+        let result = {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = &self._file;
+            (|| {
+                file.set_len(0)?;
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(owner.as_bytes())?;
+                file.sync_all()
+            })()
+        };
+        #[cfg(not(any(unix, windows)))]
+        let result = std::fs::write(&self.path, owner);
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not record the worktree owner in its claim file");
+            return false;
+        }
+        true
     }
 
     /// Takes the folder's claim, or answers `None` when `wait` is false and
@@ -1864,6 +2004,18 @@ fn project_destination(workspace: &Path, location: &Path) -> Result<ProjectDesti
             ));
         }
     }
+    // Backstop: refuse a destination inside a working tree of this same
+    // repository even when that checkout is not registered and never proves
+    // itself as the main one — a folder whose `.git` is gone, a metadata
+    // directory named `.git`, an unregistered linked worktree. The deepest
+    // folder that exists is the one git is asked about, so a destination that
+    // does not exist yet is still judged by the folder it would go into.
+    if let Some(ancestor) = deepest_existing_ancestor(&destination)
+        && git::common_dir(&ancestor, git::OBSERVATION_GIT_TIMEOUT)
+            .is_ok_and(|common| common == common_norm)
+    {
+        return Err(destination_message(location, &destination, &ancestor));
+    }
     Ok(ProjectDestination {
         location: location.to_path_buf(),
         project,
@@ -1884,6 +2036,17 @@ fn destination_message(location: &Path, destination: &Path, checkout: &Path) -> 
         destination.display(),
         checkout.display()
     )
+}
+
+/// The deepest folder on `path`'s way up that exists, `path` included.
+fn deepest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
 }
 
 /// Whether `git` accepts `name` as a branch.
@@ -3471,14 +3634,25 @@ mod tests {
     /// unrelated parent, seen from a linked worktree, leaves nothing that
     /// proves which folder is the main checkout. h4rn refuses every location
     /// rather than guess, and never puts a checkout in the real main checkout.
+    ///
+    /// The metadata dir is tried under its own name and under `.git`: git
+    /// reports the parent of a metadata dir called `.git` as the main worktree,
+    /// and h4rn must not believe that either.
     #[test]
     fn an_unprovable_main_checkout_refuses_every_location() {
+        refuses_every_location_when_the_main_checkout_cannot_be_proved("admin-meta");
+        refuses_every_location_when_the_main_checkout_cannot_be_proved(".git");
+    }
+
+    /// [`an_unprovable_main_checkout_refuses_every_location`] for one metadata
+    /// directory name.
+    fn refuses_every_location_when_the_main_checkout_cannot_be_proved(metadata: &str) {
         let root = tempfile::tempdir().expect("root");
         let meta = root.path().join("meta");
         std::fs::create_dir(&meta).expect("meta");
         let main = root.path().join("code").join("api");
         std::fs::create_dir_all(&main).expect("api");
-        let gitdir = meta.join("admin-meta");
+        let gitdir = meta.join(metadata);
         run(
             root.path(),
             &[
@@ -3508,6 +3682,13 @@ mod tests {
                 linked.to_str().unwrap(),
             ],
         );
+        if metadata == ".git" {
+            assert_eq!(
+                git::repo_of(&linked),
+                Some(meta.clone()),
+                "git names the metadata dir's parent as the main worktree"
+            );
+        }
 
         let data = tempfile::tempdir().expect("data");
         let locations = [main.clone(), main.join("nested")];
@@ -3526,7 +3707,7 @@ mod tests {
                 "the refusal says the main checkout is unknown: {error}"
             );
             assert!(
-                !error.contains("admin-meta") && !error.contains("api.git"),
+                !error.contains(metadata) && !error.contains("api.git"),
                 "the refusal never names the metadata directory: {error}"
             );
             assert!(
@@ -3550,6 +3731,60 @@ mod tests {
                 .iter()
                 .all(|worktree| worktree.branch.as_deref() != Some("guessed/x")),
             "only the linked checkout that was already there is registered"
+        );
+    }
+
+    /// A checkout of the same repository that git no longer registers is still
+    /// refused as a location: the deepest existing folder is asked for its
+    /// common dir, which is this repository's.
+    #[test]
+    fn an_unregistered_checkouts_folder_is_still_refused_as_a_location() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("api");
+        std::fs::create_dir(&main).expect("api");
+        init_repo(&main);
+        let stale = root.path().join("stale");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "unlisted",
+                stale.to_str().unwrap(),
+            ],
+        );
+        // Deleting the admin entry's `gitdir` is what makes git stop listing
+        // a registration whose checkout is still a working tree.
+        let admin = worktree_gitdir(&stale).expect("admin dir");
+        std::fs::remove_file(admin.join("gitdir")).expect("remove gitdir");
+        assert!(
+            git::list_worktrees(&main).expect("list").is_empty(),
+            "git no longer lists the checkout"
+        );
+
+        let data = tempfile::tempdir().expect("data");
+        let error = create_blocking(
+            &main,
+            &WorktreeRequest::Named("guessed/x".into()),
+            "guessed",
+            &settings(Some(&stale)),
+            data.path(),
+            None,
+        )
+        .expect_err("the destination is a working tree of the same repository");
+        assert!(error.contains("inside the project checkout"), "{error}");
+        assert!(
+            error.contains(&stale.to_string_lossy().into_owned()),
+            "the refusal names the checkout: {error}"
+        );
+        assert!(
+            !stale
+                .join(project_name(&main))
+                .join(folder_name("guessed/x"))
+                .exists(),
+            "no checkout was made inside the unregistered checkout"
         );
     }
 
@@ -3835,6 +4070,204 @@ mod tests {
         );
     }
 
+    /// A checkout folder deleted by hand leaves its registration and marker
+    /// behind. The admin dir alone then proves ownership, and the next start
+    /// finishes the removal (git accepts a registration whose folder is gone)
+    /// and deletes the branch h4rn made.
+    #[test]
+    fn a_deleted_checkout_folder_with_its_registration_is_finished_at_the_next_start() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("deleted/x".into()),
+            "deleted",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        std::fs::remove_dir_all(&created.path).expect("remove the checkout folder");
+        assert_eq!(
+            git::list_worktrees(repo.path()).expect("list").len(),
+            1,
+            "the registration is still there"
+        );
+
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(swept, vec![created.path.clone()]);
+        assert!(
+            git::list_worktrees(repo.path()).expect("list").is_empty(),
+            "the registration is gone"
+        );
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/deleted/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "the branch this create made is gone"
+        );
+        assert!(
+            std::fs::read_dir(data.path().join("worktrees-pending"))
+                .expect("pending dir")
+                .next()
+                .is_none(),
+            "the record is retired"
+        );
+    }
+
+    /// A kill right after `git worktree add`, before the owner marker, leaves
+    /// no marker to match. The token the create wrote into the destination's
+    /// claim before the add proves the checkout is its own, so the next start
+    /// removes it.
+    #[test]
+    fn a_create_killed_right_after_its_add_is_swept() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let location = data.path().join("worktrees");
+        let project = project_name(repo.path());
+        let dest = checkout_path(&location, &project, "killed/x");
+        std::fs::create_dir_all(dest.parent().expect("project folder")).expect("project folder");
+        run(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "-b",
+                "killed/x",
+                dest.to_str().unwrap(),
+            ],
+        );
+        let head = git::run_with_timeout(repo.path(), ["rev-parse", "HEAD"], CREATE_TIMEOUT)
+            .expect("head");
+        let owner = "killed-create-owner";
+        let record = PendingRecord {
+            repo: repo.path().to_path_buf(),
+            path: dest.clone(),
+            branch: "killed/x".into(),
+            created_branch: true,
+            head: Some(head),
+            owner: owner.into(),
+            admin: None,
+            removing: false,
+            checkout_removed: false,
+            branch_removed: false,
+        };
+        let pending = data.path().join("worktrees-pending");
+        std::fs::create_dir_all(&pending).expect("pending dir");
+        write_pending_record(&pending.join("killed.json"), &record).expect("record");
+        let claim = claim_path(&location, &project, &dest);
+        std::fs::create_dir_all(claim.parent().expect("claims folder")).expect("claims folder");
+        std::fs::write(&claim, owner).expect("claim token");
+        assert!(
+            worktree_gitdir(&dest).is_some(),
+            "the add registered the checkout"
+        );
+        assert!(
+            registration_owner(&worktree_gitdir(&dest).expect("admin dir")).is_none(),
+            "the kill came before the owner marker"
+        );
+
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(swept, vec![dest.clone()], "the leftover checkout is swept");
+        assert!(!dest.exists(), "the checkout is gone");
+        assert!(
+            git::list_worktrees(repo.path()).expect("list").is_empty(),
+            "the registration is gone"
+        );
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/killed/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "the branch this create made is gone"
+        );
+        assert!(
+            std::fs::read_dir(&pending)
+                .expect("pending dir")
+                .next()
+                .is_none(),
+            "the record is retired"
+        );
+    }
+
+    /// A kill between `git worktree remove` and the progress write leaves a
+    /// record that still says the checkout exists. The "removing" mark written
+    /// before the removal is what lets the next start delete the branch
+    /// instead of retiring the record and leaking it.
+    #[test]
+    fn a_removal_marked_before_git_runs_finishes_the_branch_at_the_next_start() {
+        let repo = repo();
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            repo.path(),
+            &WorktreeRequest::Named("unsaved/x".into()),
+            "unsaved",
+            &settings(None),
+            data.path(),
+            None,
+        )
+        .expect("create");
+        run(
+            repo.path(),
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                created.path.to_str().unwrap(),
+            ],
+        );
+        let pending = data.path().join("worktrees-pending");
+        let record_file = std::fs::read_dir(&pending)
+            .expect("pending dir")
+            .next()
+            .expect("a record")
+            .expect("record entry")
+            .path();
+        let mut record: PendingRecord =
+            serde_json::from_slice(&std::fs::read(&record_file).expect("read the record"))
+                .expect("parse the record");
+        assert!(record.admin.is_some(), "the create recorded its admin dir");
+        // The state a kill after the removal, before the progress write, leaves.
+        record.removing = true;
+        record.checkout_removed = false;
+        record.branch_removed = false;
+        write_pending_record(&record_file, &record).expect("record");
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/unsaved/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_ok(),
+            "the branch is still there when the process dies"
+        );
+
+        let swept = sweep_pending(data.path(), &[]);
+        assert_eq!(swept, vec![created.path.clone()]);
+        assert!(
+            git::run_with_timeout(
+                repo.path(),
+                ["rev-parse", "--verify", "refs/heads/unsaved/x"],
+                CREATE_TIMEOUT,
+            )
+            .is_err(),
+            "the next start deletes the branch this create made"
+        );
+        assert!(
+            std::fs::read_dir(&pending)
+                .expect("pending dir")
+                .next()
+                .is_none(),
+            "the record is retired"
+        );
+    }
+
     /// A branch deletion that fails keeps the record and the branch for a later
     /// retry; the sweep reports only what it actually removed.
     #[test]
@@ -3912,6 +4345,7 @@ mod tests {
             head: None,
             owner: "already-cleaned".into(),
             admin: None,
+            removing: false,
             checkout_removed: true,
             branch_removed: true,
         };
@@ -3964,6 +4398,7 @@ mod tests {
             head: None,
             owner: "not-h4rns-owner".into(),
             admin: None,
+            removing: false,
             checkout_removed: false,
             branch_removed: true,
         };

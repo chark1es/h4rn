@@ -102,6 +102,14 @@ async fn validate_for_save(
     let refused = tokio::task::spawn_blocking(move || {
         for path in projects {
             let registered = Path::new(&path).to_path_buf();
+            // A project whose folder was deleted (or lives on an unmounted
+            // volume), or whose git repository is gone, cannot be checked and
+            // must not block every save: skip it. A repository that is still
+            // there but whose main checkout cannot be proved keeps refusing,
+            // because a checkout could land inside it.
+            if !registered.is_dir() || !crate::worktrees::git::is_git_repo(&registered) {
+                continue;
+            }
             let repo = crate::worktrees::git::toplevel(&registered).unwrap_or(registered);
             if let Some(message) = crate::worktrees::create::destination_refusal(&repo, &expanded) {
                 return Some(message);

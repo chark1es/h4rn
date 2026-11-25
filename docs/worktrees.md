@@ -50,16 +50,21 @@ repository. The project folder is named after the real main worktree (or the
 bare repository's git directory), wherever that is: h4rn resolves the checkout
 from `core.worktree`, from the directory whose `.git` file points at the common
 git directory, or from a nearby directory or registration whose own `.git` file
-proves it is that checkout. Metadata directories such as `api.git` or an admin
-directory are never mistaken for a working tree, and a linked worktree is never
-accepted as the main one. When none of those can prove where the main checkout
-is, h4rn refuses the location instead of guessing; the refusal says the main
-checkout could not be found and never names the metadata directory. One reading
-of the repository decides both the project folder's name and the destination
-that is checked and created, so a location that passes the check is exactly the
-one a checkout goes into. The destination is refused inside the workspace, the
-main checkout, or any other linked worktree of the same repository, because a
-checkout there would make that working tree dirty. The check uses one complete
+proves it is that checkout. A folder that git reports as the main worktree only
+because its git directory is named `.git` counts only when the workspace is
+inside it or it really holds the checkout (its `.git` resolves to that git
+directory, or a file the repository tracks is there), and as a last check no
+folder on the destination's way up may belong to the same repository. Metadata
+directories such as `api.git` or an admin directory are never mistaken for a
+working tree, and a linked worktree is never accepted as the main one. When none
+of those can prove where the main checkout is, h4rn refuses the location
+instead of guessing; the refusal says the main checkout could not be found and
+never names the metadata directory. One reading of the repository decides both
+the project folder's name and the destination that is checked and created, so a
+location that passes the check is exactly the one a checkout goes into. The
+destination is refused inside the workspace, the main checkout, or any other
+linked worktree of the same repository, because a checkout there would make that
+working tree dirty. The check uses one complete
 worktree snapshot; if git cannot read an admin entry, the location is refused
 instead of guessing that the missing worktree is absent. All of these are
 refused when the setting is saved and when a worktree is created, because a
@@ -74,8 +79,9 @@ The setting is per machine, because it is a path on that host. It applies to
 new worktrees only; existing checkouts stay where they are. Deleting or
 archiving a thread never moves or removes its checkout. h4rn keeps a hidden
 `.claims` folder beside the checkouts, with one small lock file per destination,
-so two creates for the same folder take turns instead of racing; the files are
-tiny and safe to leave alone.
+so two creates for the same folder take turns instead of racing; each file also
+names the create that last used the folder, so recovery can prove ownership
+after a crash. The files are tiny and safe to leave alone.
 
 ## Branch names
 
@@ -122,11 +128,20 @@ rollbacks. If the daemon is killed first, the next startup finishes each record
 only with positive proof. While the checkout is still there, the proof is the
 checkout's `.git` naming the recorded admin dir, that admin dir's `gitdir`
 pointing back at the checkout, its `HEAD` being the recorded branch, and the
-owner token matching. Once the checkout has been removed and that step was
-recorded, the record itself is the proof, because it says this create removed
-its own checkout; the startup then deletes the branch h4rn made only if that
-branch is not registered, is not checked out anywhere, and still points at the
-commit the create started from, and retires the record. A record that cannot be
+owner token matching. The same token is written into the destination folder's
+claim file before `git worktree add` runs, so a kill between the add and the
+marker in the admin dir is still proved by it. A checkout folder that is gone
+while its admin dir and marker remain — deleted by hand, or a kill inside
+`git worktree remove` — is finished from the admin dir alone: its `gitdir` still
+names the path and its `HEAD` the branch, and git removes a registration whose
+folder no longer exists. Before `git worktree remove` runs, the record is marked
+as removing, so a kill between the removal and the write that records it still
+finishes the branch step instead of retiring the record and leaving the branch
+behind. Once the checkout has been removed and that step was recorded, the
+record itself is the proof, because it says this create removed its own
+checkout; the startup then deletes the branch h4rn made only if that branch is
+not registered, is not checked out anywhere, and still points at the commit the
+create started from, and retires the record. A record that cannot be
 proved is kept and left alone. A record whose path a thread now uses is retired
 without touching the checkout; a thread working in a parent folder does not
 count as using the checkout, so an unused one is still cleaned up. Recovery
