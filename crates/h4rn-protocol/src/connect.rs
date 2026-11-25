@@ -9,8 +9,11 @@
 //!
 //! The relay is deliberately dumb. A [`RelayFrame`] carries an opaque payload
 //! for one Noise session; connect routes it by `conn_id` and never inspects it
-//! (ADR-010). Only [`RelayFrameKind::Open`] has a payload the relay parses: it
-//! names the target machine so connect can authorise and route the session.
+//! (ADR-010). Only [`RelayFrameKind::Open`] and the guest control frames
+//! ([`RelayFrameKind::GuestHttp`], [`RelayFrameKind::GuestHttpChunk`],
+//! [`RelayFrameKind::GuestHttpAdmit`], [`RelayFrameKind::GuestHttpCancel`],
+//! [`RelayFrameKind::Hello`]) have a payload
+//! the relay parses; everything else is opaque.
 //!
 //! Payload bytes travel as base64 in JSON because control frames and data
 //! frames share one WebSocket. The relay is the fallback path, so the
@@ -72,6 +75,26 @@ pub enum RelayFrameKind {
     /// and time. Connect reads it to decide whether a phone should be woken;
     /// it never carries message text, tool output, paths or credentials.
     Activity,
+    /// The daemon's go-ahead for a chunked guest body (ADR-044).
+    ///
+    /// The daemon checks the link, the browser binding and the pending budget
+    /// before any body bytes arrive. Its payload is a JSON
+    /// [`GuestHttpAdmission`]; a refusal arrives as a [`GuestHttpResponse`]
+    /// instead, so no upload frame is ever sent for a rejected exchange.
+    GuestHttpAdmit,
+    /// Connect gave up on an exchange it never admitted (ADR-044).
+    ///
+    /// The payload is a JSON [`GuestHttpAdmission`] naming the exchange. It
+    /// tells a daemon that was still deciding, or had already admitted an
+    /// upload whose body Connect will never send, to drop that upload and the
+    /// slot it holds instead of pinning it until its idle timeout.
+    GuestHttpCancel,
+    /// What a peer understands, sent once when its relay socket opens.
+    ///
+    /// Only a daemon sends this. The payload is a JSON [`RelayHello`]. A relay
+    /// uses it to choose a protocol an older peer still speaks instead of
+    /// inferring support from a timeout.
+    Hello,
     /// Tear the session down. The payload is optional and opaque to the relay.
     Close,
     /// Round-trip probe. The relay echoes it back to the sender.
@@ -133,6 +156,32 @@ pub struct GuestHttpResponse {
     /// and only after it has checked every attribute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_cookie: Option<String>,
+}
+
+/// The feature name a daemon advertises when it sends
+/// [`RelayFrameKind::GuestHttpAdmit`] before a guest upload body.
+pub const RELAY_FEATURE_GUEST_ADMISSION: &str = "guest_http_admission";
+
+/// What a peer understands, sent on its relay hello.
+///
+/// Features are opt-in names rather than a version number: a relay keeps
+/// working with a peer that does not name a feature, and only the path that
+/// needs it changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RelayHello {
+    /// Feature names the peer implements. Unknown names are ignored.
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+/// The daemon's go-ahead for one chunked guest body.
+///
+/// A refusal is a [`GuestHttpResponse`] with the reason, so a link, a binding
+/// or a full pending budget never costs the browser an upload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GuestHttpAdmission {
+    /// The exchange whose body may now be sent.
+    pub request_id: String,
 }
 
 /// One slice of a guest HTTP body.

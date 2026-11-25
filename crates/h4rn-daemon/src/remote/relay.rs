@@ -47,16 +47,30 @@ enum RelayInbound {
     Error(String),
 }
 
-/// How long a guest body may take to finish before it is dropped.
+/// How long an upload may stay silent before it is dropped.
+///
+/// A browser that keeps sending chunks refreshes this on every frame, so a
+/// large body is never cut off for taking long; a browser that disappears
+/// gives its upload slot back at the next ping instead of pinning it.
+const GUEST_UPLOAD_IDLE: Duration = Duration::from_secs(30);
+
+/// How long a refusal marker keeps dropping late chunks for one request id.
 const GUEST_UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How many guest exchanges may use the surface at once.
 ///
-/// A guest upload, a snapshot and a blob read are all bounded work, but they
-/// must never queue behind each other in the relay loop. The cap also bounds
-/// how many uploads may hold buffered bytes, so the relay's memory follows the
-/// same limit as its concurrent work.
+/// A snapshot, a blob read and the work of a finished upload are bounded here.
+/// Uploads wait on their own cap first, so a slow body never takes a slot a
+/// read needs.
 const GUEST_EXCHANGE_CONCURRENCY: usize = 4;
+
+/// How many uploads may hold buffered bytes at once.
+///
+/// This is deliberately smaller than [`GUEST_EXCHANGE_CONCURRENCY`] and
+/// separate from it: a browser trickling a body occupies an upload slot, never
+/// the slot a state read or a snapshot needs. It also bounds the daemon's
+/// pre-authorization buffers.
+const GUEST_UPLOAD_CONCURRENCY: usize = 2;
 
 /// How much of an upload may be buffered before its link is authorized.
 ///
@@ -72,13 +86,24 @@ struct PendingGuest {
     request: h4rn_protocol::GuestHttpRequest,
     body: Vec<u8>,
     next_seq: u64,
-    /// When the first frame arrived, so an abandoned upload cannot pin memory.
-    started: std::time::Instant,
+    /// When this upload last showed life (its request or its latest chunk), so
+    /// an abandoned browser cannot pin a slot.
+    updated: std::time::Instant,
     /// A submission may only be buffered once `check_submission` accepted its
     /// link; until then chunks wait here.
     checking: bool,
     /// The last chunk arrived while the check was still running.
     complete: bool,
+    /// The upload permit, held from the link check until the body is complete
+    /// and its exchange takes over. It bounds buffered uploads only; reads use
+    /// their own permits.
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// Wakes the link check when the relay cancels this upload.
+    ///
+    /// The check owns the upload permit while it runs, so a cancel must reach
+    /// it instead of waiting for the surface and the outbound queue: otherwise
+    /// an abandoned upload would pin its slot until both answered.
+    cancel: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -126,7 +151,11 @@ struct GuestRelay {
     surface: Arc<dyn GuestSurface>,
     out_tx: mpsc::Sender<RelayFrame>,
     state: Arc<Mutex<GuestState>>,
+    /// Bounds concurrent exchange work: snapshots, blob reads and the answer a
+    /// finished upload produces.
     permits: Arc<tokio::sync::Semaphore>,
+    /// Bounds uploads that may buffer a body, separately from those permits.
+    uploads: Arc<tokio::sync::Semaphore>,
 }
 
 impl GuestRelay {
@@ -136,6 +165,7 @@ impl GuestRelay {
             out_tx,
             state: Arc::new(Mutex::new(GuestState::default())),
             permits: Arc::new(tokio::sync::Semaphore::new(GUEST_EXCHANGE_CONCURRENCY)),
+            uploads: Arc::new(tokio::sync::Semaphore::new(GUEST_UPLOAD_CONCURRENCY)),
         }
     }
 
@@ -154,11 +184,20 @@ impl GuestRelay {
             return;
         }
         if request.chunked {
+            // A new upload is a good moment to let go of bodies a browser
+            // abandoned, so their slots are free before this one asks.
+            self.expire();
             let checking = guest_method(&request.method) == crate::guest::Method::Post;
             let mut state = self.lock();
-            if checking && state.pending.len() >= GUEST_EXCHANGE_CONCURRENCY {
-                // Every buffer slot is taken, so accepting another upload would
-                // grow memory past the cap the permits already promise.
+            let uploading = state
+                .pending
+                .values()
+                .filter(|pending| pending.checking)
+                .count();
+            if checking && uploading >= GUEST_UPLOAD_CONCURRENCY {
+                // Every upload slot is taken, so accepting another buffered
+                // body would grow memory past the cap the upload permits
+                // promise. Reads are never counted here.
                 drop(state);
                 self.refuse_busy(frame.conn_id.clone(), request_id);
                 return;
@@ -170,9 +209,11 @@ impl GuestRelay {
                     request,
                     body: Vec::new(),
                     next_seq: 0,
-                    started: std::time::Instant::now(),
+                    updated: std::time::Instant::now(),
                     checking,
                     complete: false,
+                    permit: None,
+                    cancel: Arc::new(tokio::sync::Notify::new()),
                 },
             );
             drop(state);
@@ -213,6 +254,7 @@ impl GuestRelay {
             return;
         }
         pending.next_seq += 1;
+        pending.updated = std::time::Instant::now();
         // While the link check runs, only a bounded amount may accumulate: an
         // unauthorized upload must not be able to buffer its whole body before
         // it is refused. Once authorized, the exchange limit applies instead.
@@ -246,61 +288,133 @@ impl GuestRelay {
             pending.complete = true;
             return;
         }
-        let Some(pending) = state.pending.remove(&chunk.request_id) else {
+        let Some(mut pending) = state.pending.remove(&chunk.request_id) else {
             return;
         };
         drop(state);
-        self.spawn_exchange(pending.conn_id, pending.request, Some(pending.body), None);
+        // The body is complete, but its upload slot stays counted until the
+        // exchange actually holds a work permit. Freeing it here would let
+        // completed bodies pile up uncounted while every work permit is busy.
+        let upload = pending.permit.take();
+        self.spawn_finished_upload(pending.conn_id, pending.request, pending.body, upload);
+    }
+
+    /// Drops one upload the relay gave up on before sending its body.
+    ///
+    /// Connect cancels an admission it timed out on. An admitted upload holds
+    /// its upload permit in the pending row, so removing the row releases the
+    /// slot at once instead of at the idle timeout; a link check still running
+    /// finds the row gone and drops the permit it was about to store. Late
+    /// chunks are ignored because their request id is no longer pending.
+    fn dispatch_cancel(&self, frame: &RelayFrame) {
+        let cancel: h4rn_protocol::GuestHttpAdmission = match serde_json::from_slice(&frame.payload)
+        {
+            Ok(cancel) => cancel,
+            Err(_) => {
+                tracing::warn!("relay sent a guest cancel that is not JSON");
+                return;
+            }
+        };
+        let mut state = self.lock();
+        if let Some(pending) = state.pending.remove(&cancel.request_id) {
+            // A check still running holds the upload permit. Wake it so the
+            // slot returns now, not when the surface and the queue answer.
+            pending.cancel.notify_one();
+        }
     }
 
     /// Checks a chunked submission's link before its body is trusted.
+    ///
+    /// The check holds an upload permit. On success the daemon tells the
+    /// browser it may send the body, and that permit stays with the pending
+    /// upload until the body is complete; the finished exchange then takes a
+    /// normal work permit. Nothing the guest uploads can therefore occupy a
+    /// slot a read needs, and a refusal never reads a byte of it.
     fn spawn_check(&self, request_id: String) {
         let relay = self.clone();
         let surface = Arc::clone(&self.surface);
         tokio::spawn(async move {
             let permit = relay
-                .permits
+                .uploads
                 .clone()
                 .acquire_owned()
                 .await
-                .expect("the guest exchange semaphore is never closed");
-            let input = {
+                .expect("the guest upload semaphore is never closed");
+            let (conn_id, input, cancel) = {
                 let state = relay.lock();
                 let Some(pending) = state.pending.get(&request_id) else {
                     return;
                 };
-                crate::server::guest_input(
-                    guest_method(&pending.request.method),
-                    pending.request.path.clone(),
-                    pending.request.public_prefix.clone(),
-                    &guest_headers(&pending.request),
-                    Vec::new(),
+                (
+                    pending.conn_id.clone(),
+                    crate::server::guest_input(
+                        guest_method(&pending.request.method),
+                        pending.request.path.clone(),
+                        pending.request.public_prefix.clone(),
+                        &guest_headers(&pending.request),
+                        Vec::new(),
+                    ),
+                    Arc::clone(&pending.cancel),
                 )
             };
-            match surface.check_submission(&input).await {
+            // Both waits below are cancellable: a cancel drops this task's
+            // upload permit at once instead of pinning the slot until the
+            // surface or the outbound queue answers.
+            let cancelled = cancel.notified();
+            tokio::pin!(cancelled);
+            let checked = tokio::select! {
+                result = surface.check_submission(&input) => result,
+                _ = &mut cancelled => return,
+            };
+            match checked {
                 Ok(()) => {
+                    // The admitted state is committed before the go-ahead is
+                    // sent, so the pre-authorization cap covers exactly the
+                    // bytes that arrived before authorization.
+                    let mut upload = Some(permit);
                     let started = {
                         let mut state = relay.lock();
                         let Some(pending) = state.pending.get_mut(&request_id) else {
+                            // Refused for its size, or dropped as abandoned;
+                            // it must not be told to send its body.
                             return;
                         };
                         pending.checking = false;
                         if !pending.complete {
-                            return;
+                            // The body still arrives: the upload slot stays
+                            // with it, bounding what it may buffer.
+                            pending.permit = upload.take();
+                            None
+                        } else {
+                            let Some(pending) = state.pending.remove(&request_id) else {
+                                return;
+                            };
+                            // The body is complete, so the upload slot is done
+                            // when this task returns. The exchange takes a
+                            // work permit of its own.
+                            Some((pending.conn_id, pending.request, pending.body))
                         }
-                        let Some(pending) = state.pending.remove(&request_id) else {
-                            return;
-                        };
-                        Some((pending.conn_id, pending.request, pending.body))
                     };
+                    // The go-ahead goes before anything else this exchange
+                    // sends, so a browser that waits for it never races the
+                    // answer. A cancel in this window means the browser has
+                    // gone: the answer is dropped with it.
+                    tokio::select! {
+                        _ = relay.send_admission(conn_id, request_id.clone()) => {}
+                        _ = &mut cancelled => return,
+                    }
                     if let Some((conn_id, request, body)) = started {
-                        // The check's permit goes to the exchange: the slot
-                        // never reopens between authorization and the work it
-                        // admitted, so another upload cannot take it.
-                        relay.spawn_exchange(conn_id, request, Some(body), Some(permit));
+                        // The body is complete. The upload slot is handed to
+                        // the exchange together with the work permit it waits
+                        // for, so the slot is never free while a body waits.
+                        relay.spawn_finished_upload(conn_id, request, body, upload.take());
                     }
                 }
                 Err(output) => {
+                    // The refusal only needs queue space, never the upload
+                    // slot: release it first so another upload is admitted
+                    // while this answer waits for the outbound queue.
+                    drop(permit);
                     let conn_id = {
                         let mut state = relay.lock();
                         let conn_id = state
@@ -316,6 +430,49 @@ impl GuestRelay {
                     relay.send_output(conn_id, request_id, &output).await;
                 }
             }
+        });
+    }
+
+    /// Tells a browser that its chunked body may now be sent.
+    async fn send_admission(&self, conn_id: String, request_id: String) {
+        let admission = h4rn_protocol::GuestHttpAdmission { request_id };
+        let Ok(payload) = serde_json::to_vec(&admission) else {
+            tracing::warn!("could not serialise a guest admission");
+            return;
+        };
+        let _ = self
+            .out_tx
+            .send(RelayFrame {
+                conn_id,
+                kind: RelayFrameKind::GuestHttpAdmit,
+                payload,
+            })
+            .await;
+    }
+
+    /// Hands a complete upload body to an exchange without free counting it.
+    ///
+    /// The work permit is taken while the upload slot is still held, and only
+    /// then is the upload slot released. A finished body therefore always
+    /// occupies either its own slot or a work slot, so bodies waiting on busy
+    /// work permits can never exceed [`GUEST_UPLOAD_CONCURRENCY`].
+    fn spawn_finished_upload(
+        &self,
+        conn_id: String,
+        request: h4rn_protocol::GuestHttpRequest,
+        body: Vec<u8>,
+        upload: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        let relay = self.clone();
+        tokio::spawn(async move {
+            let work = relay
+                .permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("the guest exchange semaphore is never closed");
+            drop(upload);
+            relay.spawn_exchange(conn_id, request, Some(body), Some(work));
         });
     }
 
@@ -480,12 +637,15 @@ impl GuestRelay {
     }
 
     /// Drops uploads whose browser went away and old refusal markers.
+    ///
+    /// A dropped upload drops the permit it was holding, so its slot is free
+    /// for the next body instead of waiting on the abandoned one.
     fn expire(&self) {
         let now = std::time::Instant::now();
         let mut state = self.lock();
         state
             .pending
-            .retain(|_, guest| now.duration_since(guest.started) < GUEST_UPLOAD_TIMEOUT);
+            .retain(|_, guest| now.duration_since(guest.updated) < GUEST_UPLOAD_IDLE);
         state
             .rejected
             .retain(|_, at| now.duration_since(*at) < GUEST_UPLOAD_TIMEOUT);
@@ -750,6 +910,19 @@ async fn run_once(
         .map_err(|error| anyhow::anyhow!("connect to the relay: {error}"))?;
     tracing::info!(machine = ?client.machine_id(), "relay connected");
     let (mut sink, mut stream) = socket.split();
+    // Say what this daemon understands before any guest exchange can start.
+    // The relay then knows a chunked upload is admitted before its body is
+    // sent, instead of guessing from how long the daemon takes to answer.
+    let hello = RelayFrame {
+        conn_id: String::new(),
+        kind: RelayFrameKind::Hello,
+        payload: serde_json::to_vec(&h4rn_protocol::RelayHello {
+            features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
+        })?,
+    };
+    sink.send(Message::Text(serde_json::to_string(&hello)?.into()))
+        .await
+        .map_err(|error| anyhow::anyhow!("relay hello failed: {error}"))?;
     let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
     let (out_tx, mut out_rx) = mpsc::channel::<RelayFrame>(256);
     dialer.attach(out_tx.clone(), Arc::clone(&connections));
@@ -893,9 +1066,13 @@ async fn handle_event(
             RelayFrameKind::GuestHttp
             | RelayFrameKind::GuestHttpChunk
             | RelayFrameKind::Activity
+            | RelayFrameKind::GuestHttpCancel
             | RelayFrameKind::Ping => {
                 handle_unblocked_frame(&frame, guests);
             }
+            // A daemon only sends these: a relayed admission or hello
+            // addressed back to the daemon has nothing to act on.
+            RelayFrameKind::GuestHttpAdmit | RelayFrameKind::Hello => {}
         },
         RelayServerEvent::Snapshot { devices, .. } => {
             apply_snapshot(service, registry, &devices);
@@ -961,6 +1138,7 @@ fn handle_unblocked_frame(frame: &RelayFrame, guests: &GuestRelay) {
     match frame.kind {
         RelayFrameKind::GuestHttp => guests.dispatch(frame),
         RelayFrameKind::GuestHttpChunk => guests.dispatch_chunk(frame),
+        RelayFrameKind::GuestHttpCancel => guests.dispatch_cancel(frame),
         RelayFrameKind::Ping => {
             // The relay echoes the daemon's ping; use the quiet moment to
             // drop uploads a browser abandoned.
@@ -1137,6 +1315,8 @@ mod tests {
         /// upload's pre-authorization buffer.
         check_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
         check_arrived: tokio::sync::Notify,
+        /// How many link checks have started.
+        checks_started: Arc<AtomicUsize>,
     }
 
     impl FakeSurface {
@@ -1147,6 +1327,7 @@ mod tests {
                 exchanges: Arc::new(AtomicUsize::new(0)),
                 check_gate: Mutex::new(None),
                 check_arrived: tokio::sync::Notify::new(),
+                checks_started: Arc::new(AtomicUsize::new(0)),
             })
         }
 
@@ -1157,7 +1338,18 @@ mod tests {
                 exchanges: Arc::new(AtomicUsize::new(0)),
                 check_gate: Mutex::new(None),
                 check_arrived: tokio::sync::Notify::new(),
+                checks_started: Arc::new(AtomicUsize::new(0)),
             })
+        }
+
+        /// An allowed surface whose check waits at `gate`.
+        fn allowing_at(gate: Arc<tokio::sync::Notify>) -> Arc<Self> {
+            let surface = Self::new(b"ok".to_vec());
+            *surface
+                .check_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate);
+            surface
         }
 
         /// An unauthorized surface whose check waits at `gate`.
@@ -1177,6 +1369,7 @@ mod tests {
             &self,
             _input: &crate::guest::GuestHttpInput,
         ) -> Result<(), crate::guest::GuestHttpOutput> {
+            self.checks_started.fetch_add(1, Ordering::SeqCst);
             let gate = self
                 .check_gate
                 .lock()
@@ -1256,6 +1449,17 @@ mod tests {
         }
     }
 
+    fn cancel_frame(request_id: &str) -> RelayFrame {
+        let cancel = h4rn_protocol::GuestHttpAdmission {
+            request_id: request_id.to_owned(),
+        };
+        RelayFrame {
+            conn_id: format!("guest-{request_id}"),
+            kind: RelayFrameKind::GuestHttpCancel,
+            payload: serde_json::to_vec(&cancel).expect("cancel json"),
+        }
+    }
+
     /// Waits for a non-chunk guest answer frame.
     async fn next_answer(rx: &mut mpsc::Receiver<RelayFrame>) -> RelayFrame {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1268,6 +1472,31 @@ mod tests {
         })
         .await
         .expect("a guest answer in time")
+    }
+
+    fn get_frame(request_id: &str, path: &str) -> RelayFrame {
+        let request = h4rn_protocol::GuestHttpRequest {
+            request_id: request_id.to_owned(),
+            method: "GET".to_owned(),
+            path: path.to_owned(),
+            public_prefix: None,
+            chunked: false,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        RelayFrame {
+            conn_id: format!("guest-{request_id}"),
+            kind: RelayFrameKind::GuestHttp,
+            payload: serde_json::to_vec(&request).expect("request json"),
+        }
+    }
+
+    /// Waits for one frame of any kind.
+    async fn next_frame(rx: &mut mpsc::Receiver<RelayFrame>) -> RelayFrame {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a guest frame in time")
+            .expect("relay queue open")
     }
 
     #[tokio::test]
@@ -1429,6 +1658,386 @@ mod tests {
         assert_eq!(response.status, 503);
         assert!(!relay.lock().pending.contains_key("over"));
         gate.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn an_authorized_upload_holds_its_slot_before_the_admission_is_queued() {
+        let surface = FakeSurface::new(b"ok".to_vec());
+        let (tx, mut rx) = mpsc::channel(1);
+        let relay = GuestRelay::new(surface, tx.clone());
+
+        // Fill the outbound queue, so the go-ahead cannot be queued yet. The
+        // check itself answers immediately, which leaves the task held exactly
+        // between committing the admitted state and sending the go-ahead.
+        tx.send(RelayFrame {
+            conn_id: "existing".to_owned(),
+            kind: RelayFrameKind::Ping,
+            payload: Vec::new(),
+        })
+        .await
+        .expect("fill queue");
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+
+        // The admitted state is committed before the go-ahead is attempted:
+        // the check is over and the upload slot is already stored on the row
+        // while the queue is still full. Waiting for the state transition, not
+        // for a duration, makes that ordering the assertion.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready = {
+                    let state = relay.lock();
+                    state
+                        .pending
+                        .get("g1")
+                        .is_some_and(|pending| !pending.checking)
+                };
+                if ready {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the admission was never prepared");
+        {
+            let state = relay.lock();
+            let pending = state.pending.get("g1").expect("the admitted upload");
+            assert!(!pending.checking, "the link check was still running");
+            assert!(
+                pending.permit.is_some(),
+                "the admission was queued before its upload slot was held"
+            );
+            assert!(pending.body.is_empty(), "the body arrived unasked");
+        }
+
+        // Draining the queue releases the go-ahead the state above preceded.
+        assert_eq!(next_frame(&mut rx).await.kind, RelayFrameKind::Ping);
+        let admission = next_frame(&mut rx).await;
+        assert_eq!(admission.kind, RelayFrameKind::GuestHttpAdmit);
+        let admission: h4rn_protocol::GuestHttpAdmission =
+            serde_json::from_slice(&admission.payload).expect("admission json");
+        assert_eq!(admission.request_id, "g1");
+        // No body is needed to learn that this upload is allowed.
+        assert!(
+            relay
+                .lock()
+                .pending
+                .get("g1")
+                .is_some_and(|pending| pending.body.is_empty()),
+            "the surface ran before the body finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_upload_is_answered_without_an_admission() {
+        let surface = FakeSurface::refusing();
+        let exchanges = Arc::clone(&surface.exchanges);
+        let (tx, mut rx) = mpsc::channel(8);
+        let relay = GuestRelay::new(surface, tx);
+
+        // The request alone is enough to refuse: no byte of the body is read.
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        let answer = next_frame(&mut rx).await;
+        assert_ne!(
+            answer.kind,
+            RelayFrameKind::GuestHttpAdmit,
+            "a refused upload was admitted"
+        );
+        let response: h4rn_protocol::GuestHttpResponse =
+            serde_json::from_slice(&answer.payload).expect("answer json");
+        assert_eq!(response.status, 410);
+        assert_eq!(exchanges.load(Ordering::SeqCst), 0);
+        assert!(!relay.lock().pending.contains_key("g1"));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_frees_its_upload_slot_before_it_is_queued() {
+        // The check refuses while the outbound queue is full, so the answer
+        // waits for room. The upload slot it held must already be back: the
+        // refusal needs no slot, and another upload may be admitted meanwhile.
+        let surface = FakeSurface::refusing();
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut relay = GuestRelay::new(surface, tx.clone());
+        relay.uploads = Arc::new(tokio::sync::Semaphore::new(1));
+        tx.send(RelayFrame {
+            conn_id: "existing".to_owned(),
+            kind: RelayFrameKind::Ping,
+            payload: Vec::new(),
+        })
+        .await
+        .expect("fill queue");
+
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        // Waiting for the row to leave and the slot to return is the same
+        // state the answer is queued from, so no duration is assumed.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let freed =
+                    relay.lock().pending.is_empty() && relay.uploads.available_permits() == 1;
+                if freed {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a refused upload kept its slot until the answer could be queued");
+        assert_eq!(
+            relay.uploads.available_permits(),
+            1,
+            "a refused upload still held its slot while its answer waited"
+        );
+
+        // A cancel for the refused request finds nothing to release, and the
+        // slot stays free.
+        handle_unblocked_frame(&cancel_frame("g1"), &relay);
+        assert_eq!(relay.uploads.available_permits(), 1);
+
+        // The refusal itself still arrives once the queue drains.
+        assert_eq!(next_frame(&mut rx).await.kind, RelayFrameKind::Ping);
+        let answer = next_answer(&mut rx).await;
+        let response: h4rn_protocol::GuestHttpResponse =
+            serde_json::from_slice(&answer.payload).expect("answer json");
+        assert_eq!(response.status, 410);
+    }
+
+    /// Waits until the fake surface has started `count` exchanges.
+    async fn wait_for_exchanges(exchanges: &AtomicUsize, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while exchanges.load(Ordering::SeqCst) < count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the exchange never reached the surface");
+    }
+
+    #[tokio::test]
+    async fn an_admitted_post_keeps_its_work_slot_until_its_last_frame_is_queued() {
+        // One work permit and room for one queued frame: the admitted POST
+        // answers with a header and two chunks. Its work slot must stay held
+        // through the final chunk, not merely the header, or a second exchange
+        // could overtake the answer it was admitted for.
+        let surface = FakeSurface::new(vec![b'a'; h4rn_protocol::GUEST_CHUNK_BYTES * 2]);
+        let exchanges = Arc::clone(&surface.exchanges);
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut relay = GuestRelay::new(surface, tx.clone());
+        relay.permits = Arc::new(tokio::sync::Semaphore::new(1));
+
+        // The upload is admitted, then its body finishes in one chunk.
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        let admission = next_frame(&mut rx).await;
+        assert_eq!(admission.kind, RelayFrameKind::GuestHttpAdmit);
+        handle_unblocked_frame(&chunk_frame("g1", 0, true, b"{}".to_vec()), &relay);
+        wait_for_exchanges(&exchanges, 1).await;
+
+        // A state read on another link waits for the work slot.
+        handle_unblocked_frame(&get_frame("g2", "/guest/tok/blob/two"), &relay);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            exchanges.load(Ordering::SeqCst),
+            1,
+            "a second exchange ran while the first still held buffered frames"
+        );
+
+        // The header alone frees a queue slot; the work slot must still be
+        // held until both body chunks have been queued.
+        let header = rx.recv().await.expect("queue open");
+        assert_eq!(header.kind, RelayFrameKind::GuestHttp);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            exchanges.load(Ordering::SeqCst),
+            1,
+            "the permit was released once only the header was queued"
+        );
+
+        // Drain the queue: the first answer finishes and gives up its permit,
+        // then the second exchange runs.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while exchanges.load(Ordering::SeqCst) < 2 {
+                let _ = rx.recv().await.expect("queue open");
+            }
+        })
+        .await
+        .expect("the held permit was never released after the final frame");
+    }
+
+    #[tokio::test]
+    async fn a_finished_upload_keeps_its_slot_until_a_work_permit_is_held() {
+        // Every work permit is busy with other exchanges. A completed upload
+        // must keep its upload slot while it waits, or bodies waiting for work
+        // would pile up past the upload cap uncounted.
+        let surface = FakeSurface::new(b"ok".to_vec());
+        let (tx, mut rx) = mpsc::channel(32);
+        let relay = GuestRelay::new(surface, tx);
+        let busy = relay
+            .permits
+            .clone()
+            .acquire_many_owned(GUEST_EXCHANGE_CONCURRENCY as u32)
+            .await
+            .expect("hold every work permit");
+
+        for index in 0..GUEST_UPLOAD_CONCURRENCY {
+            let id = format!("up{index}");
+            handle_unblocked_frame(&guest_frame(&id, true), &relay);
+            assert_eq!(
+                next_frame(&mut rx).await.kind,
+                RelayFrameKind::GuestHttpAdmit
+            );
+            handle_unblocked_frame(&chunk_frame(&id, 0, true, b"{}".to_vec()), &relay);
+            assert!(
+                !relay.lock().pending.contains_key(&id),
+                "a complete body was left in the pending map"
+            );
+            assert_eq!(
+                relay.uploads.available_permits(),
+                GUEST_UPLOAD_CONCURRENCY - 1 - index,
+                "a completed body freed its upload slot before its exchange held a work permit"
+            );
+        }
+
+        // Both completed bodies are waiting for work, so a third upload must
+        // not be admitted (or buffered) past the upload cap.
+        handle_unblocked_frame(&guest_frame("over", true), &relay);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "an upload was admitted while the completed bodies still waited"
+        );
+        assert_eq!(relay.uploads.available_permits(), 0);
+        assert_eq!(
+            relay.lock().pending.len(),
+            1,
+            "more than the waiting upload"
+        );
+
+        // Once the work is free, the two bodies run and the third is admitted.
+        drop(busy);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = rx.recv().await.expect("queue open");
+                if frame.kind != RelayFrameKind::GuestHttpAdmit {
+                    continue;
+                }
+                let admission: h4rn_protocol::GuestHttpAdmission =
+                    serde_json::from_slice(&frame.payload).expect("admission json");
+                if admission.request_id == "over" {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the third upload was never admitted after the work freed up");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_admission_releases_its_upload_slot_at_once() {
+        // Connect timed out waiting for this admission and will never send a
+        // body. The daemon must free the slot on the cancel, not pin it until
+        // the idle timeout, so the next upload is served immediately.
+        let surface = FakeSurface::new(b"ok".to_vec());
+        let (tx, mut rx) = mpsc::channel(8);
+        let relay = GuestRelay::new(surface, tx);
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        assert_eq!(
+            next_frame(&mut rx).await.kind,
+            RelayFrameKind::GuestHttpAdmit
+        );
+        assert_eq!(
+            relay.uploads.available_permits(),
+            GUEST_UPLOAD_CONCURRENCY - 1
+        );
+
+        handle_unblocked_frame(&cancel_frame("g1"), &relay);
+        assert!(!relay.lock().pending.contains_key("g1"));
+        assert_eq!(
+            relay.uploads.available_permits(),
+            GUEST_UPLOAD_CONCURRENCY,
+            "a cancelled admission kept its upload slot"
+        );
+
+        handle_unblocked_frame(&guest_frame("g2", true), &relay);
+        assert_eq!(
+            next_frame(&mut rx).await.kind,
+            RelayFrameKind::GuestHttpAdmit,
+            "the next upload waited for the cancelled one's idle timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_uploads_never_take_a_state_reads_slot() {
+        // More uploads than the upload cap, all waiting on their link check.
+        // With one shared cap they would hold every work permit and the read
+        // would wait for an upload that may never finish.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let surface = FakeSurface::refusing_at(Arc::clone(&gate));
+        let started = Arc::clone(&surface.checks_started);
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut relay = GuestRelay::new(surface, tx);
+        // Make the pools the same size: if uploads borrowed the work permits,
+        // the two admitted uploads below would hold every one of them.
+        relay.permits = Arc::new(tokio::sync::Semaphore::new(GUEST_UPLOAD_CONCURRENCY));
+        for index in 0..GUEST_UPLOAD_CONCURRENCY + 2 {
+            handle_unblocked_frame(&guest_frame(&format!("up{index}"), true), &relay);
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while started.load(Ordering::SeqCst) < GUEST_UPLOAD_CONCURRENCY {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the admitted upload checks never started");
+
+        // A state read on another link is answered while the uploads wait.
+        handle_unblocked_frame(&get_frame("read", "/guest/tok/state"), &relay);
+        let response = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = rx.recv().await.expect("queue open");
+                if frame.kind != RelayFrameKind::GuestHttp {
+                    continue;
+                }
+                let response: h4rn_protocol::GuestHttpResponse =
+                    serde_json::from_slice(&frame.payload).expect("answer json");
+                if response.request_id == "read" {
+                    return response;
+                }
+            }
+        })
+        .await
+        .expect("a state read waited behind a slow upload");
+        assert_eq!(response.status, 200);
+        gate.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_upload_gives_its_slot_back() {
+        let surface = FakeSurface::new(b"ok".to_vec());
+        let (tx, mut rx) = mpsc::channel(64);
+        let relay = GuestRelay::new(surface, tx);
+        for index in 0..GUEST_UPLOAD_CONCURRENCY {
+            handle_unblocked_frame(&guest_frame(&format!("up{index}"), true), &relay);
+            let admission = next_frame(&mut rx).await;
+            assert_eq!(admission.kind, RelayFrameKind::GuestHttpAdmit);
+        }
+        // The slots are held by uploads that never sent a body.
+        {
+            let mut state = relay.lock();
+            for pending in state.pending.values_mut() {
+                pending.updated =
+                    std::time::Instant::now() - GUEST_UPLOAD_IDLE - Duration::from_secs(1);
+            }
+        }
+        // The quiet moment after a ping drops them, and the slot is free.
+        handle_unblocked_frame(&ping_frame(), &relay);
+        assert!(relay.lock().pending.is_empty());
+        handle_unblocked_frame(&guest_frame("next", true), &relay);
+        let admission = next_frame(&mut rx).await;
+        assert_eq!(
+            admission.kind,
+            RelayFrameKind::GuestHttpAdmit,
+            "an abandoned upload kept its slot"
+        );
     }
 
     #[tokio::test]
@@ -1763,5 +2372,52 @@ mod tests {
         })
         .await
         .expect("the guest answer arrives after the queue drains");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_releases_the_upload_slot_before_the_admission_is_queued() {
+        // The check holds the only upload permit, and the queue is full, so a
+        // task that waited for either would pin the slot. A cancel must free it
+        // at once: the relay gave up on this body, and another upload needs the
+        // slot now.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let surface = FakeSurface::allowing_at(Arc::clone(&gate));
+        let checks = Arc::clone(&surface.checks_started);
+        let (tx, _rx) = mpsc::channel(8);
+        let mut relay = GuestRelay::new(surface, tx);
+        relay.uploads = Arc::new(tokio::sync::Semaphore::new(1));
+
+        handle_unblocked_frame(&guest_frame("g1", true), &relay);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while checks.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the link check never started");
+        assert_eq!(
+            relay.uploads.available_permits(),
+            0,
+            "the check did not hold the upload slot"
+        );
+
+        // Cancelled while the surface is still deciding. No admission frame is
+        // queued for it, and the slot returns immediately.
+        handle_unblocked_frame(&cancel_frame("g1"), &relay);
+        assert!(relay.lock().pending.is_empty());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if relay.uploads.available_permits() == 1 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a cancelled upload kept its slot until the check answered");
+        assert!(
+            relay.lock().pending.is_empty(),
+            "a cancelled upload came back into the book"
+        );
     }
 }

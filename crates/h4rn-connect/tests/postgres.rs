@@ -1189,22 +1189,29 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
     let binding = "guest_binding_value";
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let connection = Uuid::now_v7();
     state
         .relay
         .register(h4rn_connect::relay::Peer {
             device_id: daemon.device.id,
+            connection_id: connection,
+            announces_hello: false,
             user_id: daemon.user.id,
             machine_id: Some(machine_id),
             kind: "daemon".to_string(),
             tx,
         })
         .await;
+    let link = h4rn_connect::relay::DaemonLink {
+        device_id: daemon.device.id,
+        connection_id: connection,
+    };
 
     let pages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let page_state = std::sync::Arc::new(std::sync::Mutex::new("active".to_string()));
     let link_bound = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let task_state = state.clone();
-    let task_device = daemon.device.id;
+    let task_link = link;
     let task_pages = pages.clone();
     let task_token = token.to_string();
     let task_binding = binding.to_string();
@@ -1235,7 +1242,7 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
                     let bound = task_link_bound.load(std::sync::atomic::Ordering::Relaxed);
                     let response =
                         fake_guest_answer(request, &task_token, &task_binding, &state, bound);
-                    task_state.relay.complete_guest(task_device, response).await;
+                    task_state.relay.complete_guest(task_link, response).await;
                 }
                 h4rn_protocol::RelayFrameKind::GuestHttpChunk => {
                     let Ok(chunk) =
@@ -1252,7 +1259,7 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
                         task_state
                             .relay
                             .complete_guest(
-                                task_device,
+                                task_link,
                                 h4rn_protocol::GuestHttpResponse {
                                     request_id: chunk.request_id,
                                     status: 202,
@@ -1614,4 +1621,558 @@ async fn push_devices_register_rotate_and_leave_with_the_session() {
         .await
         .unwrap();
     assert_eq!(leftover, 0, "deleting the account left device rows");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_failed_guest_proxy_leaves_no_waiter_and_no_body() {
+    use h4rn_protocol::RelayServerEvent;
+    use h4rn_protocol::{GuestHttpChunk, GuestHttpRequest, GuestHttpResponse, RelayFrameKind};
+
+    let token = "guest_token_for_the_failure_test";
+
+    // A relay that cannot deliver the frame: the peer's queue is already gone.
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-failure-a")).await;
+    let machine = state
+        .store
+        .machines(daemon.user.id, &std::collections::HashSet::new())
+        .await
+        .expect("machines")
+        .into_iter()
+        .find(|machine| machine.name == "guest-failure-a")
+        .expect("the daemon's machine");
+    let machine_id = Uuid::parse_str(&machine.id).expect("machine id");
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    drop(rx);
+    let connection = Uuid::now_v7();
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            connection_id: connection,
+            announces_hello: false,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_string(),
+            tx,
+        })
+        .await;
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/guest/{machine_id}/{token}/state"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delivery failure response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        state.relay.pending_guests().await,
+        0,
+        "a failed delivery kept its waiter"
+    );
+
+    // A daemon that starts a chunked answer and then never finishes: the
+    // answer timeout must take the waiter and the half-arrived body with it.
+    let state = test_state_with(|config| config.guest_answer_timeout_secs = 1).await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-failure-b")).await;
+    let machine = state
+        .store
+        .machines(daemon.user.id, &std::collections::HashSet::new())
+        .await
+        .expect("machines")
+        .into_iter()
+        .find(|machine| machine.name == "guest-failure-b")
+        .expect("the daemon's machine");
+    let machine_id = Uuid::parse_str(&machine.id).expect("machine id");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let connection = Uuid::now_v7();
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            connection_id: connection,
+            announces_hello: false,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_string(),
+            tx,
+        })
+        .await;
+    let link = h4rn_connect::relay::DaemonLink {
+        device_id: daemon.device.id,
+        connection_id: connection,
+    };
+    let fake = {
+        let relay = state.relay.clone();
+        let device = link;
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let RelayServerEvent::Frame { frame } = event else {
+                    continue;
+                };
+                if frame.kind != RelayFrameKind::GuestHttp {
+                    continue;
+                }
+                let request: GuestHttpRequest =
+                    serde_json::from_slice(&frame.payload).expect("request json");
+                // A chunked answer that has started is never completed.
+                let started = relay
+                    .complete_guest(
+                        device,
+                        GuestHttpResponse {
+                            request_id: request.request_id.clone(),
+                            status: 200,
+                            chunked: true,
+                            headers: vec![(
+                                "content-type".to_string(),
+                                "application/json".to_string(),
+                            )],
+                            body: Vec::new(),
+                            set_cookie: None,
+                        },
+                    )
+                    .await;
+                assert!(started);
+                let chunk = relay
+                    .complete_guest_chunk(
+                        device,
+                        GuestHttpChunk {
+                            request_id: request.request_id,
+                            seq: 0,
+                            last: false,
+                            body: b"{\"state\":\"active\"".to_vec(),
+                        },
+                    )
+                    .await;
+                assert!(chunk);
+                break;
+            }
+        })
+    };
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/guest/{machine_id}/{token}/state"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("timeout response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        state.relay.pending_guests().await,
+        0,
+        "a timed-out exchange kept its waiter"
+    );
+    assert_eq!(
+        state.relay.pending_guest_bodies().await,
+        0,
+        "a timed-out exchange kept its half-arrived body"
+    );
+    fake.await.expect("fake daemon task");
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_router_upload_waits_for_the_announced_admission() {
+    use h4rn_protocol::{
+        GuestHttpChunk, GuestHttpRequest, GuestHttpResponse, RelayFrameKind, RelayServerEvent,
+    };
+
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-admission")).await;
+    let machine_id = daemon.device.machine_id.expect("the daemon owns a machine");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let connection = Uuid::now_v7();
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            connection_id: connection,
+            announces_hello: true,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_owned(),
+            tx,
+        })
+        .await;
+
+    let relay = state.relay.clone();
+    let device = h4rn_connect::relay::DaemonLink {
+        device_id: daemon.device.id,
+        connection_id: connection,
+    };
+    let (report_tx, report_rx) = tokio::sync::oneshot::channel();
+    let fake = tokio::spawn(async move {
+        // Request one arrives before the hello: Connect must time it out and
+        // cancel it. Request two is admitted after a short pause, which proves
+        // no chunk crosses before the admission. Request three arrives after a
+        // greeted hello but is never admitted: that must time out and cancel
+        // too, which a hard-coded legacy branch behind the announced one cannot
+        // do.
+        let mut first = String::new();
+        let mut second = String::new();
+        let mut second_admitted = false;
+        let mut chunk_before_admission = false;
+        let mut cancelled_first = false;
+        let mut body = Vec::new();
+        let mut answered_second = false;
+        let mut third_chunks = 0usize;
+        let mut cancelled_third = false;
+        while let Some(event) = rx.recv().await {
+            let RelayServerEvent::Frame { frame } = event else {
+                continue;
+            };
+            match frame.kind {
+                RelayFrameKind::GuestHttp => {
+                    let request: GuestHttpRequest =
+                        serde_json::from_slice(&frame.payload).expect("guest request");
+                    assert!(request.chunked, "a router upload was not chunked");
+                    if first.is_empty() {
+                        first = request.request_id;
+                        continue;
+                    }
+                    if second.is_empty() {
+                        second = request.request_id;
+                        // Show that Connect waits for the admission; if it did
+                        // not, a chunk would appear in this window.
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        while let Ok(event) = rx.try_recv() {
+                            if let RelayServerEvent::Frame { frame } = event
+                                && frame.kind == RelayFrameKind::GuestHttpChunk
+                            {
+                                chunk_before_admission = true;
+                            }
+                        }
+                        assert!(
+                            relay.admit_guest(device, &second).await,
+                            "the admission failed"
+                        );
+                        second_admitted = true;
+                        continue;
+                    }
+                    // Request three: greeted, but this daemon never admits it.
+                }
+                RelayFrameKind::GuestHttpChunk => {
+                    let chunk: GuestHttpChunk =
+                        serde_json::from_slice(&frame.payload).expect("chunk");
+                    if chunk.request_id == first {
+                        // A relay that guessed the timeout streamed this body
+                        // for an exchange it never admitted. Answer it so the
+                        // test fails on the status instead of hanging.
+                        cancelled_first = true;
+                        relay
+                            .complete_guest(
+                                device,
+                                GuestHttpResponse {
+                                    request_id: chunk.request_id,
+                                    status: 202,
+                                    chunked: false,
+                                    headers: Vec::new(),
+                                    body: b"{}".to_vec(),
+                                    set_cookie: None,
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+                    if chunk.request_id != second {
+                        third_chunks += 1;
+                        continue;
+                    }
+                    if !second_admitted {
+                        chunk_before_admission = true;
+                    }
+                    body.extend_from_slice(&chunk.body);
+                    if chunk.last && !answered_second {
+                        answered_second = true;
+                        relay
+                            .complete_guest(
+                                device,
+                                GuestHttpResponse {
+                                    request_id: chunk.request_id,
+                                    status: 202,
+                                    chunked: false,
+                                    headers: vec![(
+                                        "content-type".to_owned(),
+                                        "application/json".to_owned(),
+                                    )],
+                                    body: format!("{{\"received\":{}}}", body.len()).into_bytes(),
+                                    set_cookie: None,
+                                },
+                            )
+                            .await;
+                    }
+                }
+                RelayFrameKind::GuestHttpCancel => {
+                    if let Ok(cancel) =
+                        serde_json::from_slice::<h4rn_protocol::GuestHttpAdmission>(&frame.payload)
+                    {
+                        if cancel.request_id == first {
+                            cancelled_first = true;
+                        }
+                        if !second.is_empty() && cancel.request_id != second {
+                            cancelled_third = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if cancelled_third {
+                // Give a wrong implementation's chunks a moment to arrive, so
+                // "zero chunks" is a real observation, not a race.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                while let Ok(event) = rx.try_recv() {
+                    if let RelayServerEvent::Frame { frame } = event
+                        && frame.kind == RelayFrameKind::GuestHttpChunk
+                    {
+                        let chunk: GuestHttpChunk =
+                            serde_json::from_slice(&frame.payload).expect("chunk");
+                        if !second.is_empty() && chunk.request_id != second {
+                            third_chunks += 1;
+                        }
+                    }
+                }
+                let _ = report_tx.send((
+                    chunk_before_admission,
+                    cancelled_first,
+                    body.len(),
+                    third_chunks,
+                    cancelled_third,
+                ));
+                return;
+            }
+        }
+    });
+
+    // A real router request, so `guest_proxy_exchange` negotiates the hello
+    // itself instead of a test passing its result in.
+    let post = |body: Vec<u8>| {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/guest/{machine_id}/guest_token_for_router_test/messages"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+
+    // A connection that promised a hello but has not sent one is unknown:
+    // the handler fails closed and sends no body, rather than treating the
+    // silence as an older daemon.
+    let (status, body) = send(&state, post(vec![b'a'; 64 * 1024])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "guest_negotiating");
+
+    // The hello arrives after the grace. The next upload is admitted and
+    // streams to the daemon; the earlier request left nothing to stream to.
+    state
+        .relay
+        .announce(
+            daemon.device.id,
+            connection,
+            h4rn_protocol::RelayHello {
+                features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
+            },
+        )
+        .await;
+    let upload = vec![b'a'; 128 * 1024];
+    let (status, body) = send(&state, post(upload.clone())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["received"], upload.len());
+
+    // A greeted connection that stays unadmitted past the deadline is an
+    // error too. A branch that hard-coded the announced path to the legacy
+    // one would stream this body and answer 202 (or hang on the daemon).
+    let (status, body) = send(&state, post(vec![b'b'; 64 * 1024])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "guest_admission_timeout");
+
+    let (early, cancelled, received, third_chunks, cancelled_third) =
+        report_rx.await.expect("the daemon never answered");
+    assert!(!early, "a chunk crossed before the admission");
+    assert!(cancelled, "Connect never cancelled the timed-out admission");
+    assert_eq!(received, upload.len());
+    assert_eq!(
+        third_chunks, 0,
+        "a greeted, unadmitted upload streamed its body"
+    );
+    assert!(
+        cancelled_third,
+        "Connect never cancelled the greeted upload it timed out"
+    );
+    fake.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_cancelled_page_fetch_leaves_no_waiter() {
+    use h4rn_protocol::{RelayFrameKind, RelayServerEvent};
+
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-page-cancel")).await;
+    let machine = state
+        .store
+        .machines(daemon.user.id, &std::collections::HashSet::new())
+        .await
+        .expect("machines")
+        .into_iter()
+        .find(|machine| machine.name == "guest-page-cancel")
+        .expect("the daemon's machine");
+    let machine_id = Uuid::parse_str(&machine.id).expect("machine id");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            connection_id: Uuid::now_v7(),
+            announces_hello: false,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_owned(),
+            tx,
+        })
+        .await;
+
+    let app = router(state.clone());
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/guest/{machine_id}/guest_page_cancel_token"))
+        .body(Body::empty())
+        .unwrap();
+    let handler = tokio::spawn(async move {
+        let _ = app.oneshot(request).await;
+    });
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the daemon never received the page request")
+        .expect("relay queue closed");
+    let RelayServerEvent::Frame { frame } = event else {
+        panic!("unexpected relay event");
+    };
+    assert_eq!(frame.kind, RelayFrameKind::GuestHttp);
+    assert_eq!(state.relay.pending_guests().await, 1);
+
+    // A browser that closes the tab during the fetch drops the handler future;
+    // the waiter must go with it instead of waiting for a 10-second timeout
+    // that nothing will run.
+    handler.abort();
+    let _ = handler.await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.relay.pending_guests().await > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a cancelled page fetch kept its waiter");
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn a_cancelled_guest_request_leaves_no_waiter_or_body() {
+    use h4rn_protocol::{
+        GuestHttpChunk, GuestHttpRequest, GuestHttpResponse, RelayFrameKind, RelayServerEvent,
+    };
+
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("guest-cancel")).await;
+    let machine_id = daemon.device.machine_id.expect("the daemon owns a machine");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let connection = Uuid::now_v7();
+    state
+        .relay
+        .register(h4rn_connect::relay::Peer {
+            device_id: daemon.device.id,
+            connection_id: connection,
+            announces_hello: false,
+            user_id: daemon.user.id,
+            machine_id: Some(machine_id),
+            kind: "daemon".to_owned(),
+            tx,
+        })
+        .await;
+    let link = h4rn_connect::relay::DaemonLink {
+        device_id: daemon.device.id,
+        connection_id: connection,
+    };
+
+    // Start the real handler future and cancel it, as a browser disconnect
+    // does mid-answer.
+    let app = router(state.clone());
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/guest/{machine_id}/guest_cancel_token/state"))
+        .body(Body::empty())
+        .unwrap();
+    let handler = tokio::spawn(async move {
+        let _ = app.oneshot(request).await;
+    });
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the daemon never received the exchange")
+        .expect("relay queue closed");
+    let RelayServerEvent::Frame { frame } = event else {
+        panic!("unexpected relay event");
+    };
+    assert_eq!(frame.kind, RelayFrameKind::GuestHttp);
+    let request: GuestHttpRequest = serde_json::from_slice(&frame.payload).expect("guest request");
+    assert_eq!(state.relay.pending_guests().await, 1);
+
+    // A chunked answer that has started but not finished is the partial body
+    // that used to outlive its browser.
+    assert!(
+        state
+            .relay
+            .complete_guest(
+                link,
+                GuestHttpResponse {
+                    request_id: request.request_id.clone(),
+                    status: 200,
+                    chunked: true,
+                    headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+                    body: Vec::new(),
+                    set_cookie: None,
+                },
+            )
+            .await
+    );
+    assert!(
+        state
+            .relay
+            .complete_guest_chunk(
+                link,
+                GuestHttpChunk {
+                    request_id: request.request_id,
+                    seq: 0,
+                    last: false,
+                    body: b"{\"state\":".to_vec(),
+                },
+            )
+            .await
+    );
+    assert_eq!(state.relay.pending_guest_bodies().await, 1);
+
+    handler.abort();
+    let _ = handler.await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if state.relay.pending_guests().await == 0
+                && state.relay.pending_guest_bodies().await == 0
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a cancelled request kept its waiter or partial body");
 }

@@ -98,6 +98,7 @@ both, using the snake_case names shown below.
 | `H4RN_CONNECT_FCM_URL` | `https://fcm.googleapis.com` | FCM v1 base URL; tests point it at a mock. |
 | `H4RN_CONNECT_PUSH_GROUP_WINDOW_MS` | `1000` | Window that groups simultaneous transitions into one alert. |
 | `H4RN_CONNECT_PUSH_COMPLETION_MAX_AGE_SECS` | `120` | Finished work older than this never alerts. |
+| `H4RN_CONNECT_GUEST_ANSWER_TIMEOUT_SECS` | `120` | How long Connect waits for a relayed guest exchange's answer before forgetting the exchange. |
 
 `RUST_LOG` controls tracing. The relay logs metadata (ids, status,
 frame sizes), never payloads or secrets.

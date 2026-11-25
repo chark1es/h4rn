@@ -214,6 +214,11 @@ pub struct Config {
     pub push_group_window_ms: u64,
     /// How old a completed/failed transition may be and still alert.
     pub push_completion_max_age_secs: i64,
+    /// How long Connect waits for a relayed guest exchange's answer.
+    ///
+    /// A daemon that takes longer is answered with an unavailable error and
+    /// the exchange is forgotten, so no waiter or half-arrived body survives.
+    pub guest_answer_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -244,6 +249,7 @@ impl Default for Config {
             fcm_url: "https://fcm.googleapis.com".to_string(),
             push_group_window_ms: 1_000,
             push_completion_max_age_secs: 120,
+            guest_answer_timeout_secs: 120,
         }
     }
 }
@@ -274,6 +280,7 @@ impl fmt::Debug for Config {
             )
             .field("fcm_token_url", &self.fcm_token_url)
             .field("fcm_url", &self.fcm_url)
+            .field("guest_answer_timeout_secs", &self.guest_answer_timeout_secs)
             .finish()
     }
 }
@@ -412,6 +419,10 @@ impl Config {
                     None,
                 )
             })?;
+        }
+        if let Some(value) = env("H4RN_CONNECT_GUEST_ANSWER_TIMEOUT_SECS") {
+            self.guest_answer_timeout_secs =
+                parse_u64("H4RN_CONNECT_GUEST_ANSWER_TIMEOUT_SECS", &value)?;
         }
         Ok(())
     }
@@ -607,6 +618,16 @@ fn parse_i64(name: &str, value: &str) -> Result<i64> {
     value
         .parse()
         .map_err(|_| AppError::config("invalid_number", format!("{name} is not a number"), None))
+}
+
+fn parse_u64(name: &str, value: &str) -> Result<u64> {
+    value.parse().map_err(|_| {
+        AppError::config(
+            "invalid_number",
+            format!("{name} is not a non-negative integer"),
+            None,
+        )
+    })
 }
 
 fn parse_u32(name: &str, value: &str) -> Result<u32> {

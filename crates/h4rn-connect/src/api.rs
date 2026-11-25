@@ -2147,13 +2147,14 @@ async fn ask_daemon_for_page(
 ) -> Option<h4rn_protocol::GuestHttpResponse> {
     let machine = state.store.machine(machine_id).await.ok()?;
     let daemon = machine.daemon_device_id?;
-    if !state.relay.online(daemon).await {
-        return None;
-    }
+    let link = state.relay.link(daemon).await?;
     let request_id = Uuid::now_v7().to_string();
     let request = page_request(&request_id, machine_id, token, binding);
     let payload = serde_json::to_vec(&request).ok()?;
-    let waiter = state.relay.expect_guest(&request_id, daemon).await;
+    // A browser that goes away while the page is fetched must not leave the
+    // relay holding a waiter for an answer nobody reads.
+    let mut cleanup = GuestExchangeGuard::new(Arc::clone(&state.relay), request_id.clone());
+    let waiter = state.relay.expect_guest(&request_id, link).await;
     let frame = RelayFrame {
         conn_id: format!("guest-{request_id}"),
         kind: RelayFrameKind::GuestHttp,
@@ -2161,23 +2162,22 @@ async fn ask_daemon_for_page(
     };
     if state
         .relay
-        .send_wait(
-            daemon,
+        .send_wait_to(
+            link,
             RelayServerEvent::Frame { frame },
             Duration::from_secs(10),
         )
         .await
         .is_err()
     {
-        state.relay.forget_guest(&request_id).await;
         return None;
     }
     match tokio::time::timeout(Duration::from_secs(10), waiter).await {
-        Ok(Ok(answer)) => Some(answer),
-        _ => {
-            state.relay.forget_guest(&request_id).await;
-            None
+        Ok(Ok(answer)) => {
+            cleanup.disarm();
+            Some(answer)
         }
+        _ => None,
     }
 }
 
@@ -2279,6 +2279,14 @@ fn guest_page_response(cookie: Option<String>, state: &str) -> Response {
     }
     response
 }
+
+/// How long a chunked upload waits for the daemon's go-ahead.
+///
+/// A daemon from before the admission frame never sends one; it bounds the
+/// buffered bytes itself, so a short wait keeps that pairing working. A current
+/// daemon announces [`h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION`], and a
+/// wait past this bound is an error rather than permission to upload.
+const GUEST_ADMISSION_WAIT: Duration = Duration::from_secs(2);
 
 /// Forwards one guest HTTP exchange to the machine's daemon.
 ///
@@ -2395,8 +2403,10 @@ async fn guest_proxy(
         Duration::from_secs(60),
     )?;
     let request_id = Uuid::now_v7().to_string();
-    // Any failure after the waiter is registered must forget it, or a request
-    // id would keep its oneshot (and a chunked body) forever.
+    // Any failure after the waiter is registered must forget it, and so must
+    // a browser that goes away while its request is still running: a dropped
+    // handler future never reaches the cleanup below.
+    let mut cleanup = GuestExchangeGuard::new(Arc::clone(&state.relay), request_id.clone());
     let outcome = guest_proxy_exchange(
         &state,
         machine_id,
@@ -2409,7 +2419,70 @@ async fn guest_proxy(
         &request_id,
     )
     .await;
-    discard_failed_exchange(&state.relay, &request_id, outcome).await
+    settle_exchange(&mut cleanup, outcome).await
+}
+
+/// Forgets a guest exchange when its proxy future ends for any reason.
+///
+/// The relay keeps a waiter and any half-arrived answer under the request id.
+/// A failed exchange cleans up when it returns, but a cancelled HTTP request
+/// (the browser disconnects mid-answer) drops the future instead of returning,
+/// so cleanup is tied to the guard's lifetime. `forget_guest` is a no-op once
+/// the answer was delivered, so a successful exchange needs no special case.
+pub(crate) struct GuestExchangeGuard {
+    relay: Arc<RelayHub>,
+    request_id: Option<String>,
+}
+
+impl GuestExchangeGuard {
+    pub(crate) fn new(relay: Arc<RelayHub>, request_id: String) -> Self {
+        Self {
+            relay,
+            request_id: Some(request_id),
+        }
+    }
+
+    /// The request this guard still owns, once its exchange is settled.
+    pub(crate) fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    /// Keeps the exchange; its answer (or failure) already cleaned it up.
+    fn disarm(&mut self) {
+        self.request_id = None;
+    }
+}
+
+impl Drop for GuestExchangeGuard {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request_id.take() else {
+            return;
+        };
+        let relay = Arc::clone(&self.relay);
+        // Drop cannot await. The cleanup task owns both maps under one lock,
+        // so it removes the waiter and the partial body together.
+        tokio::spawn(async move {
+            relay.forget_guest(&request_id).await;
+        });
+    }
+}
+
+/// Cleans up one guest exchange and disarms its guard.
+///
+/// The disarm happens only after `forget_guest` returned. A browser that
+/// disconnects during the cleanup drops this future at an await point; if the
+/// guard were already disarmed, the waiter (and any half-arrived body) would
+/// stay in the relay until the process restarted.
+pub(crate) async fn settle_exchange<T>(
+    cleanup: &mut GuestExchangeGuard,
+    outcome: Result<T>,
+) -> Result<T> {
+    let Some(request_id) = cleanup.request_id().map(ToOwned::to_owned) else {
+        return outcome;
+    };
+    let outcome = discard_failed_exchange(&cleanup.relay, &request_id, outcome).await;
+    cleanup.disarm();
+    outcome
 }
 
 /// Forgets a guest waiter when its exchange failed, and passes the result on.
@@ -2468,12 +2541,13 @@ async fn guest_proxy_exchange(
     let daemon = machine
         .daemon_device_id
         .ok_or_else(|| AppError::unavailable("daemon_missing", "the machine has no daemon"))?;
-    if !state.relay.online(daemon).await {
-        return Err(AppError::unavailable(
-            "daemon_offline",
-            "the machine's daemon is not connected",
-        ));
-    }
+    // One connection owns this exchange: its capability, its admission, the
+    // request frames and every chunk. A daemon that reconnects mid-upload makes
+    // the exchange retryable instead of moving it to a socket that has not
+    // said hello or admitted anything.
+    let link = state.relay.link(daemon).await.ok_or_else(|| {
+        AppError::unavailable("daemon_offline", "the machine's daemon is not connected")
+    })?;
 
     let mut path = format!("/guest/{token}");
     if !rest.is_empty() {
@@ -2497,7 +2571,7 @@ async fn guest_proxy_exchange(
     };
     let payload = serde_json::to_vec(&request)
         .map_err(|_| AppError::internal("serialise the guest request"))?;
-    let waiter = state.relay.expect_guest(request_id, daemon).await;
+    let exchange = state.relay.expect_guest_exchange(request_id, link).await;
     let frame = RelayFrame {
         conn_id: format!("guest-{request_id}"),
         kind: RelayFrameKind::GuestHttp,
@@ -2505,18 +2579,66 @@ async fn guest_proxy_exchange(
     };
     state
         .relay
-        .send_wait(
-            daemon,
+        .send_wait_to(
+            link,
             RelayServerEvent::Frame { frame },
             Duration::from_secs(10),
         )
         .await?;
 
     if chunked {
-        stream_guest_body(state, daemon, request_id, body).await?;
+        // A daemon says on its relay hello whether it admits an upload before
+        // the body. A connection that promised a hello and has not sent one is
+        // still unknown after the grace: fail closed there rather than stream
+        // to a current daemon that simply has not spoken yet. Only a socket
+        // built before hellos, or one whose hello omits the feature, keeps the
+        // bounded legacy path.
+        let admission = state
+            .relay
+            .guest_admission(link, GUEST_ADMISSION_WAIT)
+            .await;
+        match admission {
+            crate::relay::GuestAdmission::Announced => {
+                forward_guest_body(
+                    &state.relay,
+                    link,
+                    request_id,
+                    true,
+                    exchange.admission,
+                    body,
+                )
+                .await?;
+            }
+            crate::relay::GuestAdmission::Legacy => {
+                forward_guest_body(
+                    &state.relay,
+                    link,
+                    request_id,
+                    false,
+                    exchange.admission,
+                    body,
+                )
+                .await?;
+            }
+            crate::relay::GuestAdmission::Unknown => {
+                // The daemon may already hold an upload slot for this
+                // exchange; drop it, and let the browser retry once the hello
+                // has arrived.
+                cancel_guest_admission(&state.relay, link, request_id).await;
+                return Err(AppError::unavailable(
+                    "guest_negotiating",
+                    "the machine is still saying what it supports; try again",
+                ));
+            }
+        }
     }
 
-    let answer = match tokio::time::timeout(Duration::from_secs(120), waiter).await {
+    let answer = match tokio::time::timeout(
+        Duration::from_secs(state.config.guest_answer_timeout_secs),
+        exchange.response,
+    )
+    .await
+    {
         Ok(Ok(answer)) => answer,
         Ok(Err(_)) => {
             return Err(AppError::unavailable(
@@ -2534,10 +2656,73 @@ async fn guest_proxy_exchange(
     guest_answer_response(state, answer, &public_prefix)
 }
 
+/// Waits for the daemon's admission before forwarding a chunked guest body.
+///
+/// A daemon that announced [`h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION`]
+/// must accept the exchange before a byte of the body leaves Connect: a wait
+/// that expires is an error, never an invitation to upload. A refusal answers
+/// the exchange and closes the admission, so nothing is uploaded for it. A
+/// daemon that did not announce the feature keeps the short bounded wait and
+/// then its own pre-authorization buffer, which is what that build implements.
+async fn forward_guest_body(
+    relay: &RelayHub,
+    link: crate::relay::DaemonLink,
+    request_id: &str,
+    negotiated: bool,
+    admission: tokio::sync::oneshot::Receiver<()>,
+    body: axum::body::Body,
+) -> Result<()> {
+    match tokio::time::timeout(GUEST_ADMISSION_WAIT, admission).await {
+        Ok(Ok(())) => stream_guest_body(relay, link, request_id, body).await,
+        // The daemon answered instead of admitting: the refusal is already on
+        // its way to the browser, and none of the body was read.
+        Ok(Err(_)) => Ok(()),
+        Err(_) if negotiated => {
+            // The daemon may already hold an upload slot for an exchange whose
+            // body will never arrive. Tell it to release the slot now instead
+            // of pinning it until its idle timeout.
+            cancel_guest_admission(relay, link, request_id).await;
+            Err(AppError::unavailable(
+                "guest_admission_timeout",
+                "the machine did not admit the upload in time",
+            ))
+        }
+        Err(_) => stream_guest_body(relay, link, request_id, body).await,
+    }
+}
+
+/// Tells a daemon to forget an upload Connect will not send a body for.
+///
+/// Best effort: the exchange already fails, and a daemon that misses the
+/// cancel still gives the slot back at its idle timeout.
+async fn cancel_guest_admission(
+    relay: &RelayHub,
+    link: crate::relay::DaemonLink,
+    request_id: &str,
+) {
+    let Ok(payload) = serde_json::to_vec(&h4rn_protocol::GuestHttpAdmission {
+        request_id: request_id.to_owned(),
+    }) else {
+        return;
+    };
+    let frame = RelayFrame {
+        conn_id: format!("guest-{request_id}"),
+        kind: RelayFrameKind::GuestHttpCancel,
+        payload,
+    };
+    let _ = relay
+        .send_wait_to(
+            link,
+            RelayServerEvent::Frame { frame },
+            Duration::from_secs(1),
+        )
+        .await;
+}
+
 /// Streams a guest upload to its daemon in frames that stay small.
 async fn stream_guest_body(
-    state: &AppState,
-    daemon: Uuid,
+    relay: &RelayHub,
+    link: crate::relay::DaemonLink,
     request_id: &str,
     body: axum::body::Body,
 ) -> Result<()> {
@@ -2559,18 +2744,18 @@ async fn stream_guest_body(
             ));
         }
         for slice in chunk.chunks(h4rn_protocol::GUEST_CHUNK_BYTES) {
-            send_guest_chunk(state, daemon, request_id, seq, false, slice.to_vec()).await?;
+            send_guest_chunk(relay, link, request_id, seq, false, slice.to_vec()).await?;
             seq += 1;
         }
     }
     // An empty last frame terminates a body that ended on a slice boundary.
-    send_guest_chunk(state, daemon, request_id, seq, true, Vec::new()).await
+    send_guest_chunk(relay, link, request_id, seq, true, Vec::new()).await
 }
 
 /// Sends one body slice to the daemon.
 async fn send_guest_chunk(
-    state: &AppState,
-    daemon: Uuid,
+    relay: &RelayHub,
+    link: crate::relay::DaemonLink,
     request_id: &str,
     seq: u64,
     last: bool,
@@ -2584,10 +2769,9 @@ async fn send_guest_chunk(
     };
     let payload = serde_json::to_vec(&chunk)
         .map_err(|_| AppError::internal("serialise a guest body slice"))?;
-    state
-        .relay
-        .send_wait(
-            daemon,
+    relay
+        .send_wait_to(
+            link,
             RelayServerEvent::Frame {
                 frame: RelayFrame {
                     conn_id: format!("guest-{request_id}"),
@@ -3151,7 +3335,10 @@ mod tests {
     #[tokio::test]
     async fn a_failed_guest_exchange_forgets_its_waiter() {
         let hub = crate::relay::RelayHub::new();
-        let daemon = Uuid::now_v7();
+        let daemon = crate::relay::DaemonLink {
+            device_id: Uuid::now_v7(),
+            connection_id: Uuid::now_v7(),
+        };
         let _waiter = hub.expect_guest("g1", daemon).await;
         let failed = Err::<(), AppError>(AppError::internal("the daemon went away"));
         assert!(discard_failed_exchange(&hub, "g1", failed).await.is_err());
@@ -3165,6 +3352,321 @@ mod tests {
         let _waiter = hub.expect_guest("g2", daemon).await;
         assert!(discard_failed_exchange(&hub, "g2", Ok(())).await.is_ok());
         assert_eq!(hub.pending_guests().await, 1);
+    }
+
+    #[tokio::test]
+    async fn both_proxy_failures_drop_a_started_chunked_answer() {
+        // The two ways `guest_proxy_exchange` fails, one where the frame could
+        // not be delivered and one where the answer timed out. Either must take
+        // a chunked answer that already started with it, waiter and body.
+        for failure in [
+            AppError::unavailable("relay_backpressure", "the other device is too slow"),
+            AppError::unavailable("guest_timeout", "the machine did not answer in time"),
+        ] {
+            let hub = crate::relay::RelayHub::new();
+            let daemon = crate::relay::DaemonLink {
+                device_id: Uuid::now_v7(),
+                connection_id: Uuid::now_v7(),
+            };
+            let exchange = hub.expect_guest_exchange("g1", daemon).await;
+            assert!(
+                hub.complete_guest(
+                    daemon,
+                    h4rn_protocol::GuestHttpResponse {
+                        request_id: "g1".into(),
+                        status: 200,
+                        chunked: true,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                        set_cookie: None,
+                    }
+                )
+                .await,
+                "the chunked answer did not start"
+            );
+            assert!(
+                hub.complete_guest_chunk(
+                    daemon,
+                    h4rn_protocol::GuestHttpChunk {
+                        request_id: "g1".into(),
+                        seq: 0,
+                        last: false,
+                        body: b"first half".to_vec(),
+                    }
+                )
+                .await,
+                "the first half did not arrive"
+            );
+
+            let failed = discard_failed_exchange(&hub, "g1", Err::<(), AppError>(failure)).await;
+            assert!(failed.is_err());
+            assert_eq!(hub.pending_guests().await, 0, "a failure kept a waiter");
+            assert_eq!(
+                hub.pending_guest_bodies().await,
+                0,
+                "a failure kept a half-arrived body"
+            );
+            assert!(
+                exchange.response.await.is_err(),
+                "a failed exchange still delivered an answer"
+            );
+        }
+    }
+
+    /// A registered daemon connection whose outbound queue the test owns.
+    async fn daemon_connection(
+        hub: &Arc<crate::relay::RelayHub>,
+        daemon: Uuid,
+        announces_hello: bool,
+    ) -> (
+        tokio::sync::mpsc::Receiver<RelayServerEvent>,
+        crate::relay::DaemonLink,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let connection = Uuid::now_v7();
+        hub.register(crate::relay::Peer {
+            device_id: daemon,
+            connection_id: connection,
+            announces_hello,
+            user_id: Uuid::now_v7(),
+            machine_id: None,
+            kind: "daemon".to_owned(),
+            tx,
+        })
+        .await;
+        (
+            rx,
+            crate::relay::DaemonLink {
+                device_id: daemon,
+                connection_id: connection,
+            },
+        )
+    }
+
+    /// A daemon connection from a build that predates relay hellos.
+    async fn daemon_peer(
+        hub: &Arc<crate::relay::RelayHub>,
+        daemon: Uuid,
+    ) -> (
+        crate::relay::DaemonLink,
+        tokio::sync::mpsc::Receiver<RelayServerEvent>,
+    ) {
+        let (rx, link) = daemon_connection(hub, daemon, false).await;
+        (link, rx)
+    }
+
+    /// The next frame the daemon would receive, if one arrives.
+    async fn next_daemon_frame(
+        rx: &mut tokio::sync::mpsc::Receiver<RelayServerEvent>,
+    ) -> Option<RelayFrame> {
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+            Ok(Some(RelayServerEvent::Frame { frame })) => Some(frame),
+            _ => None,
+        }
+    }
+
+    /// A daemon connection that announced the negotiated admission protocol.
+    async fn announcing_daemon(
+        hub: &Arc<crate::relay::RelayHub>,
+    ) -> (
+        crate::relay::DaemonLink,
+        tokio::sync::mpsc::Receiver<RelayServerEvent>,
+    ) {
+        let daemon = Uuid::now_v7();
+        let (rx, link) = daemon_connection(hub, daemon, true).await;
+        hub.announce(
+            daemon,
+            link.connection_id,
+            h4rn_protocol::RelayHello {
+                features: vec![h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION.to_owned()],
+            },
+        )
+        .await;
+        (link, rx)
+    }
+
+    #[tokio::test]
+    async fn a_negotiated_upload_waits_for_admission_then_streams() {
+        let hub = Arc::new(crate::relay::RelayHub::new());
+        let (daemon, mut rx) = announcing_daemon(&hub).await;
+        let exchange = hub.expect_guest_exchange("g1", daemon).await;
+        let body = axum::body::Body::from(vec![b'a'; 8]);
+        let sending = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                forward_guest_body(&hub, daemon, "g1", true, exchange.admission, body).await
+            })
+        };
+
+        // The daemon announced admission, so a silent daemon means no byte
+        // leaves Connect, however long it stays silent.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "an upload crossed before the daemon admitted it"
+        );
+        assert!(hub.admit_guest(daemon, "g1").await, "the admission failed");
+
+        let first = next_daemon_frame(&mut rx)
+            .await
+            .expect("the admitted upload never streamed");
+        assert_eq!(first.kind, RelayFrameKind::GuestHttpChunk);
+        let mut last = false;
+        let mut frames = 0;
+        while !last {
+            let frame = next_daemon_frame(&mut rx)
+                .await
+                .expect("the upload stopped before its last frame");
+            let chunk: h4rn_protocol::GuestHttpChunk =
+                serde_json::from_slice(&frame.payload).expect("chunk json");
+            last = chunk.last;
+            frames += 1;
+        }
+        assert!(frames > 0);
+        sending
+            .await
+            .expect("send task")
+            .expect("an admitted upload failed to stream");
+    }
+
+    #[tokio::test]
+    async fn a_negotiated_upload_that_is_never_admitted_fails_without_uploading() {
+        let hub = Arc::new(crate::relay::RelayHub::new());
+        let (daemon, mut rx) = announcing_daemon(&hub).await;
+        let exchange = hub.expect_guest_exchange("g1", daemon).await;
+        let body = axum::body::Body::from(vec![b'a'; 8]);
+        let sending = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                forward_guest_body(&hub, daemon, "g1", true, exchange.admission, body).await
+            })
+        };
+
+        // A current daemon that is merely slow is an error, not an older
+        // daemon: the old timeout-as-version guess sent the body here.
+        let failed = tokio::time::timeout(Duration::from_secs(5), sending)
+            .await
+            .expect("the admission wait never ended")
+            .expect("send task");
+        assert!(failed.is_err(), "a silent daemon was treated as admitted");
+        // The daemon may already hold an upload slot for this exchange; the
+        // only thing Connect sends is a cancel, never a body frame.
+        let frame = next_daemon_frame(&mut rx)
+            .await
+            .expect("the daemon was never told to release the upload");
+        assert_eq!(
+            frame.kind,
+            RelayFrameKind::GuestHttpCancel,
+            "a timed-out admission was not cancelled"
+        );
+        let cancel: h4rn_protocol::GuestHttpAdmission =
+            serde_json::from_slice(&frame.payload).expect("cancel json");
+        assert_eq!(cancel.request_id, "g1");
+        assert!(
+            rx.try_recv().is_err(),
+            "a body crossed for an upload that was never admitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_pinned_to_a_replaced_connection_fails_retryably() {
+        // The daemon reconnects mid-upload. Its new socket has not said hello
+        // and admitted nothing, so the exchange must fail as retryable instead
+        // of moving to it: no chunk may reach a connection that never agreed.
+        let hub = Arc::new(crate::relay::RelayHub::new());
+        let daemon = Uuid::now_v7();
+        let (_first_rx, first) = daemon_connection(&hub, daemon, false).await;
+        let exchange = hub.expect_guest_exchange("g1", first).await;
+        assert!(hub.admit_guest(first, "g1").await);
+        let (mut second_rx, _second) = daemon_connection(&hub, daemon, true).await;
+
+        // The pinned socket is gone, so its capability is unknown, not the new
+        // socket's.
+        assert_eq!(
+            hub.guest_admission(first, Duration::from_millis(20)).await,
+            crate::relay::GuestAdmission::Unknown
+        );
+        let body = axum::body::Body::from(vec![b'a'; 8]);
+        let error = forward_guest_body(&hub, first, "g1", true, exchange.admission, body)
+            .await
+            .expect_err("an upload ran on a connection that was replaced");
+        assert_eq!(error.body().code, "guest_connection_replaced");
+        assert!(
+            second_rx.try_recv().is_err(),
+            "a chunk reached the connection that replaced the upload's own"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_negotiated_upload_refused_by_the_daemon_sends_no_body() {
+        let hub = Arc::new(crate::relay::RelayHub::new());
+        let (daemon, mut rx) = announcing_daemon(&hub).await;
+        let exchange = hub.expect_guest_exchange("g1", daemon).await;
+        let response = exchange.response;
+        let body = axum::body::Body::from(vec![b'a'; 8]);
+        let sending = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                forward_guest_body(&hub, daemon, "g1", true, exchange.admission, body).await
+            })
+        };
+        // Give the upload a moment to prove it waits.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            hub.complete_guest(
+                daemon,
+                h4rn_protocol::GuestHttpResponse {
+                    request_id: "g1".into(),
+                    status: 410,
+                    chunked: false,
+                    headers: vec![("content-type".into(), "text/plain".into())],
+                    body: b"gone".to_vec(),
+                    set_cookie: None,
+                }
+            )
+            .await,
+            "the refusal was not delivered"
+        );
+
+        sending
+            .await
+            .expect("send task")
+            .expect("a refusal failed the proxy instead of answering it");
+        assert!(
+            rx.try_recv().is_err(),
+            "a refused upload still sent its body"
+        );
+        assert_eq!(hub.pending_guests().await, 0, "a refusal kept a waiter");
+        let answer = response
+            .await
+            .expect("the refusal never reached the browser");
+        assert_eq!(answer.status, 410);
+    }
+
+    #[tokio::test]
+    async fn an_older_daemon_keeps_the_bounded_streaming_path() {
+        let hub = Arc::new(crate::relay::RelayHub::new());
+        let daemon = Uuid::now_v7();
+        let (link, mut rx) = daemon_peer(&hub, daemon).await;
+        assert!(
+            !hub.advertises(daemon, h4rn_protocol::RELAY_FEATURE_GUEST_ADMISSION)
+                .await,
+            "a daemon that never sent a hello advertised a feature"
+        );
+        let exchange = hub.expect_guest_exchange("g1", link).await;
+        let body = axum::body::Body::from(vec![b'a'; 8]);
+        let sending = tokio::spawn(async move {
+            forward_guest_body(&hub, link, "g1", false, exchange.admission, body).await
+        });
+
+        // A daemon that did not announce admission keeps the short bounded
+        // wait and then the body, because that build bounds its own buffer.
+        let first = next_daemon_frame(&mut rx)
+            .await
+            .expect("an older daemon never received the body");
+        assert_eq!(first.kind, RelayFrameKind::GuestHttpChunk);
+        let _ = sending.await.expect("send task");
     }
 
     #[test]
