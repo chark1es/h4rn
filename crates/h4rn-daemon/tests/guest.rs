@@ -2672,6 +2672,16 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         self.0.append(meta, domain, wire).await
     }
 
+    async fn append_sent(
+        &self,
+        meta: &h4rn_daemon::journal::ThreadMeta,
+        domain: &[h4rn_core::ThreadEvent],
+        wire: &[Event],
+        item_id: &str,
+    ) -> Result<Vec<u64>, h4rn_daemon::journal::JournalError> {
+        self.0.append_sent(meta, domain, wire, item_id).await
+    }
+
     async fn append_wire(
         &self,
         thread_id: &ThreadId,
@@ -2728,12 +2738,14 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
             .await
     }
 
-    async fn mark_item_pending(
+    async fn fall_back_from_native_resume(
         &self,
         thread_id: &ThreadId,
-        item_id: &str,
-    ) -> Result<(), h4rn_daemon::journal::JournalError> {
-        self.0.mark_item_pending(thread_id, item_id).await
+        switch_generation: u64,
+    ) -> Result<bool, h4rn_daemon::journal::JournalError> {
+        self.0
+            .fall_back_from_native_resume(thread_id, switch_generation)
+            .await
     }
 
     async fn mark_item_accepted(

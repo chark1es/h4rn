@@ -38,7 +38,10 @@ only fail after the switch, so it is not listed.
    those ids are kept durably until a provider accepts the prompt, so a restart
    does not turn a queued message into history. A rate-limited write parks the
    request you sent, not the prompt with its handoff block; the block is built
-   again for the next delivery instead of being wrapped twice.
+   again for the next delivery instead of being wrapped twice. A turn is only
+   shown as done once that acceptance is durable (and the switch flag is
+   cleared), so the thread cannot look idle while the journal still calls your
+   request undelivered.
 5. Each turn is metered against the harness and model that actually ran it.
 6. A recorded usage limit belonged to the old provider, so the switch clears
    it and its countdown leaves the sidebar and the phone inbox. An armed
@@ -62,7 +65,9 @@ reported instead of being carried into a session that cannot start. When the
 agent names its modes but none is a safe replacement — for example it offers
 only `accept-edits` and the thread is in Plan — the switch is refused before it
 commits and names the modes the agent does offer, rather than reporting success
-and failing on the first Send.
+and failing on the first Send. An agent whose whole catalogue is outside h4rn's
+vocabulary (`review-only`, say) is refused by name too: it offers no mode a
+thread could run in, which is not the same as an agent that never named one.
 
 The model is chosen for the new harness rather than carried over, because model
 names rarely mean the same thing across providers.
@@ -81,16 +86,19 @@ instead of splitting work across providers:
 - a rate-limit pause is armed with an auto-resume;
 - an approval is waiting for an answer.
 
-A refused switch changes nothing: the thread keeps its harness, its session and
-its queued or parked work. The refusal carries the advice that fits it, not a
-generic "wait for the turn".
+A refused switch changes nothing: the thread keeps its harness, its session, its
+queued or parked work and its recorded usage limit with its countdown. The
+refusal carries the advice that fits it, not a generic "wait for the turn".
 
 The switch itself is one durable decision. The thread row and the divider are
 written in one transaction, and only then is the old session ended; a journal
 that refuses the write leaves the thread on its old harness with its session
 intact. An approval whose session is gone is dropped rather than blocking every
 later switch, and is resolved on every client so no cue or phone sheet stays up
-for an answer no session can take. Each cue has a daemon-minted client id, and
+for an answer no session can take. The fallback from a dead native resume (an
+imported conversation whose harness exited before it found the session) writes
+only its own fields and only on the switch it read, so a Stop and a switch that
+land while that write waits are not undone by it. Each cue has a daemon-minted client id, and
 the harness's own request id stays private to its session: two agents can both
 ask approval `7` without either answer reaching the other's question, and an
 answer for a retired cue is refused instead of resolving a newer one.

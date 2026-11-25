@@ -792,6 +792,12 @@ struct SwitchSnapshot {
     advertised_models: Vec<String>,
     advertised_efforts: Vec<String>,
     context_window: Option<u64>,
+    /// The limit the switch clears, so a refused switch keeps its countdown.
+    ///
+    /// The old provider's pause is dropped as part of the switch. A journal
+    /// that refuses the write must leave the thread exactly as it was, or the
+    /// summary loses a countdown the thread is still waiting on.
+    limit: Option<LimitBrief>,
 }
 
 impl SwitchSnapshot {
@@ -803,6 +809,49 @@ impl SwitchSnapshot {
         record.advertised_models = self.advertised_models;
         record.advertised_efforts = self.advertised_efforts;
         record.context_window = self.context_window;
+        record.limit = self.limit;
+    }
+}
+
+/// What a Send staged on the record before its one journal commit.
+///
+/// A staged turn only exists if the commit lands. Restoring this on a failed
+/// commit keeps the thread exactly as usable as it was: no active turn with no
+/// journal row, no countdown lost to a message nobody received, and the next
+/// Send or switch is not refused by work that never existed.
+struct StagedTurn {
+    state: ThreadState,
+    last_turn_id: Option<TurnId>,
+    limit: Option<LimitBrief>,
+    resume_at: Option<DateTime<Utc>>,
+    branch: Option<String>,
+    transport_error_reported: Option<TurnId>,
+    transport_report: Option<TransportReport>,
+}
+
+impl StagedTurn {
+    fn of(record: &ThreadRecord) -> Self {
+        Self {
+            state: record.state.clone(),
+            last_turn_id: record.last_turn_id.clone(),
+            limit: record.limit.clone(),
+            resume_at: record.resume_at,
+            branch: record.branch.clone(),
+            transport_error_reported: record.transport_error_reported.clone(),
+            transport_report: record.transport_report.clone(),
+        }
+    }
+
+    /// Takes the staged turn back off the record. The caller holds the lock.
+    fn restore(self, record: &mut ThreadRecord) {
+        record.state = self.state;
+        record.active = None;
+        record.last_turn_id = self.last_turn_id;
+        record.limit = self.limit;
+        record.resume_at = self.resume_at;
+        record.branch = self.branch;
+        record.transport_error_reported = self.transport_error_reported;
+        record.transport_report = self.transport_report;
     }
 }
 
@@ -1177,6 +1226,13 @@ struct TurnDispatch {
     /// attempt starts or the turn ends without accepting them.
     write_attempt: AtomicU64,
     accepted_attempt: AtomicU64,
+    /// The attempt whose acceptance the journal has recorded.
+    ///
+    /// The harness accepting a prompt and the journal recording that are two
+    /// facts. Held output is released on the second: a completion is what lets a
+    /// switch hand the conversation over, and it must not be published before
+    /// the request it answers is durably the person's.
+    durable_attempt: AtomicU64,
     /// Wakes the pump when a write attempt settles: accepted, or failed.
     write_settled: tokio::sync::Notify,
     /// Whether this turn has been through the history handoff step.
@@ -1449,6 +1505,7 @@ struct TurnError {
 /// the prompt failure that carries stderr, an exit row). These reports are one
 /// row, so they are merged into the most specific message rather than published
 /// separately.
+#[derive(Clone, Debug)]
 struct TransportReport {
     turn_id: TurnId,
     message: String,
@@ -1558,6 +1615,7 @@ impl TurnDispatch {
             on_the_wire: AtomicBool::new(false),
             write_attempt: AtomicU64::new(0),
             accepted_attempt: AtomicU64::new(0),
+            durable_attempt: AtomicU64::new(0),
             write_settled: tokio::sync::Notify::new(),
             handoff_applied: AtomicBool::new(false),
             prompt_item_id: std::sync::Mutex::new(prompt_item_id),
@@ -1625,6 +1683,17 @@ impl TurnDispatch {
     fn write_accepted(&self) -> bool {
         let attempt = self.write_attempt.load(Ordering::SeqCst);
         attempt != 0 && self.accepted_attempt.load(Ordering::SeqCst) == attempt
+    }
+
+    /// Records that `attempt`'s acceptance reached the journal.
+    fn note_write_durable(&self, attempt: u64) {
+        self.durable_attempt.store(attempt, Ordering::SeqCst);
+    }
+
+    /// Whether the current write attempt's acceptance is durable.
+    fn write_durable(&self) -> bool {
+        let attempt = self.write_attempt.load(Ordering::SeqCst);
+        attempt != 0 && self.durable_attempt.load(Ordering::SeqCst) == attempt
     }
 
     /// The number of the write attempt that is handing the prompt over now.
@@ -2140,6 +2209,7 @@ impl ThreadRecord {
             advertised_models: self.advertised_models.clone(),
             advertised_efforts: self.advertised_efforts.clone(),
             context_window: self.context_window,
+            limit: self.limit.clone(),
         }
     }
 
@@ -2644,7 +2714,7 @@ impl ThreadRecord {
         self.active.as_ref().is_some_and(|active| {
             active.promoted
                 && active.dispatch.state() == DispatchState::Claimed
-                && !active.dispatch.write_accepted()
+                && !active.dispatch.write_durable()
         })
     }
 
@@ -3652,15 +3722,6 @@ impl ThreadManager {
         );
         let turn_id = dispatch.turn_id.clone();
         let item_id = user_item_id(&turn_id);
-        if let Err(error) = self
-            .inner
-            .journal
-            .mark_item_pending(&thread_id, &item_id)
-            .await
-        {
-            return Err(ManagerError::Internal(error.to_string()));
-        }
-
         let domain = vec![
             ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -3692,15 +3753,12 @@ impl ThreadManager {
         let handle: ThreadHandle = Arc::new(Mutex::new(record));
         let (summary, seq) = {
             let mut record = handle.lock().await;
-            let emitted = self.inner.emit(&mut record, domain, wire).await;
-            if emitted.is_err() {
-                let _ = self
-                    .inner
-                    .journal
-                    .mark_item_accepted(&thread_id, &item_id)
-                    .await;
-            }
-            emitted?
+            // The new thread's first message and its undelivered marker are one
+            // commit: a thread whose row exists without either would be a
+            // conversation with a turn nothing can ever deliver.
+            self.inner
+                .emit_sent(&mut record, domain, wire, &item_id)
+                .await?
         };
         self.inner
             .threads
@@ -4016,16 +4074,6 @@ impl ThreadManager {
             let release_pending =
                 stale_schedule && record.pending_turn() && record.parks_persisted_prompt();
             let item_id = fresh_item_id("user");
-            // The message is journaled now but may wait in the queue, or be
-            // forgotten by a restart. Mark it durable until a provider takes it.
-            if let Err(error) = self
-                .inner
-                .journal
-                .mark_item_pending(thread_id, &item_id)
-                .await
-            {
-                return Err(ManagerError::Internal(error.to_string()));
-            }
             record.queued.push_back(QueuedTurn {
                 input: UserInput {
                     text: text.clone(),
@@ -4051,27 +4099,34 @@ impl ThreadManager {
                 record.meta.parked = None;
                 record.limit = None;
             }
-            let pending_item = item_id.clone();
             let wire = vec![Event::ItemCompleted {
                 thread_id: thread_id.clone(),
                 turn_id: active_turn_id.clone(),
                 item: Item::Message {
-                    item_id,
+                    item_id: item_id.clone(),
                     role: MessageRole::User,
                     text,
                     attachments: resolved_attachments,
                 },
                 at: None,
             }];
-            let emitted = self.inner.emit(&mut record, domain, wire).await;
+            // The message it is waiting to run and its "no provider has it yet"
+            // marker are one commit, so neither can outlive the other.
+            let emitted = self
+                .inner
+                .emit_sent(&mut record, domain, wire, &item_id)
+                .await;
             if emitted.is_err() {
-                // The message never reached the journal, so no handoff needs
-                // to know it was undelivered.
-                let _ = self
-                    .inner
-                    .journal
-                    .mark_item_accepted(thread_id, &pending_item)
-                    .await;
+                // The message never reached the journal, so it must not stay in
+                // the queue: the next settlement would promote a prompt nothing
+                // recorded, under a turn that is already over.
+                if record
+                    .queued
+                    .back()
+                    .is_some_and(|queued| queued.item_id == item_id)
+                {
+                    record.queued.pop_back();
+                }
             }
             drop(record);
             if release_pending {
@@ -4118,6 +4173,12 @@ impl ThreadManager {
             .await;
         }
 
+        // Everything the turn is about to stage on the record, kept until the
+        // one journal commit that makes it real. A failed commit must not leave
+        // an active dispatch (and the lifecycle it opened) behind: later sends
+        // would queue behind a turn nothing can deliver, and a switch would be
+        // refused by it.
+        let staged = StagedTurn::of(&record);
         let dispatch = record.begin_turn_for_work(
             now,
             UserInput {
@@ -4129,18 +4190,9 @@ impl ThreadManager {
         );
         let turn_id = dispatch.turn_id.clone();
         let item_id = user_item_id(&turn_id);
-        // The item is durable before the event is; a restart between the two
-        // would otherwise read a message no provider ever saw as history.
-        if let Err(error) = self
-            .inner
-            .journal
-            .mark_item_pending(thread_id, &item_id)
-            .await
+        if record.scheduled_limit.take().is_some()
+            && let Some(meter) = self.inner.meter.get()
         {
-            return Err(ManagerError::Internal(error.to_string()));
-        }
-        let stale_schedule = record.scheduled_limit.take().is_some();
-        if stale_schedule && let Some(meter) = self.inner.meter.get() {
             let _ = meter.cancel_schedule(thread_id).await;
         }
         let domain = vec![
@@ -4170,15 +4222,20 @@ impl ThreadManager {
                 harness: Some(record.meta.harness),
             },
         ];
-        let emitted = self.inner.emit(&mut record, domain, wire).await;
-        if emitted.is_err() {
-            let _ = self
-                .inner
-                .journal
-                .mark_item_accepted(thread_id, &item_id)
-                .await;
-        }
-        let (_, seq) = emitted?;
+        // The message and its "no provider has it yet" marker are one commit,
+        // so neither can outlive the other. The staged turn goes back when the
+        // commit is refused.
+        let emitted = self
+            .inner
+            .emit_sent(&mut record, domain, wire, &item_id)
+            .await;
+        let (_, seq) = match emitted {
+            Ok(emitted) => emitted,
+            Err(error) => {
+                staged.restore(&mut record);
+                return Err(error);
+            }
+        };
 
         // A setting this session could not switch in place (an effort or model
         // it only applies when starting) makes this the turn that must start a
@@ -6317,7 +6374,33 @@ impl Inner {
         &self,
         record: &mut ThreadRecord,
         domain: Vec<ThreadEvent>,
+        wire: Vec<Event>,
+    ) -> Result<(ThreadSummary, u64), ManagerError> {
+        self.emit_recording(record, domain, wire, None).await
+    }
+
+    /// [`Self::emit`] for a message a provider has not accepted yet.
+    ///
+    /// The events and the "undelivered" marker are one commit. Sent apart, a
+    /// failure between them leaves either a request that vanishes from the next
+    /// handoff or a marker no message ever matches.
+    async fn emit_sent(
+        &self,
+        record: &mut ThreadRecord,
+        domain: Vec<ThreadEvent>,
+        wire: Vec<Event>,
+        item_id: &str,
+    ) -> Result<(ThreadSummary, u64), ManagerError> {
+        self.emit_recording(record, domain, wire, Some(item_id))
+            .await
+    }
+
+    async fn emit_recording(
+        &self,
+        record: &mut ThreadRecord,
+        domain: Vec<ThreadEvent>,
         mut wire: Vec<Event>,
+        pending_item: Option<&str>,
     ) -> Result<(ThreadSummary, u64), ManagerError> {
         for event in &domain {
             record.state = record.state.clone().apply(event);
@@ -6333,11 +6416,15 @@ impl Inner {
         // it is durable, to close a socket in that exact window.
         self.pause_append(&domain).await;
         let _guard = self.emit_lock.lock().await;
-        let seqs = self
-            .journal
-            .append(&record.meta, &domain, &wire)
-            .await
-            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        let appended = match pending_item {
+            Some(item_id) => {
+                self.journal
+                    .append_sent(&record.meta, &domain, &wire, item_id)
+                    .await
+            }
+            None => self.journal.append(&record.meta, &domain, &wire).await,
+        };
+        let seqs = appended.map_err(|error| ManagerError::Internal(error.to_string()))?;
         self.broadcast(&record.meta.thread_id, &wire, &seqs);
         record.last_signature = Some(SummarySignature::of(&summary));
         let seq = seqs.last().copied().unwrap_or(0);
@@ -7903,14 +7990,15 @@ impl Inner {
         match sent {
             Ok(()) => {
                 // The harness took the prompt: everything it reported during the
-                // write belongs to this turn and is released in order.
+                // write belongs to this turn. Its acceptance is recorded here,
+                // and its *durability* below, before any of it is published: a
+                // completion exposed before the acceptance is durable can be
+                // settled, switched and handed over while the journal still
+                // calls the person's prompt undelivered. The handoff would then
+                // contain the reply without the request that produced it.
                 dispatch.accept_write(attempt);
-                dispatch.note_write_settled();
-                // The provider accepted this prompt, so its user item is no
-                // longer undelivered. Keeping it pending would leave a real
-                // turn out of every later handoff.
-                self.mark_item_accepted(&handle, dispatch.prompt_item_id())
-                    .await;
+                let prompt_item = dispatch.prompt_item_id();
+                self.mark_item_accepted(&handle, prompt_item).await;
                 if dispatch.handoff_applied()
                     && let Some(generation) = dispatch.handoff_generation()
                 {
@@ -7920,6 +8008,8 @@ impl Inner {
                     // history for the retry.
                     self.clear_handoff_pending(&handle, generation).await;
                 }
+                dispatch.note_write_durable(attempt);
+                dispatch.note_write_settled();
             }
             Err(error) => {
                 // Only the adapter's typed limit may arm a resume: an arbitrary
@@ -8527,6 +8617,39 @@ impl Inner {
                     held_owner = Some((dispatch, attempt));
                     continue;
                 }
+            }
+            // A completion settles the turn, and a settlement is what lets the
+            // next switch hand the conversation over: the prompt it answers must
+            // be durably accepted first, or the handoff would carry the reply
+            // without the request. So a completion read while its write is still
+            // being written is held even on a person's Send, and is applied after
+            // that write's acceptance is durable. A completion that already has
+            // held output behind it is kept for the same reason: the settlement
+            // would drop text and tools that belong to the turn it ends. A
+            // closed transport is the exception only when nothing is held: its
+            // exit report is what the row must carry, and the write that died
+            // owns the turn.
+            let held_completion = if matches!(&event, HarnessEvent::TurnCompleted { .. })
+                && (!held.is_empty() || !health.as_ref().is_some_and(|health| health.is_closed()))
+            {
+                record.active.as_ref().and_then(|active| {
+                    (active.dispatch.state() == DispatchState::Claimed
+                        && !active.dispatch.write_durable())
+                    .then(|| {
+                        (
+                            Arc::clone(&active.dispatch),
+                            active.dispatch.write_attempt(),
+                        )
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some((dispatch, attempt)) = held_completion {
+                drop(record);
+                held.push_back(event);
+                held_owner = Some((dispatch, attempt));
+                continue;
             }
             // A turn whose prompt is not on the wire yet cannot own this
             // output. The ACP bridge publishes a turn's settlement behind the
@@ -9405,7 +9528,7 @@ impl Inner {
         handle: &ThreadHandle,
         turn: &Arc<TurnDispatch>,
     ) -> HandoffRetry {
-        let meta = {
+        let (thread_id, switch_generation) = {
             let mut record = handle.lock().await;
             // Only the turn this pump's startup carried can be retried; a turn
             // that arrived later belongs to a session of its own.
@@ -9444,10 +9567,20 @@ impl Inner {
                 imported.native_resume = false;
             }
             record.session = SessionSlot::None;
-            record.meta.clone()
+            (record.meta.thread_id.clone(), record.meta.switch_generation)
         };
-        if let Err(error) = self.journal.upsert_thread(&meta).await {
-            tracing::warn!(%error, "could not clear a failed imported resume id");
+        // Only the fallback's own fields, and only while this row is still the
+        // switch they belong to. The write earlier cloned the whole row and
+        // upserted it after releasing the lock, so a Stop and a switch in that
+        // window were undone: the durable row went back to the harness the
+        // person had just left. A switch that lands after this read names a
+        // newer generation and the row is left alone.
+        if let Err(error) = self
+            .journal
+            .fall_back_from_native_resume(&thread_id, switch_generation)
+            .await
+        {
+            tracing::warn!(%error, "could not record a fallback from a dead native resume");
         }
         // The next claim builds the one handoff for this prompt. Doing it here
         // too would wrap a prompt the claim is already wrapping: the delivery
@@ -10442,9 +10575,6 @@ impl Inner {
         );
         let turn_id = dispatch.turn_id.clone();
         let item_id = user_item_id(&turn_id);
-        if let Err(error) = self.journal.mark_item_pending(&thread_id, &item_id).await {
-            tracing::error!(%error, "could not record the auto-resume prompt as undelivered");
-        }
         let domain = vec![
             ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -10472,11 +10602,10 @@ impl Inner {
                 harness: Some(record.meta.harness),
             },
         ];
-        if let Err(error) = self.emit(&mut record, domain, wire).await {
+        if let Err(error) = self.emit_sent(&mut record, domain, wire, &item_id).await {
             // The turn is begun and its pause is gone; the prompt still needs
             // an owner. The ledger records the failure so the schedule can be
             // re-checked, but the delivery below is not conditional on it.
-            let _ = self.journal.mark_item_accepted(&thread_id, &item_id).await;
             tracing::error!(%error, "could not record the auto-resume turn");
         }
         let stale = record.detach_stale_session();
@@ -11342,6 +11471,31 @@ mod tests {
         fail_next_appends: std::sync::atomic::AtomicUsize,
         fail_next_reads: std::sync::atomic::AtomicUsize,
         clear_gate: std::sync::Mutex<Option<Arc<ClearGate>>>,
+        fallback_gate: std::sync::Mutex<Option<Arc<FallbackGate>>>,
+        accept_gate: std::sync::Mutex<Option<Arc<AcceptGate>>>,
+    }
+
+    /// A test's hold on the durable acceptance write.
+    ///
+    /// The provider has taken the prompt; the journal has not recorded it yet.
+    /// Nothing may show the turn as finished in that window.
+    #[derive(Default)]
+    struct AcceptGate {
+        reached: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        done: tokio::sync::Notify,
+    }
+
+    /// A test's hold on the durable fallback write.
+    ///
+    /// The fallback has already changed the in-memory record and is about to
+    /// make it durable. A Stop and a switch in that window must not be undone by
+    /// the write that follows.
+    #[derive(Default)]
+    struct FallbackGate {
+        reached: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        done: tokio::sync::Notify,
     }
 
     /// A test's hold on the durable handoff-clear write.
@@ -11359,6 +11513,8 @@ mod tests {
                 fail_next_appends: std::sync::atomic::AtomicUsize::new(0),
                 fail_next_reads: std::sync::atomic::AtomicUsize::new(0),
                 clear_gate: std::sync::Mutex::new(None),
+                fallback_gate: std::sync::Mutex::new(None),
+                accept_gate: std::sync::Mutex::new(None),
             })
         }
 
@@ -11370,6 +11526,26 @@ mod tests {
         /// Makes the next `count` conversation reads fail.
         fn fail_next_reads(&self, count: usize) {
             self.fail_next_reads.store(count, Ordering::SeqCst);
+        }
+
+        /// Holds the next fallback write after the record already changed.
+        fn hold_next_fallback(&self) -> Arc<FallbackGate> {
+            let gate = Arc::new(FallbackGate::default());
+            *self
+                .fallback_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate.clone());
+            gate
+        }
+
+        /// Holds the next durable acceptance of a prompt the provider took.
+        fn hold_next_accept(&self) -> Arc<AcceptGate> {
+            let gate = Arc::new(AcceptGate::default());
+            *self
+                .accept_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate.clone());
+            gate
         }
 
         /// Holds the next handoff-flag clear after in-memory state changed.
@@ -11409,6 +11585,22 @@ mod tests {
                 )));
             }
             self.inner.append(meta, domain, wire).await
+        }
+
+        async fn append_sent(
+            &self,
+            meta: &ThreadMeta,
+            domain: &[ThreadEvent],
+            wire: &[Event],
+            item_id: &str,
+        ) -> Result<Vec<u64>, crate::journal::JournalError> {
+            if self.fail_next_appends.load(Ordering::SeqCst) > 0 {
+                self.fail_next_appends.fetch_sub(1, Ordering::SeqCst);
+                return Err(crate::journal::JournalError::Io(std::io::Error::other(
+                    "injected journal write failure",
+                )));
+            }
+            self.inner.append_sent(meta, domain, wire, item_id).await
         }
 
         async fn append_wire(
@@ -11488,12 +11680,29 @@ mod tests {
                 .await
         }
 
-        async fn mark_item_pending(
+        async fn fall_back_from_native_resume(
             &self,
             thread_id: &ThreadId,
-            item_id: &str,
-        ) -> Result<(), crate::journal::JournalError> {
-            self.inner.mark_item_pending(thread_id, item_id).await
+            switch_generation: u64,
+        ) -> Result<bool, crate::journal::JournalError> {
+            let gate = self
+                .fallback_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(gate) = gate {
+                gate.reached.notify_one();
+                gate.resume.notified().await;
+                let result = self
+                    .inner
+                    .fall_back_from_native_resume(thread_id, switch_generation)
+                    .await;
+                gate.done.notify_one();
+                return result;
+            }
+            self.inner
+                .fall_back_from_native_resume(thread_id, switch_generation)
+                .await
         }
 
         async fn mark_item_accepted(
@@ -11501,6 +11710,18 @@ mod tests {
             thread_id: &ThreadId,
             item_id: &str,
         ) -> Result<(), crate::journal::JournalError> {
+            let gate = self
+                .accept_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(gate) = gate {
+                gate.reached.notify_one();
+                gate.resume.notified().await;
+                let result = self.inner.mark_item_accepted(thread_id, item_id).await;
+                gate.done.notify_one();
+                return result;
+            }
             self.inner.mark_item_accepted(thread_id, item_id).await
         }
 
@@ -15836,39 +16057,36 @@ mod tests {
             .expect("create");
 
         // The fake's send has not returned (the gate is closed): a pump that
-        // waited for the session lock could publish nothing here.
-        let mut assistant = String::new();
-        let completed = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
+        // waited for the session lock could publish nothing here. Everything the
+        // adapter streamed reaches the turn, and the completion waits: the
+        // prompt is not durably accepted until `send` returns `Ok`.
+        let mut streamed = 0usize;
+        let completed_early = tokio::time::timeout(Duration::from_secs(10), async {
+            while streamed < DELTAS {
                 let wire = next_event(&mut events).await;
                 match wire.event {
-                    Event::ItemCompleted {
-                        item:
-                            Item::Message {
-                                role: MessageRole::Assistant,
-                                text,
-                                ..
-                            },
-                        ..
-                    } => assistant = text,
-                    Event::TurnCompleted {
-                        turn_id, status, ..
-                    } => return (turn_id, status),
+                    Event::MessageDelta { text, .. } => streamed += text.chars().count(),
+                    Event::TurnCompleted { .. } => return true,
                     _ => {}
                 }
             }
+            false
         })
         .await
         .expect("the pump applied the whole stream while send held the session");
-        assert_eq!(completed.0, created.turn_id);
-        assert_eq!(completed.1, TurnStatus::Completed);
-        assert_eq!(
-            assistant.chars().count(),
-            DELTAS,
-            "every streamed delta reached the turn"
+        assert_eq!(streamed, DELTAS, "every streamed delta reached the turn");
+        assert!(
+            !completed_early,
+            "the turn completed before its prompt was accepted"
         );
 
         send_done.release();
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the accepted write completed the turn");
+        assert_eq!(turn, created.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
         let _ = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
             .await;
@@ -25304,6 +25522,90 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A switch the journal refuses keeps the countdown it was about to clear.
+    ///
+    /// The old provider's limit is dropped as part of the switch. A refused
+    /// write must put it back: the thread is still waiting on that reset, and a
+    /// summary without it says the pause is over.
+    #[tokio::test]
+    async fn a_failed_switch_keeps_the_old_providers_limit() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let (claude, injector) = FakeHarness::new().with_event_injector();
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(
+                    StaticHarnessCatalog::with(Arc::new(claude))
+                        .and(Arc::new(FakeHarness::new().with_kind(HarnessKind::Codex))),
+                ),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let reset_at = Utc::now() + chrono::Duration::minutes(5);
+        injector.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: false,
+        });
+        loop {
+            let wire = next_event(&mut events).await;
+            if matches!(wire.event, Event::UsageLimitHit { .. }) {
+                break;
+            }
+        }
+        assert!(
+            manager
+                .thread_summary(&created.thread_id)
+                .await
+                .expect("summary")
+                .limit
+                .is_some()
+        );
+
+        journal.fail_next_appends(1);
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect_err("the journal refuses the switch");
+
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_eq!(summary.harness, HarnessKind::ClaudeCode);
+        assert_eq!(
+            summary.agent_state,
+            AgentState::RateLimited,
+            "the refused switch cleared the countdown"
+        );
+        assert!(
+            summary.limit.is_some(),
+            "the refused switch dropped the recorded limit"
+        );
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        assert!(handle.lock().await.limit.is_some());
+        manager.shutdown().await;
+    }
+
     /// A session that already died between turns belongs to the old provider;
     /// its late exit report must not pause the switched thread or publish a row.
     #[tokio::test]
@@ -25685,6 +25987,7 @@ mod tests {
             "demo".to_owned(),
             crate::provider_switch::TargetCapabilities {
                 modes: vec![RuntimeMode::ApprovalRequired, RuntimeMode::AutoAcceptEdits],
+                other_modes: Vec::new(),
                 efforts: Vec::new(),
                 fast: false,
             },
@@ -25916,10 +26219,324 @@ mod tests {
         manager.shutdown().await;
     }
 
-    /// A late handoff-clear write from the session the thread left cannot undo
-    /// a later switch's durable row.
+    /// A Send the journal refuses leaves no turn behind.
+    ///
+    /// The staged turn is not real if its commit failed. Leaving it active would
+    /// queue every later message behind a prompt no provider will ever get, and
+    /// refuse every switch for work that does not exist.
     #[tokio::test]
-    async fn a_late_handoff_clear_cannot_undo_a_later_switch() {
+    async fn a_send_the_journal_refuses_leaves_no_turn_behind() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(
+                    StaticHarnessCatalog::with(Arc::new(FakeHarness::new()))
+                        .and(Arc::new(FakeHarness::new().with_kind(HarnessKind::Codex))),
+                ),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+
+        journal.fail_next_appends(1);
+        let refused = manager
+            .send_message(&created.thread_id, "lost".into(), Vec::new())
+            .await;
+        assert!(refused.is_err(), "the journal rejected the message");
+
+        {
+            let record = handle.lock().await;
+            assert!(
+                record.active.is_none(),
+                "the refused send left a turn no provider can deliver"
+            );
+            assert!(record.queued.is_empty());
+        }
+        assert!(
+            journal
+                .pending_item_ids(&created.thread_id)
+                .await
+                .expect("pending items")
+                .is_empty(),
+            "the refused message left an undelivered marker behind"
+        );
+
+        // Nothing is in flight, so a switch is not refused, and the next Send
+        // runs at once instead of waiting behind the lost turn.
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("the thread is idle and switches");
+        let sent = manager
+            .send_message(&created.thread_id, "again".into(), Vec::new())
+            .await
+            .expect("the next send is accepted");
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the next send runs at once");
+        assert_eq!(turn, sent.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        manager.shutdown().await;
+    }
+
+    /// A late fallback write from the session the thread left cannot undo a
+    /// later switch.
+    ///
+    /// The imported thread's one native resume dies, so the daemon falls back to
+    /// a handoff. While that fallback's durable write is still to come, the turn
+    /// is stopped and the thread switches to Codex. The write that lands after
+    /// must change only the fallback's fields, and only on the switch it saw:
+    /// the row the person chose stays the row a restart reads.
+    #[tokio::test]
+    async fn a_late_fallback_cannot_undo_a_later_switch() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let claude = FakeHarness::new().with_resume_death("No conversation found with session ID");
+        let codex = FakeHarness::new().with_kind(HarnessKind::Codex);
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(StaticHarnessCatalog::with(Arc::new(claude)).and(Arc::new(codex))),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let now = Utc::now();
+        manager
+            .import_thread(NewImportedThread {
+                host: host.clone(),
+                harness: HarnessKind::ClaudeCode,
+                workspace_path: workspace.path().display().to_string(),
+                project_path: None,
+                model: "fake-model".into(),
+                title: "Imported".into(),
+                created_at: now,
+                last_active: now,
+                resume_id: Some("saved-session".into()),
+                source: h4rn_protocol::ImportSource::ClaudeCode,
+                source_path: workspace.path().join("saved.jsonl").display().to_string(),
+                source_key: "claude_code:late-fallback".into(),
+                messages: vec![
+                    ImportedThreadMessage {
+                        role: MessageRole::User,
+                        text: "an earlier request".into(),
+                        at: now,
+                    },
+                    ImportedThreadMessage {
+                        role: MessageRole::Assistant,
+                        text: "an earlier reply".into(),
+                        at: now,
+                    },
+                ],
+            })
+            .await
+            .expect("import");
+        let thread_id = manager
+            .list_threads(&ThreadFilter::default())
+            .await
+            .first()
+            .expect("imported thread")
+            .thread_id
+            .clone();
+        let handle = manager.inner.handle(&thread_id).await.expect("handle");
+
+        // Hold the fallback's durable write: the record already cleared the
+        // dead resume id and owes the handoff, the row still names it.
+        let gate = journal.hold_next_fallback();
+        manager
+            .send_message(&thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("send");
+        tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
+            .await
+            .expect("the fallback reached its durable write");
+
+        // The requeued prompt goes onto a fresh session and finishes, all while
+        // the fallback's durable write is still waiting.
+        manager.inner.spawn_session(handle.clone());
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let outcome = manager
+            .switch_thread_harness(&thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("the idle thread switches");
+        assert_eq!(outcome.summary.harness, HarnessKind::Codex);
+
+        gate.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), gate.done.notified())
+            .await
+            .expect("the late fallback write finished");
+
+        let meta = journal
+            .list_threads()
+            .await
+            .expect("threads")
+            .into_iter()
+            .find(|meta| meta.thread_id == thread_id)
+            .expect("thread row");
+        assert_eq!(
+            meta.harness,
+            HarnessKind::Codex,
+            "the late fallback restored the harness the person left"
+        );
+        assert!(
+            meta.handoff_pending,
+            "the switched thread no longer owes its history"
+        );
+        assert!(meta.resume_id.is_none(), "the dead resume id came back");
+        let record = handle.lock().await;
+        assert_eq!(record.meta.harness, HarnessKind::Codex);
+        assert!(record.meta.resume_id.is_none());
+        drop(record);
+        manager.shutdown().await;
+    }
+
+    /// A turn is not shown as finished before its prompt is durably accepted.
+    ///
+    /// The provider takes the prompt and reports the whole turn while that
+    /// acceptance is being written. If the settlement slipped out first, a
+    /// switch in that window would hand over the reply without the request that
+    /// produced it; the completion waits for the acceptance, and the handoff
+    /// the new harness receives holds both.
+    #[tokio::test]
+    async fn a_finished_turn_waits_for_its_durable_acceptance() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(
+                    StaticHarnessCatalog::with(Arc::new(FakeHarness::new()))
+                        .and(Arc::new(FakeHarness::new().with_kind(HarnessKind::Codex))),
+                ),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // Hold the acceptance write of the second prompt. The fake reports the
+        // whole turn while `send` runs, so the completion is ready before the
+        // acceptance is durable.
+        let gate = journal.hold_next_accept();
+        let second = manager
+            .send_message(&created.thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("the second turn is accepted");
+        tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
+            .await
+            .expect("the acceptance write was reached");
+
+        // The turn must not have completed while the request is still marked
+        // undelivered.
+        let completed = tokio::time::timeout(Duration::from_millis(50), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted { turn_id, .. } = wire.event
+                    && turn_id == second.turn_id
+                {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            !completed,
+            "the turn finished before its prompt was durably accepted"
+        );
+
+        gate.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), gate.done.notified())
+            .await
+            .expect("the acceptance write finished");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("switch to Codex");
+        let sent = manager
+            .send_message(&created.thread_id, "next".into(), Vec::new())
+            .await
+            .expect("the handoff turn");
+        let mut echoed = String::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted { turn_id, .. } if turn_id == sent.turn_id => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the handoff turn completed");
+        assert_eq!(
+            echoed.matches("Earlier conversation history").count(),
+            1,
+            "{echoed}"
+        );
+        assert!(
+            echoed.contains("carry on"),
+            "the accepted request is missing from the handoff: {echoed}"
+        );
+        assert!(
+            echoed.contains("echo: carry on"),
+            "the reply is missing from the handoff: {echoed}"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A turn is not shown as done until its handoff flag is durably cleared.
+    ///
+    /// The completed prompt is the one the new harness accepted. Publishing the
+    /// completion first would let the thread look idle while the row still says
+    /// the history is owed, so a switch in that window would send it again. The
+    /// clear lands first, and the next turn resumes the session instead.
+    #[tokio::test]
+    async fn a_handoff_clear_lands_before_the_turn_is_shown_as_done() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let host = HostId::new("host_test");
         let journal = FlakyJournal::in_memory().await;
@@ -25950,50 +26567,76 @@ mod tests {
             .await
             .expect("switch to Codex");
 
-        // Hold Codex's accepted-prompt clear after it left in-memory state.
+        // Hold the accepted prompt's clear after the record changed.
         let gate = journal.hold_next_handoff_clear();
-        manager
+        let sent = manager
             .send_message(&created.thread_id, "carry on".into(), Vec::new())
             .await
             .expect("the Codex turn starts");
         tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
             .await
             .expect("the clear reached the journal");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
 
-        // The thread moves back while the old clear is still waiting.
-        manager
-            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::ClaudeCode))
-            .await
-            .expect("switch back to Claude");
+        // The fake answered the prompt already, but the turn must not be shown
+        // as done while the row still owes the history.
+        let early = tokio::time::timeout(Duration::from_millis(50), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted { turn_id, .. } = wire.event
+                    && turn_id == sent.turn_id
+                {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            !early,
+            "the turn was shown as done before its handoff flag was cleared"
+        );
         gate.resume.notify_one();
         tokio::time::timeout(Duration::from_secs(5), gate.done.notified())
             .await
-            .expect("the late clear finished");
+            .expect("the clear finished");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
 
-        let meta = journal
+        let row = journal
             .list_threads()
             .await
             .expect("threads")
             .into_iter()
             .find(|meta| meta.thread_id == created.thread_id)
             .expect("thread row");
-        assert_eq!(meta.harness, HarnessKind::ClaudeCode, "old row restored");
         assert!(
-            meta.handoff_pending,
-            "the late clear undid the newer switch's handoff"
+            !row.handoff_pending,
+            "the accepted prompt did not clear the durable handoff"
         );
-        assert!(meta.resume_id.is_none(), "the old resume id came back");
-        let handle = manager
-            .inner
-            .handle(&created.thread_id)
+        assert_eq!(row.harness, HarnessKind::Codex);
+        assert!(row.resume_id.is_some(), "the new session is resumable");
+
+        // The next turn resumes the session: the history is not sent again.
+        let next = manager
+            .send_message(&created.thread_id, "again".into(), Vec::new())
             .await
-            .expect("handle");
-        {
-            let record = handle.lock().await;
-            assert_eq!(record.meta.harness, HarnessKind::ClaudeCode);
-            assert!(record.meta.handoff_pending);
-        }
+            .expect("the next turn");
+        let mut echoed = String::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted { turn_id, .. } if turn_id == next.turn_id => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the next turn completed");
+        assert!(
+            !echoed.contains("Earlier conversation history"),
+            "the cleared handoff was sent again: {echoed}"
+        );
         manager.shutdown().await;
     }
 
@@ -26141,95 +26784,335 @@ mod tests {
         );
     }
 
-    /// A parked prompt restored after a restart carries the handoff exactly
-    /// once, even though the thread never accepted the earlier attempt.
-    #[tokio::test]
-    async fn a_restart_delivers_a_parked_handoff_prompt_with_one_history_header() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let journal_path = workspace.path().join("journal.sqlite");
-        let meter_path = workspace.path().join("meter.sqlite");
-        let reset_at = Utc::now() + chrono::Duration::minutes(20);
-        let journal = Arc::new(
-            SqliteJournal::connect(&journal_path)
-                .await
-                .expect("journal"),
+    /// Opens a manager on a journal and meter file, so a restart reads them.
+    async fn open_persistent_manager(
+        journal_path: &std::path::Path,
+        meter_path: &std::path::Path,
+        claude: FakeHarness,
+        codex: FakeHarness,
+    ) -> Arc<ThreadManager> {
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::connect(journal_path).await.expect("journal"));
+        let manager = Arc::new(
+            ThreadManager::open(
+                journal,
+                Arc::new(StaticHarnessCatalog::with(Arc::new(claude)).and(Arc::new(codex))),
+                HostId::new("host_test"),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
         );
-        let meter = Arc::new(
-            h4rn_meter::MeterHub::open(&meter_path)
-                .await
-                .expect("meter"),
-        );
-        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
-        let ParkedRequeue {
-            _workspace,
-            manager,
-            thread_id,
-            second,
-            ..
-        } = parked;
-        // This pause sits on a thread that owes its history to the next
-        // delivery, exactly as one parked just after a harness switch does.
-        {
-            let handle = manager
-                .inner
-                .handle(&thread_id)
-                .await
-                .expect("thread handle");
-            let mut record = handle.lock().await;
-            record.meta.handoff_pending = true;
-        }
-        let meta = manager.thread_meta(&thread_id).await.expect("meta");
+        manager.set_meter(Arc::new(
+            h4rn_meter::MeterHub::open(meter_path).await.expect("meter"),
+        ));
+        manager.resync_meter_state().await;
+        manager
+    }
+
+    /// The durable row for one thread.
+    async fn thread_row(manager: &ThreadManager, thread_id: &ThreadId) -> ThreadMeta {
         manager
             .inner
             .journal
-            .upsert_thread(&meta)
+            .list_threads()
             .await
-            .expect("parked row");
-        manager.shutdown().await;
-        drop(manager);
+            .expect("threads")
+            .into_iter()
+            .find(|meta| &meta.thread_id == thread_id)
+            .expect("thread row")
+    }
 
-        let journal = Arc::new(
-            SqliteJournal::connect(&journal_path)
-                .await
-                .expect("journal after restart"),
-        );
-        let manager =
-            open_test_manager_with_journal(FakeHarness::new(), HostId::new("host_test"), journal)
-                .await;
-        manager.set_meter(Arc::new(
-            h4rn_meter::MeterHub::open(&meter_path)
-                .await
-                .expect("meter after restart"),
-        ));
-        manager.resync_meter_state().await;
+    /// Restarts on the same files and delivers the parked prompt once.
+    ///
+    /// Returns the text the new harness received.
+    async fn restart_and_resume_parked(
+        journal_path: &std::path::Path,
+        meter_path: &std::path::Path,
+        thread_id: &ThreadId,
+        tag: &str,
+    ) -> (Arc<ThreadManager>, String) {
+        let manager = open_persistent_manager(
+            journal_path,
+            meter_path,
+            FakeHarness::new(),
+            FakeHarness::new().with_kind(HarnessKind::Codex),
+        )
+        .await;
         let mut events = manager.subscribe();
         manager
-            .resume_now(&thread_id)
+            .resume_now(thread_id)
             .await
             .expect("the restored schedule fires");
         let mut echoed = String::new();
-        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let wire = next_event(&mut events).await;
                 match wire.event {
                     Event::MessageDelta { text, .. } => echoed.push_str(&text),
-                    Event::TurnCompleted {
-                        turn_id, status, ..
-                    } => return (turn_id, status),
+                    Event::TurnCompleted { status, .. } => return status,
                     _ => {}
                 }
             }
         })
         .await
-        .expect("the restored prompt completed");
-        assert_eq!(turn, second.turn_id);
-        assert_eq!(status, TurnStatus::Completed);
+        .unwrap_or_else(|_| panic!("the restored prompt ({tag}) never completed"));
+        assert_eq!(status, TurnStatus::Completed, "{tag}");
+        (manager, echoed)
+    }
+
+    /// A prompt parked by the first post-switch delivery keeps the person's
+    /// request, so the restart that delivers it sends one history header.
+    ///
+    /// A parked prompt is stored before the rate-limited write so a daemon that
+    /// restarts can deliver it. It must store what the person asked for, not the
+    /// handoff wrapper built for the failed attempt: the restored delivery adds
+    /// the history itself, and a stored wrapper would be wrapped twice.
+    #[tokio::test]
+    async fn a_prompt_parked_by_the_first_post_switch_delivery_keeps_the_request() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = Utc::now() + chrono::Duration::minutes(20);
+        let (codex, sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_closed_limit_after(0, "the provider is rate limited", Some(reset_at))
+            .with_send_count();
+        let (codex, gate) = codex.with_send_gate_after(0);
+        let manager =
+            open_persistent_manager(&journal_path, &meter_path, FakeHarness::new(), codex).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(
+                HostId::new("host_test"),
+                workspace.path(),
+                "the original request",
+            ))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("switch to Codex");
+        assert!(
+            thread_row(&manager, &created.thread_id)
+                .await
+                .handoff_pending
+        );
+
+        // The first post-switch delivery is the one that carries the handoff.
+        // Its write is held, its session is detached, and the write then fails
+        // on the closed transport with the provider's reset.
+        let sent = manager
+            .send_message(&created.thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("the handoff turn starts");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        tokio::time::timeout(Duration::from_secs(5), sends.wait_for(1))
+            .await
+            .expect("the handoff prompt reached the Codex session");
+        let detached = {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live generation");
+            record.detach_session(generation)
+        };
+        assert!(detached.is_some(), "the writing session was detached");
+        gate.release();
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .map(|record| record.meta.parked.is_some())
+                .unwrap_or(false))
+            .await,
+            "the failed write never parked the prompt"
+        );
+
+        let parked = {
+            let record = handle.lock().await;
+            record
+                .meta
+                .parked
+                .clone()
+                .expect("the parked prompt is on the record")
+        };
+        assert_eq!(parked.turn_id, sent.turn_id);
+        assert_eq!(
+            parked.text, "carry on",
+            "the parked prompt stored the handoff wrapper"
+        );
+        assert_eq!(
+            parked.item_id.as_deref(),
+            Some(user_item_id(&sent.turn_id).as_str())
+        );
+        let row = thread_row(&manager, &created.thread_id).await;
+        let stored = row.parked.clone().expect("the parked prompt is durable");
+        assert_eq!(stored.text, "carry on", "the durable prompt was wrapped");
+        assert!(row.handoff_pending, "the switch's handoff was lost");
+        manager.shutdown().await;
+        drop(manager);
+
+        let (manager, echoed) = restart_and_resume_parked(
+            &journal_path,
+            &meter_path,
+            &created.thread_id,
+            "parked post-switch prompt",
+        )
+        .await;
         assert_eq!(
             echoed.matches("Earlier conversation history").count(),
             1,
             "the restored prompt was wrapped twice: {echoed}"
         );
-        assert!(echoed.ends_with("second"), "{echoed}");
+        assert!(echoed.contains("the original request"), "{echoed}");
+        assert!(echoed.ends_with("carry on"), "{echoed}");
+        assert!(
+            manager
+                .inner
+                .journal
+                .pending_item_ids(&created.thread_id)
+                .await
+                .expect("pending items")
+                .is_empty(),
+            "the delivered prompt is still marked undelivered"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A queued prompt promoted after a switch is parked with the item it was
+    /// journaled as, which belongs to the turn that was running then.
+    ///
+    /// The restored delivery must accept that very item: the handoff leaves it
+    /// out by id, and the "undelivered" marker is cleared by the id the record
+    /// restored, not by the one its turn id would suggest.
+    #[tokio::test]
+    async fn a_parked_promoted_prompt_restores_the_item_it_was_journaled_as() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = Utc::now() + chrono::Duration::minutes(20);
+        let (codex, gate) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_closed_limit_after(0, "the provider is rate limited", Some(reset_at))
+            .with_start_gate();
+        let manager =
+            open_persistent_manager(&journal_path, &meter_path, FakeHarness::new(), codex).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(
+                HostId::new("host_test"),
+                workspace.path(),
+                "the original request",
+            ))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        manager
+            .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))
+            .await
+            .expect("switch to Codex");
+
+        // The post-switch startup is held, so the follow-up queues behind the
+        // first prompt. Stopping that prompt promotes the follow-up, which the
+        // startup then delivers with the handoff.
+        let first = manager
+            .send_message(
+                &created.thread_id,
+                "the first new prompt".into(),
+                Vec::new(),
+            )
+            .await
+            .expect("send");
+        let follow_up = manager
+            .send_message(&created.thread_id, "the follow-up".into(), Vec::new())
+            .await
+            .expect("queue the follow-up");
+        assert_eq!(
+            follow_up.turn_id, first.turn_id,
+            "the follow-up waits behind the first turn"
+        );
+        manager
+            .interrupt(&created.thread_id)
+            .await
+            .expect("stop the first turn");
+        gate.release();
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle");
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .map(|record| record.meta.parked.is_some())
+                .unwrap_or(false))
+            .await,
+            "the promoted prompt was never parked"
+        );
+        let parked = {
+            let record = handle.lock().await;
+            record
+                .meta
+                .parked
+                .clone()
+                .expect("the parked prompt is on the record")
+        };
+        assert_ne!(
+            parked.turn_id, first.turn_id,
+            "the promoted follow-up owns the parked prompt"
+        );
+        assert_eq!(parked.text, "the follow-up");
+        let promoted_item = parked.item_id.clone().expect("the journaled item id");
+        assert_ne!(
+            promoted_item,
+            user_item_id(&parked.turn_id),
+            "the queued item was journaled under the earlier turn"
+        );
+        let row = thread_row(&manager, &created.thread_id).await;
+        assert_eq!(
+            row.parked.as_ref().map(|parked| parked.text.as_str()),
+            Some("the follow-up")
+        );
+        assert!(row.handoff_pending);
+        manager.shutdown().await;
+        drop(manager);
+
+        let (manager, echoed) = restart_and_resume_parked(
+            &journal_path,
+            &meter_path,
+            &created.thread_id,
+            "parked promoted prompt",
+        )
+        .await;
+        assert_eq!(
+            echoed.matches("Earlier conversation history").count(),
+            1,
+            "the restored prompt was wrapped twice: {echoed}"
+        );
+        assert!(echoed.ends_with("the follow-up"), "{echoed}");
+        assert!(
+            !echoed.contains("the first new prompt"),
+            "a prompt the person stopped became history: {echoed}"
+        );
+        assert!(
+            !manager
+                .inner
+                .journal
+                .pending_item_ids(&created.thread_id)
+                .await
+                .expect("pending items")
+                .contains(&promoted_item),
+            "the restored delivery accepted a different item than it carried"
+        );
         manager.shutdown().await;
     }
 

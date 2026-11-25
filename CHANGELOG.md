@@ -668,6 +668,18 @@ All notable changes to h4rn are recorded here. The format follows
   switch, and the IDE's Turn scope follows the newest real turn past a switch
   divider. See [docs/import.md](docs/import.md) and
   [docs/provider-switch.md](docs/provider-switch.md).
+- **A turn is only done once the journal agrees, and a refused Send leaves nothing behind.** A
+  prompt the provider accepted is durably recorded before its turn can be shown as finished, and
+  the switch's handoff flag is cleared first too, so a switch in that window can no longer hand
+  the reply over without the request that produced it. The fallback from a dead native resume
+  writes only its own fields and only on the switch it read, so a Stop and a switch during that
+  write are not undone; a Send the journal refuses rolls its staged turn back (no orphan dispatch,
+  no ghost in the queue, no lost countdown), and a switch the journal refuses keeps the old
+  provider's limit countdown instead of dropping it. An ACP agent that names only modes h4rn
+  cannot map (for example `review-only`) is refused by name rather than treated as having no
+  catalogue. Previous Turn and Next Turn skip a switch divider and a user cue, and an imported
+  conversation with no assistant turn still shows where it came from. See
+  [docs/provider-switch.md](docs/provider-switch.md).
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan

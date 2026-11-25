@@ -293,6 +293,22 @@ pub trait Journal: Send + Sync {
         wire: &[Event],
     ) -> Result<Vec<u64>, JournalError>;
 
+    /// Appends a sent prompt's events and its undelivered marker in one commit.
+    ///
+    /// A Send is one fact: the message the person wrote is in the log *and* a
+    /// provider has not taken it yet. Committing the two separately lets a
+    /// failed write keep the message row while the marker is gone (a later
+    /// handoff silently drops the request) or keep the marker while the event
+    /// is gone (an undelivered item nothing can deliver). Either way the thread
+    /// is left describing work that does not exist.
+    async fn append_sent(
+        &self,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+        item_id: &str,
+    ) -> Result<Vec<u64>, JournalError>;
+
     /// Appends projected events that are derived (for example a tab change
     /// produced by the background ticker) without a lifecycle event.
     async fn append_wire(
@@ -350,12 +366,18 @@ pub trait Journal: Send + Sync {
         switch_generation: u64,
     ) -> Result<bool, JournalError>;
 
-    /// Remembers that a journaled user item has not reached a provider yet.
-    async fn mark_item_pending(
+    /// Records that a dead imported resume fell back to a handoff.
+    ///
+    /// Only the fallback's own fields change (the resume id is cleared, the
+    /// handoff flag is set and the import's native resume is spent), and only
+    /// while the row still belongs to the switch the fallback saw. A fallback
+    /// that finishes after the thread moved again therefore cannot restore the
+    /// old harness's metadata or spend the new one's one native resume.
+    async fn fall_back_from_native_resume(
         &self,
         thread_id: &ThreadId,
-        item_id: &str,
-    ) -> Result<(), JournalError>;
+        switch_generation: u64,
+    ) -> Result<bool, JournalError>;
 
     /// Forgets a pending item once a provider accepted its prompt.
     async fn mark_item_accepted(
@@ -778,6 +800,53 @@ impl SqliteJournal {
         }
         Ok(())
     }
+
+    /// One transaction for a thread row, its events and, when the append is a
+    /// person's prompt, the marker that says no provider has taken it yet.
+    async fn append_with_pending(
+        &self,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+        pending_item: Option<&str>,
+    ) -> Result<Vec<u64>, JournalError> {
+        // One transaction: the thread row, the domain log and the wire log
+        // commit together or not at all, so a crash or a failed insert cannot
+        // leave a domain event without its wire event. A sent prompt's
+        // undelivered marker belongs to the same commit for the same reason.
+        let mut tx = self.pool.begin().await?;
+        upsert_thread_on(&mut tx, meta).await?;
+        if !domain.is_empty() {
+            SqliteEventStore::append_in(&mut tx, &meta.thread_id, domain).await?;
+        }
+        if let Some(item_id) = pending_item {
+            mark_item_pending_on(&mut tx, &meta.thread_id, item_id).await?;
+        }
+        let seqs = if wire.is_empty() {
+            Vec::new()
+        } else {
+            append_wire_on(&mut tx, &meta.thread_id, wire).await?
+        };
+        tx.commit().await?;
+        Ok(seqs)
+    }
+}
+
+/// Marks a journaled user item undelivered on any connection.
+async fn mark_item_pending_on(
+    conn: &mut sqlx::SqliteConnection,
+    thread_id: &ThreadId,
+    item_id: &str,
+) -> Result<(), JournalError> {
+    sqlx::query(
+        "INSERT INTO daemon_pending_items (thread_id, item_id) VALUES (?, ?)
+         ON CONFLICT(thread_id, item_id) DO NOTHING",
+    )
+    .bind(thread_id.as_str())
+    .bind(item_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Upserts a thread row on any connection (a pooled one or a transaction's).
@@ -949,21 +1018,18 @@ impl Journal for SqliteJournal {
         domain: &[ThreadEvent],
         wire: &[Event],
     ) -> Result<Vec<u64>, JournalError> {
-        // One transaction: the thread row, the domain log and the wire log
-        // commit together or not at all, so a crash or a failed insert cannot
-        // leave a domain event without its wire event.
-        let mut tx = self.pool.begin().await?;
-        upsert_thread_on(&mut tx, meta).await?;
-        if !domain.is_empty() {
-            SqliteEventStore::append_in(&mut tx, &meta.thread_id, domain).await?;
-        }
-        let seqs = if wire.is_empty() {
-            Vec::new()
-        } else {
-            append_wire_on(&mut tx, &meta.thread_id, wire).await?
-        };
-        tx.commit().await?;
-        Ok(seqs)
+        self.append_with_pending(meta, domain, wire, None).await
+    }
+
+    async fn append_sent(
+        &self,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+        item_id: &str,
+    ) -> Result<Vec<u64>, JournalError> {
+        self.append_with_pending(meta, domain, wire, Some(item_id))
+            .await
     }
 
     async fn append_wire(
@@ -1135,20 +1201,31 @@ impl Journal for SqliteJournal {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn mark_item_pending(
+    async fn fall_back_from_native_resume(
         &self,
         thread_id: &ThreadId,
-        item_id: &str,
-    ) -> Result<(), JournalError> {
-        sqlx::query(
-            "INSERT INTO daemon_pending_items (thread_id, item_id) VALUES (?, ?)
-             ON CONFLICT(thread_id, item_id) DO NOTHING",
+        switch_generation: u64,
+    ) -> Result<bool, JournalError> {
+        // One statement, one field: the resume id this fallback could not use is
+        // cleared, the history is owed, and the import's one native resume is
+        // spent. The generation guard means a fallback that lost its thread to a
+        // later switch changes nothing at all.
+        let result = sqlx::query(
+            "UPDATE daemon_threads
+                SET resume_id = NULL,
+                    handoff_pending = 1,
+                    imported_json = CASE
+                        WHEN json_valid(imported_json)
+                            THEN json_set(imported_json, '$.native_resume', json('false'))
+                        ELSE imported_json
+                    END
+              WHERE thread_id = ? AND switch_generation = ?",
         )
         .bind(thread_id.as_str())
-        .bind(item_id)
+        .bind(switch_generation as i64)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     async fn mark_item_accepted(
@@ -2052,6 +2129,57 @@ mod tests {
         journal.upsert_thread(&one).await.unwrap();
         let rows = journal.list_threads().await.unwrap();
         assert_eq!(rows, vec![one]);
+    }
+
+    /// The fallback from a dead native resume changes only its own fields, and
+    /// only on the switch it saw.
+    #[tokio::test]
+    async fn a_fallback_write_is_generation_checked_and_field_limited() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let mut one = meta("th_one");
+        one.resume_id = Some("saved-session".into());
+        one.title = "keep me".into();
+        one.model = "keep-the-model".into();
+        one.imported = Some(ImportedOrigin {
+            source: h4rn_protocol::ImportSource::ClaudeCode,
+            source_path: "/tmp/work/saved.jsonl".into(),
+            session_id: Some("saved-session".into()),
+            project_path: None,
+            native_resume: true,
+        });
+        one.switch_generation = 4;
+        journal.upsert_thread(&one).await.unwrap();
+
+        assert!(
+            !journal
+                .fall_back_from_native_resume(&one.thread_id, 3)
+                .await
+                .unwrap(),
+            "an older switch's write was accepted"
+        );
+        let row = journal.list_threads().await.unwrap().remove(0);
+        assert_eq!(row.resume_id.as_deref(), Some("saved-session"));
+
+        assert!(
+            journal
+                .fall_back_from_native_resume(&one.thread_id, 4)
+                .await
+                .unwrap(),
+            "the fallback on the current switch was refused"
+        );
+        let row = journal.list_threads().await.unwrap().remove(0);
+        assert!(row.resume_id.is_none(), "the dead resume id survived");
+        assert!(row.handoff_pending, "the history is not owed");
+        assert!(
+            row.imported
+                .as_ref()
+                .is_some_and(|imported| !imported.native_resume),
+            "the import's native resume was not spent"
+        );
+        // Everything the fallback does not own is left exactly as it was.
+        assert_eq!(row.title, "keep me");
+        assert_eq!(row.model, "keep-the-model");
+        assert_eq!(row.switch_generation, 4);
     }
 
     #[tokio::test]

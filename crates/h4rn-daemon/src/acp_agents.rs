@@ -275,15 +275,24 @@ impl crate::threads::AcpCapabilitySource for AcpAgentService {
             (cached_modes, cached_efforts)
         };
         let mut mapped: Vec<h4rn_protocol::RuntimeMode> = Vec::new();
+        let mut other: Vec<String> = Vec::new();
         for mode in &modes {
-            if let Some(runtime_mode) = h4rn_harness::runtime_mode_for_acp_mode_id(&mode.id)
-                && !mapped.contains(&runtime_mode)
-            {
-                mapped.push(runtime_mode);
+            match h4rn_harness::runtime_mode_for_acp_mode_id(&mode.id) {
+                Some(runtime_mode) => {
+                    if !mapped.contains(&runtime_mode) {
+                        mapped.push(runtime_mode);
+                    }
+                }
+                // The agent named a mode this build has no equivalent for. It
+                // is kept: an agent whose whole catalogue is like this offers
+                // no mode a thread can run in, which is a refusal to report, not
+                // an agent to trust with the declared controls.
+                None => other.push(mode.id.clone()),
             }
         }
         Ok(Some(crate::provider_switch::TargetCapabilities {
             modes: mapped,
+            other_modes: other,
             efforts,
             // A configured agent has no fast tier; a thread that asked for one
             // is told it was dropped.

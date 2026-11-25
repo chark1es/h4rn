@@ -154,7 +154,8 @@ A row imported by an older daemon, with no native resume and no durable handoff
 flag, gets that flag backfilled on the first restart, so its history is not lost
 by the upgrade. The thread's receipt names the import source even after the
 thread has switched harness: the label says where the conversation came from,
-not which provider runs it now.
+not which provider runs it now, and it stays there for a conversation whose only
+rows are your own messages (no assistant turn has been written yet).
 
 The budget covers the whole handoff — the header, every message as it is
 serialised, the lead-in and your new request — so the saved history never pushes

@@ -1849,7 +1849,26 @@ its own catalogue at session start, so the switch resolves that catalogue before
 it commits (probing the agent when this daemon has no answer yet) and drops a
 value the agent never advertised instead of reporting a switch whose first Send
 would fail. The response names every value
-that was dropped, and the transcript's divider names the two harnesses. Each
-`TurnStarted` event carries the harness that ran the turn, so a transcript that
-spans a switch does not relabel old turns with the new provider, and the metering
-ledger attributes each turn to the harness and model that really served it.
+that was dropped, and the transcript's divider names the two harnesses. An agent
+that names a catalogue h4rn can map nothing from is refused with its own mode
+names: "it offers no mode a thread can run in" is a different fact from "it
+never named one", and only the second is trusted with the declared controls.
+Each `TurnStarted` event carries the harness that ran the turn, so a transcript
+that spans a switch does not relabel old turns with the new provider, and the
+metering ledger attributes each turn to the harness and model that really served
+it.
+
+A switch is honest only if the journal and the record agree on what the old
+provider already accepted, so acceptance is written before the turn's completion
+is published. A provider can report a whole turn while its prompt is still being
+written; the daemon holds that completion until the acceptance — and the handoff
+clear that belongs to it — is durable, and only then settles the turn. Without
+that order a switch in that window could hand over the reply while the request
+that produced it was still recorded as undelivered. The fallback from a dead
+native resume follows the same rule from the other side: it changes only the
+fallback's own fields (the resume id, the handoff flag and the import's spent
+native resume) and only while the row still belongs to the switch it read, so a
+late write cannot restore the harness the person left. A refused switch restores
+everything it staged, including the old provider's recorded limit and its
+countdown, and a Send the journal refuses takes its staged turn back so no
+dispatch, queued ghost or countdown outlives it.

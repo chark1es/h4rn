@@ -48,8 +48,14 @@ pub struct CurrentSettings {
 /// handed to a session that will refuse to start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetCapabilities {
-    /// Permission modes the target offers.
+    /// Permission modes the target offers, in h4rn's own vocabulary.
     pub modes: Vec<RuntimeMode>,
+    /// Mode names the target advertised that map to no h4rn mode.
+    ///
+    /// Kept so an agent whose whole catalogue is unrecognised can be told apart
+    /// from one that never named a mode at all: the first can take no thread,
+    /// the second is trusted to run with h4rn's declared controls.
+    pub other_modes: Vec<String>,
     /// Reasoning-effort values the target offers.
     pub efforts: Vec<String>,
     /// Whether the target has a fast tier.
@@ -202,11 +208,31 @@ pub fn plan(
     let modes = target
         .map(|caps| caps.modes.clone())
         .unwrap_or(declared.modes);
+    let other_modes = target
+        .map(|caps| caps.other_modes.clone())
+        .unwrap_or_default();
     let efforts = target
         .map(|caps| caps.efforts.clone())
         .unwrap_or(declared.efforts);
     let fast_supported = target.map(|caps| caps.fast).unwrap_or(declared.fast);
     let mut dropped = Vec::new();
+
+    // An agent that named a catalogue this build cannot map offers no mode a
+    // thread could run in. Treating that as "no catalogue" would let the switch
+    // report success and then fail every turn, so it is refused here with the
+    // agent's own names.
+    if modes.is_empty() && !other_modes.is_empty() {
+        return Err(SwitchPlanError::Unsupported(format!(
+            "{} offers only {}, none of which is a mode h4rn can run a thread in; \
+             choose another agent or harness",
+            harness_label(request.harness),
+            other_modes
+                .iter()
+                .map(|mode| format!("`{mode}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )));
+    }
 
     let runtime_mode = if modes.contains(&current.runtime_mode) {
         current.runtime_mode
@@ -389,6 +415,48 @@ mod tests {
         );
     }
 
+    /// An ACP agent whose whole mode catalogue is unrecognised offers no mode a
+    /// thread could run in, so the switch is refused by name instead of claiming
+    /// a mode the agent never had.
+    #[test]
+    fn plan_refuses_an_acp_agent_with_only_unrecognised_modes() {
+        let capabilities = TargetCapabilities {
+            modes: Vec::new(),
+            other_modes: vec!["review-only".into()],
+            efforts: Vec::new(),
+            fast: false,
+        };
+        let error = super::plan(
+            HarnessKind::ClaudeCode,
+            &acp_request("reviewer", "deepseek-chat"),
+            &current(RuntimeMode::ApprovalRequired, None, false),
+            Some(&capabilities),
+        )
+        .expect_err("the agent offers no mode this build can run");
+        assert!(
+            matches!(&error, SwitchPlanError::Unsupported(message) if message.contains("`review-only`")),
+            "{error:?}"
+        );
+
+        // An agent that also offers one recognised mode keeps working: only the
+        // unidentified names are left out of the plan.
+        let capabilities = TargetCapabilities {
+            modes: vec![RuntimeMode::ApprovalRequired],
+            other_modes: vec!["review-only".into()],
+            efforts: Vec::new(),
+            fast: false,
+        };
+        let plan = super::plan(
+            HarnessKind::ClaudeCode,
+            &acp_request("reviewer", "deepseek-chat"),
+            &current(RuntimeMode::ApprovalRequired, None, false),
+            Some(&capabilities),
+        )
+        .expect("one recognised mode is enough to run the thread");
+        assert_eq!(plan.runtime_mode, RuntimeMode::ApprovalRequired);
+        assert!(plan.dropped.is_empty(), "{:?}", plan.dropped);
+    }
+
     /// An ACP agent that offers only `accept-edits` has no safe replacement
     /// for Plan: startup would refuse `default`, so the switch stops before
     /// committing and names what the agent does offer.
@@ -396,6 +464,7 @@ mod tests {
     fn plan_refuses_when_the_target_acp_agent_has_no_safe_mode() {
         let capabilities = TargetCapabilities {
             modes: vec![RuntimeMode::AutoAcceptEdits],
+            other_modes: Vec::new(),
             efforts: Vec::new(),
             fast: false,
         };
@@ -418,6 +487,7 @@ mod tests {
     fn plan_drops_a_mode_the_target_acp_agent_does_not_advertise() {
         let capabilities = TargetCapabilities {
             modes: vec![RuntimeMode::ApprovalRequired, RuntimeMode::FullAccess],
+            other_modes: Vec::new(),
             efforts: Vec::new(),
             fast: false,
         };
@@ -457,6 +527,7 @@ mod tests {
     fn plan_drops_an_effort_the_target_acp_agent_does_not_advertise() {
         let capabilities = TargetCapabilities {
             modes: vec![RuntimeMode::ApprovalRequired],
+            other_modes: Vec::new(),
             efforts: vec!["low".into(), "high".into()],
             fast: false,
         };
