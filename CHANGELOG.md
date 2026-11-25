@@ -252,9 +252,10 @@ All notable changes to h4rn are recorded here. The format follows
   saved conversation, the source's next send is acknowledged at once (it has a
   turn and a durable row) but its dispatch waits, and that wait never holds the
   thread's session-switch lock, so a later send is still answered at once. The
-  fork's first message is written before its copy is waited on, and the deadline
-  runs from that write: Claude Code reports its session only after the first user
-  frame, so a fork that waited for that report first would never copy at all. A
+  fork's first message is written before its copy is waited on, within one
+  deadline that starts when the source's copy gate opens: Claude Code reports its
+  session only after the first user frame, so a fork that waited for that report
+  first would never copy at all. A
   provider still reading the source at the deadline has its process shut down and
   fenced, and the source is released there — after the copy is stopped, before
   the handoff session starts — so a message sent afterwards can never reach the
@@ -835,7 +836,8 @@ All notable changes to h4rn are recorded here. The format follows
   for a natively forked session until the first user frame arrives, so waiting
   for its session report before writing the prompt made every Claude fork wait
   out the whole copy deadline and fall back to the handoff. The fork's prompt is
-  written first and the deadline runs from that write. A provider that never
+  written first, within the single copy deadline that starts when the source's
+  copy gate opens. A provider that never
   reports its session still confirms the copy with its first output, and one
   that stays silent is shut down and fenced; the source is released after the
   copy is stopped and before the handoff session starts.
@@ -858,6 +860,13 @@ All notable changes to h4rn are recorded here. The format follows
   even when the thread started in a linked worktree under a metadata folder's
   parent, while a linked worktree nested in its own main checkout
   (`repo/.worktrees/one`) still works.
+- **A metadata parent no longer passes for the main checkout on a tracked name
+  from inside its own worktree.** With the metadata directory at `meta/.git` and
+  a linked worktree at `meta/docs`, the tracked `docs/README.md` resolved to the
+  worktree's own file and made `meta` look like the main checkout. A tracked
+  name now counts only when it is the folder's own file, not one inside the
+  workspace or another registered worktree, so that location is refused when
+  saved and when a checkout is made.
 - **A worktree create interrupted before it registered its checkout no longer
   stays behind.** When the destination's claim proves the create and there is no
   admin dir, the next start removes an empty destination folder, deletes the

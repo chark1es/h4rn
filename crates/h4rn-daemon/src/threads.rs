@@ -1077,8 +1077,9 @@ struct ThreadRecord {
     /// borrowed id is cleared and `handoff_pending` is set. That history is
     /// still in front of the session that answered, though, so the next turn
     /// on it must not send the handoff again. This names the generation that
-    /// holds the copy; once that session is detached the marker clears and the
-    /// durable flag gives the next startup its handoff.
+    /// holds the copy. `needs_history_handoff` compares it with the live
+    /// session's generation, which is what keeps a respawned session from
+    /// being exempt; clearing it on detach is only tidiness.
     handoff_satisfied_by: Option<u64>,
     pump: Option<JoinHandle<()>>,
     pending_approvals: BTreeMap<String, PendingApproval>,
@@ -2919,13 +2920,18 @@ impl ThreadRecord {
         // conversation in the session that answered: that session must keep
         // using it, without the journaled history in front of every prompt.
         // The durable flag still owns the handoff for the session after it.
-        (matches!(
+        // A native fork confirmed by its first output already has its copied
+        // conversation in the session that answered: that session must keep
+        // using it, without the journaled history in front of every prompt.
+        // The durable flag still owns the handoff for the session after it.
+        // A pending rewind handoff is never exempt: it cuts that conversation.
+        matches!(
             self.meta.pending_rewind,
             Some(h4rn_protocol::PendingRewind::Handoff)
-        ) || self.meta.handoff_pending)
+        ) || (self.meta.handoff_pending
             && !self
                 .handoff_satisfied_by
-                .is_some_and(|generation| self.session.generation() == Some(generation))
+                .is_some_and(|generation| self.session.generation() == Some(generation)))
     }
 
     /// Drops approvals no session on this thread can answer any more.
@@ -11068,7 +11074,7 @@ impl Inner {
 
     /// Releases a native copy whose turn was stopped before its prompt.
     ///
-    /// A Stop (or a pause that parks the turn) between the native start
+    /// A Stop between the native start
     /// returning and the fork's prompt being written leaves nothing to confirm
     /// the copy or fence it: no prompt is sent, so neither the pump nor the
     /// confirmation wait will ever run. The copy exists only to hold the
@@ -11487,9 +11493,11 @@ impl Inner {
             // unconfirmed when it passes is shut down and fenced here, and the
             // turn is handed off.
             if let Some(confirmed) = fork_confirmed {
-                // `deliver` can return without writing anything: a Stop (or a
-                // pause) can settle the turn while the claim waits, or the
-                // session the start produced may be replaced before the write.
+                // `deliver` can return without writing anything: a Stop can
+                // settle the turn while the claim waits, or the session the
+                // start produced may be replaced before the write. (A limit
+                // pause parks the turn without settling it, so that copy waits
+                // out its deadline and is fenced there instead.)
                 // Nothing will ever confirm the copy then, and neither the wait
                 // below nor the pump will release it, so the source would stay
                 // gated until its backstop. The confirmation and the turn are
@@ -13323,6 +13331,7 @@ impl Inner {
                         let switch_generation = record.meta.switch_generation;
                         if let Err(error) = self
                             .journal
+                            // No rewind is pending on a fork's first turn.
                             .fall_back_from_native_resume(&fork_id, switch_generation, false)
                             .await
                         {

@@ -2740,6 +2740,105 @@ async fn refuse_an_unprovable_main_checkout(metadata: &str) {
     daemon.stop().await;
 }
 
+/// A metadata parent with a linked worktree below it proves nothing from a
+/// tracked name that resolves inside that worktree. With the metadata dir at
+/// `meta/.git`, the real checkout at `code/api` and the project registered as
+/// the linked worktree `meta/docs`, the tracked `docs/README.md` is the
+/// worktree's own file. Saving a location in an ignored repository inside the
+/// real main checkout is refused instead of accepted because `meta` looks like
+/// the main worktree.
+#[tokio::test]
+async fn worktree_settings_refuse_a_metadata_parent_proved_by_its_workspace() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    std::fs::create_dir(root.path().join("meta")).expect("meta");
+    let main = root.path().join("code").join("api");
+    std::fs::create_dir_all(&main).expect("api");
+    git_in(
+        root.path(),
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            root.path().join("meta").join(".git").to_str().unwrap(),
+            main.to_str().unwrap(),
+        ],
+    );
+    git_in(&main, &["config", "user.name", "h4rn test"]);
+    git_in(&main, &["config", "user.email", "test@example.invalid"]);
+    git_in(&main, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(main.join(".gitignore"), "vendor/\n").expect("ignore");
+    std::fs::write(main.join("README.md"), "hello\n").expect("readme");
+    std::fs::create_dir(main.join("docs")).expect("docs");
+    std::fs::write(main.join("docs").join("README.md"), "docs\n").expect("docs readme");
+    git_in(&main, &["add", ".gitignore", "README.md", "docs/README.md"]);
+    git_in(&main, &["commit", "-m", "Initial commit"]);
+    let workspace = root.path().join("meta").join("docs");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "docs",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    // An ignored repository inside the real main checkout keeps the location's
+    // deepest existing ancestor out of this repository, so only the main
+    // checkout proof can refuse it.
+    let nested = main.join("vendor").join("lib");
+    std::fs::create_dir_all(&nested).expect("nested repository");
+    git_in(&nested, &["init", "-q", "-b", "main"]);
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: workspace.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the linked worktree as the project");
+
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(nested.to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the metadata parent cannot prove the main checkout");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error.message.contains("main checkout could not be found"),
+        "{error:?}"
+    );
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(
+                settings.location, None,
+                "the refused location was not saved"
+            );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
 /// A registered project whose folder was deleted (or whose git repository is
 /// gone) must not block every save: the location is checked against the
 /// projects that are still there, and the save succeeds.

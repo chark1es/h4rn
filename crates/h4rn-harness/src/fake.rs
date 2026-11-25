@@ -1838,10 +1838,12 @@ impl Harness for FakeHarness {
             .unwrap_or_default();
         let delay = self.send_delay.unwrap_or(env_delay);
 
+        let names_session = !(self.text_without_session_started && spec.native_fork);
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
             session_id,
+            names_session,
             sender: if dies_on_start.is_some() {
                 None
             } else {
@@ -1906,6 +1908,10 @@ pub struct FakeSession {
     /// The id this session reported, so the daemon can tag provider boundaries
     /// with the session that recorded them.
     session_id: String,
+    /// Whether the session ever names itself. A native fork in the
+    /// "text without `SessionStarted`" mode models a provider that never
+    /// reports its session, so its accessor answers `None` too.
+    names_session: bool,
     /// The stream's producer. `None` (or dropped) ends the stream after the
     /// events already queued.
     sender: Option<EventSink>,
@@ -2015,7 +2021,7 @@ impl HarnessSession for FakeSession {
     }
 
     fn session_id(&self) -> Option<String> {
-        Some(self.session_id.clone())
+        self.names_session.then(|| self.session_id.clone())
     }
 
     fn controls(&self) -> Option<crate::SessionControls> {
