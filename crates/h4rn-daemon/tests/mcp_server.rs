@@ -3193,8 +3193,8 @@ mod watch_grant {
             "the watch wake ran above the grant's ceiling: {:?}",
             settings.get()
         );
-        let sends_after_wake = sends.get();
         wait_for_turn_end(&daemon, &thread_id).await;
+        let sends_after_wake = sends.get();
 
         // Revoking the grant ends the watch: the next change starts nothing.
         daemon
@@ -3350,8 +3350,8 @@ mod watch_grant {
             "the wake of a family with a live refresh token ran uncapped: {:?}",
             settings.get()
         );
-        let sends_after_wake = sends.get();
         wait_for_turn_end(&daemon, &thread_id).await;
+        let sends_after_wake = sends.get();
 
         // Revoke the family that created the watch. The client's second family
         // is still live, and must not keep this watch alive.

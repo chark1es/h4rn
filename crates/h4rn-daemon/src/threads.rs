@@ -3094,15 +3094,22 @@ impl ThreadRecord {
 
     /// Finds the claim that is a turn's own promoted prompt.
     ///
-    /// A promoted prompt is taken from the queue as the thread's next turn, so
-    /// its claim names the turn and is cleared once the adapter took it. A
-    /// steer's claim is never returned here: it belongs to a running turn, not
-    /// to the prompt that started one.
+    /// A turn's own prompt is taken from the queue as the thread's next turn
+    /// (or is an ordinary send to an idle thread), so its claim names the turn
+    /// and is cleared once the adapter took it. A steer's claim is never
+    /// returned here: it belongs to a running turn, not to the prompt that
+    /// started one.
     fn promoted_claim_position(&self, turn_id: &TurnId) -> Option<usize> {
         self.meta
             .claimed
             .iter()
             .position(|claim| claim.promoted && &claim.turn_id == turn_id)
+    }
+
+    /// What is known about a turn's own prompt's delivery, when it has a claim.
+    fn promoted_claim_state(&self, turn_id: &TurnId) -> Option<QueuedClaimState> {
+        self.promoted_claim_position(turn_id)
+            .map(|position| self.meta.claimed[position].state)
     }
 
     /// Removes a turn's promoted claim, if it still has one.
@@ -3132,7 +3139,9 @@ impl ThreadRecord {
     /// failure. The row stays in the queue for the person to resend or discard.
     ///
     /// A `claimed` or `delivered` claim is dropped: its turn ended with no
-    /// delivery to recover.
+    /// delivery to recover. An ordinary send's `sending` claim is dropped too:
+    /// its prompt is already the turn's journaled user item, so the visible row
+    /// exists even without the claim.
     ///
     /// Returns whether the queue changed, so the settlement that carries this
     /// publishes it.
@@ -3140,9 +3149,16 @@ impl ThreadRecord {
         let Some(position) = self.promoted_claim_position(turn_id) else {
             return false;
         };
+        // A promotion's prompt has no transcript row of its own until it is
+        // delivered, so an unknown delivery must become a visible row. An
+        // ordinary send's prompt is already journaled as its turn's user item,
+        // so dropping the claim loses no text; it also keeps a completion that
+        // raced the write's acceptance from surfacing a row for a message the
+        // person can already see.
+        let promoted_from_queue = self.promoted_turn_is(turn_id);
         let claim = self.meta.claimed.remove(position);
         match claim.state {
-            QueuedClaimState::Sending => {
+            QueuedClaimState::Sending if promoted_from_queue => {
                 let index = (claim.index as usize).min(self.meta.queued.len());
                 let mut message = claim.message;
                 message.message.delivery_unknown = true;
@@ -3159,6 +3175,8 @@ impl ThreadRecord {
                 true
             }
             QueuedClaimState::Claimed | QueuedClaimState::Delivered => false,
+            // An ordinary send's prompt is already its turn's user item.
+            QueuedClaimState::Sending => false,
         }
     }
 
@@ -3258,6 +3276,12 @@ impl ThreadRecord {
             }
             let index = (claim.index as usize).min(self.meta.queued.len());
             match claim.state {
+                // An ordinary send to an idle thread is already journaled as its
+                // turn's user item. A `claimed` one was never written to the
+                // adapter, so restoring it as a queue row would send the same
+                // text a second time; only a `sending` one, which may already be
+                // in the provider conversation, needs the visible row below.
+                QueuedClaimState::Claimed if claim.promoted && !claim.from_queue => continue,
                 QueuedClaimState::Claimed | QueuedClaimState::Refused => {
                     self.meta.queued.insert(index, claim.message);
                 }
@@ -3814,6 +3838,13 @@ impl ThreadRecord {
     /// after it produced output): the caller then settles it as usual.
     async fn requeue_promoted_turn(&mut self, turn_id: &TurnId, why: RequeueReason) -> bool {
         if !self.promoted_turn_is(turn_id) {
+            return false;
+        }
+        // A write that may already have reached the adapter is never sent
+        // again on the daemon's own: parking the prompt would deliver the same
+        // text when the schedule fires. Its settlement turns the claim into the
+        // visible **May have been delivered** row the person decides on.
+        if self.promoted_claim_state(turn_id) == Some(QueuedClaimState::Sending) {
             return false;
         }
         if matches!(why, RequeueReason::CompletionFailed) {
@@ -6453,7 +6484,7 @@ impl ThreadManager {
                     // that window must not surface it as an uncertain row.
                     let _in_flight = InFlightClaim::new(&self.inner, &message_id);
                     let mut guard = session.lock().await;
-                    let direct_claim: Option<(QueuedMessageId, StoredQueuedMessage)>;
+                    let direct_claim: Option<(QueuedMessageId, StoredQueuedMessage, u32)>;
                     // The turn may have ended, or this session may have been
                     // replaced, while the steer waited for the session lock. Lock
                     // order is session then record, the same as delivery.
@@ -6467,6 +6498,14 @@ impl ThreadManager {
                             "that turn ended before the message could be steered; send it again"
                                 .into(),
                         ));
+                        }
+                        // The sender's grant is re-checked here, under the
+                        // session lock immediately before the adapter can see
+                        // the text, exactly as a promoted write does. A family
+                        // revoked while the client composed the steer never
+                        // reaches the running turn.
+                        if !self.inner.grant_allows(grant.as_ref()) {
+                            return Err(ManagerError::Conflict(REVOKED_GRANT_MESSAGE.into()));
                         }
                         // A direct steer has no queue row, so this claim is its
                         // only durable copy. Write `sending` before the adapter
@@ -6492,6 +6531,7 @@ impl ThreadManager {
                             turn_id: active_turn_id.clone(),
                             state: QueuedClaimState::Sending,
                             promoted: false,
+                            from_queue: false,
                         });
                         if !self
                             .inner
@@ -6507,7 +6547,7 @@ impl ThreadManager {
                                     .into(),
                             ));
                         }
-                        direct_claim = Some((message_id, claimed));
+                        direct_claim = Some((message_id, claimed, claim_index));
                     }
                     #[cfg(test)]
                     self.inner.pause_direct_steer().await;
@@ -6525,7 +6565,7 @@ impl ThreadManager {
                             // A definite refusal never reached the turn, so its
                             // claim is removed instead of being restored as an
                             // unsure row.
-                            if let Some((message_id, _)) = &direct_claim {
+                            if let Some((message_id, _, _)) = &direct_claim {
                                 let mut record = handle.lock().await;
                                 if let Some(position) = record.claim_position(message_id) {
                                     record.meta.claimed[position].state = QueuedClaimState::Refused;
@@ -6546,13 +6586,35 @@ impl ThreadManager {
                             return Err(error);
                         }
                         Err(SteerFailure::Unclear(error)) => {
-                            // The frame was written before the connection failed (a
-                            // Codex `turn/steer` timeout), so the turn may already
-                            // hold the text. The claim stays `sending`: a restart
-                            // shows the payload as "May have been delivered" and
-                            // nothing sends it again on its own. Saying it failed
-                            // would invite a resend and put the words in the turn
-                            // twice.
+                            // The frame was written before the connection failed
+                            // (a Codex `turn/steer` timeout), so the turn may
+                            // already hold the text. Nothing will resolve the
+                            // claim now, so it becomes the visible row a restart
+                            // would show at once. It is never sent automatically;
+                            // saying it failed would invite a blind resend and put
+                            // the words in the turn twice.
+                            if let Some((message_id, claim, index)) = direct_claim.clone() {
+                                let mut record = handle.lock().await;
+                                record
+                                    .meta
+                                    .claimed
+                                    .retain(|entry| entry.message.message.message_id != message_id);
+                                let mut message = claim;
+                                message.message.delivery_unknown = true;
+                                let index = (index as usize).min(record.meta.queued.len());
+                                record.meta.queued.insert(index, message);
+                                record.note_queue_change();
+                                if let Err(error) =
+                                    self.inner.emit(&mut record, Vec::new(), Vec::new()).await
+                                {
+                                    // The durable `sending` claim is still the
+                                    // record a restart recovers the text from.
+                                    tracing::warn!(
+                                        %error,
+                                        "an unsure direct steer's row could not be saved"
+                                    );
+                                }
+                            }
                             return Err(ManagerError::DeliveryUnclear(format!(
                                 "the message may have reached the agent: {error}"
                             )));
@@ -6562,23 +6624,10 @@ impl ThreadManager {
                     // The message is in the running turn: record it as a user item
                     // of that turn. It is never also queued.
                     let mut record = handle.lock().await;
-                    // Record the acceptance before the transcript row: a crash
-                    // between the two must not offer a delivered steer as an
-                    // unsure row after a restart.
-                    if let Some((message_id, _)) = &direct_claim {
-                        if let Some(position) = record.claim_position(message_id) {
-                            record.meta.claimed[position].state = QueuedClaimState::Delivered;
-                        }
-                        self.inner
-                            .save_claim_change(&mut record, "a delivered direct steer")
-                            .await;
-                        record
-                            .meta
-                            .claimed
-                            .retain(|claim| &claim.message.message.message_id != message_id);
-                        // The text is in the turn now. A rewind that saw the
-                        // claim in flight may have queued the same row; it is
-                        // delivered once, not twice.
+                    // The text is in the turn now. A rewind that saw the claim
+                    // in flight may have queued the same row; it is delivered
+                    // once, not twice.
+                    if let Some((message_id, _, _)) = &direct_claim {
                         record.drop_queued_row(message_id);
                     }
                     let mut domain = Vec::new();
@@ -6609,53 +6658,99 @@ impl ThreadManager {
                         },
                         at: None,
                     }];
-                    let (_, seq) = match self
-                        .inner
-                        .emit_steer(&mut record, domain, wire, &steer_item)
-                        .await
-                    {
-                        Ok(emitted) => emitted,
-                        // The harness already has the text, so this is a delivery
-                        // that only missed its transcript row. Reporting it as a
-                        // failure would invite a resend and put the words into the
-                        // turn twice.
-                        Err(error) => {
-                            tracing::error!(
-                                %thread_id,
-                                %error,
-                                "a steer reached the turn but its transcript row was not saved"
-                            );
-                            // The claim was removed in memory for the transcript
-                            // write that failed. Put the delivered claim back so
-                            // the record still says what happened.
-                            if let Some((_, claim)) = direct_claim.clone() {
-                                let claim_index = record.meta.queued.len() as u32;
-                                record.meta.claimed.push(QueuedClaim {
-                                    message: claim,
-                                    index: claim_index,
-                                    turn_id: active_turn_id.clone(),
-                                    state: QueuedClaimState::Delivered,
-                                    promoted: false,
-                                });
-                                self.inner
-                                    .save_claim_change(&mut record, "a delivered direct steer")
-                                    .await;
-                            }
-                            return Ok(AcceptedMessage {
-                                thread_id: thread_id.clone(),
-                                turn_id: active_turn_id,
-                                seq: self.inner.journal.head().await.unwrap_or(0),
-                                queued_message_id: None,
-                                unrecorded: true,
-                            });
+                    // The claim stays `sending` until this row is durable: the
+                    // adapter took the text, so a daemon that stops before the
+                    // row lands recovers it as a **May have been delivered**
+                    // row instead of dropping the only copy. A failed append is
+                    // retried before that fallback, because a transient write
+                    // error should still produce the transcript row.
+                    let mut seq = None;
+                    let mut last_error = None;
+                    for attempt in 1..=3 {
+                        if let Some((message_id, _, _)) = &direct_claim {
+                            record
+                                .meta
+                                .claimed
+                                .retain(|claim| &claim.message.message.message_id != message_id);
                         }
-                    };
+                        match self
+                            .inner
+                            .emit_steer(&mut record, domain.clone(), wire.clone(), &steer_item)
+                            .await
+                        {
+                            Ok((_, written)) => {
+                                seq = Some(written);
+                                break;
+                            }
+                            Err(error) => {
+                                // Storage still says `sending`, so memory must
+                                // too while the retry runs.
+                                if let Some((message_id, claim, index)) = direct_claim.clone() {
+                                    if record.claim_position(&message_id).is_none() {
+                                        record.meta.claimed.push(QueuedClaim {
+                                            message: claim,
+                                            index,
+                                            turn_id: active_turn_id.clone(),
+                                            state: QueuedClaimState::Sending,
+                                            promoted: false,
+                                            from_queue: false,
+                                        });
+                                    }
+                                }
+                                last_error = Some(error);
+                                if attempt < 3 {
+                                    tokio::time::sleep(Duration::from_millis(20)).await;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(seq) = seq {
+                        return Ok(AcceptedMessage {
+                            thread_id: thread_id.clone(),
+                            turn_id: active_turn_id,
+                            seq,
+                            queued_message_id: None,
+                            unrecorded: false,
+                        });
+                    }
+                    // Every attempt failed. The harness already has the text,
+                    // so this is a delivery that only missed its transcript
+                    // row. Reporting it as a failure would invite a resend and
+                    // put the words into the turn twice. Keep them visible as
+                    // the row a restart would recover, and say the row is
+                    // missing.
+                    tracing::error!(
+                        %thread_id,
+                        error = ?last_error,
+                        "a steer reached the turn but its transcript row was not saved"
+                    );
+                    if let Some((message_id, claim, index)) = direct_claim.clone() {
+                        record
+                            .meta
+                            .claimed
+                            .retain(|entry| entry.message.message.message_id != message_id);
+                        let mut message = claim;
+                        message.message.delivery_unknown = true;
+                        let index = (index as usize).min(record.meta.queued.len());
+                        record.meta.queued.insert(index, message);
+                        record.note_queue_change();
+                        if let Err(error) =
+                            self.inner.emit(&mut record, Vec::new(), Vec::new()).await
+                        {
+                            // Storage still holds the `sending` claim, which is
+                            // what a restart recovers the text from.
+                            tracing::warn!(
+                                %error,
+                                "a delivered steer's recovery row could not be saved"
+                            );
+                        }
+                    }
                     return Ok(AcceptedMessage {
                         thread_id: thread_id.clone(),
                         turn_id: active_turn_id,
-                        seq,
+                        seq: self.inner.journal.head().await.unwrap_or(0),
                         queued_message_id: None,
-                        unrecorded: false,
+                        unrecorded: true,
                     });
                 }
                 // A turn runs but the client named none: it last saw idle, so
@@ -6844,6 +6939,7 @@ impl ThreadManager {
                 turn_id: turn_id.clone(),
                 state: QueuedClaimState::Claimed,
                 promoted: true,
+                from_queue: true,
             });
             let mut domain = Vec::new();
             // The queue's oldest message becomes this turn, so a resume armed
@@ -6912,7 +7008,13 @@ impl ThreadManager {
         // already held from the selection above.
 
         let snapshot = record.start_snapshot();
-
+        // The turn's own prompt keeps a delivery claim even though this send
+        // never waited in the queue: the adapter call and the turn start are
+        // two steps, and a daemon that stops between them must still know the
+        // text was being sent. The claim is written in the same append as the
+        // turn, so it can never exist without the prompt.
+        let claim_ceiling = ceiling;
+        let claim_grant = grant.clone();
         let dispatch = record.begin_turn_for_work(
             now,
             UserInput {
@@ -6927,6 +7029,31 @@ impl ThreadManager {
         // its request named; the marker acceptance clears must be that same id.
         let item_id = item_id.clone().unwrap_or_else(|| user_item_id(&turn_id));
         dispatch.set_prompt_item_id(item_id.clone());
+        let claim_index = record.meta.queued.len() as u32;
+        record.meta.claimed.push(QueuedClaim {
+            message: StoredQueuedMessage {
+                message: QueuedMessage {
+                    message_id: QueuedMessageId::new_uuid_v7(),
+                    text: text.clone(),
+                    attachments: resolved_attachments.clone(),
+                    queued_at: now,
+                    steerable: false,
+                    delivery_unknown: false,
+                },
+                ceiling: claim_ceiling,
+                grant: claim_grant,
+                // The user item is already journaled under the real id in this
+                // same append, so the claim does not name it. A guest request
+                // therefore reads as accepted from its transcript item, never
+                // from a claim staged before the append.
+                item_id: None,
+            },
+            index: claim_index,
+            turn_id: turn_id.clone(),
+            state: QueuedClaimState::Claimed,
+            promoted: true,
+            from_queue: false,
+        });
 
         let mut domain = Vec::new();
         let released = self
@@ -7326,36 +7453,40 @@ impl ThreadManager {
                 Err(SteerFailure::Unclear(error)) => {
                     // The harness may already have the message. Requiring the
                     // person to retype it is worse than a missing row; a second
-                    // automatic delivery is not. The claim stays at `sending`, so
-                    // a restart shows the payload as "May have been delivered"
-                    // instead of dropping it, and nothing sends it again on its
-                    // own. The request says the outcome is unknown rather than
-                    // inviting a blind resend.
+                    // automatic delivery is not. Nothing will resolve the claim
+                    // now, so it becomes the visible row a restart would show
+                    // at once. It stays marked **May have been delivered** and
+                    // nothing sends it again on its own. The request says the
+                    // outcome is unknown rather than inviting a blind resend.
                     let mut record = handle.lock().await;
-                    if let Some(position) = record.claim_position(message_id) {
-                        record.meta.claimed[position].state = QueuedClaimState::Sending;
+                    record
+                        .meta
+                        .claimed
+                        .retain(|claim| &claim.message.message.message_id != message_id);
+                    let mut row = message;
+                    row.message.delivery_unknown = true;
+                    restore_queue_item(&mut record, index, row);
+                    record.note_queue_change();
+                    if let Err(error) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await {
+                        // The durable `sending` claim is still the record a
+                        // restart recovers the text from.
+                        tracing::warn!(
+                            %error,
+                            "an unsure steer's row could not be saved"
+                        );
                     }
-                    self.inner
-                        .save_claim_change(&mut record, "an unclear steer")
-                        .await;
                     return Err(ManagerError::DeliveryUnclear(format!(
                         "the message may have reached the agent: {error}"
                     )));
                 }
             }
             let mut record = handle.lock().await;
-            // The adapter took it. Record that before anything else can fail:
-            // even if the transcript row is never written, a restart must drop
-            // the claim instead of offering it as "may have been delivered".
-            if let Some(position) = record.claim_position(message_id) {
-                record.meta.claimed[position].state = QueuedClaimState::Delivered;
-            }
-            self.inner
-                .save_claim_change(&mut record, "a delivered steer")
-                .await;
-            // The turn has the text, so the claim no longer needs to hold it.
-            // Removing it in the same write that records the transcript row
-            // keeps one copy of the message.
+            // The adapter took the text. Its claim stays `sending` until the
+            // transcript row is durable: a daemon that stops before the row
+            // lands recovers the text as a **May have been delivered** row
+            // instead of dropping the only copy. A failed append is retried
+            // before that fallback, because a transient write error should
+            // still produce the transcript row.
             record
                 .meta
                 .claimed
@@ -7387,28 +7518,66 @@ impl ThreadManager {
                 item,
                 at: None,
             }];
-            let seq = match self.inner.emit(&mut record, domain, wire).await {
-                Ok((_, seq)) => seq,
-                Err(error) => {
+            let mut written = None;
+            let mut last_error = None;
+            for attempt in 1..=3 {
+                match self
+                    .inner
+                    .emit(&mut record, domain.clone(), wire.clone())
+                    .await
+                {
+                    Ok((_, seq)) => {
+                        written = Some(seq);
+                        break;
+                    }
+                    Err(error) => {
+                        // Storage still says `sending`, so memory must too
+                        // while the retry runs.
+                        if record.claim_position(message_id).is_none() {
+                            record.meta.claimed.push(QueuedClaim {
+                                message: message.clone(),
+                                index: index as u32,
+                                turn_id: active_turn_id.clone(),
+                                state: QueuedClaimState::Sending,
+                                promoted: false,
+                                from_queue: true,
+                            });
+                        }
+                        last_error = Some(error);
+                        if attempt < 3 {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }
+                }
+            }
+            let seq = match written {
+                Some(seq) => seq,
+                None => {
                     // The message is in the turn, so it is delivered; only its
-                    // transcript row is missing. Put the delivered claim back so
-                    // the record still describes what happened, and try the
-                    // write once more.
+                    // transcript row is missing. Keep the text visible as the
+                    // row a restart would recover, and never send it on its
+                    // own.
                     tracing::error!(
                         %thread_id,
-                        %error,
+                        error = ?last_error,
                         "a queued steer reached the turn but its transcript row was not saved"
                     );
-                    record.meta.claimed.push(QueuedClaim {
-                        message: message.clone(),
-                        index: index as u32,
-                        turn_id: active_turn_id.clone(),
-                        state: QueuedClaimState::Delivered,
-                        promoted: false,
-                    });
-                    self.inner
-                        .save_claim_change(&mut record, "a delivered steer")
-                        .await;
+                    record
+                        .meta
+                        .claimed
+                        .retain(|claim| &claim.message.message.message_id != message_id);
+                    let mut row = message.clone();
+                    row.message.delivery_unknown = true;
+                    restore_queue_item(&mut record, index, row);
+                    record.note_queue_change();
+                    if let Err(error) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await {
+                        // Storage still holds the `sending` claim, which is
+                        // what a restart recovers the text from.
+                        tracing::warn!(
+                            %error,
+                            "a delivered steer's recovery row could not be saved"
+                        );
+                    }
                     0
                 }
             };
@@ -7486,6 +7655,7 @@ impl ThreadManager {
             turn_id: turn_id.clone(),
             state: QueuedClaimState::Claimed,
             promoted: false,
+            from_queue: true,
         });
         record.note_queue_change();
         if let Err(error) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await {
@@ -7579,6 +7749,7 @@ impl ThreadManager {
             turn_id: turn_id.clone(),
             state: QueuedClaimState::Claimed,
             promoted: true,
+            from_queue: true,
         });
         let mut domain = Vec::new();
         let released = self
@@ -10757,6 +10928,7 @@ impl Inner {
                 turn_id: next_id.clone(),
                 state: QueuedClaimState::Claimed,
                 promoted: true,
+                from_queue: true,
             });
             attempt_domain.push(ThreadEvent::TurnQueued { at: now });
             attempt_domain.push(ThreadEvent::TurnStarted { at: now });
@@ -12213,6 +12385,67 @@ impl Inner {
                 }
                 (None, false)
             } else {
+                // A promoted prompt whose write may already have reached the
+                // adapter is never written again on a replacement session: the
+                // same text would be delivered twice. Nothing will resolve its
+                // claim now that the session is gone, so settle the turn here,
+                // where the claim becomes the visible **May have been
+                // delivered** row the person can resend or discard.
+                if record.promoted_turn_is(turn_id)
+                    && record.promoted_claim_state(turn_id) == Some(QueuedClaimState::Sending)
+                {
+                    let hint = Some("Inspect the thread and retry when ready".into());
+                    let end = if dead {
+                        TurnEnd::transport_failed(message.clone(), hint, false)
+                    } else {
+                        TurnEnd::failed(message.clone(), hint, false)
+                    };
+                    let settled = self.settle_turn_locked(&mut record, turn_id, end).await;
+                    // The limit still belongs to this thread even though the
+                    // prompt is now the person's decision. It is applied after
+                    // the settlement, so a pause can never park a prompt whose
+                    // delivery is unknown.
+                    if let Some(signal) = limit.clone() {
+                        let now = self.now();
+                        let auto_resume = signal.reset_at.is_some();
+                        let (ceiling, grant) = (dispatch.ceiling(), dispatch.grant().cloned());
+                        let mut domain = Vec::new();
+                        let mut wire = Vec::new();
+                        if let Some(event) = self
+                            .apply_limit_hit(
+                                &mut record,
+                                Some(claimed_generation),
+                                ceiling,
+                                grant,
+                                signal.reset_at,
+                                auto_resume,
+                                now,
+                            )
+                            .await
+                        {
+                            wire.push(event);
+                        }
+                        let auto_resume = auto_resume && record.auto_resume_armed();
+                        wire.push(Event::UsageLimitHit {
+                            thread_id: record.meta.thread_id.clone(),
+                            reset_at: signal.reset_at,
+                            auto_resume,
+                        });
+                        domain.push(ThreadEvent::UsageLimitHit {
+                            reset_at: signal.reset_at,
+                            auto_resume,
+                            at: now,
+                        });
+                        if let Err(error) = self.emit(&mut record, domain, wire).await {
+                            tracing::error!(%error, "failed to record a rate limit");
+                        }
+                    }
+                    drop(record);
+                    if settled {
+                        self.spawn_advance(handle);
+                    }
+                    return;
+                }
                 // Test-only interleaving point: the old scope read the record
                 // and then released the dispatch in a second step, so a Stop
                 // landing in this window made the requeue fail and left the
@@ -12710,11 +12943,15 @@ impl Inner {
                         .await;
                 }
                 // The accepted prompt carried the rewind's handoff, so a later
-                // turn resumes the new session instead of sending it again.
-                if matches!(
-                    record.meta.pending_rewind,
-                    Some(h4rn_protocol::PendingRewind::Handoff)
-                ) {
+                // turn resumes the new session instead of sending it again. A
+                // prompt that did not carry it must not clear a handoff a newer
+                // attempt has just armed.
+                if dispatch.handoff_applied()
+                    && matches!(
+                        record.meta.pending_rewind,
+                        Some(h4rn_protocol::PendingRewind::Handoff)
+                    )
+                {
                     record.meta.pending_rewind = None;
                     if let Err(error) = self.journal.upsert_thread(&record.meta).await {
                         tracing::warn!(
@@ -19204,6 +19441,7 @@ mod tests {
                 turn_id: created.turn_id.clone(),
                 state: crate::journal::QueuedClaimState::Sending,
                 promoted: true,
+                from_queue: true,
             });
         }
         let refused = manager
@@ -19857,6 +20095,95 @@ mod tests {
             handle.lock().await.active.is_none(),
             "the turn ended instead of staying Working"
         );
+    }
+
+    /// A promoted prompt whose write may already have reached the adapter is
+    /// never written again when its session is detached.
+    ///
+    /// The detach used to send the prompt to a replacement session, delivering
+    /// the same text twice. Its claim now becomes the visible **May have been
+    /// delivered** row a restart would show, and nothing sends it again.
+    #[tokio::test]
+    async fn an_ambiguous_promoted_write_after_a_detach_is_never_sent_again() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, gate) = harness.with_send_gate_after(1);
+        let harness = harness.with_send_failure_after(1, "codex turn/start timed out");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "A");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        sends.wait_for(1).await;
+        manager
+            .send_message(&created.thread_id, "only copy".into(), Vec::new())
+            .await
+            .expect("queue the message while the first turn runs");
+        completion.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let promoted = loop {
+            let wire = next_event(&mut events).await;
+            if let Event::TurnStarted { turn_id, .. } = wire.event
+                && turn_id != created.turn_id
+            {
+                break turn_id;
+            }
+        };
+        assert!(
+            wait_until(|| sends.get() == 2).await,
+            "the promoted prompt was never written"
+        );
+
+        // The write is held inside the adapter. Detaching its session makes
+        // the write fail without the adapter ever answering.
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live generation");
+            record.detach_session(generation);
+        }
+        gate.release();
+
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            settled_turn(&mut events, &promoted),
+        )
+        .await
+        .expect("the promoted turn settled");
+        assert_eq!(status, TurnStatus::Failed);
+        assert_eq!(
+            sends.get(),
+            2,
+            "the ambiguous promoted write was sent again on a replacement session"
+        );
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("only copy", true)],
+            "the ambiguous write is not the visible row the person decides on"
+        );
+        assert!(
+            handle.lock().await.active.is_none(),
+            "the turn stayed active with nobody to deliver it"
+        );
+        manager.shutdown().await;
     }
 
     /// A restart restores an imported thread's finished agent and its newest
@@ -28433,11 +28760,12 @@ mod tests {
     /// that arrives while the promoted prompt has not been handed to the
     /// harness cannot belong to it: it is the finished turn's late output. It is
     /// dropped before anything is published, so it can neither reach the
-    /// promoted turn nor keep its prompt from going back to the pause. If the
-    /// harness did emit a delta that early, dropping it is the tolerated order
-    /// here; the requeue and the parked prompt are what this asserts.
+    /// promoted turn nor keep its prompt from becoming the visible row the
+    /// person decides on. If the harness did emit a delta that early, dropping
+    /// it is the tolerated order here; the settled turn and the unsure row are
+    /// what this asserts.
     #[tokio::test]
-    async fn a_late_update_from_a_finished_turn_never_denies_a_promoted_turns_requeue() {
+    async fn a_late_update_from_a_finished_turn_is_dropped_when_a_limited_promoted_write_settles() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
         let (harness, injector) = FakeHarness::new().with_event_injector();
@@ -28540,7 +28868,12 @@ mod tests {
                         late_deltas += 1;
                     }
                 }
-                Event::UsageLimitHit { .. } => break,
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } if turn_id == promoted => {
+                    assert_eq!(status, TurnStatus::Failed);
+                    break;
+                }
                 _ => {}
             }
         }
@@ -28550,37 +28883,28 @@ mod tests {
         );
 
         let record = handle.lock().await;
-        assert_eq!(
-            record
-                .scheduled_limit
-                .as_ref()
-                .and_then(|limit| limit.parked_turn.clone()),
-            Some(promoted.clone()),
-            "the pause names the promoted turn"
-        );
-        assert_eq!(
-            record
-                .meta
-                .parked
-                .as_ref()
-                .map(|parked| parked.turn_id.clone()),
-            Some(promoted.clone()),
-            "the prompt is on the row for a restart to restore"
-        );
-        let active = record
-            .active
-            .as_ref()
-            .expect("the promoted turn is parked, not failed");
-        assert_eq!(active.turn_id, promoted);
         assert!(
-            record.pending_turn(),
-            "the failed write put the prompt back"
+            record.meta.parked.is_none(),
+            "a prompt whose delivery is unknown was parked for a resume"
         );
         assert!(
-            active.text.is_empty(),
-            "the finished turn's late update is not the promoted turn's own text"
+            record.active.is_none(),
+            "the promoted turn stayed active instead of settling"
         );
         drop(record);
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("queued", true)],
+            "the unsure promoted prompt is not the visible row the person decides on"
+        );
 
         manager.shutdown().await;
     }
@@ -28696,7 +29020,12 @@ mod tests {
                         late_deltas += 1;
                     }
                 }
-                Event::UsageLimitHit { .. } => break,
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } if turn_id == promoted => {
+                    assert_eq!(status, TurnStatus::Failed);
+                    break;
+                }
                 _ => {}
             }
         }
@@ -28722,33 +29051,41 @@ mod tests {
             "the finished turn's late update was journaled: {journaled:?}"
         );
         let record = handle.lock().await;
-        let active = record
-            .active
-            .as_ref()
-            .expect("the promoted turn is parked, not failed");
-        assert_eq!(active.turn_id, promoted);
         assert!(
-            active.text.is_empty(),
-            "the finished turn's late update became the promoted turn's text"
+            record.meta.parked.is_none(),
+            "a prompt whose delivery is unknown was parked for a resume"
         );
         assert!(
-            record.pending_turn(),
-            "the failed write put the prompt back"
+            record.active.is_none(),
+            "the promoted turn stayed active instead of settling"
         );
         drop(record);
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("queued", true)],
+            "the unsure promoted prompt is not the visible row the person decides on"
+        );
 
         manager.shutdown().await;
     }
 
-    /// The exit report survives the non-accepted requeue.
+    /// The exit report survives an unsure promoted write.
     ///
-    /// A promoted turn whose prompt the harness never accepted goes back to the
-    /// pause instead of being failed for a death it never touched. The
-    /// transport's exit status and stderr still describe the session that died,
-    /// and clearing the held report while requeueing would erase the only row
-    /// the person has for that death.
+    /// A promoted turn whose prompt the harness may have accepted settles as
+    /// the visible row instead of being parked. The transport's exit status and
+    /// stderr still describe the session that died, and clearing the held
+    /// report while settling would erase the only row the person has for that
+    /// death.
     #[tokio::test]
-    async fn a_requeued_turn_keeps_the_exit_report_of_the_session_that_died() {
+    async fn a_limited_promoted_write_keeps_the_exit_report_of_the_session_that_died() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
         let completed = || {
@@ -28784,7 +29121,7 @@ mod tests {
             .send_message(&created.thread_id, "queued".into(), Vec::new())
             .await
             .expect("queue");
-        let promoted = loop {
+        let _promoted = loop {
             let wire = next_event(&mut events).await;
             if let Event::TurnStarted { turn_id, .. } = wire.event
                 && turn_id != created.turn_id
@@ -28837,23 +29174,31 @@ mod tests {
             .expect("handle");
         let record = handle.lock().await;
         assert!(
-            record.pending_turn(),
-            "the promoted turn did not go back to the pause"
+            record.active.is_none(),
+            "the unsure promoted turn stayed active instead of settling"
         );
-        assert_eq!(
-            record
-                .meta
-                .parked
-                .as_ref()
-                .map(|parked| parked.turn_id.clone()),
-            Some(promoted.clone()),
-            "the pause does not name the requeued prompt"
+        assert!(
+            record.meta.parked.is_none(),
+            "a prompt whose delivery is unknown was parked for a resume"
         );
         assert!(
             record.transport_report.is_none(),
             "the published report is not left behind for a second row"
         );
         drop(record);
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("queued", true)],
+            "the unsure promoted prompt is not the visible row the person decides on"
+        );
 
         write.release();
         manager.shutdown().await;
@@ -29563,7 +29908,7 @@ mod tests {
         let (harness, gate) = FakeHarness::new().with_send_gate_after(2);
         let (harness, completion) = harness.with_later_completion_gate();
         let (harness, sends) = harness.with_send_count();
-        let harness = harness.with_send_failure_after(2, "the harness rejected the message");
+        let harness = harness.with_send_not_sent_after(2, "the harness rejected the message");
         let host = HostId::new("host_test");
         let manager = open_test_manager(harness, host.clone()).await;
         let mut events = manager.subscribe();
@@ -30537,14 +30882,13 @@ mod tests {
         );
         manager.shutdown().await;
     }
-    /// A failed write whose schedule the ledger refuses parks no prompt.
+    /// A failed write whose schedule the ledger refuses leaves no pause.
     ///
-    /// The recovery hands the promoted prompt back and then arms its schedule.
-    /// Saving the prompt on the thread row before the ledger answers would
-    /// leave a prompt no schedule owns: the turn still runs, and a restart can
-    /// deliver it again. Only a schedule that was really armed may save it.
+    /// The limit is still recorded, but a schedule that could not be armed must
+    /// not leave a prompt parked for a resume that will never exist. The turn
+    /// settles and the prompt stays as the visible unsure row.
     #[tokio::test]
-    async fn a_failed_write_whose_schedule_the_ledger_refuses_parks_no_prompt() {
+    async fn a_failed_write_whose_schedule_the_ledger_refuses_leaves_no_pause() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let journal_path = workspace.path().join("journal.sqlite");
         let meter_path = workspace.path().join("meter.sqlite");
@@ -30593,14 +30937,6 @@ mod tests {
             .handle(&created.thread_id)
             .await
             .expect("handle");
-        let dispatch = {
-            let record = handle.lock().await;
-            record
-                .dispatch_for(&promoted)
-                .expect("the promoted turn's dispatch")
-        };
-        let pause = Arc::new(RecoverPause::default());
-        dispatch.pause_recovery_at(Arc::clone(&pause));
 
         // The ledger refuses the schedule the failed write is about to arm.
         meter.store().fail_next_schedule_reads_for_tests(1);
@@ -30624,21 +30960,12 @@ mod tests {
             }
         })
         .await
-        .expect("the requeued turn settled");
+        .expect("the failed turn settled");
         assert!(
             failed_to_schedule,
             "the refused schedule was never reported"
         );
         assert_eq!(status, TurnStatus::Failed);
-        let parked = pause
-            .parked
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .expect("the recovery never inspected the parked prompt");
-        assert!(
-            !parked,
-            "the recovery parked the prompt before its schedule was armed"
-        );
 
         {
             let record = handle.lock().await;
@@ -30685,16 +31012,17 @@ mod tests {
         manager.shutdown().await;
     }
 
-    /// A requeued turn with no schedule to deliver it fails instead of hanging.
+    /// A limited promoted write with no schedule to deliver it fails instead of
+    /// hanging.
     ///
     /// The promoted prompt's write dies on the exit report's limit, but a
-    /// daemon without a meter can arm no resume. Parking the prompt for a
+    /// daemon without a meter can arm no resume. Leaving the turn pending for a
     /// schedule that will never exist would leave the thread Working forever,
-    /// so the turn settles honestly and the queue moves on. Nothing may show
-    /// the thread as `Scheduled` either: the published flag comes from the
-    /// schedule that was really armed, not from the limit signal.
+    /// so it settles honestly with the unsure row and the queue moves on.
+    /// Nothing may show the thread as `Scheduled` either: the published flag
+    /// comes from the schedule that was really armed, not from the limit signal.
     #[tokio::test]
-    async fn a_requeued_turn_with_no_schedule_to_deliver_it_fails_instead_of_hanging() {
+    async fn a_limited_promoted_write_with_no_schedule_settles_instead_of_hanging() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
         let (harness, completion) = FakeHarness::new().with_later_completion_gate();
@@ -31686,6 +32014,64 @@ mod tests {
     /// whether a steer is folded into the running turn or becomes a second turn
     /// is unknowable from its result stream, so the daemon refuses instead of
     /// settling the wrong turn.
+    /// A direct steer re-checks the sender's grant under the session lock.
+    ///
+    /// The text must never reach a running turn for a family that was revoked
+    /// while the steer was being composed, exactly as a promoted write refuses.
+    #[tokio::test]
+    async fn a_direct_steer_rechecks_its_grant_before_the_write() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        manager.set_grant_authority(Arc::new(TestGrantAuthority::default()));
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        let refused = manager
+            .send_message_with_work(
+                &created.thread_id,
+                "go left".into(),
+                Vec::new(),
+                SendWork {
+                    mode: SendMode::Steer,
+                    turn_id: Some(created.turn_id.clone()),
+                    grant: Some(work_grant("family-a")),
+                    ..SendWork::default()
+                },
+            )
+            .await
+            .expect_err("the revoked grant is refused");
+        assert!(
+            refused.to_string().contains("access was revoked"),
+            "the refusal names the revoked grant: {refused}"
+        );
+        assert_eq!(steers.get(), 0, "the revoked steer reached the turn");
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert!(
+            queue.queued.is_empty(),
+            "a refused direct steer left a queue row"
+        );
+        assert!(
+            manager
+                .thread_meta(&created.thread_id)
+                .await
+                .expect("thread meta")
+                .claimed
+                .is_empty(),
+            "a refused direct steer left a claim"
+        );
+        manager.shutdown().await;
+    }
+
     #[tokio::test]
     async fn a_harness_without_attributable_mid_turn_input_refuses_a_steer() {
         let workspace = tempfile::tempdir().expect("tempdir");
@@ -31847,29 +32233,32 @@ mod tests {
             )
             .await
             .expect("the steer is delivered even though the row is not recorded");
-        assert!(
-            accepted.queued.is_empty(),
-            "the claimed message is not queued any more"
+        assert_eq!(
+            accepted
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("steer me", true)],
+            "a steer whose transcript never saved is not the visible row"
         );
         assert_eq!(steers.get(), 1, "the harness took the message once");
         let queue = manager
             .thread_queue(&created.thread_id, 0)
             .await
             .expect("queue");
-        assert!(queue.queued.is_empty(), "the claim is not in the queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("steer me", true)],
+            "the unsure steer is not visible while the daemon keeps running"
+        );
 
-        // The daemon stopped in the window where the claim says `sending`.
-        {
-            let handle = manager
-                .inner
-                .handle(&created.thread_id)
-                .await
-                .expect("handle");
-            let mut record = handle.lock().await;
-            if let Some(position) = record.claim_position(&message_id) {
-                record.meta.claimed[position].state = QueuedClaimState::Sending;
-            }
-        }
+        // The daemon stopped while storage still held the `sending` claim: the
+        // failed writes never recorded the queue row above.
         manager.shutdown().await;
         // Let the restarted daemon's own recovery write land.
         journal.fail_next_appends(0);
@@ -31974,7 +32363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unclear_steer_failure_leaves_the_message_claimed_not_queued() {
+    async fn an_unclear_steer_is_a_visible_row_without_a_restart() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let (harness, _steers) = FakeHarness::with_events(running_script())
             .with_kind(HarnessKind::Codex)
@@ -32002,14 +32391,24 @@ mod tests {
                 },
             )
             .await;
-        assert!(failed.is_err(), "the timeout is reported");
+        assert!(
+            matches!(failed, Err(ManagerError::DeliveryUnclear(_))),
+            "a timeout is reported as possibly delivered, got {failed:?}"
+        );
+        // Nothing will resolve the claim, so the row is visible now rather
+        // than only after a restart.
         let queue = manager
             .thread_queue(&created.thread_id, 0)
             .await
             .expect("queue");
-        assert!(
-            queue.queued.is_empty(),
-            "a timeout may have delivered it, so it is not queued again"
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("may be delivered", true)],
+            "an unclear steer stayed hidden in a claim"
         );
         manager.shutdown().await;
     }
@@ -32059,13 +32458,17 @@ mod tests {
             .into_iter()
             .find(|meta| meta.thread_id == created.thread_id)
             .expect("the thread's metadata");
+        assert!(
+            stored.claimed.is_empty(),
+            "an unclear steer stayed hidden in a claim"
+        );
         assert_eq!(
             stored
-                .claimed
+                .queued
                 .iter()
-                .map(|claim| claim.state)
+                .map(|entry| { (entry.message.text.as_str(), entry.message.delivery_unknown,) })
                 .collect::<Vec<_>>(),
-            [QueuedClaimState::Sending],
+            [("only copy", true)],
             "an unclear outcome must stay recoverable, not be recorded as delivered"
         );
 
@@ -32151,13 +32554,17 @@ mod tests {
             .into_iter()
             .find(|meta| meta.thread_id == created.thread_id)
             .expect("the thread's metadata");
+        assert!(
+            stored.claimed.is_empty(),
+            "an unclear direct steer stayed hidden in a claim"
+        );
         assert_eq!(
             stored
-                .claimed
+                .queued
                 .iter()
-                .map(|claim| (claim.state, claim.promoted))
+                .map(|entry| { (entry.message.text.as_str(), entry.message.delivery_unknown,) })
                 .collect::<Vec<_>>(),
-            [(QueuedClaimState::Sending, false)],
+            [("direct only copy", true)],
             "the direct steer has no durable copy of its own"
         );
 
@@ -32521,6 +32928,101 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["outside work"],
             "the message refused at the write is still queued"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A refused promoted message keeps its place in the queue.
+    ///
+    /// It waited in front of the messages behind it, so restoring it at the end
+    /// (after the settlement promoted the next one) would invert the order the
+    /// person set up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_promoted_message_keeps_its_queue_position() {
+        /// Live until the first check reads it; the check at the write runs
+        /// after the revocation and must see it gone.
+        struct RevokeAfterFirstRead {
+            live: std::sync::atomic::AtomicBool,
+            checked: std::sync::Barrier,
+            revoked: std::sync::Barrier,
+        }
+
+        impl GrantAuthority for RevokeAfterFirstRead {
+            fn family_is_live(&self, _: &str) -> bool {
+                let observed = self.live.load(Ordering::SeqCst);
+                if observed {
+                    self.checked.wait();
+                    self.revoked.wait();
+                }
+                observed
+            }
+        }
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+
+        manager
+            .send_message_for_work(
+                &created.thread_id,
+                "refused A".into(),
+                Vec::new(),
+                None,
+                Some(work_grant("family-a")),
+            )
+            .await
+            .expect("queue A");
+        manager
+            .send_message(&created.thread_id, "B".into(), Vec::new())
+            .await
+            .expect("queue B");
+        manager
+            .send_message(&created.thread_id, "C".into(), Vec::new())
+            .await
+            .expect("queue C");
+        let authority = Arc::new(RevokeAfterFirstRead {
+            live: std::sync::atomic::AtomicBool::new(true),
+            checked: std::sync::Barrier::new(2),
+            revoked: std::sync::Barrier::new(2),
+        });
+        manager.set_grant_authority(authority.clone());
+        let revoke = std::thread::spawn({
+            let authority = Arc::clone(&authority);
+            move || {
+                authority.checked.wait();
+                authority.live.store(false, Ordering::SeqCst);
+                authority.revoked.wait();
+            }
+        });
+        completion.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the promoted turn settled");
+        revoke.join().expect("the revoking thread");
+        assert_eq!(status, TurnStatus::Failed);
+
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["refused A", "C"],
+            "the refused message was restored behind the one promoted in its place"
         );
         manager.shutdown().await;
     }
@@ -33015,6 +33517,87 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// An ordinary send to an idle thread keeps a durable delivery claim.
+    ///
+    /// The claim is written before the adapter call, so a daemon that stops
+    /// while the write is on the wire recovers the prompt as a **May have been
+    /// delivered** row instead of losing the record that it was being sent.
+    #[tokio::test]
+    async fn an_idle_send_has_a_durable_delivery_claim() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, gate) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_gate_after(1);
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // The next idle send's write is held inside the adapter, after its
+        // `sending` claim was made durable.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("the idle send starts a turn");
+        sends.wait_for(2).await;
+
+        let stored = persisted_meta(&journal, &created.thread_id).await;
+        assert!(
+            stored.queued.is_empty(),
+            "the idle send's queue row was not replaced by a claim"
+        );
+        assert_eq!(
+            stored
+                .claimed
+                .iter()
+                .map(|claim| (
+                    claim.message.message.text.as_str(),
+                    claim.state,
+                    claim.promoted
+                ))
+                .collect::<Vec<_>>(),
+            [("second", QueuedClaimState::Sending, true)],
+            "an idle send left no durable delivery record"
+        );
+
+        // The crash image: a second daemon over the same journal sees the
+        // prompt as possibly delivered and sends nothing on its own.
+        let (fresh, restarted_sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted = open_test_manager_with_journal(fresh, host, journal).await;
+        let queue = restarted
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue after the crash");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("second", true)],
+            "the crash lost the idle send or called it known unsent"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), restarted_sends.wait_for(1))
+                .await
+                .is_err(),
+            "the restart sent the recovered idle prompt on its own"
+        );
+        restarted.shutdown().await;
+
+        gate.release();
+        manager.shutdown().await;
+    }
+
     /// A promoted message is dequeued durably before its prompt is written.
     ///
     /// The settlement's first append fails; its retry saves the dequeue and the
@@ -33277,6 +33860,98 @@ mod tests {
         restarted.shutdown().await;
     }
 
+    /// A limit never parks a promoted prompt whose write is already unknown.
+    ///
+    /// The adapter may hold the text. Parking the prompt would let the schedule
+    /// send it again; the claim becomes the **May have been delivered** row the
+    /// person decides on after a restart instead.
+    #[tokio::test]
+    async fn a_limit_never_parks_a_promoted_prompt_whose_write_is_unknown() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let harness =
+            harness.with_closed_limit_after(1, "provider usage limit reached", Some(reset_at));
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "A");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        sends.wait_for(1).await;
+        manager
+            .send_message(&created.thread_id, "only copy".into(), Vec::new())
+            .await
+            .expect("queue the message while the first turn runs");
+        completion.release();
+
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the promoted turn settled");
+        assert_eq!(status, TurnStatus::Failed);
+        assert_eq!(sends.get(), 2, "the promoted write was attempted once");
+
+        let stored = persisted_meta(&journal, &created.thread_id).await;
+        assert!(
+            stored.parked.is_none(),
+            "the pause parked a prompt whose delivery is unknown"
+        );
+        assert!(
+            stored.claimed.is_empty(),
+            "an unknown delivery stayed hidden in a claim"
+        );
+        assert_eq!(
+            stored
+                .queued
+                .iter()
+                .map(|entry| (entry.message.text.as_str(), entry.message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("only copy", true)],
+            "the limit lost the unsure prompt or called it known unsent"
+        );
+
+        manager.shutdown().await;
+        drop(manager);
+
+        // The restart must not send the row on its own: only the person may.
+        let (fresh, restarted_sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted = open_test_manager_with_journal(fresh, host, journal).await;
+        restarted.set_meter(Arc::new(
+            h4rn_meter::MeterHub::in_memory().await.expect("meter"),
+        ));
+        restarted.resync_meter_state().await;
+        let queue = restarted
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue after the restart");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("only copy", true)],
+            "the restart lost the unsure prompt or sent it on its own"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), restarted_sends.wait_for(1))
+                .await
+                .is_err(),
+            "the restart sent the unsure prompt on its own"
+        );
+        restarted.shutdown().await;
+    }
+
     /// A promoted prompt whose write failed after the adapter was called is
     /// shown as "may have been delivered" as soon as its turn settles, not only
     /// after a restart.
@@ -33500,6 +34175,7 @@ mod tests {
             turn_id: TurnId::new_uuid_v7(),
             state: QueuedClaimState::Delivered,
             promoted: true,
+            from_queue: true,
         });
         journal
             .upsert_thread(&meta)
@@ -33572,6 +34248,7 @@ mod tests {
             turn_id: created.turn_id.clone(),
             state: QueuedClaimState::Sending,
             promoted: true,
+            from_queue: true,
         });
         journal.upsert_thread(&meta).await.expect("the crash image");
 
@@ -34431,13 +35108,13 @@ mod tests {
         manager.shutdown().await;
     }
 
-    /// A direct steer that the harness took is reported as delivered even when
-    /// the transcript row cannot be written.
+    /// A direct steer whose transcript append fails is retried.
     ///
-    /// The alternative is an error, which the client answers by sending the
-    /// same words again: the running turn would then hold them twice.
+    /// The harness already took the words, so the row is still reported as
+    /// delivered; a transient journal error must not lose it from the
+    /// transcript when one more write would land it.
     #[tokio::test]
-    async fn a_steer_that_cannot_be_recorded_is_reported_as_delivered() {
+    async fn a_delivered_steers_transcript_append_is_retried() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let journal = FlakyJournal::in_memory().await;
         let (harness, steers) = FakeHarness::with_events(running_script())
@@ -34457,7 +35134,7 @@ mod tests {
         wait_for_running_turn(&mut events).await;
 
         // The direct steer first writes its `sending` claim, then the harness
-        // takes it, then the transcript row's append fails.
+        // takes it, then the transcript row's first append fails.
         let pause = Arc::new(DeliveryPause::default());
         *manager
             .inner
@@ -34480,15 +35157,12 @@ mod tests {
             .deliver_pause
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        // Skip the delivered-claim write; the transcript append after it fails.
-        journal.fail_appends_after(1, 1);
+        journal.fail_next_appends(1);
         pause.resume.notify_one();
-        let accepted = send
-            .await
-            .expect("the steer is delivered even though its row is not recorded");
+        let accepted = send.await.expect("the steer is delivered");
         assert!(
-            accepted.unrecorded,
-            "the result says the transcript row is missing"
+            !accepted.unrecorded,
+            "the retried transcript append did not record the row"
         );
         assert_eq!(
             accepted.queued_message_id, None,
@@ -34496,7 +35170,217 @@ mod tests {
         );
         steers.wait_for(1).await;
         assert_eq!(steers.texts(), vec!["go left".to_owned()]);
+
+        let wire = manager
+            .inner
+            .journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("the journal");
+        assert_eq!(
+            wire.into_iter()
+                .filter(|entry| matches!(
+                    &entry.event,
+                    Event::ItemCompleted {
+                        item: Item::Message {
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                        ..
+                    } if text == "go left"
+                ))
+                .count(),
+            1,
+            "the retried steer row is not in the transcript exactly once"
+        );
         manager.shutdown().await;
+    }
+
+    /// A delivered steer whose transcript never saves keeps a visible row.
+    ///
+    /// Every retry can fail. The text is already in the turn, so it must not
+    /// vanish from h4rn's records: it stays as the **May have been delivered**
+    /// row a restart recovers, and nothing sends it again on its own.
+    #[tokio::test]
+    async fn a_delivered_steer_whose_transcript_never_saves_keeps_a_visible_row() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        let accepted = {
+            let mut send = std::pin::pin!(manager.send_message_with(
+                &created.thread_id,
+                "go left".into(),
+                Vec::new(),
+                SendMode::Steer,
+                Some(created.turn_id.clone()),
+            ));
+            tokio::select! {
+                _ = pause.checked.notified() => {}
+                result = &mut send => panic!("the steer finished before its claim paused: {result:?}"),
+            }
+            *manager
+                .inner
+                .deliver_pause
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            // Every transcript attempt fails; the fallback row is written after.
+            journal.fail_next_appends(3);
+            pause.resume.notify_one();
+            send.await.expect("the steer is delivered")
+        };
+        assert!(accepted.unrecorded, "the result says the row is missing");
+        assert_eq!(accepted.queued_message_id, None);
+        steers.wait_for(1).await;
+        assert_eq!(steers.texts(), vec!["go left".to_owned()]);
+
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("go left", true)],
+            "a delivered steer without a transcript row vanished"
+        );
+
+        manager.shutdown().await;
+        drop(manager);
+
+        let (fresh, restarted_sends) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted =
+            open_test_manager_with_journal(fresh, host, Arc::clone(&journal) as Arc<dyn Journal>)
+                .await;
+        let queue = restarted
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue after the restart");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("go left", true)],
+            "the restart lost the delivered steer's only record"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), restarted_sends.wait_for(1))
+                .await
+                .is_err(),
+            "the restart sent the delivered steer again"
+        );
+        restarted.shutdown().await;
+    }
+
+    /// A queued steer whose transcript never saves keeps a visible row.
+    ///
+    /// Its queue row was removed to claim it and the turn has the text. If the
+    /// transcript append keeps failing, the text must come back as the row a
+    /// restart recovers instead of disappearing.
+    #[tokio::test]
+    async fn a_queued_steer_whose_transcript_never_saves_keeps_a_visible_row() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal = FlakyJournal::in_memory().await;
+        let (harness, _steers) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_steer_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(
+            harness,
+            host.clone(),
+            Arc::clone(&journal) as Arc<dyn Journal>,
+        )
+        .await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+        let queued = manager
+            .send_message(&created.thread_id, "go left".into(), Vec::new())
+            .await
+            .expect("queue");
+        let message_id = queued.queued_message_id.expect("queued id");
+
+        // Skip the claim and `sending` writes; fail every transcript attempt.
+        journal.fail_appends_after(2, 3);
+        let updated = manager
+            .queue_message(
+                &created.thread_id,
+                &message_id,
+                QueueAction::Steer {
+                    turn_id: Some(created.turn_id.clone()),
+                },
+            )
+            .await
+            .expect("the steer is delivered");
+        assert_eq!(
+            updated
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("go left", true)],
+            "a queued steer without a transcript row vanished"
+        );
+
+        manager.shutdown().await;
+        drop(manager);
+
+        let (fresh, restarted_sends) = FakeHarness::with_events(running_script())
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted =
+            open_test_manager_with_journal(fresh, host, Arc::clone(&journal) as Arc<dyn Journal>)
+                .await;
+        let queue = restarted
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue after the restart");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("go left", true)],
+            "the restart lost the queued steer's only record"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), restarted_sends.wait_for(1))
+                .await
+                .is_err(),
+            "the restart sent the delivered steer again"
+        );
+        restarted.shutdown().await;
     }
 
     /// A refused steer's restore write is retried, so the message survives a
@@ -36145,10 +37029,10 @@ mod tests {
             .expect("create");
         next_turn_completion(&mut events).await;
 
-        // Hold B's delivery before its prompt is written, then refuse every
-        // journal append from that point on. The streaming output and the
-        // settlement can no longer write the boundary as a side effect: it must
-        // have a write of its own.
+        // Hold B's delivery before its prompt is written, then let its delivery
+        // claim land and refuse every journal append after it. The streaming
+        // output and the settlement can no longer write the boundary as a side
+        // effect: it must have a write of its own.
         let pause = Arc::new(DeliveryPause::default());
         *manager
             .inner
@@ -36162,7 +37046,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), pause.checked.notified())
             .await
             .expect("B never reached its delivery");
-        journal.fail_next_appends(usize::MAX);
+        journal.fail_appends_after(1, usize::MAX);
         *manager
             .inner
             .deliver_pause
@@ -37650,6 +38534,7 @@ mod tests {
                 turn_id: second.turn_id.clone(),
                 state: QueuedClaimState::Sending,
                 promoted: true,
+                from_queue: true,
             });
         }
 

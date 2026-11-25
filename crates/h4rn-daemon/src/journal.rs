@@ -282,6 +282,15 @@ pub struct QueuedClaim {
     /// settling a turn drops its promoted claim but never an unclear steer's.
     #[serde(default)]
     pub promoted: bool,
+    /// Whether the message waited in the thread's queue before it was claimed.
+    ///
+    /// An ordinary send to an idle thread also writes a claim, but its prompt is
+    /// already the turn's journaled user item: a `claimed` one (the adapter was
+    /// never called) is dropped at startup instead of being queued again. A
+    /// `sending` one still becomes the visible unsure row, because the adapter
+    /// may have taken it and the transcript cannot say.
+    #[serde(default)]
+    pub from_queue: bool,
 }
 
 /// What a [`QueuedClaim`] knows about its message's delivery.
