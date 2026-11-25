@@ -10,7 +10,8 @@
 //! an outside agent sees only this small tool set, never the person's own
 //! upstream servers.
 
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -21,8 +22,9 @@ use h4rn_protocol::{
     HarnessKind, HostId, OutsideAgentLevel, RuntimeMode, ThreadId, ThreadSummary, WorkGrant,
 };
 use serde_json::{Value, json};
+use tokio::sync::RwLock as AsyncRwLock;
 
-use super::oauth::{Grant, OAuthStore};
+use super::oauth::{Grant, OAuthError, OAuthStore};
 use super::rate::{EndpointLimits, RateLimiter};
 use super::redact::Redactor;
 use crate::auth::TokenStore;
@@ -40,7 +42,7 @@ const READ_TOOLS: &[&str] = &[
     "get_thread",
     "list_providers",
 ];
-const WRITE_TOOLS: &[&str] = &["start_thread", "send_thread_message", "stop_thread"];
+const WRITE_TOOLS: &[&str] = &["start_thread", "send_thread_message"];
 
 /// The daemon half of outside-agent access.
 pub struct OutsideAgents {
@@ -57,6 +59,44 @@ pub struct OutsideAgents {
     /// Redacts every value this server returns. Shared with h4rn's own agent
     /// tools, so both seats answer with the same redacted title.
     redactor: Arc<Redactor>,
+    /// Orders an admitted RPC against a revoke.
+    ///
+    /// One admitted request holds the read side from admission until its tool
+    /// call answers; a revoke takes the write side. So "Revoke" returning means
+    /// no RPC admitted under that grant is still writing a prompt.
+    admission: AsyncRwLock<()>,
+    /// An interleaving point for the revoke-ordering test.
+    ///
+    /// Production never installs one, so this costs one option check per MCP
+    /// request.
+    admission_pause: Mutex<Option<Arc<AdmissionPause>>>,
+}
+
+/// A test-only stop between an MCP request's admission and its tool call.
+pub struct AdmissionPause {
+    used: AtomicBool,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl AdmissionPause {
+    /// Waits until a request reaches the gate.
+    pub async fn arrived(&self) {
+        self.arrived.notified().await;
+    }
+
+    /// Lets the paused request continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn hold(&self) {
+        if self.used.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.arrived.notify_waiters();
+        self.release.notified().await;
+    }
 }
 
 impl OutsideAgents {
@@ -80,7 +120,27 @@ impl OutsideAgents {
             base_url: RwLock::new(None),
             limits: RwLock::new(EndpointLimits::default()),
             redactor,
+            admission: AsyncRwLock::new(()),
+            admission_pause: Mutex::new(None),
         }
+    }
+
+    /// Arms a stop on the next admitted MCP request.
+    ///
+    /// Used only by the integration test that proves a revoke is ordered
+    /// against an RPC that was already admitted under the grant.
+    #[doc(hidden)]
+    pub fn pause_next_admitted_rpc(&self) -> Arc<AdmissionPause> {
+        let gate = Arc::new(AdmissionPause {
+            used: AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *self
+            .admission_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
     }
 
     /// Replaces the limiter (tests use a small window to prove the refusal).
@@ -117,9 +177,48 @@ impl OutsideAgents {
 
     /// Turns outside-agent access on or off, revoking every grant when off.
     ///
-    /// The switch and the revocations are one durable write in the store.
-    pub fn set_enabled(&self, enabled: bool) -> Result<bool, super::oauth::OAuthError> {
-        self.store.set_enabled(enabled)
+    /// The switch and the revocations are one durable write in the store. When
+    /// turning it off, the write side of the admission gate is held, and the
+    /// call returns only once every prompt write already in flight under a
+    /// revoked family has landed and every such session lost its tool token.
+    pub async fn set_enabled(&self, enabled: bool) -> Result<bool, OAuthError> {
+        if enabled {
+            self.store.set_enabled(true)?;
+            return Ok(true);
+        }
+        let _gate = self.admission.write().await;
+        let families = self.store.set_enabled_families(false)?;
+        self.drain_families(families).await;
+        Ok(false)
+    }
+
+    /// Revokes one agent's grant, ordered against admitted calls and writes.
+    ///
+    /// Returns after the file holds the revocation, every suite of work the
+    /// grant asked for can no longer start, and any prompt write it had in
+    /// flight has landed. A turn already running may finish, but its session
+    /// no longer holds the tool token.
+    pub async fn revoke_client(&self, client_id: &str) -> Result<(), OAuthError> {
+        let _gate = self.admission.write().await;
+        let families = self.store.revoke_client_families(client_id)?;
+        self.drain_families(families).await;
+        Ok(())
+    }
+
+    /// Waits for in-flight prompt writes and drops the sessions' tool tokens.
+    async fn drain_families(&self, families: Vec<String>) {
+        if families.is_empty() {
+            return;
+        }
+        let store = Arc::clone(&self.store);
+        let wait = families.clone();
+        let waited = tokio::task::spawn_blocking(move || store.wait_for_drain(&wait)).await;
+        if let Err(error) = waited {
+            tracing::warn!(%error, "could not wait for outside prompt writes to land");
+        }
+        self.manager
+            .revoke_tool_tokens_for_families(&families)
+            .await;
     }
 
     /// Names the store that holds the owner's access token.
@@ -224,6 +323,17 @@ impl OutsideAgents {
     pub async fn handle_mcp(&self, headers: HeaderMap, body: Bytes) -> Response {
         if !self.enabled() {
             return outside_disabled();
+        }
+        // Held from admission to answer: a revoke that returns cannot leave an
+        // RPC admitted under the grant still writing a prompt.
+        let _admitted = self.admission.read().await;
+        let pause = self
+            .admission_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.hold().await;
         }
         let Some(token) = bearer_token(&headers) else {
             return unauthorized(self);
@@ -426,17 +536,6 @@ impl OutsideAgents {
                         "text": {"type": "string"}
                     },
                     "required": ["thread_id", "text"],
-                    "additionalProperties": false
-                }),
-                false,
-            ));
-            tools.push(tool(
-                "stop_thread",
-                "Stop the turn a thread is running. The thread stays open.",
-                json!({
-                    "type": "object",
-                    "properties": {"thread_id": {"type": "string"}},
-                    "required": ["thread_id"],
                     "additionalProperties": false
                 }),
                 false,
@@ -776,17 +875,6 @@ impl OutsideAgents {
                         "turn_id": accepted.turn_id,
                         "runtime_mode_ceiling": ceiling,
                     }),
-                ))
-            }
-            "stop_thread" => {
-                let thread_id = ThreadId::new(required_string(&arguments, "thread_id")?);
-                self.manager
-                    .interrupt(&thread_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok(structured(
-                    format!("Stopped the running turn in {thread_id}."),
-                    json!({"thread_id": thread_id, "stopped": true}),
                 ))
             }
             other => Err(format!("h4rn has no outside tool named `{other}`")),

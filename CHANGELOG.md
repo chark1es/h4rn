@@ -795,6 +795,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Outside-agent access can no longer outlive or slip past a revocation.** A tool call binds the
+  turn that admitted it (so a slow delegation or PR watch cannot inherit a later, wider turn), a
+  revoke waits for admitted calls and in-flight prompt writes before it returns and drops the
+  affected sessions' tool tokens, a PR watch and its grant survive a restart, a resumed ACP session
+  with no mode catalogue is refused unless full access was asked for, and a replayed refresh token
+  stays recognisable for the family's whole life. The outside surface no longer offers `stop_thread`,
+  and a Full-access grant stops after 24 hours.
+
 - **A fork whose journal write fails never appears.** The fork's handle became
   reachable before its summary was durable, so the periodic refresh could
   publish a thread whose copy then failed to record — a row a client could open

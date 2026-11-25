@@ -1439,6 +1439,92 @@ async fn pr_link_tools_use_the_thread_and_its_forge_remote() {
 }
 
 #[tokio::test]
+async fn a_watch_binds_the_turn_that_called_the_tool() {
+    use h4rn_daemon::mcp_server::{AgentToolsProvider, settings::AgentToolSettingsStore};
+    use h4rn_mcp::provider::{ToolAdmission, ToolCallContext, ToolProvider};
+    use h4rn_mcp::session::McpScope;
+    use h4rn_protocol::{RuntimeMode, WorkGrant};
+
+    // The thread's first turn is held open, so an active turn with no grant
+    // exists while the tool call runs.
+    let (fake, _completion) = FakeHarness::new().with_completion_gate();
+    let daemon = boot_with(fake, None, None).await;
+    let workspace = git_repo_with_remote();
+    let thread = daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, workspace.path(), "hold this turn"))
+        .await
+        .expect("create thread");
+    let journal = Arc::new(
+        h4rn_daemon::journal::SqliteJournal::in_memory()
+            .await
+            .expect("journal"),
+    );
+    let links = h4rn_daemon::pr_links::PrLinkService::new(
+        journal,
+        Arc::new(MockSource),
+        Arc::new(MockSink),
+    );
+    links
+        .link_known(&thread.thread_id, "account-1", &repo(), 7)
+        .await
+        .expect("link");
+    let forge = h4rn_daemon::forge::ForgeService::open(daemon.data_dir()).expect("forge");
+    let settings = Arc::new(AgentToolSettingsStore::open(
+        daemon.data_dir(),
+        daemon.host.clone(),
+    ));
+    let provider = AgentToolsProvider::new(
+        Arc::clone(&daemon.manager),
+        Arc::clone(&links),
+        forge,
+        settings,
+        Arc::new(h4rn_daemon::mcp_server::Redactor::new()),
+        daemon.host.clone(),
+    );
+    let scope = McpScope::harness(
+        HarnessKind::ClaudeCode,
+        daemon.host.clone(),
+        Some(thread.thread_id.clone()),
+    );
+    let admitted = WorkGrant {
+        client_id: "client-admitted".into(),
+        family: "family-admitted".into(),
+        ceiling: Some(RuntimeMode::ApprovalRequired),
+    };
+    let context =
+        ToolCallContext::new(scope, "h4rn", Duration::from_secs(5)).with_admission(ToolAdmission {
+            turn_id: Some(h4rn_protocol::TurnId::new("turn-admitted")),
+            grant: Some(admitted.clone()),
+        });
+    provider
+        .call_tool("watch_pull_request", json!({"number": 7}), &context)
+        .await
+        .expect("watch");
+
+    assert_eq!(
+        links.watch_grant(&thread.thread_id, &repo(), 7),
+        Some(h4rn_daemon::pr_links::WatchGrant {
+            client_id: admitted.client_id,
+            family: admitted.family,
+            ceiling: admitted.ceiling,
+        }),
+        "the watch took the live turn's grant instead of the admitted one"
+    );
+    daemon.stop().await;
+}
+
+/// A `repo()` helper local to this test module's PR-link cases.
+fn repo() -> h4rn_protocol::ForgeRepoRef {
+    h4rn_protocol::ForgeRepoRef {
+        forge: h4rn_protocol::ForgeKind::GitHub,
+        base_url: "https://github.com".into(),
+        owner: "acme".into(),
+        repo: "widgets".into(),
+    }
+}
+
+#[tokio::test]
 async fn agent_tools_are_hidden_when_their_harness_switch_is_off() {
     use h4rn_daemon::mcp_server::{AgentToolsProvider, settings::AgentToolSettingsStore};
     use h4rn_mcp::provider::ToolProvider;
@@ -1936,6 +2022,247 @@ async fn a_supervised_message_runs_at_approval_required_and_leaves_the_mode_alon
     // The person's own mode is untouched: only the turn the agent queued is
     // clamped.
     assert_eq!(summary.runtime_mode, RuntimeMode::FullAccess);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_outside_agent_cannot_stop_the_owners_work() {
+    let daemon = boot(None).await;
+    let client = http();
+    let token = supervised_token(&daemon, &client).await;
+    let tools = list_tools(&client, &daemon.outside_url(), &token).await;
+    assert!(
+        !tools.iter().any(|tool| tool == "stop_thread"),
+        "the outside surface still offers stop_thread: {tools:?}"
+    );
+    assert!(tools.iter().any(|tool| tool == "send_thread_message"));
+
+    let repo = git_repo_with_remote();
+    let thread = daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, repo.path(), "the owner's work"))
+        .await
+        .expect("create thread");
+    let refused = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "stop_thread",
+        json!({"thread_id": thread.thread_id}),
+    )
+    .await;
+    assert!(
+        refused
+            .get("error")
+            .and_then(|error| error["message"].as_str())
+            .is_some_and(|message| message.contains("no outside tool")),
+        "stop_thread was not refused: {refused}"
+    );
+    daemon.stop().await;
+}
+
+/// A revoke is ordered against an RPC that was already admitted.
+///
+/// The request holds the admission gate from the moment it is admitted; the
+/// revoke cannot return until it answers. This is what makes "Revoke returned"
+/// mean nothing under that grant is still writing a prompt.
+#[tokio::test]
+async fn a_revoke_waits_for_an_admitted_rpc() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_owned();
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        &client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
+    let repo = git_repo_with_remote();
+    let thread = daemon
+        .manager
+        .create_thread(new_thread(&daemon.host, repo.path(), "hold still"))
+        .await
+        .expect("create thread");
+
+    let gate = daemon.outside.pause_next_admitted_rpc();
+    let send = tokio::spawn({
+        let client = client.clone();
+        let url = daemon.outside_url();
+        let token = token.clone();
+        let thread_id = thread.thread_id.clone();
+        async move {
+            post_rpc(
+                &client,
+                &url,
+                &token,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "send_thread_message",
+                        "arguments": {"thread_id": thread_id, "text": "one more"}
+                    }
+                }),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), gate.arrived())
+        .await
+        .expect("the request was never admitted");
+
+    let outside = Arc::clone(&daemon.outside);
+    let revoke_client = client_id.clone();
+    let revoke = tokio::spawn(async move { outside.revoke_client(&revoke_client).await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !revoke.is_finished(),
+        "the revoke returned while an admitted RPC was still in flight"
+    );
+
+    gate.release();
+    let (status, _) = send.await.expect("join the send");
+    assert_eq!(status, StatusCode::OK, "the admitted call was not answered");
+    revoke
+        .await
+        .expect("join the revoke")
+        .expect("the revocation is durable");
+    daemon.stop().await;
+}
+
+/// A revoke also waits for a prompt write it did not admit over HTTP.
+///
+/// Queued messages, parked prompts and resumes write outside an MCP request;
+/// they register the same ticket before the adapter call, so the revoke cannot
+/// return while one is landing.
+#[tokio::test]
+async fn a_revoke_waits_for_an_in_flight_prompt_write() {
+    let daemon = boot(None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_owned();
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        &client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
+    let store = daemon.outside.store();
+    let audience = daemon.outside.mcp_url();
+    let grant = store
+        .verify_access(&token, Some(&audience))
+        .expect("the approved token is live");
+    let ticket = store
+        .begin_delivery(&grant.family)
+        .expect("the family is live");
+
+    let outside = Arc::clone(&daemon.outside);
+    let revoke_client = client_id.clone();
+    let revoke = tokio::spawn(async move { outside.revoke_client(&revoke_client).await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !revoke.is_finished(),
+        "the revoke returned while a prompt write under its grant was in flight"
+    );
+
+    drop(ticket);
+    revoke
+        .await
+        .expect("join the revoke")
+        .expect("the revocation is durable");
+    assert!(!store.grant_is_live(&grant.family));
+    daemon.stop().await;
+}
+
+/// A revoke ends the running session's tool token, not just future work.
+///
+/// The turn itself may finish, but the agent it is running cannot call h4rn's
+/// tools with the token it was handed.
+#[tokio::test]
+async fn a_revoke_drops_the_running_sessions_tool_token() {
+    let (fake, completion) = FakeHarness::new().with_completion_gate();
+    let daemon = boot_with(fake, None, None).await;
+    let client = http();
+    let redirect = "http://localhost:1455/callback";
+    let (_, registered) = register(&client, &daemon.base(), redirect).await;
+    let client_id = registered["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_owned();
+    let token = begin_and_approve(
+        &daemon,
+        &client,
+        &daemon.base(),
+        &client_id,
+        redirect,
+        "supervised",
+    )
+    .await;
+    let repo = git_repo_with_remote();
+    let started = call_tool(
+        &client,
+        &daemon.outside_url(),
+        &token,
+        "start_thread",
+        json!({
+            "harness": "claude_code",
+            "model": "default",
+            "prompt": "keep working",
+            "workspace_path": repo.path().display().to_string(),
+            "runtime_mode": "approval_required"
+        }),
+    )
+    .await;
+    assert!(started.get("error").is_none(), "{started}");
+    let thread_id = h4rn_protocol::ThreadId::new(
+        started["result"]["structuredContent"]["thread_id"]
+            .as_str()
+            .expect("thread id"),
+    );
+    let injections = wait_for_injection(&daemon.mcp, 1).await;
+    let harness_token = injections[0].token.clone().expect("harness token");
+
+    daemon
+        .outside
+        .revoke_client(&client_id)
+        .await
+        .expect("revoke");
+
+    // The running turn was allowed to continue...
+    assert!(
+        daemon.manager.turn_in_flight(&thread_id).await,
+        "the revoke stopped a turn that had already delivered its prompt"
+    );
+    // ...but its harness session lost the tool token.
+    let (status, _) = post_rpc(
+        &client,
+        &daemon.mcp_url(),
+        &harness_token,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the revoked grant's session kept its tool token"
+    );
+    completion.release();
     daemon.stop().await;
 }
 
@@ -3162,8 +3489,21 @@ mod watch_grant {
             daemon.host.clone(),
             Some(thread_id.clone()),
         );
+        // The real MCP server captures the calling turn and grant when the
+        // tool call is admitted; this direct provider call supplies the same
+        // snapshot, taken while the supervised turn is still active.
+        let admission = daemon
+            .manager
+            .active_turn_admission(&thread_id)
+            .await
+            .map(|(turn_id, grant)| h4rn_mcp::provider::ToolAdmission {
+                turn_id: Some(turn_id),
+                grant,
+            })
+            .unwrap_or_default();
         let context =
-            h4rn_mcp::provider::ToolCallContext::new(scope, "h4rn", Duration::from_secs(5));
+            h4rn_mcp::provider::ToolCallContext::new(scope, "h4rn", Duration::from_secs(5))
+                .with_admission(admission);
         provider
             .call_tool("link_pull_request", json!({"number": 7}), &context)
             .await
@@ -3313,8 +3653,21 @@ mod watch_grant {
             daemon.host.clone(),
             Some(thread_id.clone()),
         );
+        // The real MCP server captures the calling turn and grant when the
+        // tool call is admitted; this direct provider call supplies the same
+        // snapshot, taken while the supervised turn is still active.
+        let admission = daemon
+            .manager
+            .active_turn_admission(&thread_id)
+            .await
+            .map(|(turn_id, grant)| h4rn_mcp::provider::ToolAdmission {
+                turn_id: Some(turn_id),
+                grant,
+            })
+            .unwrap_or_default();
         let context =
-            h4rn_mcp::provider::ToolCallContext::new(scope, "h4rn", Duration::from_secs(5));
+            h4rn_mcp::provider::ToolCallContext::new(scope, "h4rn", Duration::from_secs(5))
+                .with_admission(admission);
         provider
             .call_tool("link_pull_request", json!({"number": 7}), &context)
             .await
@@ -3488,6 +3841,74 @@ async fn a_delegated_child_inherits_the_turns_ceiling_and_grant() {
     assert!(
         !daemon.manager.turn_in_flight(&refused_id).await,
         "a revoked grant's delegated child left a turn running"
+    );
+    daemon.stop().await;
+}
+
+/// A delegated child inherits the authority of the turn that called the tool,
+/// even if the tool ran after that turn ended.
+///
+/// The calling turn is admitted with a supervised grant, while the thread runs
+/// at full access and its live turn has no grant. A child that read the live
+/// turn would start at full access; it must start at the admitted ceiling.
+#[tokio::test]
+async fn a_delegation_binds_the_admitted_turn_not_the_live_one() {
+    use h4rn_daemon::subagents::provider::SubagentProvider;
+    use h4rn_mcp::provider::{ToolAdmission, ToolCallContext, ToolProvider};
+    use h4rn_mcp::session::McpScope;
+    use h4rn_protocol::{RuntimeMode, TurnId, WorkGrant};
+
+    let (fake, _completion) = FakeHarness::new().with_completion_gate();
+    let daemon = boot_with(fake, None, None).await;
+    let repo = git_repo_with_remote();
+    let mut request = new_thread(&daemon.host, repo.path(), "the parent work");
+    request.runtime_mode = RuntimeMode::FullAccess;
+    let parent = daemon
+        .manager
+        .create_thread(request)
+        .await
+        .expect("create the parent");
+
+    let provider = SubagentProvider::new(Arc::clone(&daemon.subagents));
+    let context = ToolCallContext::new(
+        McpScope::harness(
+            HarnessKind::ClaudeCode,
+            daemon.host.clone(),
+            Some(parent.thread_id.clone()),
+        ),
+        "h4rn",
+        Duration::from_secs(5),
+    )
+    .with_admission(ToolAdmission {
+        turn_id: Some(TurnId::new("turn-supervised")),
+        grant: Some(WorkGrant {
+            client_id: "client-supervised".into(),
+            family: "family-supervised".into(),
+            ceiling: Some(RuntimeMode::ApprovalRequired),
+        }),
+    });
+    let spawned = provider
+        .call_tool(
+            "spawn_subagent",
+            json!({"task": "read the tests"}),
+            &context,
+        )
+        .await
+        .expect("delegate");
+    let child_id = h4rn_protocol::ThreadId::new(
+        spawned.structured_content.as_ref().expect("json")["subagent"]["child_thread_id"]
+            .as_str()
+            .expect("child thread id"),
+    );
+    let summary = daemon
+        .manager
+        .thread_summary(&child_id)
+        .await
+        .expect("child summary");
+    assert_eq!(
+        summary.runtime_mode,
+        RuntimeMode::ApprovalRequired,
+        "the child inherited the live full-access turn instead of the admitted turn"
     );
     daemon.stop().await;
 }

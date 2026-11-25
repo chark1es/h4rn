@@ -1831,7 +1831,27 @@ The family is the grant's identity, not the client: a client can hold several si
 asked for under one must not survive that one's revocation because another is still live. At the
 moment work is delivered the exact family is re-checked, and a family with no live, unrevoked token
 — access or refresh — refuses delivery rather than starting a session. A delegated child inherits
-the calling turn's triple, so a supervised turn cannot delegate its way past its ceiling.
+the calling turn's triple, so a supervised turn cannot delegate its way past its ceiling. The turn
+is bound when the MCP request is admitted, not when the tool's asynchronous setup finishes: a slow
+watch or delegation therefore cannot attach itself to a later turn's (possibly wider) authority.
+
+The level belongs to the family and is read again on every admission, so a level change applies to
+tokens already issued rather than waiting for a rotation. Full access is the one level that can run
+unattended, so it has its own ceiling: a Full-access family may issue tokens only until 24 hours
+after approval, a later refresh is refused and revokes the family, and the person signs in again.
+Read-only and supervised grants keep the thirty-day refresh lifetime.
+
+**A revoke is ordered, not merely durable.** An MCP request holds a shared admission gate for its
+whole answer; a prompt write from a queued message, a parked prompt or a resume registers a ticket
+before the adapter call. A revoke takes the exclusive gate and then waits for the tickets, so when
+it returns no admitted call and no in-flight prompt under that family can still reach an agent. A
+turn that already delivered its prompt may finish — stopping the owner's work on someone else's
+revoke would be worse — but its harness session loses the tool token, so it cannot call h4rn's
+tools any more. For the same reason the outside surface has no tool that stops a turn.
+
+A PR watch is work that outlives the daemon, so it is stored in the journal with its exact triple
+and restored on startup; a restart neither drops the watch nor recreates it without its grant. Its
+first read after a restart is the new baseline, so changes while h4rn was closed are not replayed.
 
 Tokens also carry the RFC 8707 `resource` they were issued for, when the client names one, and
 `/mcp` refuses a token bound to another resource. Tool results for `get_thread` redact the daemon's

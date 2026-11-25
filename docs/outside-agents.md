@@ -146,6 +146,12 @@ never spends a rate-limit hit.
 - Access tokens last **one hour**; refresh tokens last **thirty days** and rotate on every use. A
   grant is live while **any** token in its family is: a watch or a parked prompt does not die when
   the one-hour access token expires if the refresh token is still live.
+- **Full access has a 24-hour ceiling.** A Full-access sign-in may not be renewed past 24 hours from
+  approval: every token it issues expires at most then, a later refresh is refused, and the whole
+  family is revoked. The person approves a fresh sign-in if they still want it. Read-only and
+  supervised grants keep the ordinary refresh lifetime.
+- The grant's level lives on the sign-in (the token family), not on an individual token, and is read
+  again on every request. Lowering a family's level therefore applies to tokens already issued.
 - Both are random 256-bit values with a recognisable prefix (`h4rn_at_`, `h4rn_rt_`).
 - Only a BLAKE3 digest is written to `outside_agents.json`; a copy of the file is not a copy of the
   credentials. No token is ever logged or returned in a tool result. An approval's redirect carries
@@ -179,13 +185,12 @@ never spends a rate-limit hit.
 | `list_providers` | read (harnesses, models recent threads used, proxy models) |
 | `start_thread` | supervised, full |
 | `send_thread_message` | supervised, full |
-| `stop_thread` | supervised, full |
 
 `start_thread` needs a project id or an absolute workspace, plus a harness and a model from
 `list_providers`. It never creates a worktree. A thread it starts cannot run with more permission
 than its grant allows: a supervised grant always starts at `approval_required`, and a message it
 sends to an existing thread is clamped to that mode for the turn without changing the person's own
-thread setting.
+thread setting. There is no tool that stops the person's work: stopping a turn stays in h4rn.
 
 The grant is a `(client, token family, ceiling)` triple, and every piece of work that can start a
 turn later carries it: a queued message, a prompt parked by a provider limit, the resume schedule, a
@@ -198,15 +203,29 @@ whichever dispatch is active: a supervised `start_thread` attaches it to the fir
 to the thread's mode, so raising the mode while that first prompt runs changes the live session only
 as far as the ceiling allows and the person's next turn gets the new mode.
 
+A tool call binds the turn that was running when its MCP request arrived, not whichever turn is
+active when the tool finishes its own setup. A delegation or a watch created by a slow tool call
+therefore inherits that turn's grant even if the turn ended and another (perhaps the person's
+full-access) turn started meanwhile. The grant and the turn are captured at admission and carried
+through.
+
 A turn stopped by a provider limit stores the ceiling and the grant on the resume schedule itself, in
 the same write that arms it, so the resume runs under them even if the daemon stopped before
 anything else was recorded. A PR watch created inside a supervised turn keeps the exact token family
 and the ceiling: every wake asks whether that family is still live (a revoked family starts nothing
 and ends the watch) and starts at most at the ceiling. The wake turn itself carries the same triple,
-so a watch it re-creates keeps the grant rather than clearing it. A live mode switch, a prompt
-dispatch and a resume's session selection share one per-thread gate, so a switch that has already
-applied full access to the session cannot be read as the old setting by an incoming supervised
-message or an auto-resume.
+so a watch it re-creates keeps the grant rather than clearing it. A watch is durable: its PR, thread
+and triple are stored with the journal, so a restart restores the watch and never recreates it
+without the grant. A live mode switch, a prompt dispatch and a resume's session selection share one
+per-thread gate, so a switch that has already applied full access to the session cannot be read as
+the old setting by an incoming supervised message or an auto-resume.
+
+Revoking an agent is ordered against everything already admitted under its grant. An MCP request
+holds a shared admission gate for its whole answer, and a prompt write (from a queued message, a
+parked prompt or a resume) registers itself before the adapter call; the revoke takes the exclusive
+side and waits for both. When Revoke returns, no admitted call and no in-flight prompt under that
+family is still reaching an agent. A turn that already delivered its prompt may finish, but its
+harness session loses the tool token at revocation, so it cannot call h4rn's tools any more.
 
 `thread_status`, `start_thread`, `list_threads` and `get_thread` share one redactor. A thread's
 title is redacted before the 80-character cut, so the journal never stores a credential or a
@@ -229,8 +248,10 @@ token, `h4rn_`-prefixed tokens, and the forge token shapes h4rn already recognis
 
 Settings → Sharing & access lists connected agents with their level, when they last used a token
 and when the sign-in expires. **Revoke** cuts off future work at once: a queued message, a parked
-prompt, a watch wake or a delegated child starts nothing after it. A turn that is already running
-finishes first; see [Known limitations](#known-limitations).
+prompt, a watch wake or a delegated child starts nothing after it, and a call already admitted under
+the grant cannot still be writing when Revoke returns. A turn that is already running finishes
+first, but its session loses the tool token; see
+[Known limitations](#known-limitations).
 
 ## Relay
 
@@ -242,15 +263,12 @@ and cannot be reached by an agent on the internet yet.
 
 ## Known limitations
 
-- A turn that has already been delivered keeps running when its grant's family is revoked or the
-  Labs switch is turned off. Its harness session also keeps the tool token it was given until the
-  session ends; only the next delivery is refused.
-- A prompt that was claimed a moment before a revocation is still written.
-- A Full-access grant has no ceiling, so work it starts runs at the thread's mode when that work is
-  delivered.
-- A watch or a delegation created by a tool call that lands outside the grant's own turn carries no
-  grant with it.
-- A grant's level is frozen when it is approved. To change it, revoke the grant and sign in again.
+- A turn that has already delivered its prompt keeps running when its grant's family is revoked or
+  the Labs switch is turned off. Its session loses the tool token, so it can no longer call h4rn's
+  tools, but the harness itself is not stopped: only the next delivery is refused.
+- A grant's level cannot be changed from Settings yet. The level is stored with the family and is
+  read again on every request, so a future level change applies at once; today the way to change it
+  is to revoke the grant and sign in again.
 - A re-watch cannot bring back a watch whose family was revoked.
 - On a wildcard or LAN-only bind, outside agents cannot sign in: there is no loopback listener for
   the OAuth routes.
@@ -265,12 +283,17 @@ and cannot be reached by an agent on the internet yet.
   page on another loopback port, `same-site`, a rebinding `Host`, a non-loopback listener, a foreign
   `resource`, a resource named at the token endpoint, a JSON-RPC batch, a supervised ceiling raised
   after queueing, refresh rotation, redacted titles and tool output, and a revocation that cannot be
-  saved are proved; and the PR-link tools run against a scripted forge.
+  saved are proved; and the PR-link tools run against a scripted forge. It also proves that a watch
+  binds the turn that admitted it, that a delegation does the same, that a revoke waits for an
+  admitted call and for an in-flight prompt write, and that the outside tool list has no
+  `stop_thread`.
 - Unit tests in `crates/h4rn-daemon/src/mcp_server/` cover redirect allow-listing, PKCE vectors,
   expiry, one-time codes, replay revocation, resource binding at the token endpoint, the
   revocation-versus-use race, a revocation freeing its registration slot, an approval never writing
   its code to disk, sign-in caps, registration caps, the bounded rate limiter, quarantine of an
-  unreadable store, and the page having no form.
+  unreadable store, the directory fsync after a rename, the Full-access 24-hour ceiling, a level
+  re-read at admission, a rotated refresh record kept for its live family, and the page having no
+  form.
 - `crates/h4rn-daemon/src/threads.rs` covers the ceiling through a capped turn, across a mode change,
   on a reused session, and through a usage limit and restart.
 - `apps/ui/src/features/access/` covers the Sharing & access list, the waiting sign-in (unverified

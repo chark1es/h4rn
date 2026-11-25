@@ -365,7 +365,7 @@ pub(super) async fn handle(
             repo,
             number,
         } => {
-            conn.state.pr_links.unwatch(&thread_id, &repo, number);
+            conn.state.pr_links.unwatch(&thread_id, &repo, number).await;
             Ok(ResponseBody::Ack)
         }
         ClientRequest::ForgeListIssues {

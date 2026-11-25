@@ -26,7 +26,7 @@ use serde_json::json;
 use sqlx::{Row, SqlitePool};
 
 use crate::issue_links::IssueLinkRecord;
-use crate::pr_links::PrLinkRecord;
+use crate::pr_links::{PrLinkRecord, StoredPrWatch};
 
 /// Where a thread's current title came from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -873,6 +873,21 @@ pub trait Journal: Send + Sync {
         number: u32,
     ) -> Result<Vec<PrLinkRecord>, JournalError>;
 
+    /// Replaces every persisted PR watch with `watches`.
+    ///
+    /// One snapshot, written in one transaction, so a watcher that ended by
+    /// any path cannot be left behind and restored after a restart. The grant
+    /// travels with the watcher.
+    async fn replace_pr_watches(&self, watches: &[StoredPrWatch]) -> Result<(), JournalError> {
+        let _ = watches;
+        Ok(())
+    }
+
+    /// Every persisted PR watch, oldest first.
+    async fn pr_watches(&self) -> Result<Vec<StoredPrWatch>, JournalError> {
+        Ok(Vec::new())
+    }
+
     /// The SQLite pool backing this journal, when it has one.
     ///
     /// Guest links live in the same database file as the thread journal
@@ -1190,6 +1205,28 @@ impl SqliteJournal {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_pr_links_pr
              ON daemon_pr_links (forge, base_url, owner, repo, number)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // A PR watch is work that outlives the daemon, so it and its outside
+        // grant are stored here. A restart restores the watcher instead of
+        // dropping it, and never without the grant it was created under.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_pr_watches (
+                thread_id  TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                forge      TEXT NOT NULL,
+                base_url   TEXT NOT NULL,
+                owner      TEXT NOT NULL,
+                repo       TEXT NOT NULL,
+                number     INTEGER NOT NULL,
+                client_id  TEXT,
+                family     TEXT,
+                ceiling    TEXT,
+                watched_at TEXT NOT NULL,
+                PRIMARY KEY (thread_id, forge, base_url, owner, repo, number)
+            )",
         )
         .execute(&self.pool)
         .await?;
@@ -2537,6 +2574,53 @@ impl Journal for SqliteJournal {
         rows.into_iter().map(pr_link_from_row).collect()
     }
 
+    async fn replace_pr_watches(&self, watches: &[StoredPrWatch]) -> Result<(), JournalError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM daemon_pr_watches")
+            .execute(&mut *transaction)
+            .await?;
+        for watch in watches {
+            let ceiling = match watch.grant.as_ref().and_then(|grant| grant.ceiling) {
+                Some(ceiling) => Some(serde_json::to_string(&ceiling).map_err(|error| {
+                    JournalError::Database(sqlx::Error::Protocol(error.to_string()))
+                })?),
+                None => None,
+            };
+            sqlx::query(
+                "INSERT INTO daemon_pr_watches
+                    (thread_id, account_id, forge, base_url, owner, repo, number,
+                     client_id, family, ceiling, watched_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(watch.thread_id.as_str())
+            .bind(&watch.account_id)
+            .bind(watch.repo.forge.slug())
+            .bind(&watch.repo.base_url)
+            .bind(&watch.repo.owner)
+            .bind(&watch.repo.repo)
+            .bind(i64::from(watch.number))
+            .bind(watch.grant.as_ref().map(|grant| grant.client_id.as_str()))
+            .bind(watch.grant.as_ref().map(|grant| grant.family.as_str()))
+            .bind(ceiling)
+            .bind(watch.watched_at.to_rfc3339())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn pr_watches(&self) -> Result<Vec<StoredPrWatch>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT thread_id, account_id, forge, base_url, owner, repo, number,
+                    client_id, family, ceiling, watched_at
+             FROM daemon_pr_watches ORDER BY watched_at ASC, rowid ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(pr_watch_from_row).collect()
+    }
+
     async fn upsert_issue_link(&self, link: &IssueLinkRecord) -> Result<(), JournalError> {
         let (kind, key) = issue_scope_parts(&link.scope);
         let scope_json = serde_json::to_string(&link.scope)
@@ -3215,6 +3299,58 @@ fn pr_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<PrLinkRecord, Journa
             .map_err(|error| {
                 JournalError::Database(sqlx::Error::Protocol(format!(
                     "unparsable linked_at {linked_at:?} in daemon_pr_links: {error}"
+                )))
+            })?,
+    })
+}
+
+fn pr_watch_from_row(row: sqlx::sqlite::SqliteRow) -> Result<StoredPrWatch, JournalError> {
+    let forge: String = row.try_get("forge")?;
+    let number: i64 = row.try_get("number")?;
+    let client_id: Option<String> = row.try_get("client_id")?;
+    let family: Option<String> = row.try_get("family")?;
+    let ceiling: Option<String> = row.try_get("ceiling")?;
+    let grant = match (client_id, family) {
+        (Some(client_id), Some(family)) => Some(crate::pr_links::WatchGrant {
+            client_id,
+            family,
+            ceiling: ceiling
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        JournalError::Database(sqlx::Error::Protocol(format!(
+                            "unparsable PR watch ceiling {value:?}: {error}"
+                        )))
+                    })
+                })
+                .transpose()?,
+        }),
+        _ => None,
+    };
+    let watched_at: String = row.try_get("watched_at")?;
+    Ok(StoredPrWatch {
+        thread_id: ThreadId::new(row.try_get::<String, _>("thread_id")?),
+        account_id: row.try_get("account_id")?,
+        repo: ForgeRepoRef {
+            forge: ForgeKind::parse(&forge).ok_or_else(|| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unknown forge slug {forge:?} in daemon_pr_watches"
+                )))
+            })?,
+            base_url: row.try_get("base_url")?,
+            owner: row.try_get("owner")?,
+            repo: row.try_get("repo")?,
+        },
+        number: u32::try_from(number).map_err(|_| {
+            JournalError::Database(sqlx::Error::Protocol(format!(
+                "PR number {number} does not fit in daemon_pr_watches"
+            )))
+        })?,
+        grant,
+        watched_at: DateTime::parse_from_rfc3339(&watched_at)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unparsable watched_at {watched_at:?} in daemon_pr_watches: {error}"
                 )))
             })?,
     })

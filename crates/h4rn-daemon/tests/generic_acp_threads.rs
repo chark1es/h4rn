@@ -692,7 +692,7 @@ async fn a_dual_catalogue_agent_probes_and_starts_with_its_v1_catalogue() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_empty_resume_reply_keeps_the_saved_model_and_mode() {
+async fn an_empty_resume_reply_cannot_confirm_a_non_full_access_mode() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mut env = std::collections::BTreeMap::new();
     // Resume-only, and the reply names the session without repeating a
@@ -708,18 +708,19 @@ async fn an_empty_resume_reply_keeps_the_saved_model_and_mode() {
     assert_eq!(status, TurnStatus::Completed);
     assert!(text.contains("echo: hello"), "got {text:?}");
 
-    // The agent knows the model and mode from the session it continues; an
-    // empty catalogue must not reject the saved selection.
+    // The reply names no mode, so h4rn cannot prove the resumed session is not
+    // running wider than this approval-required thread (or an outside grant's
+    // ceiling). It refuses and starts nothing.
     manager.restart_sessions(&[HarnessKind::Acp]).await;
     manager
         .send_message(&thread, "after the empty resume".into(), Vec::new())
         .await
         .expect("send");
-    let (status, text, _) = next_turn(&mut events, |_| {}).await;
-    assert_eq!(status, TurnStatus::Completed);
-    assert!(
-        text.contains("echo: after the empty resume"),
-        "got {text:?}"
+    let (status, _text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(
+        status,
+        TurnStatus::Failed,
+        "an unconfirmed resumed mode must fail the turn instead of running it"
     );
 
     let starts = std::fs::read_to_string(workspace.path().join(".agy-fixture-sessions"))

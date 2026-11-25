@@ -331,16 +331,15 @@ impl ToolProvider for AgentToolsProvider {
                 let repo = self.linked_repo(&thread_id, number, repository).await?;
                 // The watch can wake this thread long after this turn ends, so
                 // it keeps the outside grant that asked for the turn and that
-                // turn's ceiling. A person's own turn has neither.
-                let grant = self
-                    .manager
-                    .active_turn_grant(&thread_id)
-                    .await
-                    .map(|work| WatchGrant {
-                        client_id: work.client_id,
-                        family: work.family,
-                        ceiling: work.ceiling,
-                    });
+                // turn's ceiling. The grant was captured when this MCP request
+                // was admitted, not read now: if another turn started while the
+                // link lookup ran, this watch still belongs to the turn that
+                // called the tool. A person's own turn has no grant.
+                let grant = context.admission.grant.as_ref().map(|work| WatchGrant {
+                    client_id: work.client_id.clone(),
+                    family: work.family.clone(),
+                    ceiling: work.ceiling,
+                });
                 self.pr_links
                     .watch_with_grant(&thread_id, &repo, number, grant)
                     .await
@@ -357,7 +356,7 @@ impl ToolProvider for AgentToolsProvider {
                 let number = Self::number(&arguments)?;
                 let repository = arguments.get("repository").and_then(Value::as_str);
                 let repo = self.linked_repo(&thread_id, number, repository).await?;
-                self.pr_links.unwatch(&thread_id, &repo, number);
+                self.pr_links.unwatch(&thread_id, &repo, number).await;
                 Ok(structured(
                     format!(
                         "Stopped watching {}#{number}. The link stays.",
