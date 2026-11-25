@@ -793,11 +793,19 @@ pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
 /// common dir named `.git`, and `git worktree list` reports a
 /// `--separate-git-dir` repository's metadata directory the same way. A
 /// metadata directory is not a working tree, so the inference counts only when
-/// the workspace is inside the candidate, or `core.worktree` is unset and the
-/// candidate holds the working tree: its `.git` resolves to the common dir, or
-/// a path tracked in `HEAD` exists there.
+/// the workspace is itself the main checkout (a shortcut), or `core.worktree`
+/// is unset and the candidate holds the working tree: its `.git` resolves to
+/// the common dir, or a path tracked in `HEAD` exists there. A linked worktree
+/// nested inside its own main checkout passes on the tracked path.
 fn holds_working_tree(candidate: &Path, workspace: &Path, common: &Path, limit: Duration) -> bool {
-    if norm(workspace).starts_with(norm(candidate)) {
+    // Being inside the candidate proves nothing by itself: a linked worktree
+    // can sit inside the metadata directory's parent, which `repo_of` names
+    // after the common dir's `.git`. The workspace being the main worktree
+    // (its own git dir is the common dir; a linked worktree's is its admin
+    // dir) is a shortcut; otherwise the candidate still has to prove it holds
+    // the working tree below, which a linked worktree nested in its own main
+    // checkout (`repo/.worktrees/one`) does and a metadata parent does not.
+    if norm(workspace).starts_with(norm(candidate)) && workspace_is_main(workspace, common, limit) {
         return true;
     }
     match core_worktree(common, limit) {
@@ -815,6 +823,15 @@ fn holds_working_tree(candidate: &Path, workspace: &Path, common: &Path, limit: 
         return true;
     }
     tracked_path_exists(candidate, common, limit)
+}
+
+/// Whether `workspace` is the repository's main worktree: its own git dir is
+/// the common dir rather than an admin dir under `<common>/worktrees`.
+fn workspace_is_main(workspace: &Path, common: &Path, limit: Duration) -> bool {
+    match run_path_with_timeout(workspace, ["rev-parse", "--git-dir"], limit) {
+        Ok(git_dir) => norm(&workspace.join(git_dir)) == norm(common),
+        Err(_) => false,
+    }
 }
 
 /// Whether any path tracked by the repository's `HEAD` exists in `candidate`.
