@@ -145,7 +145,11 @@ describe("RewindDialog", () => {
   it("names the handoff for a prompt with no recorded provider boundary", async () => {
     mock.plan.method = "handoff";
     open();
-    expect(await screen.findByText(/starts a new session with a handoff/)).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "This message can't be dropped natively, so h4rn starts a new session with a handoff.",
+      ),
+    ).toBeTruthy();
     expect(screen.queryByText(/drops this message and every later turn/)).toBeNull();
   });
 

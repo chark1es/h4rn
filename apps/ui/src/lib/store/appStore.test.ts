@@ -14,6 +14,7 @@ vi.mock("@/lib/client/config", () => ({
 
 import { onManualPlacement } from "@/features/notifications/placement";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
+import type { EventEnvelope } from "@/lib/client/types";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
 import {
   applyEvent,
@@ -24,6 +25,7 @@ import {
   loadThreadQueue,
   loadThreads,
   moveQueuedMessage,
+  noticeRewindFallback,
   planRewind,
   rewindThread,
   sendMessage,
@@ -411,6 +413,27 @@ describe("rewindThread", () => {
     const prompt = await rewindThread("th_rewind", "item_user_1", false);
     expect(prompt?.method).toBe("handoff");
     expect(getState().toasts.at(-1)?.description).toContain("fresh session");
+  });
+});
+
+describe("rewind fallback notice", () => {
+  const envelope = (replayed: boolean): EventEnvelope => ({
+    seq: 1,
+    replayed,
+    event: {
+      type: "rewind_fell_back",
+      thread_id: "th_fallback",
+      at: "2026-01-01T00:00:00Z",
+    },
+  });
+
+  it("says a live fallback once and stays quiet when it is replayed", () => {
+    noticeRewindFallback(envelope(false));
+    const live = getState().toasts.at(-1);
+    expect(live?.title).toBe("The rewind fell back to a fresh session");
+
+    noticeRewindFallback(envelope(true));
+    expect(getState().toasts.at(-1)?.id).toBe(live?.id);
   });
 });
 

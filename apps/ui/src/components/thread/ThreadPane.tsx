@@ -93,6 +93,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   const hosts = useApp((state) => state.hosts);
   const host = useApp((state) => state.hosts[summary?.host ?? ""]);
   const log = useApp((state) => state.logs[threadId]);
+  const queued = useApp((state) => state.queues[threadId]?.queued);
   const threadError = useApp((state) => state.threadErrors[threadId]);
   const connection = useApp((state) => state.connection.status);
   const lastSyncAt = useApp((state) => state.lastSyncAt);
@@ -231,7 +232,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     });
   const firstApproval = pendingApprovals[0];
   const hostName = host?.name ?? summary.host;
-  const rewindBlocked = rewindRefusal(summary, log);
+  const rewindBlocked = rewindRefusal(summary, log, queued);
 
   const main = (
     <main
@@ -433,6 +434,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
       <RewindDialog
         thread={summary}
         log={log}
+        queued={queued}
         itemId={rewindTarget?.itemId ?? null}
         open={rewindTarget !== null}
         onOpenChange={(open) => {

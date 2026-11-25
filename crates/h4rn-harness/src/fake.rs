@@ -1359,7 +1359,9 @@ impl Harness for FakeHarness {
                 .await;
         } else {
             sender
-                .send(HarnessEvent::SessionStarted { session_id })
+                .send(HarnessEvent::SessionStarted {
+                    session_id: session_id.clone(),
+                })
                 .await;
         }
         let health = TransportHealth::new();
@@ -1399,6 +1401,7 @@ impl Harness for FakeHarness {
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
+            session_id,
             sender: if dies_on_start.is_some() {
                 None
             } else {
@@ -1455,6 +1458,9 @@ impl Harness for FakeHarness {
 pub struct FakeSession {
     kind: HarnessKind,
     workspace: PathBuf,
+    /// The id this session reported, so the daemon can tag provider boundaries
+    /// with the session that recorded them.
+    session_id: String,
     /// The stream's producer. `None` (or dropped) ends the stream after the
     /// events already queued.
     sender: Option<EventSink>,
@@ -1544,6 +1550,10 @@ pub struct FakeSession {
 impl HarnessSession for FakeSession {
     fn kind(&self) -> HarnessKind {
         self.kind
+    }
+
+    fn session_id(&self) -> Option<String> {
+        Some(self.session_id.clone())
     }
 
     fn controls(&self) -> Option<crate::SessionControls> {

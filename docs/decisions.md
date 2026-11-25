@@ -2029,18 +2029,27 @@ turn. Prompts and cuts are folded in journal order, so a prompt sent after an
 earlier cut is live and editable; a queued message joins the transcript under
 the turn that really ran it. One journaled `ThreadRewound` event is the durable cut; the
 UI folds it on replay, and the prompt returns only in the answer to the
-requesting device. The provider boundary names what the provider really
-recorded: Claude Code's assistant-message uuid before the removed prompt,
-Codex's accepted provider turn for the first removed delivered prompt. A
-harness without a native truncation, or a boundary the provider refuses, gets a
-fresh session with a bounded handoff of the kept history; if the provider
-refuses a planned boundary, that fallback is journaled and reported rather than
-silently applied. The dialog asks for the plan of the selected prompt, because
-the thread-wide capability cannot name what an older prompt, or a first prompt,
-will really use. File restore is a **Labs** feature, off by default while it is
-still being hardened: the daemon refuses it, the summary reports it unavailable
-and the dialog hides it until Settings → Labs turns it on. It exists only for a
-thread in its own linked worktree with a complete pre-turn checkpoint (a git
+requesting device. Only a turn's first user item, its cue, can be edited: a
+steer is journaled inside the running turn, so cutting at it would also remove
+the cue before it, and the daemon refuses such a target. The provider boundary
+names what the provider really recorded for the edited prompt itself: Claude
+Code's assistant-message uuid before it, Codex's accepted provider turn for it.
+A later prompt's boundary is never borrowed, and a boundary counts only in the
+provider session that recorded it, whose id is stored beside it; a boundary
+from an abandoned session plans a handoff. A harness without a native
+truncation, or a boundary the provider refuses, gets a fresh session with a
+bounded handoff of the kept history; a refused boundary is journaled and
+reported on both fallback paths rather than silently applied. A rewind is
+refused while a message's delivery is uncertain, so a row that may already be
+in the provider conversation is resent or discarded first. The dialog asks for
+the plan of the selected prompt, because the thread-wide capability cannot name
+what an older prompt, or a first prompt, will really use. File restore is a
+**Labs** feature, off by default while it is still being hardened: the daemon
+refuses it, the summary reports it unavailable and the dialog hides it until
+Settings → Labs turns it on. Its whole-tree checkpoint is only captured while
+the switch is on, so a turn sent while it was off has none and can rewind only
+its conversation. It exists only for
+a thread in its own linked worktree with a complete pre-turn checkpoint (a git
 tree of the whole tracked worktree), is refused when another live thread or
 agent session shares the directory (finished, fully idle subagents of the same
 thread excepted), and requires the same worktree registration the thread was

@@ -12,8 +12,8 @@ use h4rn_daemon::blobs::{AttachmentResolver, BlobError};
 use h4rn_daemon::fs::SnapshotStore;
 use h4rn_daemon::harnesses::StaticHarnessCatalog;
 use h4rn_daemon::journal::{Journal, SqliteJournal};
-use h4rn_daemon::threads::{NewThread, ThreadManager, ThreadManagerOptions};
-use h4rn_harness::FakeHarness;
+use h4rn_daemon::threads::{NewThread, SendMode, ThreadManager, ThreadManagerOptions};
+use h4rn_harness::{FakeHarness, HarnessEvent};
 use h4rn_protocol::{
     ApprovalKind, Attachment, AttachmentId, Event, HarnessKind, HostId, Item, MessageRole,
     PendingRewind, RewindMethod, RuntimeMode, SessionRewind, ThreadFilter, ThreadId, TurnId,
@@ -518,6 +518,101 @@ async fn a_running_turn_a_queued_message_and_an_approval_refuse_the_rewind() {
     // Wait for the two turns to settle, then start a gated third turn and raise
     // an approval on it.
     wait_turn(&mut events).await;
+}
+
+#[tokio::test]
+async fn a_steered_message_cannot_be_edited_and_never_takes_its_cue_with_it() {
+    // A scripted turn stays running after its prompt is accepted, so a steer
+    // can land inside it.
+    let harness = FakeHarness::with_events(vec![HarnessEvent::TextDelta {
+        text: "working".into(),
+    }])
+    .with_kind(HarnessKind::Codex)
+    .with_native_rewind();
+    let fixture = make_fixture(harness).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(
+            &fixture.host,
+            Path::new("/tmp/rewind-steer"),
+            "B",
+        ))
+        .await
+        .expect("create");
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            match events.recv().await {
+                Ok(wire) if matches!(wire.event, Event::MessageDelta { .. }) => break,
+                Ok(_) => {}
+                Err(error) => panic!("the scripted turn published no output: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("the scripted turn started");
+    let cue_item = prompt_item(&fixture.manager, &created.thread_id, "B").await;
+    let cue_turn = fixture
+        .manager
+        .get_thread(&created.thread_id, 0)
+        .await
+        .expect("thread")
+        .summary
+        .active_turn_id
+        .clone()
+        .expect("a running turn");
+
+    fixture
+        .manager
+        .send_message_with(
+            &created.thread_id,
+            "C".into(),
+            Vec::new(),
+            SendMode::Steer,
+            Some(cue_turn.clone()),
+        )
+        .await
+        .expect("steer C");
+    let (c_item, steer_turn) = next_user_item(&mut events).await;
+    assert_eq!(
+        steer_turn, cue_turn,
+        "the steer is journaled inside B's turn"
+    );
+
+    // Editing the steer would also remove B, its cue, so it is refused.
+    let refused = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &c_item, false)
+        .await
+        .expect_err("a steer has no turn of its own to cut");
+    assert!(
+        refused
+            .to_string()
+            .contains("only the first message of a turn can be edited"),
+        "{refused}"
+    );
+    let plan = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &c_item)
+        .await
+        .expect_err("the plan refuses a steer too");
+    assert!(
+        plan.to_string()
+            .contains("only the first message of a turn can be edited"),
+        "{plan}"
+    );
+
+    // B is still the live cue, and it is still a valid target.
+    assert_eq!(
+        prompt_item(&fixture.manager, &created.thread_id, "B").await,
+        cue_item,
+        "the cue was never silently lost"
+    );
+    fixture
+        .manager
+        .rewind_plan(&created.thread_id, &cue_item)
+        .await
+        .expect("the cue is still the turn's editable first message");
 }
 
 #[tokio::test]
@@ -1119,6 +1214,92 @@ async fn codex_reverts_the_prompt_it_really_accepted_not_a_local_index() {
 }
 
 #[tokio::test]
+async fn a_codex_prompt_without_its_own_boundary_rewinds_by_handoff() {
+    // An older Codex thread: A and B were recorded before h4rn kept provider
+    // boundaries; C is recorded after a restart. B must not borrow C's
+    // boundary, which would revert before C and keep B.
+    let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(
+            &fixture.host,
+            Path::new("/tmp/rewind-old"),
+            "A",
+        ))
+        .await
+        .expect("create");
+    let (_a_item, a_turn) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(&created.thread_id, "B".into(), Vec::new())
+        .await
+        .expect("send B");
+    let (b_item, b_turn) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+
+    drop(fixture.manager);
+    {
+        let metas = fixture.journal.list_threads().await.expect("metas");
+        let mut meta = metas
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("the thread's meta");
+        meta.provider_turns.remove(a_turn.as_str());
+        meta.provider_turns.remove(b_turn.as_str());
+        fixture
+            .journal
+            .upsert_thread(&meta)
+            .await
+            .expect("rewrite the old meta");
+    }
+    let reopened = open_manager(
+        Arc::clone(&fixture.journal),
+        FakeHarness::new().with_native_rewind(),
+        HarnessKind::Codex,
+        fixture.data.path(),
+    )
+    .await;
+    let mut events = reopened.subscribe();
+    reopened
+        .send_message(&created.thread_id, "C".into(), Vec::new())
+        .await
+        .expect("send C");
+    let (_c_item, _c_turn) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    let c_boundary = reopened
+        .thread_meta(&created.thread_id)
+        .await
+        .expect("meta")
+        .provider_turns
+        .values()
+        .find_map(|boundary| boundary.turn_id.clone());
+    assert!(c_boundary.is_some(), "C recorded its own boundary");
+
+    let plan = reopened
+        .rewind_plan(&created.thread_id, &b_item)
+        .await
+        .expect("plan B");
+    assert_eq!(
+        plan.method,
+        RewindMethod::Handoff,
+        "B has no boundary of its own, so it must not borrow C's"
+    );
+    let prompt = reopened
+        .rewind_thread(&created.thread_id, &b_item, false)
+        .await
+        .expect("rewind B");
+    assert_eq!(prompt.method, RewindMethod::Handoff);
+    let meta = reopened
+        .thread_meta(&created.thread_id)
+        .await
+        .expect("meta");
+    assert_eq!(meta.pending_rewind, Some(PendingRewind::Handoff));
+}
+
+#[tokio::test]
 async fn a_claude_prompt_is_tagged_and_resumes_at_the_last_kept_message() {
     let (fake, tags) = FakeHarness::new()
         .with_native_rewind()
@@ -1305,6 +1486,97 @@ async fn a_refused_claude_boundary_falls_back_to_a_handoff_and_later_sends_work(
         .await
         .expect("send D after the fallback");
     wait_turn(&mut events).await;
+}
+
+#[tokio::test]
+async fn a_boundary_from_an_abandoned_session_is_not_native() {
+    // A, B and C share one Claude Code session. C is rewound natively, D's
+    // resume is refused and falls back to a fresh session, so B's recorded
+    // message id belongs to a session the thread no longer resumes.
+    let fake = FakeHarness::new()
+        .with_native_rewind()
+        .with_resume_death("No message found with message.uuid of: provider-message-2");
+    let fixture = make_fixture_kind(fake, HarnessKind::ClaudeCode).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request_kind(
+            &fixture.host,
+            Path::new("/tmp/rewind-abandoned"),
+            "A",
+            HarnessKind::ClaudeCode,
+        ))
+        .await
+        .expect("create");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(&created.thread_id, "B".into(), Vec::new())
+        .await
+        .expect("send B");
+    let (b_item, b_turn) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    fixture
+        .manager
+        .send_message(&created.thread_id, "C".into(), Vec::new())
+        .await
+        .expect("send C");
+    let (c_item, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    let old_session = fixture
+        .manager
+        .thread_meta(&created.thread_id)
+        .await
+        .expect("meta")
+        .provider_turns
+        .get(b_turn.as_str())
+        .and_then(|boundary| boundary.provider_session.clone())
+        .expect("B's boundary names its session");
+
+    let prompt = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &c_item, false)
+        .await
+        .expect("rewind C natively");
+    assert_eq!(prompt.method, RewindMethod::Native);
+
+    // D's resume at C's boundary is refused; the daemon falls back.
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(&created.thread_id, "D".into(), Vec::new())
+        .await
+        .expect("send D");
+    wait_turn(&mut events).await;
+    let meta = fixture
+        .manager
+        .thread_meta(&created.thread_id)
+        .await
+        .expect("meta");
+    assert_ne!(
+        meta.resume_id.as_deref(),
+        Some(old_session.as_str()),
+        "the fallback started a fresh session"
+    );
+
+    let plan = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &b_item)
+        .await
+        .expect("plan B");
+    assert_eq!(
+        plan.method,
+        RewindMethod::Handoff,
+        "B's boundary belongs to the abandoned session"
+    );
+    let prompt = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &b_item, false)
+        .await
+        .expect("rewind B");
+    assert_eq!(prompt.method, RewindMethod::Handoff);
 }
 
 #[tokio::test]
@@ -1789,8 +2061,8 @@ async fn file_restore_is_off_until_the_labs_switch_is_turned_on() {
         .expect("the conversation still rewinds");
     assert!(!prompt.files_restored);
 
-    // With the switch on, the same prompt would accept the file choice when a
-    // checkpoint exists.
+    // No checkpoint was captured while the switch was off: turning it on does
+    // not invent one for a turn that already ran.
     fixture.manager.set_file_rewind_enabled(true);
     let a_item = prompt_item(
         &fixture.manager,
@@ -1804,7 +2076,33 @@ async fn file_restore_is_off_until_the_labs_switch_is_turned_on() {
         .await
         .expect("plan");
     assert!(plan.files_enabled);
-    assert!(plan.files_available);
+    assert!(
+        !plan.files_available,
+        "a turn sent while the switch was off has no checkpoint to restore"
+    );
+
+    // A turn sent after the switch is turned on does get one.
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(
+            &created.thread_id,
+            "C [[write:c.txt]]from C".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send C");
+    let (c_item, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    let plan = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &c_item)
+        .await
+        .expect("plan C");
+    assert!(
+        plan.files_available,
+        "a checkpoint exists for a turn sent while the switch is on"
+    );
 }
 
 #[tokio::test]
@@ -1851,76 +2149,4 @@ async fn a_rewind_plan_names_the_method_the_selected_prompt_really_uses() {
         .await
         .expect("plan B");
     assert_eq!(second.method, RewindMethod::Native);
-}
-
-#[tokio::test]
-async fn an_accepted_provider_boundary_is_durable_before_the_turn_settles() {
-    let (_base, _repo, worktree) = git_worktree();
-    let (fake, completion) = FakeHarness::new()
-        .with_native_rewind()
-        .with_later_completion_gate();
-    let (fake, sends) = fake.with_send_count();
-    let fixture = make_fixture(fake).await;
-    let mut events = fixture.manager.subscribe();
-    let created = fixture
-        .manager
-        .create_thread(thread_request(&fixture.host, &worktree, "A"))
-        .await
-        .expect("create");
-    let mut first = events.resubscribe();
-    wait_turn(&mut first).await;
-    drain(&mut events);
-    fixture
-        .manager
-        .send_message(&created.thread_id, "B".into(), Vec::new())
-        .await
-        .expect("send B");
-    let (b_item, b_turn) = next_user_item(&mut events).await;
-    // B's completion is still held, so the turn has not settled. When it does
-    // settle, its own append is refused: the boundary must still be on disk, in
-    // a write of its own, for a restart to name it.
-    sends.wait_for(2).await;
-    fixture
-        .manager
-        .fail_next_append("the journal is unavailable");
-    completion.release();
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
-    loop {
-        let metas = fixture.journal.list_threads().await.expect("metas");
-        let meta = metas
-            .into_iter()
-            .find(|meta| meta.thread_id == created.thread_id)
-            .expect("the thread's meta");
-        if meta.provider_turns.contains_key(b_turn.as_str()) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the boundary was not persisted before the turn could settle"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    drop(fixture.manager);
-    let reopened = open_manager(
-        Arc::clone(&fixture.journal),
-        FakeHarness::new().with_native_rewind(),
-        HarnessKind::Codex,
-        fixture.data.path(),
-    )
-    .await;
-    let plan = reopened
-        .rewind_plan(&created.thread_id, &b_item)
-        .await
-        .expect("plan after the restart");
-    assert_eq!(
-        plan.method,
-        RewindMethod::Native,
-        "a restarted daemon still names B's provider boundary"
-    );
-    let prompt = reopened
-        .rewind_thread(&created.thread_id, &b_item, false)
-        .await
-        .expect("rewind B after the restart");
-    assert_eq!(prompt.method, RewindMethod::Native);
 }

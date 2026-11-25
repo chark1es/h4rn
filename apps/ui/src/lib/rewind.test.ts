@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { ThreadSummary } from "@/gen";
+import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { rewindRefusal } from "./store/appStore";
 import { createThreadLog } from "./store/projection";
 
@@ -72,6 +72,22 @@ describe("rewindRefusal", () => {
     );
     expect(rewindRefusal(summary({ rewind: "unsupported" }), undefined)).toContain(
       "cannot drop turns",
+    );
+  });
+
+  it("names an uncertain delivery as something to resend or discard", () => {
+    const queued: QueuedMessage[] = [
+      {
+        message_id: "qm_uncertain",
+        text: "maybe delivered",
+        attachments: [],
+        queued_at: "2026-01-01T00:00:00Z",
+        steerable: false,
+        delivery_unknown: true,
+      },
+    ];
+    expect(rewindRefusal(summary(), createThreadLog(), queued)).toContain(
+      "Resend or discard it first",
     );
   });
 

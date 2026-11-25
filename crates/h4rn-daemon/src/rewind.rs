@@ -147,6 +147,13 @@ pub(crate) struct LivePrompt {
     /// True for a message read from a saved conversation, whose provider
     /// message id h4rn never chose.
     pub imported: bool,
+    /// True for a turn's first user item, its cue.
+    ///
+    /// A steer is journaled as another user item inside the running turn, so
+    /// only the cue starts the turn. Editing any later item of the same turn
+    /// would cut the cue too, which is the message before the one the person
+    /// chose.
+    pub cue: bool,
 }
 
 /// The prompts still live in a thread's journal, oldest first.
@@ -169,13 +176,19 @@ pub(crate) fn live_prompts(events: &[WireEvent]) -> Vec<LivePrompt> {
                 turn_id,
                 at,
                 ..
-            } => prompts.push(LivePrompt {
-                item_id: item_id.clone(),
-                turn_id: turn_id.clone(),
-                text: text.clone(),
-                attachments: attachments.clone(),
-                imported: at.is_some(),
-            }),
+            } => {
+                let cue = !prompts
+                    .iter()
+                    .any(|prompt| prompt.turn_id == turn_id.clone());
+                prompts.push(LivePrompt {
+                    item_id: item_id.clone(),
+                    turn_id: turn_id.clone(),
+                    text: text.clone(),
+                    attachments: attachments.clone(),
+                    imported: at.is_some(),
+                    cue,
+                });
+            }
             Event::ThreadRewound { before_item_id, .. } => {
                 if let Some(index) = prompts
                     .iter()

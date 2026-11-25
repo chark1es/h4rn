@@ -81,6 +81,14 @@ pub struct ProviderTurnRecord {
     /// Claude Code's uuid for the assistant message before the prompt.
     #[serde(default)]
     pub last_message_id: Option<String>,
+    /// The provider session that recorded this boundary.
+    ///
+    /// A boundary only truncates the history of the session that produced it.
+    /// A record from an older spelling of this row has none, and is read as
+    /// "not native": a handoff is safer than pairing the id with a session
+    /// that never saw it.
+    #[serde(default)]
+    pub provider_session: Option<String>,
 }
 
 /// Everything the daemon needs to rebuild a thread row without replaying it.

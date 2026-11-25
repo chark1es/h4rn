@@ -1,9 +1,14 @@
 # Editing an earlier prompt
 
-**Edit from here** sits beneath every sent message. Choosing it rewinds the
-thread to just before that message: the message and everything after it leave
-the active conversation and the harness's own history. The prompt and its
-attachments come back to the composer, ready to edit and resend.
+**Edit from here** sits beneath a turn's first sent message, its cue. Choosing
+it rewinds the thread to just before that message: the message and everything
+after it leave the active conversation and the harness's own history. The
+prompt and its attachments come back to the composer, ready to edit and resend.
+
+A message steered into a running turn is journaled inside that same turn. It
+has no edit action of its own, and the daemon refuses one that names it: cutting
+there would also remove the cue before it, a message the person did not choose.
+Edit the cue to rewind the whole turn.
 
 This is a conversation edit, not a time machine. It does not undo external
 actions the agent took elsewhere — a push, a deploy, a message to another
@@ -49,7 +54,7 @@ provider session — can only use a handoff.
 
 | Harness | Method | What it does |
 |---|---|---|
-| Codex | Native | On the next session start, resumes the thread and calls `thread/revert` before the first **provider turn h4rn really delivered** for a removed prompt. |
+| Codex | Native | On the next session start, resumes the thread and calls `thread/revert` before the removed prompt's own recorded provider turn. A later prompt's turn is never borrowed, because reverting before it would keep the edited message. |
 | Claude Code | Native | The next session resumes with `--resume-session-at <message id>`. Every prompt is sent through the tagged frame, and h4rn records the uuid of the assistant reply **before** the removed prompt. That flag is inclusive, so the boundary is the last kept message, never the removed prompt. |
 | OpenCode, Antigravity, configured ACP agents | Handoff | These harnesses cannot truncate a live conversation through the protocol h4rn speaks. h4rn starts a fresh session and gives it a bounded handoff of the kept history, using the same builder as imported threads. |
 
@@ -59,13 +64,21 @@ truncate. A queued message becomes part of the conversation when it runs, under
 its own turn, so its provider boundary is its own, not the turn that happened to
 be running when it arrived.
 
+A boundary belongs to the provider session that recorded it. h4rn stores that
+session id beside the boundary, and only uses it while the thread still resumes
+that same session. When a fallback starts a fresh session, the kept prompts'
+old boundaries stay recorded but are no longer native: a later rewind plans a
+handoff instead of pairing an old message id with a session that never saw it.
+
 The provider boundary is applied at the **next** session start. The old
 session is shut down at rewind time so it can never be sent another prompt.
 If the adapter cannot keep its native promise — the provider no longer has the
 named turn, the CLI refuses the message id, or no recorded boundary exists —
 the daemon falls back to the handoff, clears the refused boundary, journals a
 **fell back** event and tells the person, so a plan that named a native rewind
-never turns into a silent handoff.
+never turns into a silent handoff. Both fallback paths journal that event: the
+retry that starts a fresh session, and a failed startup that has to turn the
+pending boundary into a handoff.
 
 ## Files
 
@@ -84,9 +97,11 @@ other work sees.
 
 A complete checkpoint is the git tree of the whole tracked worktree captured
 just before the turn's prompt reaches the agent. It covers files a shell command
-changed even when no tool call named them. Turns recorded without one — an
-older thread, or a harness that never recorded it — refuse **Revert files too**
-with a clear message rather than restoring a partial set.
+changed even when no tool call named them. Checkpoints are only captured while
+the Labs switch is on, so a turn sent while it was off has none; turning the
+switch on does not invent one for work that already ran. Turns recorded without
+one — an older thread, or a harness that never recorded it — refuse **Revert
+files too** with a clear message rather than restoring a partial set.
 
 Restoring is refused when another thread or agent session uses that directory,
 a folder inside it, or a folder that contains it. Completed subagents of the
@@ -128,6 +143,9 @@ A rewind is refused while any of these is true:
 
 - a turn is running;
 - a message is queued or a prompt is parked behind a pause;
+- a message's delivery is uncertain — a queued row that may already have
+  reached the agent, or a promoted prompt whose write is still in flight — so
+  the person is asked to resend or discard it first;
 - an approval is pending;
 - an automatic resume is armed after a usage limit (a cancelled resume does
   not block it, even if the thread's last state still says rate limited);

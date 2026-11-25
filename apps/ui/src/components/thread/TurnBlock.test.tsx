@@ -267,4 +267,45 @@ describe("Edit from here", () => {
     expect(markup).toContain("Wait for the current turn to finish");
     expect(markup).toContain("disabled");
   });
+
+  it("is offered on a turn's cue, never on a steered message inside it", () => {
+    const markup = renderToStaticMarkup(
+      <TurnBlock
+        turn={{
+          ...userOnlyTurn("completed"),
+          items: [
+            {
+              kind: "message",
+              itemId: "item_cue",
+              role: "user",
+              text: "send B",
+              attachments: [],
+              streaming: false,
+            },
+            {
+              kind: "message",
+              itemId: "item_steer",
+              role: "user",
+              text: "steer C",
+              attachments: [],
+              streaming: false,
+            },
+            {
+              kind: "message",
+              itemId: "item_reply",
+              role: "assistant",
+              text: "reply",
+              attachments: [],
+              streaming: false,
+            },
+          ],
+        }}
+        threadId="thread_1"
+        summary={summary}
+        onReply={() => {}}
+        onEditFromHere={() => {}}
+      />,
+    );
+    expect(markup.match(/Edit from here/g)).toHaveLength(1);
+  });
 });

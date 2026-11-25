@@ -844,6 +844,25 @@ function enqueueEvent(envelope: EventEnvelope): void {
   scheduleFlush();
 }
 
+/**
+ * Says a rewind fell back to a handoff, once and only for live news.
+ *
+ * The daemon journals the fallback, so a replay folds it into the history
+ * without repeating a toast the person already saw. `replayed` is the one
+ * signal that tells the two apart.
+ */
+export function noticeRewindFallback(envelope: EventEnvelope): void {
+  if (envelope.replayed || envelope.event.type !== "rewind_fell_back") return;
+  const harness = getState().threads[envelope.event.thread_id]?.harness;
+  pushToast({
+    variant: "info",
+    title: "The rewind fell back to a fresh session",
+    description: harness
+      ? `${harnessName(harness)} refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.`
+      : "The harness refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.",
+  });
+}
+
 export function startConnection(): void {
   if (started) return;
   started = true;
@@ -858,16 +877,7 @@ export function startConnection(): void {
     // A planned native rewind can still be refused when the next session
     // starts. The daemon journals that moment; say it once, live, and let a
     // replay fold the event without repeating the news.
-    if (!envelope.replayed && envelope.event.type === "rewind_fell_back") {
-      const harness = getState().threads[envelope.event.thread_id]?.harness;
-      pushToast({
-        variant: "info",
-        title: "The rewind fell back to a fresh session",
-        description: harness
-          ? `${harnessName(harness)} refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.`
-          : "The harness refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.",
-      });
-    }
+    noticeRewindFallback(envelope);
     for (const listener of appEventListeners) listener(envelope);
   });
 
@@ -1581,6 +1591,7 @@ export function consumeComposerRestore(token: number): void {
 export function rewindRefusal(
   summary: ThreadSummary | undefined,
   log: ThreadLog | undefined,
+  queued?: QueuedMessage[] | undefined,
 ): string | null {
   if (!summary) return "The thread is not loaded yet.";
   if (summary.rewind === "unsupported") {
@@ -1588,6 +1599,11 @@ export function rewindRefusal(
   }
   if (summary.agent_state === "awaiting_approval" || pendingApprovalIn(log)) {
     return "Answer the pending approval first.";
+  }
+  // A message the daemon is unsure it delivered may already be in the
+  // provider conversation, and the rewind would remove the turn that holds it.
+  if (queued?.some((message) => message.delivery_unknown)) {
+    return "A message may have reached the agent. Resend or discard it first.";
   }
   if (summary.agent_state === "queued") {
     return "A message is waiting to run. Let it finish first.";

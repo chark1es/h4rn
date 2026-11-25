@@ -7,15 +7,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
-- **Edit an earlier prompt to rewind a thread.** Every sent message has an
-  **Edit from here** action. The message and everything after it leave the
+- **Edit an earlier prompt to rewind a thread.** Every turn's first sent
+  message has an **Edit from here** action; a message steered into a running
+  turn cannot be edited on its own, because that would also remove the message
+  before it. The message and everything after it leave the
   active thread and the harness's own history, and the prompt and its
   attachments return to the composer above any unsent draft. Codex and Claude
   Code truncate their provider conversation natively (`thread/revert` and
   `--resume-session-at`); OpenCode, Antigravity and configured ACP agents start
   a fresh session with a bounded handoff of the kept history, and the dialog
   says which one the selected message will really use; a refused native
-  boundary falls back to the handoff and says so. **Revert files too** is a
+  boundary falls back to the handoff and says so. A native boundary is the
+  edited prompt's own, recorded in the provider session the thread still
+  resumes; an older prompt with none, or one from an abandoned session, uses
+  the handoff. **Revert files too** is a
   Labs feature, off by default (Settings → Labs → **Rewind files with Edit from
   here**): while it is off the dialog hides it, the thread row reports it
   unavailable, and the daemon refuses it. When turned on, it puts a thread's own
@@ -24,8 +29,11 @@ All notable changes to h4rn are recorded here. The format follows
   whole tracked worktree, so a shell command's edits are covered), warns that it
   also undoes the person's own later edits, and is refused when another thread
   or agent session shares the directory (finished subagents with nothing queued
-  or pending do not block it). A rewind is refused while a turn runs, a message is
-  queued or parked, an approval is pending or an automatic resume is armed; a
+  or pending do not block it). Checkpoints are only captured while the switch
+  is on, so a turn sent while it was off only rewinds its conversation. A
+  rewind is refused while a turn runs, a message is
+  queued or parked, a message's delivery is uncertain (resend or discard it
+  first), an approval is pending or an automatic resume is armed; a
   cancelled resume no longer blocks it. Prompts and cuts are read in journal
   order, a queued message joins the transcript under the turn that runs it, and
   native boundaries name what Claude Code or Codex really recorded. One durable event

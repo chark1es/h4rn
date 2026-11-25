@@ -209,6 +209,10 @@ export function TurnBlock({
   const userItems = turn.items.filter(
     (item): item is MessageItem => item.kind === "message" && item.role === "user",
   );
+  // Only a turn's first user item is its cue. A steer is journaled as another
+  // user item inside the running turn, and editing it would also drop the cue
+  // before it, so the action is offered on the cue alone.
+  const cueItemId = userItems[0]?.itemId;
   const isUserTurn = turn.items.length > 0 && userItems.length === turn.items.length;
   const runningTool = [...turn.items]
     .reverse()
@@ -228,7 +232,7 @@ export function TurnBlock({
             key={item.itemId}
             item={item}
             at={turn.startedAt}
-            onEdit={onEditFromHere}
+            onEdit={item.itemId === cueItemId ? onEditFromHere : undefined}
             editDisabledReason={editDisabledReason}
           />
         ))}
@@ -272,7 +276,7 @@ export function TurnBlock({
           key={`${turn.id}:${item.itemId}`}
           item={item}
           at={turn.startedAt}
-          onEdit={onEditFromHere}
+          onEdit={item.itemId === cueItemId ? onEditFromHere : undefined}
           editDisabledReason={editDisabledReason}
         />
       ) : (

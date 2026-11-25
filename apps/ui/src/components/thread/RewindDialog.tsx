@@ -9,7 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { RewindPlan, ThreadSummary } from "@/gen";
+import type { QueuedMessage, RewindPlan, ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import {
   filesRewindAvailable,
@@ -33,12 +33,15 @@ type Choice = "keep" | "files";
 export function RewindDialog({
   thread,
   log,
+  queued,
   itemId,
   open,
   onOpenChange,
 }: {
   thread: ThreadSummary;
   log: ThreadLog | undefined;
+  /** This thread's queue rows, so an uncertain delivery can refuse the edit. */
+  queued?: QueuedMessage[] | undefined;
   itemId: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -48,7 +51,7 @@ export function RewindDialog({
   const [plan, setPlan] = useState<RewindPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  const refusal = rewindRefusal(thread, log);
+  const refusal = rewindRefusal(thread, log, queued);
   const checkpointReady = filesRewindAvailable(log, itemId);
   const filesOffered = plan?.files_enabled === true;
   const canRestoreFiles = filesOffered && plan.files_available === true;
@@ -165,7 +168,7 @@ export function RewindDialog({
 
         <p className="q-rewind-note">
           {plan?.method === "handoff"
-            ? `${harnessLabel(thread.harness)} cannot drop turns from its own history. h4rn starts a new session with a handoff of the kept conversation.`
+            ? "This message can't be dropped natively, so h4rn starts a new session with a handoff."
             : plan?.method === "native"
               ? `${harnessLabel(thread.harness)} drops this message and every later turn from its own history.`
               : plan?.method === "unsupported"
