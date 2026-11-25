@@ -1576,6 +1576,43 @@ async fn push_devices_register_rotate_and_leave_with_the_session() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["code"], "push_device_forbidden");
 
+    // The phone removes its own registration.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/push/devices/{}", phone.device.id),
+            Some(&phone),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_devices WHERE user_id = $1")
+        .bind(phone.user.id)
+        .fetch_one(state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "the phone's own delete left its token behind");
+
+    // Register again so sign-out has a row to clear.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_two,
+                "package_name": "dev.h4rn.app",
+                "app_version": "1.0.2",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
     // Signing out removes the registration as well as the session.
     let (status, _) = send(
         &state,
