@@ -2390,6 +2390,16 @@ All notable changes to h4rn are recorded here. The format follows
   output, so `cargo run -p h4rn-daemon` is unambiguous again and `cargo build`/`install` ship only
   `h4rnd`.
 
+### Fixed
+
+- **A harness switch keeps the whole reply around its handoff.** Text the adapter
+  reports while the switch is recording that the new harness took the prompt is
+  merged like live output, so a long reply is no longer cut off at the hold's bound;
+  a stream that ends inside that window applies its reply before the turn is
+  settled; and a journal that refuses the acceptance or the handoff clear is
+  retried instead of being reported as durable, so a request never stays marked
+  undelivered beside the turn it ran.
+
 ## 1.0.1 — 2026-11-19
 
 A patch release for the clients and the relay: the post-1.0 UI fixes, project folders in the
