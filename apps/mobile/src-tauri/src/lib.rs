@@ -38,7 +38,7 @@ struct SecretStore(PluginHandle<tauri::Wry>);
 #[cfg(target_os = "android")]
 struct PushBridge(PluginHandle<tauri::Wry>);
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+/// The command's answer on every target; the host build reports unavailable.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PushStatusValue {
     available: bool,
