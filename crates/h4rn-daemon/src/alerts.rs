@@ -158,6 +158,29 @@ impl ActivityPublisher for crate::remote::RelayDialer {
     }
 }
 
+/// Where an alert reads the thread's title and project from.
+///
+/// The daemon's [`ThreadManager`] is the real answer; tests inject a small
+/// table so the observation rules can be exercised without a full manager.
+#[async_trait::async_trait]
+pub trait ThreadLookup: Send + Sync {
+    /// The thread's summary, or `None` when it no longer exists.
+    async fn thread_summary(&self, thread_id: &ThreadId) -> Option<ThreadSummary>;
+    /// The thread event stream the watcher follows.
+    fn subscribe(&self) -> broadcast::Receiver<WireEvent>;
+}
+
+#[async_trait::async_trait]
+impl ThreadLookup for ThreadManager {
+    async fn thread_summary(&self, thread_id: &ThreadId) -> Option<ThreadSummary> {
+        ThreadManager::thread_summary(self, thread_id).await
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
+        ThreadManager::subscribe(self)
+    }
+}
+
 /// What the daemon remembers about one thread between events.
 #[derive(Default)]
 struct ThreadAlerts {
@@ -171,7 +194,7 @@ struct ThreadAlerts {
 /// Watches the thread stream and publishes while the switch is on.
 pub struct AgentAlertService {
     settings: Arc<AgentAlertSettingsStore>,
-    manager: Option<Arc<ThreadManager>>,
+    manager: Option<Arc<dyn ThreadLookup>>,
     publisher: Arc<dyn ActivityPublisher>,
     published: Mutex<HashMap<ThreadId, ThreadAlerts>>,
     watcher: Mutex<Option<JoinHandle<()>>>,
@@ -189,7 +212,7 @@ impl AgentAlertService {
     /// Builds the service; call [`Self::start`] to observe events.
     pub fn new(
         settings: Arc<AgentAlertSettingsStore>,
-        manager: Option<Arc<ThreadManager>>,
+        manager: Option<Arc<dyn ThreadLookup>>,
         publisher: Arc<dyn ActivityPublisher>,
     ) -> Self {
         Self {
@@ -398,6 +421,140 @@ mod tests {
         }
     }
 
+    /// A table of threads the observation tests can name.
+    #[derive(Default)]
+    struct Lookup {
+        summaries: HashMap<ThreadId, ThreadSummary>,
+    }
+
+    #[async_trait::async_trait]
+    impl ThreadLookup for Lookup {
+        async fn thread_summary(&self, thread_id: &ThreadId) -> Option<ThreadSummary> {
+            self.summaries.get(thread_id).cloned()
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
+            // These tests call `observe` directly; no watcher is started.
+            broadcast::channel(1).0.subscribe()
+        }
+    }
+
+    fn summary(thread_id: &ThreadId, parent: Option<&str>) -> ThreadSummary {
+        use h4rn_protocol::{AgentState, HarnessKind, HostId, RuntimeMode, ThreadTab, Usage};
+
+        ThreadSummary {
+            thread_id: thread_id.clone(),
+            parent_thread_id: parent.map(ThreadId::new),
+            host: HostId::new("host_test"),
+            harness: HarnessKind::ClaudeCode,
+            imported_from: None,
+            agent_id: None,
+            title: "Fix the thing".into(),
+            workspace_path: "/work/h4rn".into(),
+            project_path: None,
+            branch: None,
+            model: "test-model".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
+            models: Vec::new(),
+            fast: false,
+            tab: ThreadTab::Working,
+            placed_by_user: false,
+            pinned: false,
+            snoozed_until: None,
+            last_activity: Utc::now(),
+            agent_state: AgentState::Done,
+            usage: Usage::default(),
+            ttft_ms: None,
+            context_window: None,
+            context_fill_percent: None,
+            needs_attention: false,
+            pending_guest_requests: 0,
+            unread: false,
+            resume_at: None,
+            limit: None,
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
+            steer: true,
+        }
+    }
+
+    /// A service that can name one thread and records what it publishes.
+    fn observing_service(recorder: Arc<Recorder>) -> Arc<AgentAlertService> {
+        let thread_id = ThreadId::new("th_test");
+        let mut lookup = Lookup::default();
+        lookup
+            .summaries
+            .insert(thread_id.clone(), summary(&thread_id, None));
+        let store = Arc::new(AgentAlertSettingsStore::in_memory());
+        Arc::new(AgentAlertService::new(
+            store,
+            Some(Arc::new(lookup) as Arc<dyn ThreadLookup>),
+            recorder as Arc<dyn ActivityPublisher>,
+        ))
+    }
+
+    /// Sends one event through the real observation path.
+    async fn observe(service: &Arc<AgentAlertService>, event: Event) {
+        let thread_id = match &event {
+            Event::ThreadUpserted(summary) => summary.thread_id.clone(),
+            _ => ThreadId::new("th_test"),
+        };
+        service
+            .observe(WireEvent {
+                seq: 0,
+                thread_id,
+                event,
+            })
+            .await;
+    }
+
+    fn working_event() -> Event {
+        let thread_id = ThreadId::new("th_test");
+        Event::ThreadUpserted(summary(&thread_id, None))
+    }
+
+    fn completion(status: TurnStatus) -> Event {
+        Event::TurnCompleted {
+            thread_id: ThreadId::new("th_test"),
+            turn_id: h4rn_protocol::TurnId::new("turn_1"),
+            usage: h4rn_protocol::Usage::default(),
+            status,
+            changes: None,
+        }
+    }
+
+    fn approval_requested() -> Event {
+        Event::ApprovalRequested {
+            thread_id: ThreadId::new("th_test"),
+            turn_id: h4rn_protocol::TurnId::new("turn_1"),
+            approval_id: "approval_1".into(),
+            subagent_id: None,
+            kind: h4rn_protocol::ApprovalKind::Command,
+            prompt: "Run the tests?".into(),
+            options: Vec::new(),
+        }
+    }
+
+    fn approval_resolved() -> Event {
+        Event::ApprovalResolved {
+            thread_id: ThreadId::new("th_test"),
+            approval_id: "approval_1".into(),
+            option_id: None,
+            by_device: None,
+        }
+    }
+
+    fn limit_hit(auto_resume: bool) -> Event {
+        Event::UsageLimitHit {
+            thread_id: ThreadId::new("th_test"),
+            reset_at: None,
+            auto_resume,
+        }
+    }
+
     /// A service with no manager: these tests drive `publish` directly.
     fn service(_settings: AgentAlertSettings, recorder: Arc<Recorder>) -> AgentAlertService {
         let store = Arc::new(AgentAlertSettingsStore::in_memory());
@@ -542,5 +699,80 @@ mod tests {
             approval_state(ApprovalKind::Plan),
             AgentAlertState::Approval
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_finished_turn_alerts_again() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, working_event()).await;
+        observe(&service, completion(TurnStatus::Completed)).await;
+        observe(&service, working_event()).await;
+        observe(&service, completion(TurnStatus::Completed)).await;
+
+        let sent = recorder.sent.lock().await;
+        assert_eq!(
+            sent.len(),
+            2,
+            "a new Working turn clears the baseline so its result can alert"
+        );
+        assert!(
+            sent.iter()
+                .all(|activity| activity.state == AgentAlertState::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_approval_in_the_same_turn_alerts_again() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, approval_requested()).await;
+        observe(&service, approval_resolved()).await;
+        observe(&service, approval_requested()).await;
+
+        let sent = recorder.sent.lock().await;
+        assert_eq!(
+            sent.len(),
+            2,
+            "answering a hand clears the baseline so the next hand alerts"
+        );
+        assert!(
+            sent.iter()
+                .all(|activity| activity.state == AgentAlertState::Approval)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_limit_stop_alerts_once_and_its_completion_stays_quiet() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, limit_hit(false)).await;
+        observe(&service, completion(TurnStatus::Failed)).await;
+
+        let sent = recorder.sent.lock().await;
+        assert_eq!(
+            sent.len(),
+            1,
+            "the limit alert is the person's cue; the Failed completion is the same stop"
+        );
+        assert_eq!(sent[0].state, AgentAlertState::Limit);
+    }
+
+    #[tokio::test]
+    async fn a_turn_the_person_stopped_publishes_nothing() {
+        let recorder = Arc::new(Recorder::default());
+        let service = observing_service(Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+
+        observe(&service, working_event()).await;
+        observe(&service, completion(TurnStatus::Interrupted)).await;
+
+        assert!(recorder.sent.lock().await.is_empty());
     }
 }

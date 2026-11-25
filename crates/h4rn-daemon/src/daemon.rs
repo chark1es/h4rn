@@ -747,7 +747,7 @@ impl DaemonBuilder {
         let publisher = Arc::clone(&relay_dialer) as Arc<dyn crate::alerts::ActivityPublisher>;
         let alerts = Arc::new(crate::alerts::AgentAlertService::new(
             alert_settings,
-            Some(Arc::clone(&manager)),
+            Some(Arc::clone(&manager) as Arc<dyn crate::alerts::ThreadLookup>),
             publisher,
         ));
 
