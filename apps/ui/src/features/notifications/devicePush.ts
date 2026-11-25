@@ -349,7 +349,7 @@ export function startDevicePush(): void {
     })().catch(() => undefined);
   });
 
-  // Launch is one of the signed-in moments a pending removal is retried.
-  void reconcileDeviceDeregistration().catch(() => undefined);
+  // Launch is one of the signed-in moments a pending removal is retried:
+  // `syncAccount` above runs once here when the account is already signed in.
   void nativeSetPushEnabled(devicePushEnabled());
 }
