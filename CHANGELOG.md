@@ -769,6 +769,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Rewind and fork stay honest about messages still being delivered.** An edit
+  now waits for a steer's write to return instead of cutting the turn it was
+  about to join, a queued steer is marked in flight before its `sending` write
+  so a rewind in that window cannot surface the same text twice, and a promoted
+  prompt whose grant was revoked before delivery goes back to the queue instead
+  of vanishing. A fork made after an edit copies only the live conversation, so
+  removed text never returns, and a fork at a removed turn is refused with a
+  clear message.
 - **A refused prompt survives a crash right after its turn is recorded.** A
   prompt the daemon refused because its outside grant was revoked could sit in
   neither the journal's claim nor the queue between the turn's settlement and

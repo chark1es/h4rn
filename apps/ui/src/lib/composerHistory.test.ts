@@ -41,6 +41,7 @@ function log(turns: StreamTurn[], pendingText: string[] = []): ThreadLog {
       at: "2026-01-01T12:00:00.000Z",
       sending: true,
     })),
+    cutTurns: [],
   };
 }
 

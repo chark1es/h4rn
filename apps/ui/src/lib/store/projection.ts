@@ -163,6 +163,14 @@ export type ThreadLog = {
   pending: PendingMessage[];
   /** Guest messages waiting for this owner, oldest first. */
   guestRequests: GuestRequest[];
+  /**
+   * Turns an edit removed from this log.
+   *
+   * A rewind cuts at one cue and drops every turn from there on. An event for
+   * one of those turns that arrives afterwards — a steer whose write was still
+   * in flight — must not reopen a turn the person already removed.
+   */
+  cutTurns: TurnId[];
 };
 
 export function createThreadLog(): ThreadLog {
@@ -174,6 +182,7 @@ export function createThreadLog(): ThreadLog {
     approvals: {},
     pending: [],
     guestRequests: [],
+    cutTurns: [],
   };
 }
 
@@ -186,6 +195,7 @@ function cloneLog(log: ThreadLog): ThreadLog {
     approvals: { ...log.approvals },
     pending: [...log.pending],
     guestRequests: [...log.guestRequests],
+    cutTurns: [...log.cutTurns],
   };
 }
 
@@ -308,6 +318,13 @@ export function foldEvent(
 
   const log = cloneLog(source);
   const at = options.at ?? new Date().toISOString();
+
+  // A turn an edit removed is gone for good, and a new turn never reuses an id.
+  // A late event from one of them (a steer written after its turn settled) must
+  // not fold it back into the transcript behind the cut.
+  if ("turn_id" in event && event.turn_id !== undefined && log.cutTurns.includes(event.turn_id)) {
+    return log;
+  }
 
   switch (event.type) {
     case "turn_started": {
@@ -597,7 +614,10 @@ export function foldEvent(
       const index = log.turns.findIndex((turn) =>
         turn.items.some((item) => item.kind === "message" && item.itemId === event.before_item_id),
       );
-      if (index >= 0) log.turns = log.turns.slice(0, index);
+      if (index >= 0) {
+        for (const turn of log.turns.slice(index)) log.cutTurns.push(turn.id);
+        log.turns = log.turns.slice(0, index);
+      }
       return log;
     }
 

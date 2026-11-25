@@ -58,6 +58,13 @@ after the copy began waits for the copy gate like any other send, so it cannot
 reach the fork's reading of the source. A turn interrupted by a restart is
 settled as interrupted.
 
+A fork made after an **edit from here** reads the same cut the live thread
+shows. The removed prompt and every later turn before the new one are absent
+from the fork's transcript and from its handoff history, so text the person
+removed — which may be a pasted secret — never comes back in a new thread. A
+fork at a removed turn is refused with a clear message instead of copying a
+transcript the source no longer has.
+
 Journals written before queued prompts had their own turn id are read the same
 way: a prompt filed under the running turn goes to the next turn that starts and
 has no prompt of its own. A prompt that never became a turn — the daemon stopped
