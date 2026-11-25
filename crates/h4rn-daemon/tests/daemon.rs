@@ -2173,6 +2173,591 @@ async fn worktree_settings_refuse_a_location_that_holds_a_linked_worktrees_check
     daemon.stop().await;
 }
 
+/// A project registered at a linked worktree is named after the main checkout,
+/// so Location `<root>` holds the destination `<root>/api`, which is the main
+/// checkout itself even though the registered workspace is elsewhere.
+#[tokio::test]
+async fn worktree_settings_refuse_a_location_that_holds_a_linked_worktrees_main_checkout() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let main = root.path().join("api");
+    std::fs::create_dir(&main).expect("api");
+    git_in(&main, &["init", "-b", "main"]);
+    git_in(&main, &["config", "user.name", "h4rn test"]);
+    git_in(&main, &["config", "user.email", "test@example.invalid"]);
+    git_in(&main, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(main.join("a.txt"), "one\n").expect("write");
+    git_in(&main, &["add", "a.txt"]);
+    git_in(&main, &["commit", "-m", "Initial commit"]);
+
+    let container = root.path().join("wt");
+    std::fs::create_dir(&container).expect("wt");
+    let linked = container.join("feature");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: linked.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the linked worktree as the project");
+
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(root.path().to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the destination is the main checkout, not the linked one");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error.message.contains("inside the project checkout"),
+        "{error:?}"
+    );
+    assert!(
+        error.message.contains(&main.to_string_lossy().into_owned()),
+        "the refusal names the main checkout: {error:?}"
+    );
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(
+                settings.location, None,
+                "the refused location was not saved"
+            );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+/// A project registered at a bare repository's worktree is named after the
+/// repository's git directory, so Location `<root>` holds it. The refusal says
+/// that the destination is the bare repository's git directory and what to do.
+#[tokio::test]
+async fn worktree_settings_refuse_a_location_that_holds_a_bare_repositorys_worktree() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let source = git_repo();
+    git_in(
+        root.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            source.path().to_str().unwrap(),
+            "project.git",
+        ],
+    );
+    let bare = root.path().join("project.git");
+    let linked = root.path().join("linked");
+    git_in(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: linked.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the bare repository's worktree as the project");
+
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(root.path().to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the destination is the bare repository's git directory");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error
+            .message
+            .contains("inside the bare repository's git directory"),
+        "{error:?}"
+    );
+    assert!(
+        error.message.contains(&bare.to_string_lossy().into_owned()),
+        "the refusal names the git directory: {error:?}"
+    );
+    assert!(
+        error.message.contains("choose a folder outside it"),
+        "the refusal says what to do: {error:?}"
+    );
+    assert!(
+        error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("outside the project checkout")),
+        "{error:?}"
+    );
+
+    daemon.stop().await;
+}
+
+/// A Location inside a sibling linked worktree puts new checkouts in another
+/// thread's working tree, so saving it is refused too.
+#[tokio::test]
+async fn worktree_settings_refuse_a_location_inside_a_sibling_worktree() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let main = root.path().join("api");
+    std::fs::create_dir(&main).expect("api");
+    git_in(&main, &["init", "-b", "main"]);
+    git_in(&main, &["config", "user.name", "h4rn test"]);
+    git_in(&main, &["config", "user.email", "test@example.invalid"]);
+    git_in(&main, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(main.join("a.txt"), "one\n").expect("write");
+    git_in(&main, &["add", "a.txt"]);
+    git_in(&main, &["commit", "-m", "Initial commit"]);
+    let sibling = root.path().join("feature");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            sibling.to_str().unwrap(),
+        ],
+    );
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: main.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the project");
+
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(sibling.to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the destination is inside another worktree");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(error.message.contains("another worktree"), "{error:?}");
+    assert!(
+        error
+            .message
+            .contains(&sibling.to_string_lossy().into_owned()),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("outside the project checkout")),
+        "{error:?}"
+    );
+
+    daemon.stop().await;
+}
+
+/// A `--separate-git-dir` repository's main working tree is named `api`, not
+/// its metadata directory `admin-meta`; saving a location that holds it must
+/// refuse and name the working tree.
+#[tokio::test]
+async fn worktree_settings_refuse_a_separate_git_dir_main_checkout() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let main = root.path().join("api");
+    std::fs::create_dir(&main).expect("api");
+    let gitdir = root.path().join("admin-meta");
+    git_in(
+        root.path(),
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            gitdir.to_str().unwrap(),
+            main.to_str().unwrap(),
+        ],
+    );
+    git_in(&main, &["config", "user.name", "h4rn test"]);
+    git_in(&main, &["config", "user.email", "test@example.invalid"]);
+    git_in(&main, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(main.join("a.txt"), "one\n").expect("write");
+    git_in(&main, &["add", "a.txt"]);
+    git_in(&main, &["commit", "-m", "Initial commit"]);
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: main.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the project");
+
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(root.path().to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the destination is the real main checkout");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error.message.contains("inside the project checkout"),
+        "{error:?}"
+    );
+    assert!(
+        error.message.contains(&main.to_string_lossy().into_owned()),
+        "the refusal names the working tree: {error:?}"
+    );
+    assert!(
+        !error.message.contains("admin-meta"),
+        "the refusal does not name the metadata directory: {error:?}"
+    );
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(
+                settings.location, None,
+                "the refused location was not saved"
+            );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+/// A `--separate-git-dir` repository whose metadata dir sits under an unrelated
+/// parent leaves nothing that proves the main checkout when the project is a
+/// linked worktree. Saving a location that could hold it is refused, and the
+/// refusal never names the metadata directory.
+///
+/// The metadata dir is tried under its own name and under `.git`: git reports
+/// the parent of a metadata dir called `.git` as the main worktree, and saving
+/// a location inside the real checkout must still be refused.
+#[tokio::test]
+async fn worktree_settings_refuse_an_unprovable_main_checkout() {
+    refuse_an_unprovable_main_checkout("admin-meta").await;
+    refuse_an_unprovable_main_checkout(".git").await;
+}
+
+/// [`worktree_settings_refuse_an_unprovable_main_checkout`] for one metadata
+/// directory name.
+async fn refuse_an_unprovable_main_checkout(metadata: &str) {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    std::fs::create_dir(root.path().join("meta")).expect("meta");
+    let main = root.path().join("code").join("api");
+    std::fs::create_dir_all(&main).expect("api");
+    let gitdir = root.path().join("meta").join(metadata);
+    git_in(
+        root.path(),
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            gitdir.to_str().unwrap(),
+            main.to_str().unwrap(),
+        ],
+    );
+    git_in(&main, &["config", "user.name", "h4rn test"]);
+    git_in(&main, &["config", "user.email", "test@example.invalid"]);
+    git_in(&main, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(main.join("a.txt"), "one\n").expect("write");
+    git_in(&main, &["add", "a.txt"]);
+    git_in(&main, &["commit", "-m", "Initial commit"]);
+    let linked = root.path().join("code").join("linked");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: linked.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the linked worktree as the project");
+
+    for location in [main.clone(), main.join("nested")] {
+        let error = client
+            .request(ClientRequest::SetWorktreeSettings {
+                settings: h4rn_protocol::WorktreeSettings {
+                    location: Some(location.to_string_lossy().into_owned()),
+                    ..h4rn_protocol::WorktreeSettings::default()
+                },
+            })
+            .await
+            .expect_err("the main checkout cannot be proved");
+        assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+        assert!(
+            error.message.contains("main checkout could not be found"),
+            "{error:?}"
+        );
+        assert!(
+            !error.message.contains(metadata) && !error.message.contains("api.git"),
+            "the refusal never names the metadata directory: {error:?}"
+        );
+    }
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(
+                settings.location, None,
+                "the refused location was not saved"
+            );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+/// A registered project whose folder was deleted (or whose git repository is
+/// gone) must not block every save: the location is checked against the
+/// projects that are still there, and the save succeeds.
+#[tokio::test]
+async fn worktree_settings_save_succeeds_when_a_registered_project_is_gone() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    let project = root.path().join("api");
+    std::fs::create_dir(&project).expect("api");
+    git_in(&project, &["init", "-q", "-b", "main"]);
+    git_in(&project, &["config", "user.name", "h4rn test"]);
+    git_in(&project, &["config", "user.email", "test@example.invalid"]);
+    git_in(&project, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(project.join("a.txt"), "one\n").expect("write");
+    git_in(&project, &["add", "a.txt"]);
+    git_in(&project, &["commit", "-m", "Initial commit"]);
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: project.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the project");
+    std::fs::remove_dir_all(&project).expect("delete the project folder");
+
+    let location = root.path().join("checkouts");
+    let location_text = location.to_string_lossy().into_owned();
+    match client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(location_text.clone()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect("a project whose folder is gone does not block the save")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(settings.location, Some(location_text));
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+/// A create that was interrupted before its thread existed is finished before
+/// the next daemon starts serving.
+#[tokio::test]
+async fn a_pending_worktree_create_is_gone_before_the_daemon_serves() {
+    let data_dir = tempfile::tempdir().expect("data");
+    let repo = git_repo();
+    let created = h4rn_daemon::worktrees::create::create_blocking(
+        repo.path(),
+        &h4rn_protocol::WorktreeRequest::Named("boot/pending".into()),
+        "pending",
+        &h4rn_protocol::WorktreeSettings::default(),
+        data_dir.path(),
+        None,
+    )
+    .expect("create");
+    assert!(created.path.is_dir(), "the checkout exists before boot");
+
+    let daemon = boot_at(
+        data_dir.path().to_path_buf(),
+        None,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        None,
+        None,
+    )
+    .await;
+    assert!(!created.path.exists(), "startup finished the rollback");
+    let listed = git_in(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert_eq!(
+        listed
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1,
+        "only the main checkout remains before the daemon serves"
+    );
+    daemon.stop().await;
+}
+
+/// The data-directory lock is taken before journal restore and recovery, so a
+/// second daemon refuses and touches nothing the first one owns.
+#[tokio::test]
+async fn a_second_daemon_on_the_same_data_directory_touches_nothing() {
+    let data_dir = tempfile::tempdir().expect("data");
+    let first = boot_at(
+        data_dir.path().to_path_buf(),
+        None,
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        None,
+        None,
+    )
+    .await;
+    let repo = git_repo();
+    let created = h4rn_daemon::worktrees::create::create_blocking(
+        repo.path(),
+        &h4rn_protocol::WorktreeRequest::Named("second/daemon".into()),
+        "pending",
+        &h4rn_protocol::WorktreeSettings::default(),
+        data_dir.path(),
+        None,
+    )
+    .expect("create");
+    let pending = std::fs::read_dir(data_dir.path().join("worktrees-pending"))
+        .expect("pending records")
+        .count();
+    assert_eq!(pending, 1, "one create is waiting for a thread");
+
+    let config = Config {
+        data_dir: data_dir.path().to_path_buf(),
+        bind: "127.0.0.1:0".parse().expect("bind"),
+        extra_bind: None,
+        log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
+    };
+    let error = match DaemonBuilder::new(config)
+        .without_title_agents()
+        .build()
+        .await
+    {
+        Ok(_) => panic!("a second daemon on one data directory is refused"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("another h4rn daemon"), "{error}");
+    assert!(created.path.is_dir(), "the pending checkout is untouched");
+    assert_eq!(
+        std::fs::read_dir(data_dir.path().join("worktrees-pending"))
+            .expect("pending records")
+            .count(),
+        1,
+        "the recovery record is untouched"
+    );
+
+    first.stop().await;
+    assert!(
+        created.path.is_dir(),
+        "the first daemon's shutdown did not roll back a create it never tracked"
+    );
+    assert_eq!(
+        std::fs::read_dir(data_dir.path().join("worktrees-pending"))
+            .expect("pending records")
+            .count(),
+        1,
+        "the recovery record survived the first daemon's shutdown"
+    );
+    let swept = h4rn_daemon::worktrees::create::sweep_pending(data_dir.path(), &[]);
+    assert_eq!(swept, vec![created.path.clone()]);
+}
+
 #[tokio::test]
 async fn a_bad_saved_worktree_setting_does_not_stop_the_daemon() {
     let data_dir = tempfile::tempdir().expect("data");

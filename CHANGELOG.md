@@ -665,6 +665,55 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A worktree location is refused wherever it would put a checkout in a working
+  tree.** Saving the location and creating a thread now find the real main
+  checkout even when the repository keeps its git directory elsewhere — a
+  `--separate-git-dir` repository, a submodule — instead of naming `api.git` or
+  an admin directory, and also refuse a location inside any sibling linked
+  worktree, not only the main one. When the main checkout cannot be proved, h4rn
+  refuses the location instead of taking the first worktree registration, which
+  may be a linked worktree, so it never creates a checkout inside the real main
+  checkout by guessing. A folder git reports as the main worktree only because
+  its git directory is named `.git` counts only when it really holds the
+  checkout, and as a last check no folder on the destination's way up may belong
+  to the same repository. The same reading of the repository decides both the
+  project folder's name and the destination that is checked and created, so a
+  location that passes is exactly the one used. The check uses one complete
+  worktree snapshot, so an admin entry git cannot read refuses the location
+  rather than allowing a nested checkout. A bare repository's refusal says the
+  destination is its git directory and to choose a folder outside it.
+- **A registered project whose folder is gone no longer blocks every settings
+  save.** Its location check is skipped when the folder or its git repository
+  no longer exists, so one deleted project or unmounted volume cannot stop you
+  saving a worktree location. A repository that is still there but whose main
+  checkout cannot be proved still refuses.
+- **A failed worktree create no longer leaves its checkout behind when the
+  daemon stops.** Create admission closes at shutdown, running creates finish by
+  adopting their checkout or rolling back, and the daemon waits for those
+  rollbacks. A thread that committed in that window keeps its checkout. The
+  create writes an atomic intent before touching git and marks the registration
+  before checking out, so a kill in the checkout hook is recovered next start.
+  The ownership token is also written into the folder's claim before git runs,
+  so a kill between the registration and the mark is recovered too. A checkout
+  folder deleted while its registration and mark remain is finished from the
+  registration's admin dir, and the removal is marked before git runs, so a kill
+  between the removal and the progress write still deletes the branch h4rn
+  made. Recovery removes only a checkout it can prove this create made (a
+  registration that names its path and branch, plus the owner marker or, before
+  the marker was written, the matching claim token), retries a locked worktree after it is unlocked, and never
+  runs a repository-wide prune: a moved worktree h4rn did not make keeps its
+  registration. Once the checkout is removed, that step is recorded, and the
+  next start finishes from the record itself: it deletes the branch h4rn made
+  only when the branch is not registered, not checked out and still at the
+  commit the create began from, then retires the record. A branch deletion git
+  refuses is retried on a later start instead of being lost, a start reports
+  only checkouts it actually removed, and a thread working in a parent folder is
+  not mistaken for one using the checkout. A thread's checkout is never
+  touched.
+- **One daemon owns one data folder.** Startup takes an operating-system lock
+  before restoring threads or sweeping recovery and holds it until shutdown, so
+  a second daemon on the same folder exits without adopting or clearing the
+  first one's checkouts.
 - **A base or commit change keeps the tab its review was started for.** When a
   Branch or Commits list is still loading, changing the base or the commit now
   reopens the tab that list was started for instead of the file from before it,
