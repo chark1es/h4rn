@@ -5233,8 +5233,9 @@ impl ThreadManager {
                     .unwrap_or_default();
                 if removed.contains(turn_id) {
                     return Err(ManagerError::Refused {
-                        message: "This message was removed by an edit, so there is nothing to fork."
-                            .into(),
+                        message:
+                            "This message was removed by an edit, so there is nothing to fork."
+                                .into(),
                         hint: Some("Fork from a message that is still in the thread".into()),
                     });
                 }
