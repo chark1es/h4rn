@@ -1573,16 +1573,27 @@ exist and the Labs switch to still be on; a racing Stop sharing, new link,
 settle or switch-off therefore leaves no request and no files. The row becomes
 visible to the owner, and its `GuestRequested` event is raised, only after the
 files are written; both steps happen while the submission lock is held, so
-ending a link can never race a card into existence. Send and Dismiss claim a
+ending a link can never race a card into existence. The card is published only
+once its row says `pending`: that transition is the append's second half, made
+under the same locks, so any card the owner can see can be sent or dismissed. A
+failed transition publishes nothing and leaves the row `publishing`, and a
+snapshot hides a journaled card whose row cannot yet be answered; the sweep
+finishes such a row (or discards it with its files when the link is gone)
+instead of leaving a card nobody can answer. Send and Dismiss claim a
 request with one conditional update, so two actions can never run the same
 message twice.
 
 Every removal of a request raises `GuestRequestResolved` before its row is
 deleted, and the resolved event names its request. A crash between the claim and
 the event therefore leaves a row the startup sweep can resolve, and a repeated
-event from that sweep cannot clear another guest's hand. The periodic sweep
+event from that sweep cannot clear another guest's hand. The answer is journaled
+once: the writer claims the row's `resolution_emitted` marker with a conditional
+update before appending, so a Dismiss and a sweep that both hold the finished
+row cannot both emit it and the loser does nothing. The periodic sweep
 leaves a `sending` or `reserving` row alone while a task may still be reading
-it; only the startup pass, where no reader can exist, recovers it. A Send's
+it; only the startup pass, where no reader can exist, recovers it, and a
+`publishing` row is left alone while its submission still holds the submission
+lock and finished by the periodic sweep once no writer is left. A Send's
 acceptance is the thread's journal, not a flag beside it: the message is
 appended with the item id `item_guest_<request_id>`, and nothing becomes
 deliverable before that append commits — a prompt whose append failed is not

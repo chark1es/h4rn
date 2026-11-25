@@ -135,6 +135,9 @@ pub enum GuestError {
     /// The request is malformed or over a limit.
     #[error("{0}")]
     Invalid(String),
+    /// A durable half of a submission failed, so nothing was published.
+    #[error("{0}")]
+    Internal(String),
     /// A submission was not a same-origin JSON POST.
     #[error("{0}")]
     Forbidden(String),
@@ -156,7 +159,7 @@ impl GuestError {
             Self::NotFound(_) => 404,
             Self::Invalid(_) => 400,
             Self::Forbidden(_) => 403,
-            Self::Database(_) | Self::Io(_) => 500,
+            Self::Database(_) | Self::Io(_) | Self::Internal(_) => 500,
         }
     }
 }
@@ -244,6 +247,9 @@ pub enum SubmitPhase {
     /// After the last placement check and before the card is appended, so a
     /// test can settle the thread exactly between the two.
     BeforePublish,
+    /// After the card's row became `pending` and before the card is published,
+    /// so a test can prove every card a client sees is already answerable.
+    AfterCommit,
 }
 
 /// Where a test pauses a guest Send, relative to its journal append.
@@ -879,6 +885,11 @@ impl GuestService {
     /// `sending`) is therefore never touched by the periodic sweep, and a Send
     /// that claimed a row between this pass's read and its claim leaves the
     /// row and its files alone.
+    ///
+    /// A `publishing` row is the one exception, and only when no submission
+    /// holds the lock: that row's writer is gone (its final update failed or
+    /// its task died), so leaving it alone would keep a card that Send and
+    /// Dismiss refuse until the next restart's recovery.
     async fn sweep_finished_requests(&self, recover_in_flight: bool) -> Result<(), GuestError> {
         let rows = sqlx::query(
             "SELECT request_id, link_id, thread_id, text, attachments_json, size_bytes, created_at, status, resolution, resolution_emitted
@@ -894,14 +905,20 @@ impl GuestService {
                 self.finish_cleanup(&request).await;
                 continue;
             }
-            // Startup has no live owner for a half-published request, so it
+            // A submission holds the submit lock from before its row turns
+            // `publishing` until the card's row is `pending`, so a free lock
+            // here proves no writer owns the row. Finishing it under the lock
+            // keeps a new submission from starting beside the recovery.
+            if request.status == "publishing" {
+                if let Ok(_submission) = self.submit_lock.try_lock() {
+                    self.recover_publishing(&request).await?;
+                }
+                continue;
+            }
+            // Startup has no live owner for an interrupted claim, so it
             // either completes the card or discards the row and its files.
             if recover_in_flight {
                 match request.status.as_str() {
-                    "publishing" => {
-                        self.recover_publishing(&request).await?;
-                        continue;
-                    }
                     "reserving" | "sending" => {
                         self.recover_interrupted_submission(&request).await?;
                         continue;
@@ -1101,9 +1118,16 @@ impl GuestService {
 
     /// Records one request's answer on the wire, once.
     ///
-    /// Ok means the event is durable, or the thread is gone so no card can
-    /// remain. A failed write leaves `resolution_emitted` false, so the sweep,
-    /// startup and an ended link try again instead of losing the answer.
+    /// A Dismiss and the sweep can both hold a copy of the same finished row
+    /// (the Dismiss claims it, then pauses, while the sweep reads and resolves
+    /// it). The row's `resolution_emitted` marker is claimed with a conditional
+    /// update before anything is journaled, so exactly one writer emits and the
+    /// other's stale copy is a no-op: one answer, one `GuestRequestResolved`.
+    ///
+    /// Ok means the event is durable, another writer owns it, or the thread is
+    /// gone so no card can remain. A failed journal write puts the marker back
+    /// so the sweep, startup and an ended link try again instead of losing the
+    /// answer.
     async fn emit_resolution(&self, request: &RequestRow) -> Result<(), ManagerError> {
         if request.resolution_emitted {
             return Ok(());
@@ -1111,6 +1135,17 @@ impl GuestService {
         let Some(resolution) = request.resolution.as_deref() else {
             return Ok(());
         };
+        let claimed = sqlx::query(
+            "UPDATE guest_requests SET resolution_emitted = 1
+             WHERE request_id = ? AND resolution_emitted = 0",
+        )
+        .bind(&request.request_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        if claimed.rows_affected() == 0 {
+            return Ok(());
+        }
         match self
             .manager
             .emit_guest_request_resolved(
@@ -1123,21 +1158,24 @@ impl GuestService {
             Ok(_) => {}
             // The thread is gone, so no card can stay raised.
             Err(ManagerError::NotFound(_)) => {}
-            Err(error) => return Err(error),
-        }
-        if let Err(error) =
-            sqlx::query("UPDATE guest_requests SET resolution_emitted = 1 WHERE request_id = ?")
+            Err(error) => {
+                // Nothing reached the journal, so release the claim and let
+                // the next pass try again.
+                if let Err(reset) = sqlx::query(
+                    "UPDATE guest_requests SET resolution_emitted = 0 WHERE request_id = ?",
+                )
                 .bind(&request.request_id)
                 .execute(&self.pool)
                 .await
-        {
-            // The event is on the wire; a failed marker can only cause a
-            // duplicate later, never a lost answer.
-            tracing::warn!(
-                request = %request.request_id,
-                %error,
-                "guest resolution was emitted but could not be marked"
-            );
+                {
+                    tracing::warn!(
+                        request = %request.request_id,
+                        %reset,
+                        "a guest resolution could not be released for a retry"
+                    );
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1206,30 +1244,25 @@ impl GuestService {
         .fetch_one(&self.pool)
         .await?;
         if live > 0 && !self.is_settled(&request.thread_id).await {
+            // The row becomes `pending` as the card's second half, so the card
+            // this path re-raises is answerable the moment anyone sees it.
             match self
                 .manager
-                .emit_guest_request(&request.thread_id, request.to_proto())
+                .emit_guest_request_then(&request.thread_id, request.to_proto(), || async {
+                    self.mark_pending(&request.request_id).await
+                })
                 .await
             {
-                Ok(_) => {
-                    sqlx::query(
-                        "UPDATE guest_requests SET status = 'pending'
-                         WHERE request_id = ? AND status = 'publishing'",
-                    )
-                    .bind(&request.request_id)
-                    .execute(&self.pool)
-                    .await?;
-                    return Ok(());
-                }
+                Ok(_) => return Ok(()),
                 // The thread is gone, or it settled after the check above; the
                 // row and its files have no card to raise.
                 Err(ManagerError::NotFound(_)) | Err(ManagerError::Conflict(_)) => {}
                 Err(error) => {
-                    // Leave it publishing so the next startup tries again.
+                    // Leave it publishing so the next sweep tries again.
                     tracing::warn!(
                         request = %request.request_id,
                         %error,
-                        "a recovered guest card waits for the next startup"
+                        "a recovered guest card waits for the next sweep"
                     );
                     return Ok(());
                 }
@@ -1961,6 +1994,19 @@ impl GuestService {
                 .await?
                 .into_iter()
                 .collect();
+        // Only a row Send or Dismiss can claim carries a card. The journal can
+        // already hold a card whose row is still `publishing` (its final update
+        // failed and the sweep has not finished it yet); showing that card
+        // would offer an answer the owner can only give as "no longer exists".
+        let answerable: std::collections::HashSet<String> = sqlx::query_scalar(
+            "SELECT request_id FROM guest_requests
+             WHERE link_id = ? AND status IN ('pending', 'sent', 'dismissed')",
+        )
+        .bind(&resolved.link.link_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect();
         // A test can pause here, after the events were read, to replace the
         // link before this answer is built.
         self.hold_snapshot().await;
@@ -1992,7 +2038,7 @@ impl GuestService {
                     let seq = entry.seq;
                     let visible = match &entry.event {
                         Event::GuestRequested { request, .. } => {
-                            link_requests.contains(&request.request_id)
+                            answerable.contains(&request.request_id)
                         }
                         Event::GuestRequestResolved { request_id, .. } => {
                             link_requests.contains(request_id)
@@ -2254,39 +2300,72 @@ impl GuestService {
             resolution: None,
             resolution_emitted: false,
         };
-        // The resolved event and the row are one decision: the submit lock is
-        // still held, and ending a link takes it too, so this event cannot be
-        // raised after the link's resolved event for the same request.
-        match self
+        // The card is journaled, its row becomes the waiting request it claims
+        // to be, and only then does any client hear about it. The row update is
+        // the decision's second half: a card the owner can see must be
+        // answerable, or Send and Dismiss can only answer "no longer exists".
+        // A failed update publishes nothing and leaves the row `publishing`,
+        // which the sweep finishes (and discards if the link is gone).
+        let published = self
             .manager
-            .emit_guest_request(&row.thread_id, row.to_proto())
-            .await
-        {
-            Ok(_) => {}
-            // The settle won the thread-record lock between the check above
-            // and the append. The request must not outlive that decision.
-            Err(ManagerError::Conflict(message)) => {
+            .emit_guest_request_then(&row.thread_id, row.to_proto(), || async {
+                self.mark_pending(&row.request_id).await?;
+                // A test can pause here, with the card journaled and its row
+                // answerable but nothing published yet.
+                self.hold_submit(SubmitPhase::AfterCommit).await;
+                Ok(())
+            })
+            .await;
+        if let Err(error) = published {
+            // A publication that failed after the card reached the journal is
+            // half a decision: its row stays `publishing` for the sweep to
+            // finish (or discard with its files when the link is gone). One
+            // that never journaled the card has no half to finish, so the
+            // refused submission is dropped with its files as before.
+            let journaled = self
+                .manager
+                .guest_card_in_thread(&row.thread_id, &row.request_id)
+                .await
+                .unwrap_or(false);
+            if !journaled {
                 self.remove_request(&row.request_id, &directory).await;
-                return Err(GuestError::Link(message));
             }
-            Err(error) => {
-                // The thread disappeared between the guard and the event; the
-                // request must not outlive the thread it names.
-                self.remove_request(&row.request_id, &directory).await;
-                return Err(GuestError::NotFound(error.to_string()));
-            }
+            // The settle lost the record lock between the check above and the
+            // append, so its decision stands and the card was never published.
+            return Err(match error {
+                ManagerError::Conflict(message) => GuestError::Link(message),
+                ManagerError::NotFound(message) => GuestError::NotFound(message),
+                other => GuestError::Internal(other.to_string()),
+            });
         }
-        // The card is raised and the row becomes the waiting request it claims
-        // to be. If this update is interrupted the row stays `publishing`, and
-        // startup raises the same card again or discards both halves.
-        sqlx::query(
+        Ok(row.to_proto())
+    }
+
+    /// Makes a journaled card the waiting request it claims to be.
+    ///
+    /// The card and this row are one decision: the card is published only after
+    /// this update changed the row, so every card a client sees can be sent or
+    /// dismissed. A failure leaves the row `publishing`, which no Send or
+    /// Dismiss can claim and the sweep finishes.
+    async fn mark_pending(&self, request_id: &str) -> Result<(), ManagerError> {
+        let updated = sqlx::query(
             "UPDATE guest_requests SET status = 'pending'
              WHERE request_id = ? AND status = 'publishing'",
         )
-        .bind(&row.request_id)
+        .bind(request_id)
         .execute(&self.pool)
-        .await?;
-        Ok(row.to_proto())
+        .await
+        .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        if updated.rows_affected() == 1 {
+            return Ok(());
+        }
+        // Writing files takes no lock, and ending the link waits for the
+        // submission lock this task holds, so only this task's own claim can
+        // have left the row in another state. Treat it as a failed second
+        // half: hold the card back and let the sweep decide.
+        Err(ManagerError::Internal(format!(
+            "guest request {request_id} could not become pending"
+        )))
     }
 
     /// Drops a rejected request and its files after a failed submission.

@@ -2149,6 +2149,25 @@ async fn owner_events(client: &mut Client, thread_id: &ThreadId) -> Vec<Event> {
     }
 }
 
+/// The events the owner's live socket carries during `window`.
+///
+/// Used to prove something was *not* published: `next_event` would wait
+/// forever for an event that must never arrive.
+async fn owner_events_for(client: &mut Client, window: Duration) -> Vec<Event> {
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return events;
+        }
+        match tokio::time::timeout(left, client.next_event()).await {
+            Ok(event) => events.push(event),
+            Err(_) => return events,
+        }
+    }
+}
+
 fn guest_text_message(text: &str) -> GuestMessageInput {
     GuestMessageInput {
         text: text.into(),
@@ -4043,9 +4062,185 @@ async fn a_dismiss_that_claimed_its_row_is_never_reported_missing() {
         request_status(&daemon, &request_id).await.as_deref(),
         Some("dismissed")
     );
+    // The sweep emitted the resolution while the Dismiss was paused; the
+    // Dismiss then resumed with the row it read before its claim. The answer
+    // belongs to the request, not to whichever writer ran last: one event.
+    let pool = journal_pool(&daemon).await;
+    let resolutions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM daemon_wire_events
+         WHERE thread_id = ? AND event_json LIKE '%guest_request_resolved%'
+           AND event_json LIKE ?",
+    )
+    .bind(thread_id.as_str())
+    .bind(format!("%{request_id}%"))
+    .fetch_one(&pool)
+    .await
+    .expect("count resolutions");
+    pool.close().await;
+    assert_eq!(
+        resolutions, 1,
+        "the dismissal journalled the same answer twice"
+    );
     assert_eq!(
         summary_pending_guest_requests(&mut owner, &thread_id).await,
         0
+    );
+    daemon.stop().await;
+}
+
+/// A card is journaled only once its row can be sent or dismissed.
+///
+/// The row transition to `pending` is the card's second half. Pausing between
+/// them proves the row is already answerable before anything is published, so
+/// the owner's first act on the card can never be answered "no longer exists".
+#[tokio::test]
+async fn a_card_is_published_only_after_its_row_is_answerable() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "card order").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::AfterCommit);
+    let posting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post("/messages", &guest_text_message("answer me at once"))
+                .await
+        })
+    };
+    gate.arrived().await;
+    // The card is journaled, and its row already says it can be answered.
+    let pool = journal_pool(&daemon).await;
+    let statuses: Vec<String> = sqlx::query_scalar("SELECT status FROM guest_requests")
+        .fetch_all(&pool)
+        .await
+        .expect("read request rows");
+    pool.close().await;
+    assert_eq!(
+        statuses,
+        vec!["pending".to_string()],
+        "a card was published before its row could be answered"
+    );
+    // And nothing has been published yet: the owner's live stream stays empty
+    // while the submit is paused, so no client can act on a card early.
+    let seen = owner_events_for(&mut owner, Duration::from_millis(200)).await;
+    assert!(
+        seen.iter()
+            .all(|event| !matches!(event, Event::GuestRequested { .. })),
+        "the card was published before its row could be answered: {seen:?}"
+    );
+    gate.release();
+
+    let (status, body) = posting.await.expect("post task");
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    // The owner's first act on the published card succeeds.
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    daemon.stop().await;
+}
+
+/// A card whose row update fails is never published, and the sweep raises it
+/// only once its row can be answered.
+#[tokio::test]
+async fn a_card_whose_row_update_fails_is_never_published_and_the_sweep_recovers_it() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "card commit").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    // Make the row's last half fail exactly as a refused database would: the
+    // card is journaled and the row stays `publishing`.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_pending BEFORE UPDATE ON guest_requests
+         WHEN NEW.status = 'pending'
+         BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    )
+    .execute(&pool)
+    .await
+    .expect("install the failure");
+    let (status, body) = browser
+        .post("/messages", &guest_text_message("never unanswerable"))
+        .await;
+    assert_eq!(
+        status,
+        500,
+        "a card that could not become answerable was accepted: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let rows: Vec<String> = sqlx::query_scalar("SELECT status FROM guest_requests")
+        .fetch_all(&pool)
+        .await
+        .expect("read request rows");
+    assert_eq!(
+        rows,
+        vec!["publishing".to_string()],
+        "a failed update lost the row the sweep needs"
+    );
+    sqlx::query("DROP TRIGGER fail_pending")
+        .execute(&pool)
+        .await
+        .expect("remove the failure");
+    pool.close().await;
+
+    // Nothing reached the owner or the guest: the card is not in the live
+    // stream, the guest's snapshot hides an unanswerable row, and the thread
+    // shows no pending request.
+    let published = owner_events_for(&mut owner, Duration::from_millis(300)).await;
+    assert!(
+        published
+            .iter()
+            .all(|event| !matches!(event, Event::GuestRequested { .. })),
+        "a card the owner cannot answer was published: {published:?}"
+    );
+    let snapshot = browser.state(0).await;
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .all(|entry| !matches!(entry.event, Event::GuestRequested { .. })),
+        "the guest saw a card it could not have answered: {:?}",
+        snapshot.events
+    );
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "an unanswerable card raised a pending count"
+    );
+
+    // The sweep finishes the second half, and the card is answerable when it
+    // appears.
+    daemon.guest.sweep_expired().await.expect("sweep");
+    let request_id = request_id_from_snapshot(&browser).await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("pending")
+    );
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
     );
     daemon.stop().await;
 }
@@ -4323,14 +4518,19 @@ async fn a_dismiss_finishes_after_the_owner_disconnects_mid_claim() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     gate.release();
 
+    // The claim alone is not a finished Dismiss: its files go and its card is
+    // resolved after the claim, and a dropped socket must not stop that. Wait
+    // for the end of the dismissal, not for the status word.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if request_status(&daemon, &request_id).await.as_deref() == Some("dismissed") {
+        let status = request_status(&daemon, &request_id).await;
+        let pending = summary_pending_guest_requests(&mut owner, &thread_id).await;
+        if status.as_deref() == Some("dismissed") && pending == 0 && !directory.exists() {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "a dropped owner socket stranded the Dismiss in {request_id}"
+            "a dropped owner socket stranded the Dismiss in {request_id}: {status:?}, {pending} pending"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

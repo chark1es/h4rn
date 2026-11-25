@@ -654,6 +654,14 @@ All notable changes to h4rn are recorded here. The format follows
   submission keeps a cleanup record when its
   files cannot be removed yet, and the periodic sweep retries that removal for a finished request
   while its link still lives. A card whose journal append failed leaves no pending count behind.
+  A card is now published only once its row can be answered: the row's move to `pending` is the
+  append's second half, so a Send or Dismiss on a card you can see always succeeds. A card whose
+  last step failed is never published, a snapshot hides it until the sweep finishes it, and the
+  sweep (not just a restart) finishes a half-published row so a request is never stuck unanswerable.
+  Each answer is journaled once, so a Dismiss and a sweep that both hold the same finished row
+  cannot emit the same resolution twice. A Send whose append failed on an idle thread leaves the
+  thread exactly as you last saw it instead of Working with no turn, and keeps the pause and
+  auto-resume a limit had armed.
   A completed upload keeps its slot until its answer holds a work slot, so finished bodies cannot
   pile up past the cap; a cancel releases the daemon's upload slot at once even while its link
   check or the relay queue is still busy, and the admitted state is committed before the go-ahead

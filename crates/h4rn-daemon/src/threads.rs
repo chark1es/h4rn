@@ -2952,6 +2952,25 @@ impl ThreadManager {
         thread_id: &ThreadId,
         request: h4rn_protocol::GuestRequest,
     ) -> Result<u64, ManagerError> {
+        self.emit_guest_request_then(thread_id, request, || async { Ok(()) })
+            .await
+    }
+
+    /// [`Self::emit_guest_request`] with another durable half of the decision.
+    ///
+    /// `commit` runs once the journal owns the card and before any client can
+    /// see it. A guest submission makes its row say `pending` there, so a card
+    /// is never broadcast for a request Send or Dismiss would refuse as gone.
+    pub async fn emit_guest_request_then<F, Fut>(
+        &self,
+        thread_id: &ThreadId,
+        request: h4rn_protocol::GuestRequest,
+        commit: F,
+    ) -> Result<u64, ManagerError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), ManagerError>>,
+    {
         let handle = self.inner.handle(thread_id).await?;
         let mut record = handle.lock().await;
         let tab = record.summary(&self.inner.options.settings, self.now()).tab;
@@ -2975,7 +2994,18 @@ impl ThreadManager {
             thread_id: thread_id.clone(),
             request,
         }];
-        self.emit_guest_card(&mut record, domain, wire).await
+        let before = record.state.clone();
+        match self
+            .inner
+            .commit_emit(&mut record, domain, wire, commit)
+            .await
+        {
+            Ok((_, seq)) => Ok(seq),
+            Err(error) => {
+                record.state = before;
+                Err(error)
+            }
+        }
     }
 
     /// Appends a guest card's lifecycle change, keeping the record honest when
@@ -3745,6 +3775,30 @@ impl ThreadManager {
         }))
     }
 
+    /// Whether the thread's journal holds a guest card for `request_id`.
+    ///
+    /// A publication journals its card before the row can be answered, so a
+    /// caller whose publication failed can tell the two halves apart: a card
+    /// the sweep still has to finish, or a submission that never existed.
+    pub async fn guest_card_in_thread(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<bool, ManagerError> {
+        let events = self
+            .inner
+            .journal
+            .read_wire_since(thread_id, 0)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        Ok(events.into_iter().any(|entry| {
+            matches!(
+                entry.event,
+                Event::GuestRequested { request, .. } if request.request_id == request_id
+            )
+        }))
+    }
+
     /// Appends a message, optionally under a caller-chosen item id.
     ///
     /// Only a guest Send names the id; every other message keeps a fresh one.
@@ -3895,7 +3949,19 @@ impl ThreadManager {
         } else {
             None
         };
+        // Everything this send changes before the append is a promise the
+        // journal has to keep. Snapshot what the owner last saw, exactly as a
+        // guest card does, so a failed write restores it instead of leaving a
+        // thread Working (and Thinking) with no turn behind it: such a thread
+        // reports itself busy, so schedules skip it forever. The pause and its
+        // armed auto-resume travel in the snapshot too; the schedule is
+        // cancelled only once the turn is durable, because a cancelled ledger
+        // row is an auto-resume nothing can bring back.
         let previous_last_turn = record.last_turn_id.clone();
+        let previous_state = record.state.clone();
+        let previous_resume_at = record.resume_at;
+        let previous_limit = record.limit.clone();
+        let previous_parked = record.meta.parked.clone();
         let dispatch = record.begin_turn_for_work(
             now,
             UserInput {
@@ -3909,10 +3975,7 @@ impl ThreadManager {
             grant,
         );
         let turn_id = dispatch.turn_id.clone();
-        let stale_schedule = record.scheduled_limit.take().is_some();
-        if stale_schedule && let Some(meter) = self.inner.meter.get() {
-            let _ = meter.cancel_schedule(thread_id).await;
-        }
+        let stale_schedule = record.scheduled_limit.take();
         let domain = vec![
             ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -3940,14 +4003,27 @@ impl ThreadManager {
             },
         ];
         let emitted = self.inner.emit(&mut record, domain, wire).await;
-        if emitted.is_err() && guest {
-            // The append failed, so this turn never existed. Leaving it active
-            // would keep the thread Working with no delivery, and an owner
-            // retry would queue behind a turn nothing ever finishes.
-            record.active = None;
-            record.last_turn_id = previous_last_turn;
+        let (_, seq) = match emitted {
+            Ok((summary, seq)) => (summary, seq),
+            Err(error) => {
+                // The turn never existed. Put the record back exactly as the
+                // owner last saw it, keep the pause the failed send replaced,
+                // and leave the ledger schedule armed: nothing was cancelled.
+                record.active = None;
+                record.last_turn_id = previous_last_turn;
+                record.state = previous_state;
+                record.resume_at = previous_resume_at;
+                record.limit = previous_limit;
+                record.meta.parked = previous_parked;
+                record.scheduled_limit = stale_schedule;
+                return Err(error);
+            }
+        };
+        if stale_schedule.is_some()
+            && let Some(meter) = self.inner.meter.get()
+        {
+            let _ = meter.cancel_schedule(thread_id).await;
         }
-        let (_, seq) = emitted?;
 
         // A setting this session could not switch in place (an effort or model
         // it only applies when starting) makes this the turn that must start a
@@ -5758,14 +5834,26 @@ impl Inner {
         }
     }
 
-    /// Applies `domain` to the lifecycle state, appends both logs, broadcasts,
-    /// and returns the new summary.
-    async fn emit(
+    /// Applies `domain`, appends both logs, runs `commit`, then broadcasts.
+    ///
+    /// The append is the decision; `commit` is another durable half of the same
+    /// decision, made here so no client hears about events the rest of the
+    /// system does not yet agree with. A guest card uses it for its row: the
+    /// card must not reach the owner while the row still says the request
+    /// cannot be answered. `commit` runs under the emit lock, after the journal
+    /// owns the events and before any broadcast, so a failed commit publishes
+    /// nothing; the caller restores what the failed commit left behind.
+    async fn commit_emit<F, Fut>(
         &self,
         record: &mut ThreadRecord,
         domain: Vec<ThreadEvent>,
         mut wire: Vec<Event>,
-    ) -> Result<(ThreadSummary, u64), ManagerError> {
+        commit: F,
+    ) -> Result<(ThreadSummary, u64), ManagerError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), ManagerError>>,
+    {
         for event in &domain {
             record.state = record.state.clone().apply(event);
         }
@@ -5785,10 +5873,23 @@ impl Inner {
             .append(&record.meta, &domain, &wire)
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        commit().await?;
         self.broadcast(&record.meta.thread_id, &wire, &seqs);
         record.last_signature = Some(SummarySignature::of(&summary));
         let seq = seqs.last().copied().unwrap_or(0);
         Ok((summary, seq))
+    }
+
+    /// Applies `domain` to the lifecycle state, appends both logs, broadcasts,
+    /// and returns the new summary.
+    async fn emit(
+        &self,
+        record: &mut ThreadRecord,
+        domain: Vec<ThreadEvent>,
+        wire: Vec<Event>,
+    ) -> Result<(ThreadSummary, u64), ManagerError> {
+        self.commit_emit(record, domain, wire, || async { Ok(()) })
+            .await
     }
 
     /// Waits between a delivery's liveness check and its claim, when a test
@@ -17174,6 +17275,9 @@ mod tests {
         let thread_id = created.thread_id.clone();
         assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
         assert_eq!(sends.get(), 1);
+        wait_for_idle(&manager, &thread_id).await;
+        let before = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(before.agent_state, AgentState::Done);
 
         journal.fail_next_appends(1);
         let error = manager
@@ -17188,6 +17292,25 @@ mod tests {
             "a failed append left a turn nothing will deliver"
         );
         assert_eq!(manager.thread_queue_len(&thread_id).await, Some(0));
+        // The owner sees exactly the thread it saw before the send, and no
+        // scheduler may skip it as busy on a turn that never existed.
+        let after = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(
+            after.agent_state, before.agent_state,
+            "a failed append left the thread Thinking with no turn"
+        );
+        assert_eq!(
+            after.tab, before.tab,
+            "a failed append moved the thread Working"
+        );
+        assert_eq!(
+            after.resume_at, before.resume_at,
+            "a failed append changed the resume target"
+        );
+        assert!(
+            !manager.thread_is_busy(&thread_id).await,
+            "a failed append left the thread busy with no turn to finish"
+        );
 
         // The retry is a normal send again, and it delivers the prompt once.
         manager
@@ -17202,6 +17325,98 @@ mod tests {
                 .await
                 .expect("read the journal"),
             "the retried prompt is not in the thread"
+        );
+    }
+
+    /// A failed guest append keeps the auto-resume a limit left armed.
+    ///
+    /// An idle send replaces the pause it finds: the idle path clears the
+    /// limit and resume target and cancels the ledger schedule. If the append
+    /// then fails, all of that must come back, or the thread loses a resume
+    /// nothing would ever fire while it also calls itself busy with no turn.
+    #[tokio::test]
+    async fn a_failed_guest_append_leaves_an_armed_auto_resume_armed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let (harness, injector) = FakeHarness::new().with_event_injector();
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "guest"))
+            .await
+            .expect("create");
+        let thread_id = created.thread_id.clone();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &thread_id).await;
+
+        // The session's exit report arms a pause after its turn settled: the
+        // thread is idle and only the schedule is waiting.
+        injector.emit(HarnessEvent::TransportClosed {
+            message: "the agent exited".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
+            reset_at: Some(reset_at),
+        });
+        let handle = manager
+            .inner
+            .handle(&thread_id)
+            .await
+            .expect("thread handle");
+        assert!(
+            wait_until(|| {
+                handle
+                    .try_lock()
+                    .is_ok_and(|record| record.scheduled_limit.is_some())
+            })
+            .await,
+            "the exit report armed no pause"
+        );
+        let before = manager.thread_summary(&thread_id).await.expect("summary");
+        assert!(
+            before.resume_at.is_some(),
+            "the pause shows no resume target"
+        );
+        assert!(before.limit.is_some(), "the pause shows no limit");
+
+        journal.fail_next_appends(1);
+        let error = manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-2")
+            .await;
+        assert!(
+            error.is_err(),
+            "the injected journal failure was not reported"
+        );
+
+        let after = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(
+            after.resume_at, before.resume_at,
+            "a failed append dropped the resume target"
+        );
+        assert_eq!(
+            after.limit, before.limit,
+            "a failed append dropped the limit the pause explains"
+        );
+        assert_eq!(
+            after.agent_state, before.agent_state,
+            "a failed append rewrote the pause as a running turn"
+        );
+        {
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_some(),
+                "a failed append dropped the armed schedule from the record"
+            );
+        }
+        let schedules = meter.schedules().await.expect("read the ledger");
+        assert!(
+            schedules
+                .iter()
+                .any(|schedule| schedule.thread_id == thread_id),
+            "a failed append cancelled the ledger schedule nothing can re-arm"
         );
     }
 

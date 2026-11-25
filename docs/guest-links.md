@@ -179,13 +179,20 @@ the card above your composer. Startup finishes or discards a request interrupted
 between them, so there is never a row that uses quota without a card. The card
 and the placement it causes exist only once the journal holds them: a failed
 append restores the state you last saw, so a publication that never happened
-leaves no pending count behind. A Send or reservation interrupted by a shutdown
+leaves no pending count behind. The card is published only once its row says
+`pending`, the state Send and Dismiss claim, so a card you can see can always
+be answered; a failed last step publishes nothing and leaves the row for the
+sweep, which finishes it or discards it with its files when the link is gone,
+and a snapshot hides a journaled card whose row is not answerable yet. A Send
+or reservation interrupted by a shutdown
 is answered from the thread itself: the message carries the request's id in its
 item id, so recovery asks the journal before it decides anything about the link.
 A message that reached the thread resolves as sent, even when the link expired
 while the daemon was down; a row claimed before the append, whose message never
 arrived, resolves as dismissed and its files are removed. A prompt whose append
-failed is not queued for delivery, so retrying a Send delivers it once. A Send
+failed is not queued for delivery, so retrying a Send delivers it once, and the
+thread is left exactly as you last saw it: not Working with a turn nothing will
+deliver, and keeping the pause and auto-resume a limit had armed. A Send
 also records the attachment references it takes for the thread, so a crash
 between that step and the append releases exactly those references and the
 per-thread copy, without touching a file an earlier message of the same thread
@@ -214,7 +221,9 @@ row until its link ends, so a guest that polls after you dismissed its message
 still learns that the card resolved, and while the link lives a sweep also
 retries removing files a refused disk left behind. The answer is durable: if writing its event
 fails, the row records that it is still owed, and the sweep, a restart and Stop
-sharing all re-emit it before the row can go. Ending the link only drops a
+sharing all re-emit it before the row can go. Each answer is journaled once: the
+writer claims the row's marker before it appends, so a Dismiss and a sweep that
+both hold the finished row cannot each emit it. Ending the link only drops a
 finished row once both its files are gone and its answer is on the wire; anything
 else stays a cleanup record for the next sweep. A submission or a Send runs to
 completion on the daemon while it keeps running, even if the guest's browser
