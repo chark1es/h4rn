@@ -328,6 +328,12 @@ impl DaemonBuilder {
             .map_err(|error| anyhow::anyhow!("open CLIProxyAPI profiles: {error}"))?,
         );
         manager.set_proxy(Arc::clone(&proxy));
+        // A harness switch resolves a target ACP agent's catalogue before it
+        // commits, so the mode and effort it carries over are ones the agent
+        // really offers.
+        manager.set_acp_capabilities(
+            Arc::clone(&acp_agents) as Arc<dyn crate::threads::AcpCapabilitySource>
+        );
 
         let guest = Arc::new(
             crate::guest::GuestService::open(
@@ -713,7 +719,7 @@ pub struct Daemon {
     outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Multiplexes peer MCP sessions over the daemon's one relay socket.
     relay_dialer: Arc<crate::remote::RelayDialer>,
-    /// Publishes phone alerts while the setting is on (ADR-048).
+    /// Publishes phone alerts while the setting is on (ADR-049).
     alerts: Arc<crate::alerts::AgentAlertService>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,

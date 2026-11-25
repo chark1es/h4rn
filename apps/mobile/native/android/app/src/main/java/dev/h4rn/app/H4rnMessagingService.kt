@@ -12,7 +12,7 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
 /**
- * Receives Connect's FCM data messages and shows one alert (ADR-048).
+ * Receives Connect's FCM data messages and shows one alert (ADR-049).
  *
  * A data message is used rather than a notification payload so the app can
  * decide about the foreground: the thread already on screen stays quiet, and

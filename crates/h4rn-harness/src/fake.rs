@@ -231,9 +231,9 @@ pub struct FakeHarness {
     default_models: Vec<String>,
     /// Effects each model offers, so a model switch changes the catalogue.
     model_efforts: Option<BTreeMap<String, Vec<String>>>,
-    /// A configured ACP agent id this fake harness accepts, when a test creates
-    /// an ACP thread.
-    instance: Option<String>,
+    /// Configured ACP agent ids this fake harness accepts, when a test creates
+    /// an ACP thread and later switches it to another configured agent.
+    instances: Vec<String>,
     /// Whether a live session accepts in-place setting changes.
     switchable: bool,
     /// A test-only count of sessions this harness shut down.
@@ -664,7 +664,7 @@ impl Default for FakeHarness {
             restored_model: None,
             default_models: Vec::new(),
             model_efforts: None,
-            instance: None,
+            instances: Vec::new(),
             switchable: true,
             completion_gate: None,
             completion_gate_first_send: true,
@@ -979,7 +979,19 @@ impl FakeHarness {
     /// The daemon refuses an ACP thread that names no configured instance, so a
     /// test that creates one against this fake asks for this id.
     pub fn with_instance(mut self, id: impl Into<String>) -> Self {
-        self.instance = Some(id.into());
+        let id = id.into();
+        if !self.instances.contains(&id) {
+            self.instances.push(id);
+        }
+        self
+    }
+
+    /// Accepts several configured ACP agents, so a switch between two of them
+    /// is a real target on one adapter.
+    pub fn with_instances(mut self, ids: impl IntoIterator<Item = String>) -> Self {
+        for id in ids {
+            self = self.with_instance(id);
+        }
         self
     }
 
@@ -1192,7 +1204,9 @@ impl Harness for FakeHarness {
     }
 
     fn has_instance(&self, instance: &str) -> bool {
-        self.instance.as_deref() == Some(instance)
+        self.instances
+            .iter()
+            .any(|configured| configured == instance)
     }
 
     async fn start_session(

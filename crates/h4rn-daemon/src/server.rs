@@ -118,7 +118,7 @@ pub struct AppState {
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// Guest links and messages waiting for the owner (ADR-044).
     pub guest: Arc<crate::guest::GuestService>,
-    /// Phone alerts published through Connect while switched on (ADR-048).
+    /// Phone alerts published through Connect while switched on (ADR-049).
     pub alerts: Arc<crate::alerts::AgentAlertService>,
     /// Scheduled tasks and webhook automations.
     pub schedules: Arc<crate::schedules::ScheduleService>,
@@ -1800,6 +1800,28 @@ impl Connection {
                     .await
                     .map(|_| ResponseBody::Ack)
                     .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SwitchThreadHarness {
+                    thread_id,
+                    harness,
+                    agent_id,
+                    model,
+                } => self
+                    .state
+                    .manager
+                    .switch_thread_harness(
+                        &thread_id,
+                        crate::provider_switch::SwitchRequest {
+                            harness,
+                            agent_id,
+                            model,
+                        },
+                    )
+                    .await
+                    .map(|outcome| ResponseBody::ThreadSwitched {
+                        summary: outcome.summary,
+                        dropped: outcome.dropped,
+                    })
+                    .map_err(crate::threads::ManagerError::into_proto),
                 ClientRequest::Snooze { thread_id, until } => self
                     .state
                     .manager
@@ -3027,6 +3049,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            imported_from: None,
             agent_id: None,
             title,
             workspace_path: "/tmp/work".into(),

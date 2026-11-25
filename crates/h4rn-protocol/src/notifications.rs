@@ -1,4 +1,4 @@
-//! Phone alerts for agent activity (ADR-048).
+//! Phone alerts for agent activity (ADR-049).
 //!
 //! The daemon publishes a small, closed set of state transitions over its
 //! existing relay connection. Connect turns a new transition into an FCM data

@@ -33,6 +33,14 @@ host: HostId,
  */
 harness: HarnessKind, 
 /**
+ * Harness the conversation was imported from, when it was imported.
+ *
+ * The thread can later switch harness, so this is the one durable answer
+ * to "where did this conversation come from?"; the thread's current
+ * `harness` no longer names it.
+ */
+imported_from?: HarnessKind, 
+/**
  * Configured ACP agent instance, when `harness` is [`HarnessKind::Acp`].
  *
  * Older daemons did not have this field; threads written before it

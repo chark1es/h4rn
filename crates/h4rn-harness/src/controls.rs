@@ -19,6 +19,25 @@ pub const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// has not catalogued.
 pub const CODEX_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
+/// Maps an ACP mode id the agent advertised onto h4rn's permission modes.
+///
+/// An id h4rn has no label for is not guessed: it is simply not offered. The
+/// daemon's harness switch resolves an ACP agent's catalogue with this so the
+/// switch drops a mode the agent never named instead of failing at session
+/// start.
+pub fn runtime_mode_for_acp_mode_id(id: &str) -> Option<RuntimeMode> {
+    let id = id.trim().to_ascii_lowercase();
+    match id.as_str() {
+        "default" | "ask" | "manual" | "supervised" => Some(RuntimeMode::ApprovalRequired),
+        "accept-edits" | "acceptedits" | "accept_edits" => Some(RuntimeMode::AutoAcceptEdits),
+        "plan" | "read-only" | "readonly" => Some(RuntimeMode::Plan),
+        "auto" | "full-access" | "full_access" | "bypass" | "bypasspermissions" => {
+            Some(RuntimeMode::FullAccess)
+        }
+        _ => None,
+    }
+}
+
 /// What one harness offers for a thread's settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThreadControls {

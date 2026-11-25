@@ -54,6 +54,7 @@ import {
 } from "@/lib/store/appStore";
 import { nonDefaultSettings } from "@/lib/threadControls";
 import { cn } from "@/lib/utils";
+import { HarnessSwitch } from "./HarnessSwitch";
 
 export function ViewCluster({
   terminalOpen = false,
@@ -297,7 +298,7 @@ export function ThreadHeader({
               label={threadHarnessLabel(summary.harness, summary.agent_id)}
               size={14}
             />
-            <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
+            <HarnessSwitch summary={summary} />
             <span className="grow" />
             <ThreadPullRequestBadge threadId={summary.thread_id} />
             <span className={cn("q-th-state", summary.needs_attention && "q-accent")}>
@@ -332,7 +333,7 @@ export function ThreadHeader({
             label={threadHarnessLabel(summary.harness, summary.agent_id)}
             size={14}
           />
-          <span>{threadHarnessLabel(summary.harness, summary.agent_id)}</span>
+          <HarnessSwitch summary={summary} />
           <span className="opt">
             <span className="q-sep">/</span> {summary.model}
           </span>

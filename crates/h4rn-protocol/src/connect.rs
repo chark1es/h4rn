@@ -68,7 +68,7 @@ pub enum RelayFrameKind {
     /// single WebSocket message approaches the transport's frame limit. The
     /// payload is a JSON [`GuestHttpChunk`].
     GuestHttpChunk,
-    /// One alertable thread transition from a daemon (ADR-048).
+    /// One alertable thread transition from a daemon (ADR-049).
     ///
     /// Only a daemon may send it, and the payload is the fixed
     /// [`crate::AgentActivity`] shape: thread id, title, project name, state
@@ -1115,7 +1115,7 @@ pub struct UsageEvent {
     pub raw: Option<serde_json::Value>,
 }
 
-/// One Android install registering for push alerts (ADR-048).
+/// One Android install registering for push alerts (ADR-049).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct PushDeviceRegistration {
     /// The caller's connect device id. A registration is refused for any other.

@@ -365,11 +365,13 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktr
   ? Extract<ResponseBody, { type: "worktrees" }>
   : T extends "clear_worktrees"
     ? Extract<ResponseBody, { type: "worktrees_cleared" }>
-    : T extends "get_worktree_settings" | "set_worktree_settings"
-      ? Extract<ResponseBody, { type: "worktree_settings" }>
-      : T extends "get_agent_alert_settings" | "set_agent_alert_settings"
-        ? Extract<ResponseBody, { type: "agent_alert_settings" }>
-        : ResponseOfRest<T>;
+    : T extends "switch_thread_harness"
+      ? Extract<ResponseBody, { type: "thread_switched" }>
+      : T extends "get_worktree_settings" | "set_worktree_settings"
+        ? Extract<ResponseBody, { type: "worktree_settings" }>
+        : T extends "get_agent_alert_settings" | "set_agent_alert_settings"
+          ? Extract<ResponseBody, { type: "agent_alert_settings" }>
+          : ResponseOfRest<T>;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

@@ -48,6 +48,7 @@ import {
   toggleTerminal,
   useApp,
 } from "@/lib/store/appStore";
+import { latestRealTurn } from "@/lib/store/projection";
 import { activeThread } from "@/lib/thread-selection";
 import { cn } from "@/lib/utils";
 import { CodeEditor, type CursorPosition } from "./CodeEditor";
@@ -94,7 +95,7 @@ export function IdePane() {
   const offline = connection !== "online";
 
   const thread = activeThread(threads, selectedThread);
-  const latestTurn = thread ? (logs[thread.thread_id]?.turns.at(-1)?.id ?? null) : null;
+  const latestTurn = thread ? (latestRealTurn(logs[thread.thread_id]?.turns)?.id ?? null) : null;
   const workspace = useMemo(() => workspaceFor(thread, latestTurn), [thread, latestTurn]);
 
   const session = useIdeSession(workspace);

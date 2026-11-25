@@ -134,6 +134,13 @@ pub struct AcpAgentProbe {
     /// Modes the agent advertises.
     #[serde(default)]
     pub modes: Vec<AcpAgentMode>,
+    /// Reasoning-effort values the agent advertises.
+    ///
+    /// Empty when the agent has no effort control. A thread that asks for an
+    /// effort the agent never named cannot start a session, so a harness switch
+    /// resolves this before it commits and drops an unsupported value.
+    #[serde(default)]
+    pub efforts: Vec<String>,
     /// Why the probe did not complete, when it did not.
     #[serde(default)]
     #[ts(optional)]

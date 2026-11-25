@@ -43,6 +43,8 @@ export type * from "./DiffAgainst";
 export type * from "./DirectDevice";
 export type * from "./DirectoryEntry";
 export type * from "./DirectoryListing";
+export type * from "./DroppedSetting";
+export type * from "./DroppedSettingKind";
 export type * from "./Event";
 export type * from "./FailoverOptions";
 export type * from "./FileEntry";

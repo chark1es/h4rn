@@ -1,4 +1,4 @@
-//! Firebase Cloud Messaging HTTP v1 sender for Android alerts (ADR-048).
+//! Firebase Cloud Messaging HTTP v1 sender for Android alerts (ADR-049).
 //!
 //! The operator supplies a Firebase service-account JSON. Connect signs a
 //! JWT-bearer assertion with its RSA key, exchanges it for an OAuth2 access

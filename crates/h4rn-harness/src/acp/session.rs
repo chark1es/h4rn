@@ -467,16 +467,7 @@ pub(crate) fn mode_id_for(mode: RuntimeMode) -> &'static str {
 ///
 /// An id h4rn has no label for is not guessed: it is simply not offered.
 pub(crate) fn runtime_mode_for_id(id: &str) -> Option<RuntimeMode> {
-    let id = id.trim().to_ascii_lowercase();
-    match id.as_str() {
-        "default" | "ask" | "manual" | "supervised" => Some(RuntimeMode::ApprovalRequired),
-        "accept-edits" | "acceptedits" | "accept_edits" => Some(RuntimeMode::AutoAcceptEdits),
-        "plan" | "read-only" | "readonly" => Some(RuntimeMode::Plan),
-        "auto" | "full-access" | "full_access" | "bypass" | "bypasspermissions" => {
-            Some(RuntimeMode::FullAccess)
-        }
-        _ => None,
-    }
+    crate::controls::runtime_mode_for_acp_mode_id(id)
 }
 
 /// The id of the advertised mode that maps to `mode`.

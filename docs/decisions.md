@@ -2016,8 +2016,75 @@ Shift in multiline mode) uses the opposite action. `Cmd/Ctrl+Shift+Enter` steers
 message while a turn is really running, and `Alt/Option+Up` at the start of the composer edits the
 newest one; both are rebindable.
 
+## ADR-048: A harness switch happens between turns, over a bounded handoff
 
-## ADR-048: Phone alerts carry a fixed thread transition, never conversation content
+**Status:** Accepted
+
+A thread can move to another provider only when nothing is in flight: no running
+turn, no queued or parked prompt, no armed rate-limit resume and no waiting
+approval. That single rule is what keeps the switch honest. The old session can
+be shut down without a prompt still belonging to it, a queued message can never
+be delivered to the provider the person just left, and an approval can only be
+answered by the session that asked for it. A switch therefore belongs between
+turns, next to the turn boundary the composer already respects, not inside the
+stream as a mid-turn migration.
+
+The switch is staged: the record names the new harness and model, clears the old
+harness-native resume id and its agent fingerprint, and sets a `handoff_pending`
+flag. That row and the `HarnessSwitched` domain and wire events are one journal
+append, so the switch is either durable in full or not at all. Only after the
+append commits is the old session detached under the thread's record lock and
+shut down while the switch gate is held, so a Send cannot select a new session
+beside it. A journal that refuses the write restores the staged fields and ends
+nothing. Clearing the resume id is part of the same write, so a crash or restart
+cannot resurrect a conversation the new provider never had. `handoff_pending`
+survives a restart and is cleared only once the new session accepts the prompt
+that carried the history; a failed start or write must not lose the history a
+later message still needs. A session that already died between turns belongs to
+the old provider too, so it is drained and shut down with the live one instead of
+letting its late exit report arm a resume on the switched thread.
+
+The first turn on the new harness reuses the import fallback instead of growing a
+second implementation: the same `handoff::build`, the same `H4RN_HANDOFF_BYTES`
+budget, the same "original request plus newest messages" selection, and the same
+rule that the person's request is appended verbatim. The history is read from the
+journaled wire items, which is the one copy h4rn keeps, so a switch after a
+restart behaves like one made a moment earlier. A thread that was imported and
+then switched keeps the same path: the imported origin is no longer special once
+the thread has live turns.
+
+Settings follow the thread where the target harness can honour them. A plan mode
+on a harness without one falls back to approval required; an effort or fast tier
+the target does not expose returns to its default. A configured ACP agent names
+its own catalogue at session start, so the switch resolves that catalogue before
+it commits (probing the agent when this daemon has no answer yet) and drops a
+value the agent never advertised instead of reporting a switch whose first Send
+would fail. The response names every value
+that was dropped, and the transcript's divider names the two harnesses. An agent
+that names a catalogue h4rn can map nothing from is refused with its own mode
+names: "it offers no mode a thread can run in" is a different fact from "it
+never named one", and only the second is trusted with the declared controls.
+Each `TurnStarted` event carries the harness that ran the turn, so a transcript
+that spans a switch does not relabel old turns with the new provider, and the
+metering ledger attributes each turn to the harness and model that really served
+it.
+
+A switch is honest only if the journal and the record agree on what the old
+provider already accepted, so acceptance is written before the turn's completion
+is published. A provider can report a whole turn while its prompt is still being
+written; the daemon holds that completion until the acceptance — and the handoff
+clear that belongs to it — is durable, and only then settles the turn. Without
+that order a switch in that window could hand over the reply while the request
+that produced it was still recorded as undelivered. The fallback from a dead
+native resume follows the same rule from the other side: it changes only the
+fallback's own fields (the resume id, the handoff flag and the import's spent
+native resume) and only while the row still belongs to the switch it read, so a
+late write cannot restore the harness the person left. A refused switch restores
+everything it staged, including the old provider's recorded limit and its
+countdown, and a Send the journal refuses takes its staged turn back so no
+dispatch, queued ghost or countdown outlives it.
+
+## ADR-049: Phone alerts carry a fixed thread transition, never conversation content
 
 **Status:** Accepted
 
@@ -2061,3 +2128,4 @@ is skipped even if a registration row survived. An operator who has not
 configured a Firebase service account has push off; Connect reports that state
 and never pretends to send. The Android build compiles and runs without
 `google-services.json`; the feature is then unavailable and Settings says so.
+

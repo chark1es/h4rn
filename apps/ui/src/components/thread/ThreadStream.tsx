@@ -22,6 +22,7 @@ import {
   useApp,
 } from "@/lib/store/appStore";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
+import { isRealTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { TurnBlock } from "./TurnBlock";
 
@@ -149,6 +150,26 @@ export function QueuedTurn({
   );
 }
 
+/**
+ * The row a turn shortcut moves to.
+ *
+ * `realTurns` is the ascending list of rows an agent really ran. Moving back
+ * from a row past the first real turn stays on that turn instead of landing on
+ * a divider, and moving forward from the last one stays there.
+ */
+export function nextTurnIndex(
+  realTurns: readonly number[],
+  current: number,
+  direction: number,
+): number {
+  if (realTurns.length === 0) return Math.max(0, current);
+  if (direction < 0) {
+    const previous = realTurns.filter((index) => index < current).at(-1);
+    return previous ?? (realTurns[0] as number);
+  }
+  return realTurns.find((index) => index > current) ?? (realTurns.at(-1) as number);
+}
+
 function PendingTurn({ message }: { message: PendingMessage }) {
   return (
     <div className={cn("q-turn q-you-msg", message.sending && "q-faint")}>
@@ -169,7 +190,21 @@ function PendingTurn({ message }: { message: PendingMessage }) {
  */
 export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turns: StreamTurn[] }) {
   if (summary.tab !== "done" || summary.agent_state !== "done") return null;
-  const imported = turns.length > 0 && turns.every((turn) => turn.imported);
+  // A switch divider is not a turn the agent wrote: it must neither make a
+  // conversation look imported nor hide that it was.
+  const written = turns.filter(isRealTurn);
+  // An imported conversation with no agent turn at all (only the person's
+  // messages, or only the cue rows that stand in for them) still came from
+  // somewhere: the summary remembers the source even when no turn carries the
+  // flag.
+  const imported =
+    written.length > 0 ? written.every((turn) => turn.imported) : summary.imported_from != null;
+  // The thread may have switched harness since the import. The receipt names
+  // where the conversation came from, never the provider it runs on now.
+  const source =
+    summary.imported_from ??
+    written.find((turn) => turn.imported && turn.harness)?.harness ??
+    summary.harness;
   return (
     <div className="q-col q-receipt">
       <div className="q-live-line">
@@ -177,7 +212,7 @@ export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turn
         <span>
           {imported ? (
             <>
-              Imported from {harnessLabel(summary.harness)} · {absoluteTime(summary.last_activity)}
+              Imported from {harnessLabel(source)} · {absoluteTime(summary.last_activity)}
             </>
           ) : (
             <>
@@ -240,6 +275,14 @@ export function ThreadStream({
     return next;
   }, [turns, pending, queued]);
 
+  // The rows Previous Turn and Next Turn stop on: the turns an agent really
+  // ran. A switch divider and a user-message cue have no work behind them, so
+  // stopping on one looks like the shortcut did nothing.
+  const realTurns = useMemo(
+    () => turns.flatMap((turn, index) => (isRealTurn(turn) ? [index] : [])),
+    [turns],
+  );
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
@@ -281,13 +324,13 @@ export function ThreadStream({
   useEffect(() => {
     const handler = (event: Event) => {
       const direction = (event as CustomEvent<{ direction: number }>).detail?.direction ?? 0;
-      const next = Math.max(0, Math.min(turns.length - 1, focusTurn.current + direction));
+      const next = nextTurnIndex(realTurns, focusTurn.current, direction);
       focusTurn.current = next;
       virtualizer.scrollToIndex(next, { align: "start" });
     };
     window.addEventListener("h4rn:turn", handler);
     return () => window.removeEventListener("h4rn:turn", handler);
-  }, [turns.length, virtualizer]);
+  }, [realTurns, virtualizer]);
 
   return (
     <div
