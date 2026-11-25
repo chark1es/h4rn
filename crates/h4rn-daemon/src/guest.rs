@@ -1366,10 +1366,12 @@ impl GuestService {
     ///
     /// The row was already the one decision's first half: its files are on
     /// disk and its attachments are recorded, but the card may or may not have
-    /// been raised. The journal decides which. A card the journal holds only
-    /// needs its row's second half and one broadcast, never a second
-    /// `GuestRequested`; a card the journal never received is appended now. An
-    /// ended link gets the row and files removed.
+    /// been raised. Either way the card is appended now, with the row becoming
+    /// `pending` as the append's commit, so it is announced under a fresh
+    /// sequence and answerable only once it is ahead of any answer. A card the
+    /// journal already held appears twice there; the guest snapshot and the
+    /// owner's projection keep one card per request id. An ended link gets the
+    /// row and files removed.
     async fn recover_publishing(&self, request: &RequestRow) -> Result<(), GuestError> {
         let live: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM guest_links WHERE link_id = ? AND expires_at > ?",
@@ -1384,36 +1386,16 @@ impl GuestService {
                 .guest_card_in_thread(&request.thread_id, &request.request_id)
                 .await
             {
-                Ok(true) => {
-                    // The card is already journaled; the failed final update is
-                    // the only half missing. Making the row `pending` and
-                    // announcing the card again under a fresh sequence earns
-                    // the broadcast the failed publication never sent: the
-                    // guest's page keeps the newest copy of the card, so it
-                    // shows one, and the record gets its pending request back.
-                    if let Err(error) = self.mark_pending(&request.request_id).await {
-                        tracing::warn!(
-                            request = %request.request_id,
-                            %error,
-                            "a recovered guest card waits for the next sweep"
-                        );
-                        return Ok(());
-                    }
-                    if let Err(error) = self
-                        .manager
-                        .republish_guest_request(request.to_proto())
-                        .await
-                    {
-                        // The row is answerable and a fresh snapshot sees the
-                        // card; a live client gets it on its next snapshot.
-                        tracing::warn!(
-                            request = %request.request_id,
-                            %error,
-                            "a recovered guest card was not re-announced"
-                        );
-                    }
-                    return Ok(());
-                }
+                // The card is already journaled; the failed final update is
+                // the only half missing. It is announced again under a fresh
+                // sequence through the same ordered step as a new card, with
+                // the row becoming `pending` as its commit: a Send or Dismiss
+                // can only claim the row once the re-announced card is ahead
+                // of it, and a failed append leaves the row `publishing` for
+                // the next sweep. The guest's page keeps the newest copy of
+                // the card, so it shows one, and the record gets its pending
+                // request back.
+                Ok(true) => {}
                 Ok(false) => {}
                 Err(ManagerError::NotFound(_)) => {}
                 Err(error) => {

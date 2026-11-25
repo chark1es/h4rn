@@ -4708,6 +4708,35 @@ async fn a_card_whose_row_update_fails_is_never_published_and_the_sweep_recovers
         "an unanswerable card raised a pending count"
     );
 
+    // A sweep whose re-announcing append fails leaves the row `publishing`:
+    // the row becomes answerable only as that append's commit, so a refused
+    // write cannot strand an answerable row with no live card and no pending
+    // count, and the next sweep tries again.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_card BEFORE INSERT ON daemon_wire_events
+         WHEN NEW.event_json LIKE '%guest_requested%'
+         BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    )
+    .execute(&pool)
+    .await
+    .expect("install the append failure");
+    daemon.guest.sweep_expired().await.expect("sweep");
+    let rows: Vec<String> = sqlx::query_scalar("SELECT status FROM guest_requests")
+        .fetch_all(&pool)
+        .await
+        .expect("read request rows");
+    assert_eq!(
+        rows,
+        vec!["publishing".to_string()],
+        "a failed re-announce left an answerable row the sweep never retries"
+    );
+    sqlx::query("DROP TRIGGER fail_card")
+        .execute(&pool)
+        .await
+        .expect("remove the append failure");
+    pool.close().await;
+
     // The sweep finishes the second half, and the card is answerable when it
     // appears.
     daemon.guest.sweep_expired().await.expect("sweep");

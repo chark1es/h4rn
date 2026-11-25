@@ -6394,26 +6394,6 @@ impl ThreadManager {
             .map_err(|error| ManagerError::Internal(error.to_string()))
     }
 
-    /// Announces a guest card the journal already holds as news.
-    ///
-    /// A publication that reached the journal but failed before its row became
-    /// answerable left a card no live client ever received, and rolled the
-    /// record's pending state back. Recovery makes the row answerable and calls
-    /// this so clients learn about the card: the durable `MessageReceived` and
-    /// `GuestRequestAdded` are applied to the record again (both are
-    /// idempotent), and the card is appended under a fresh sequence and
-    /// broadcast. Appending again is what makes it news: a live client drops
-    /// any frame at or below the last sequence it applied, and the original
-    /// card predates the failure. The guest snapshot keeps the newest card per
-    /// request id, so the guest's page still shows one card.
-    pub async fn republish_guest_request(
-        &self,
-        request: h4rn_protocol::GuestRequest,
-    ) -> Result<u64, ManagerError> {
-        let thread_id = request.thread_id.clone();
-        self.emit_guest_request(&thread_id, request).await
-    }
-
     /// [`Self::send_message_with`] with a grant's ceiling and identity.
     async fn send_message_with_work(
         &self,
