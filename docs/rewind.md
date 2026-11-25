@@ -41,6 +41,10 @@ for files.
   silently resuming the old one. The boundary is written as soon as the
   provider accepts the prompt, before the turn can settle, so a busy turn and a
   restart cannot lose it.
+- A fork made after a rewind reads the same cut. The removed prompt is absent
+  from the fork's transcript and from its handoff history, and a fork at a
+  removed turn is refused with a clear message. Removed text — which may be a
+  pasted secret — never comes back through a new thread.
 - If a rewind's cut cannot be recorded, nothing changes: the files are put
   back and the thread row still describes the conversation that is in the
   journal.
@@ -70,9 +74,10 @@ its turn settles without knowing the outcome, so the daemon shows the text as
 **May have been delivered** right away — the same row a restart would recover —
 and both the dialog and the daemon refuse an edit until it is resent or
 discarded. A claim whose turn is still running is not shown: that turn owns it.
-A steer whose adapter write has not returned is not shown either, even when its
-turn settles in that window; once the write comes back the text is in the turn
-once, with no uncertain row beside it.
+A steer whose adapter write has not returned blocks the edit until it does,
+even when its turn settles in that window: the text is not in the journal yet,
+and cutting now would let it land after the cut. Once the write comes back the
+text is in the turn once, with no uncertain row beside it.
 
 A boundary belongs to the provider session that recorded it. h4rn stores that
 session id beside the boundary, and only uses it while the thread still resumes
@@ -155,6 +160,8 @@ A rewind is refused while any of these is true:
 
 - a turn is running;
 - a message is queued or a prompt is parked behind a pause;
+- a message is still being delivered — a steer's write has not returned — so
+  the person is asked to try again in a moment;
 - a message's delivery is uncertain — a queued row that may already have
   reached the agent, or a promoted prompt whose write is still in flight — so
   the person is asked to resend or discard it first;
