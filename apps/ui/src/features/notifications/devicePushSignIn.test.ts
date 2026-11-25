@@ -37,7 +37,8 @@ describe("a launch that signs in after the alerts start", () => {
     // A real launch: the alerts start while the credentials are still loading.
     remoteStore.setState({ ...remoteStore.getState(), phase: "loading" });
     startDevicePush();
-    expect(invoke).toHaveBeenLastCalledWith("push_set_enabled", { enabled: false });
+    // Nothing is decided while the stored session loads.
+    expect(invoke).not.toHaveBeenCalledWith("push_set_enabled", expect.anything());
 
     const registerPushDevice = vi.fn(async () => undefined);
     setConnectClient({

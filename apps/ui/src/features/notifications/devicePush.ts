@@ -359,6 +359,10 @@ export function startDevicePush(): void {
     const { phase } = remoteStore.getState();
     if (phase === lastPhase) return;
     lastPhase = phase;
+    // Still reading the stored session: leave the native flag as the last
+    // signed-in or signed-out moment set it. The phone may be woken for an
+    // alert while the webview is still starting.
+    if (phase === "loading") return;
     if (phase !== "signed_in") {
       // "Signed in and switched on": never re-arm while signed out, and drop
       // the flag the moment the session ends, however it ended.
@@ -396,6 +400,7 @@ export function startDevicePush(): void {
 
   // Launch is one of the signed-in moments a pending removal is retried:
   // `syncAccount` above runs once here when the account is already signed in.
-  // While signed out the flag stays off even if the switch was left on.
-  mirrorNativeFlag();
+  // While signed out the flag stays off even if the switch was left on; while
+  // the session is still loading, `syncAccount` decides once it resolves.
+  if (remoteStore.getState().phase !== "loading") mirrorNativeFlag();
 }

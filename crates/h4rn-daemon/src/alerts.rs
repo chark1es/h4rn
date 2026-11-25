@@ -174,10 +174,15 @@ impl WorktreeRoots {
 /// `project_path` (an import or fork) already names the project, so the caller
 /// resolves that first. A worktree checkout is identified by living directly
 /// below one of the daemon's worktree locations with a project folder and a
-/// branch folder under it. The location is the configured one, not a path
-/// heuristic, so a custom Settings → Worktrees location names the project too.
+/// branch folder under it, and by being a linked checkout (its `.git` is a
+/// file). The location is the configured one, so a custom Settings → Worktrees
+/// location names the project too, while an ordinary checkout that merely sits
+/// two folders below a broad location (`~/code/acme/api`) keeps its own name.
 /// Everything else keeps today's behaviour: the workspace's own folder name.
 fn project_name(path: &str, worktree_roots: &[PathBuf]) -> String {
+    if !Path::new(path).join(".git").is_file() {
+        return folder_name(path);
+    }
     for root in worktree_roots {
         let Ok(relative) = Path::new(path).strip_prefix(root) else {
             continue;
@@ -192,6 +197,10 @@ fn project_name(path: &str, worktree_roots: &[PathBuf]) -> String {
             return project;
         }
     }
+    folder_name(path)
+}
+
+fn folder_name(path: &str) -> String {
     Path::new(path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -879,11 +888,21 @@ mod tests {
         assert!(recorder.sent.lock().await.is_empty());
     }
 
+    /// A linked checkout at `<root>/<project>/<branch>`: its `.git` is a file.
+    fn linked_checkout(root: &Path, project: &str, branch: &str) -> String {
+        let checkout = root.join(project).join(branch);
+        std::fs::create_dir_all(&checkout).expect("checkout");
+        std::fs::write(checkout.join(".git"), "gitdir: /elsewhere\n").expect("gitdir file");
+        checkout.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn a_worktree_thread_alerts_with_its_project_name() {
+        let data = tempfile::tempdir().expect("data");
+        let root = data.path().join("worktrees");
         let mut summary = summary(&ThreadId::new("th_worktree"), None);
-        summary.workspace_path = "/data/worktrees/h4rn/fix-the-login".into();
-        let roots = vec![PathBuf::from("/data/worktrees")];
+        summary.workspace_path = linked_checkout(&root, "h4rn", "fix-the-login");
+        let roots = vec![root];
 
         let worktree = ActivityThread::from_summary(&summary, &roots);
         assert_eq!(
@@ -910,15 +929,34 @@ mod tests {
     fn a_custom_worktree_location_still_names_the_project() {
         // Settings → Worktrees can put checkouts anywhere; the alert must read
         // the configured location rather than the default data folder.
+        let fast = tempfile::tempdir().expect("location");
         let mut summary = summary(&ThreadId::new("th_worktree"), None);
-        summary.workspace_path = "/mnt/fast/h4rn/fix-the-login".into();
-        let roots = WorktreeRoots::fixed(vec![PathBuf::from("/mnt/fast")]);
+        summary.workspace_path = linked_checkout(fast.path(), "h4rn", "fix-the-login");
+        let roots = WorktreeRoots::fixed(vec![fast.path().to_path_buf()]);
         let roots = roots.roots_list();
 
         assert_eq!(
             ActivityThread::from_summary(&summary, &roots).project,
             "h4rn",
             "a custom location made the alert name the branch folder"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_checkout_under_a_broad_location_keeps_its_name() {
+        // A location such as `~/code` also holds ordinary clones two folders
+        // down (`~/code/acme/api`). Only a linked checkout is a worktree.
+        let code = tempfile::tempdir().expect("location");
+        let api = code.path().join("acme").join("api");
+        std::fs::create_dir_all(api.join(".git")).expect("a clone's .git directory");
+        let mut summary = summary(&ThreadId::new("th_clone"), None);
+        summary.workspace_path = api.to_string_lossy().into_owned();
+        let roots = vec![code.path().to_path_buf()];
+
+        assert_eq!(
+            ActivityThread::from_summary(&summary, &roots).project,
+            "api",
+            "an ordinary clone was named after its parent folder"
         );
     }
 
@@ -932,17 +970,18 @@ mod tests {
             "the default root is the fallback before a location is set"
         );
 
+        let fast = tempfile::tempdir().expect("location");
         settings
             .set(h4rn_protocol::WorktreeSettings {
-                location: Some("/mnt/fast".into()),
+                location: Some(fast.path().to_string_lossy().into_owned()),
                 ..Default::default()
             })
             .expect("save the location");
 
         let mut summary = summary(&ThreadId::new("th_worktree"), None);
-        summary.workspace_path = "/mnt/fast/h4rn/fix-the-login".into();
+        summary.workspace_path = linked_checkout(fast.path(), "h4rn", "fix-the-login");
         let roots = roots.roots_list();
-        assert_eq!(roots.first(), Some(&PathBuf::from("/mnt/fast")));
+        assert_eq!(roots.first(), Some(&fast.path().to_path_buf()));
         assert_eq!(
             ActivityThread::from_summary(&summary, &roots).project,
             "h4rn"
