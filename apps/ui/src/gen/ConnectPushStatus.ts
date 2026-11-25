@@ -11,4 +11,11 @@ configured: boolean,
 /**
  * Registered Android installs on this account.
  */
-devices: number, };
+devices: number, 
+/**
+ * Whether the caller's own device has a registration row.
+ *
+ * A phone asks about itself, so the account-wide count cannot answer
+ * "will this phone get an alert". Older relays omit it; unset means no.
+ */
+registered: boolean, };

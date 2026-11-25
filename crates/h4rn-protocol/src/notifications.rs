@@ -1,4 +1,4 @@
-//! Phone alerts for agent activity (ADR-049).
+//! Phone alerts for agent activity (ADR-048).
 //!
 //! The daemon publishes a small, closed set of state transitions over its
 //! existing relay connection. Connect turns a new transition into an FCM data
@@ -25,6 +25,9 @@ pub enum AgentAlertState {
     Approval,
     /// The harness asked a question and waits for an answer.
     Input,
+    /// The turn stopped at a usage, token or turn limit and will not resume by
+    /// itself.
+    Limit,
 }
 
 impl AgentAlertState {
@@ -35,17 +38,7 @@ impl AgentAlertState {
             Self::Failed => "failed",
             Self::Approval => "approval",
             Self::Input => "input",
-        }
-    }
-
-    /// Parses the stored spelling.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "completed" => Some(Self::Completed),
-            "failed" => Some(Self::Failed),
-            "approval" => Some(Self::Approval),
-            "input" => Some(Self::Input),
-            _ => None,
+            Self::Limit => "limit",
         }
     }
 
@@ -56,7 +49,7 @@ impl AgentAlertState {
 
     /// Whether this state is the agent asking for a person.
     pub fn needs_attention(self) -> bool {
-        matches!(self, Self::Approval | Self::Input)
+        matches!(self, Self::Approval | Self::Input | Self::Limit)
     }
 }
 
@@ -79,6 +72,28 @@ pub struct AgentActivity {
     pub state: AgentAlertState,
     /// When the daemon observed the transition.
     pub at: DateTime<Utc>,
+    /// Identity of this transition within the thread.
+    ///
+    /// A later transition repeats the same state (a second completion, a
+    /// second approval), so the state alone cannot tell a new event from a
+    /// replayed frame. The daemon gives every publish a fresh id; a daemon
+    /// older than this field leaves it empty and Connect falls back to `at`.
+    #[serde(default)]
+    pub transition: String,
+}
+
+impl AgentActivity {
+    /// The identity Connect stores with the delivered baseline.
+    ///
+    /// A replay of one frame carries the same value; a later transition, even
+    /// with the same state, carries a different one.
+    pub fn transition_id(&self) -> String {
+        if self.transition.is_empty() {
+            self.at.to_rfc3339()
+        } else {
+            self.transition.clone()
+        }
+    }
 }
 
 /// This machine's switch for sending agent alerts to a phone.
@@ -90,4 +105,46 @@ pub struct AgentAlertSettings {
     /// Whether activity publishing is on. Off by default.
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_older_frame_without_a_transition_uses_its_timestamp() {
+        let at = Utc::now();
+        let json = format!(
+            r#"{{"thread_id":"th_one","state":"completed","at":"{}"}}"#,
+            at.to_rfc3339()
+        );
+        let activity: AgentActivity = serde_json::from_str(&json).expect("parse");
+        assert!(activity.transition.is_empty());
+        assert_eq!(activity.transition_id(), at.to_rfc3339());
+    }
+
+    #[test]
+    fn a_later_transition_has_its_own_identity() {
+        let at = Utc::now();
+        let mut activity = AgentActivity {
+            thread_id: ThreadId::new("th_one"),
+            thread_title: String::new(),
+            project_name: String::new(),
+            state: AgentAlertState::Completed,
+            at,
+            transition: String::new(),
+        };
+        // The same frame replayed is one transition.
+        assert_eq!(activity.transition_id(), activity.transition_id());
+        // A later completion of the same state is a different one.
+        activity.transition = "later".to_string();
+        assert_ne!(activity.transition_id(), at.to_rfc3339());
+    }
+
+    #[test]
+    fn a_limit_asks_for_a_person_without_an_age_cutoff() {
+        assert!(AgentAlertState::Limit.needs_attention());
+        assert!(!AgentAlertState::Limit.is_terminal());
+        assert_eq!(AgentAlertState::Limit.as_str(), "limit");
+    }
 }

@@ -118,7 +118,7 @@ pub struct AppState {
     pub text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// Guest links and messages waiting for the owner (ADR-044).
     pub guest: Arc<crate::guest::GuestService>,
-    /// Phone alerts published through Connect while switched on (ADR-049).
+    /// Phone alerts published through Connect while switched on (ADR-048).
     pub alerts: Arc<crate::alerts::AgentAlertService>,
     /// Scheduled tasks and webhook automations.
     pub schedules: Arc<crate::schedules::ScheduleService>,

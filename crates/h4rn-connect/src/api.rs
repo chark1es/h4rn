@@ -1317,15 +1317,22 @@ async fn deregister_push_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Whether this relay can push, and how many devices the account registered.
+/// Whether this relay can push, and whether the caller's own device is
+/// registered.
 async fn push_status(
     State(state): State<AppState>,
     authed: Authed,
 ) -> Result<Json<ConnectPushStatus>> {
     let devices = state.store.push_devices(authed.user.id).await?;
+    let registered = state
+        .store
+        .push_device(authed.user.id, &authed.device.id.to_string())
+        .await?
+        .is_some();
     Ok(Json(ConnectPushStatus {
         configured: state.push.configured(),
         devices: devices.len(),
+        registered,
     }))
 }
 

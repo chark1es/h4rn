@@ -420,6 +420,15 @@ impl Config {
                 )
             })?;
         }
+        if let Some(value) = env("H4RN_CONNECT_PUSH_COMPLETION_MAX_AGE_SECS") {
+            self.push_completion_max_age_secs = value.parse().map_err(|_| {
+                AppError::config(
+                    "invalid_number",
+                    "H4RN_CONNECT_PUSH_COMPLETION_MAX_AGE_SECS is not a number",
+                    None,
+                )
+            })?;
+        }
         if let Some(value) = env("H4RN_CONNECT_GUEST_ANSWER_TIMEOUT_SECS") {
             self.guest_answer_timeout_secs =
                 parse_u64("H4RN_CONNECT_GUEST_ANSWER_TIMEOUT_SECS", &value)?;
@@ -653,6 +662,22 @@ mod tests {
             allow_insecure: true,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn the_documented_completion_age_variable_is_read() {
+        // SAFETY: this is the only test that touches this variable, and no
+        // other test reads it.
+        unsafe {
+            std::env::set_var("H4RN_CONNECT_PUSH_COMPLETION_MAX_AGE_SECS", "45");
+        }
+        let mut config = base();
+        let applied = config.apply_env();
+        unsafe {
+            std::env::remove_var("H4RN_CONNECT_PUSH_COMPLETION_MAX_AGE_SECS");
+        }
+        applied.expect("apply env");
+        assert_eq!(config.push_completion_max_age_secs, 45);
     }
 
     #[test]

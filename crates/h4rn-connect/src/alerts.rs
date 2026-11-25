@@ -1,11 +1,12 @@
-//! Alert selection and delivery for Android push (ADR-049).
+//! Alert selection and delivery for Android push (ADR-048).
 //!
 //! Connect may see the same transition many times (a reconnect, a retry, a
 //! daemon restart), so the delivered baseline is stored per `(user, thread)`
-//! and an unchanged state is dropped before it can queue. Transitions that
-//! arrive together are grouped: several agents asking for a person become one
-//! "N agents need attention" alert, and several finishing become one "N agents
-//! finished" alert.
+//! and keyed by the transition id: a replayed frame is dropped before it can
+//! queue, while a later transition that repeats the same state still alerts.
+//! Transitions that arrive together are grouped: several agents asking for a
+//! person become one "N agents need attention" alert, and several finishing
+//! become one "N agents finished" alert.
 //!
 //! The selection functions are pure so the dedupe, cutoff and grouping rules
 //! are tested without a database or a network.
@@ -54,11 +55,6 @@ impl PushAlert {
     }
 }
 
-/// Whether this transition differs from the delivered baseline.
-pub fn is_new_transition(previous: Option<&str>, activity: &AgentActivity) -> bool {
-    previous != Some(activity.state.as_str())
-}
-
 /// Whether a completion is too old to alert.
 ///
 /// Only finishing states have a cutoff. An approval that sat on the relay is
@@ -103,6 +99,7 @@ fn single(activity: &AgentActivity, project: &str) -> PushAlert {
         }
         AgentAlertState::Approval => "Needs approval".to_string(),
         AgentAlertState::Input => "Asks for input".to_string(),
+        AgentAlertState::Limit => "Stopped at a limit".to_string(),
     };
     PushAlert {
         title,
@@ -139,13 +136,19 @@ fn grouped(activities: &[AgentActivity]) -> PushAlert {
     };
     let state = if needs_attention {
         // Input is the stronger hand: it asks for an answer, not only a yes/no.
+        // A limit needs the person too; it ranks below the two direct asks.
         if activities
             .iter()
             .any(|activity| activity.state == AgentAlertState::Input)
         {
             AgentAlertState::Input
-        } else {
+        } else if activities
+            .iter()
+            .any(|activity| activity.state == AgentAlertState::Approval)
+        {
             AgentAlertState::Approval
+        } else {
+            AgentAlertState::Limit
         }
     } else if activities
         .iter()
@@ -240,6 +243,7 @@ impl AlertService {
                 user_id,
                 activity.thread_id.as_str(),
                 activity.state.as_str(),
+                &activity.transition_id(),
             )
             .await
         {
@@ -337,15 +341,30 @@ mod tests {
             project_name: "proj".to_string(),
             state,
             at: Utc::now(),
+            transition: Uuid::now_v7().to_string(),
         }
     }
 
     #[test]
-    fn the_same_state_published_again_is_not_new() {
+    fn a_replayed_frame_is_the_same_transition() {
         let activity = activity(AgentAlertState::Completed, "one");
-        assert!(is_new_transition(None, &activity));
-        assert!(!is_new_transition(Some("completed"), &activity));
-        assert!(is_new_transition(Some("approval"), &activity));
+        assert_eq!(activity.transition_id(), activity.clone().transition_id());
+    }
+
+    #[test]
+    fn a_later_completion_in_the_same_state_is_a_new_transition() {
+        let first = activity(AgentAlertState::Completed, "one");
+        let mut second = first.clone();
+        // Same state and same instant: only the transition id separates them.
+        second.transition = Uuid::now_v7().to_string();
+        assert_ne!(first.transition_id(), second.transition_id());
+    }
+
+    #[test]
+    fn a_limit_says_the_agent_stopped() {
+        let alert = single(&activity(AgentAlertState::Limit, "one"), "proj");
+        assert_eq!(alert.body, "Stopped at a limit");
+        assert_eq!(alert.state, AgentAlertState::Limit);
     }
 
     #[test]
@@ -387,6 +406,17 @@ mod tests {
         assert_eq!(alerts[0].body, "one · two");
         assert_eq!(alerts[0].count, 2);
         assert_eq!(alerts[0].state, AgentAlertState::Input);
+    }
+
+    #[test]
+    fn a_limit_is_attention() {
+        let alerts = group_activities(&[
+            activity(AgentAlertState::Limit, "one"),
+            activity(AgentAlertState::Approval, "two"),
+        ]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "2 agents need attention");
+        assert_eq!(alerts[0].state, AgentAlertState::Approval);
     }
 
     #[test]

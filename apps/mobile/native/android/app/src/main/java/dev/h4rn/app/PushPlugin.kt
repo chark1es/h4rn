@@ -21,7 +21,7 @@ internal class PushForegroundArgs {
 }
 
 /**
- * Android push bridge (ADR-049).
+ * Android push bridge (ADR-048).
  *
  * Firebase is optional at build time: without `google-services.json` the SDK
  * has no app to initialise, [status] reports unavailable, and Settings says

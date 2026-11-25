@@ -1,5 +1,5 @@
 /**
- * The native bridge for Android device alerts (ADR-049).
+ * The native bridge for Android device alerts (ADR-048).
  *
  * Only an Android Tauri shell has the plugin. Every function is inert
  * elsewhere, so the shared UI can call it unconditionally; Settings hides the

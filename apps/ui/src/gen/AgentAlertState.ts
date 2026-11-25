@@ -3,4 +3,4 @@
 /**
  * The transitions that are allowed to wake a phone.
  */
-export type AgentAlertState = "completed" | "failed" | "approval" | "input";
+export type AgentAlertState = "completed" | "failed" | "approval" | "input" | "limit";

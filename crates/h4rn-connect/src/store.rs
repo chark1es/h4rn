@@ -109,7 +109,7 @@ impl DeviceRow {
     }
 }
 
-/// One Android install registered for push alerts (ADR-049).
+/// One Android install registered for push alerts (ADR-048).
 #[derive(Clone, Debug, FromRow)]
 pub struct PushDeviceRow {
     /// Row id.
@@ -682,6 +682,10 @@ impl Store {
 
     /// Revokes a device, its sessions and every pairing. Returns the machines
     /// whose daemons must be told.
+    ///
+    /// The device's push registrations are deleted in the same transaction: a
+    /// lost phone that is revoked from the desktop must stop receiving thread
+    /// titles at once, not at its next sign-out.
     pub async fn revoke_device(&self, user_id: Uuid, device_id: Uuid) -> Result<Vec<Uuid>> {
         let mut tx = self.pool.begin().await?;
         let device = sqlx::query_as::<_, DeviceRow>(
@@ -718,6 +722,11 @@ impl Store {
             .await?;
         sqlx::query("DELETE FROM machine_devices WHERE device_id = $1")
             .bind(device_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM push_devices WHERE user_id = $1 AND device_id = $2")
+            .bind(user_id)
+            .bind(device_id.to_string())
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -823,39 +832,67 @@ impl Store {
     }
 
     /// Every Android install registered by one account.
+    ///
+    /// A device whose `revoked_at` is set never receives an alert even if a
+    /// registration row survived (revocation deletes it; this is the second
+    /// line of defence).
     pub async fn push_devices(&self, user_id: Uuid) -> Result<Vec<PushDeviceRow>> {
         Ok(sqlx::query_as::<_, PushDeviceRow>(
-            "SELECT id, user_id, device_id, token, package_name, app_version,
-                    created_at, updated_at
-             FROM push_devices WHERE user_id = $1 ORDER BY created_at",
+            "SELECT p.id, p.user_id, p.device_id, p.token, p.package_name, p.app_version,
+                    p.created_at, p.updated_at
+             FROM push_devices p
+             JOIN devices d ON d.id::text = p.device_id
+             WHERE p.user_id = $1 AND d.revoked_at IS NULL
+             ORDER BY p.created_at",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
         .await?)
     }
 
-    /// Claims one activity state for a thread.
+    /// One install's registration, when it exists.
+    pub async fn push_device(
+        &self,
+        user_id: Uuid,
+        device_id: &str,
+    ) -> Result<Option<PushDeviceRow>> {
+        Ok(sqlx::query_as::<_, PushDeviceRow>(
+            "SELECT id, user_id, device_id, token, package_name, app_version,
+                    created_at, updated_at
+             FROM push_devices WHERE user_id = $1 AND device_id = $2",
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Claims one activity transition for a thread.
     ///
-    /// Returns true only when the stored state changed. The insert/update is
-    /// one statement, so two relays or two retries of the same frame cannot
-    /// both claim it: the loser updates no row and gets no result.
+    /// Returns true only when this transition has not been delivered before.
+    /// The insert/update is one statement, so two relays or two retries of the
+    /// same frame cannot both claim it. A later transition carries a different
+    /// id even when its state repeats, so a thread alerts again in the same
+    /// state.
     pub async fn claim_push_thread_state(
         &self,
         user_id: Uuid,
         thread_id: &str,
         state: &str,
+        transition: &str,
     ) -> Result<bool> {
         let claimed: Option<bool> = sqlx::query_scalar(
-            "INSERT INTO push_thread_states (user_id, thread_id, state, updated_at)
-             VALUES ($1,$2,$3,now())
+            "INSERT INTO push_thread_states (user_id, thread_id, state, transition, updated_at)
+             VALUES ($1,$2,$3,$4,now())
              ON CONFLICT (user_id, thread_id) DO UPDATE
-                 SET state = excluded.state, updated_at = now()
-                 WHERE push_thread_states.state <> excluded.state
+                 SET state = excluded.state, transition = excluded.transition, updated_at = now()
+                 WHERE push_thread_states.transition <> excluded.transition
              RETURNING true",
         )
         .bind(user_id)
         .bind(thread_id)
         .bind(state)
+        .bind(transition)
         .fetch_optional(&self.pool)
         .await?;
         Ok(claimed.unwrap_or(false))

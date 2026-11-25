@@ -29,4 +29,13 @@ state: AgentAlertState,
 /**
  * When the daemon observed the transition.
  */
-at: string, };
+at: string, 
+/**
+ * Identity of this transition within the thread.
+ *
+ * A later transition repeats the same state (a second completion, a
+ * second approval), so the state alone cannot tell a new event from a
+ * replayed frame. The daemon gives every publish a fresh id; a daemon
+ * older than this field leaves it empty and Connect falls back to `at`.
+ */
+transition: string, };

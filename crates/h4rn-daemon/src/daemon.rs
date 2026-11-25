@@ -713,7 +713,7 @@ pub struct Daemon {
     outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Multiplexes peer MCP sessions over the daemon's one relay socket.
     relay_dialer: Arc<crate::remote::RelayDialer>,
-    /// Publishes phone alerts while the setting is on (ADR-049).
+    /// Publishes phone alerts while the setting is on (ADR-048).
     alerts: Arc<crate::alerts::AgentAlertService>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,

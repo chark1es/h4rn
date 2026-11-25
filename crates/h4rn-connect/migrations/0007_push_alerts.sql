@@ -1,4 +1,4 @@
--- Android push alerts (ADR-049).
+-- Android push alerts (ADR-048).
 --
 -- One row per Android install the signed-in user registered. The FCM token is
 -- a routing credential for Google, not an h4rn secret; it is nevertheless only
@@ -20,14 +20,17 @@ CREATE INDEX push_devices_user_idx ON push_devices (user_id);
 -- the old token deliverable through another row.
 CREATE UNIQUE INDEX push_devices_token_idx ON push_devices (token);
 
--- The last activity state delivered per (user, thread), so publishing the same
--- state again never alerts twice. Kept in Postgres so a relay restart does not
--- replay an alert.
+-- The last transition delivered per (user, thread), so a replay of one frame
+-- never alerts twice while a later transition that repeats the same state (a
+-- second completion, a second approval) still does. The identity is the
+-- daemon's transition id, or the frame's timestamp from a daemon that predates
+-- it. Kept in Postgres so a relay restart does not replay an alert.
 CREATE TABLE push_thread_states (
     user_id    UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     thread_id  TEXT NOT NULL,
     state      TEXT NOT NULL
-               CHECK (state IN ('completed', 'failed', 'approval', 'input')),
+               CHECK (state IN ('completed', 'failed', 'approval', 'input', 'limit')),
+    transition TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, thread_id)
 );

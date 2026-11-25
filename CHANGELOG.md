@@ -7,16 +7,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
-- **Android can alert you when an agent finishes, fails, needs approval or asks a question.**
-  Alerts go through Connect and are off by default behind two switches: the machine's Settings →
-  Notifications switch, and Device notifications on the phone. The daemon publishes only a thread
-  id, its title, the project name, one of four states and a timestamp, never message text, tool
-  output, file paths or credentials. Connect groups agents that need attention or finish together
-  into one alert, drops a repeated state and ignores completions older than two minutes. Tapping
-  an alert opens its thread; only the thread already on screen stays quiet. Operators configure
-  one Firebase service account on Connect and supply `google-services.json` only when building the
-  Android app, so the app and CI still build without it and Settings says when alerts are
-  unavailable.
+- **Android can alert you when an agent finishes, fails, needs approval, asks a question or stops
+  at a limit.** Alerts go through Connect and are off by default behind two switches: the machine's
+  Settings → Notifications switch, and Device notifications on the phone. The daemon publishes only
+  a thread id, its title, the project name, one of five states, a transition id and a timestamp,
+  never message text, tool output, file paths or credentials. Each transition has its own identity,
+  so a replayed frame is not sent twice while a thread's second completion or second approval still
+  alerts. A turn you stopped yourself does not alert, and a usage or turn limit that will not resume
+  by itself asks you to come back. Connect groups agents that need attention or finish together into
+  one alert, drops transitions it already sent and ignores completions older than two minutes.
+  Tapping an alert opens its thread; only the thread already on screen stays quiet. Revoking a
+  phone deletes its registration, so a lost device stops receiving thread titles at once, and
+  Settings reports this phone's own registration rather than the account's device count. Operators
+  configure one Firebase service account on Connect and supply `google-services.json` only when
+  building the Android app, so the app and CI still build without it and Settings says when alerts
+  are unavailable.
 
 - **A new thread can run in its own git worktree.** Choose **Run in a new
   worktree** in the New thread dialog, with an optional branch name. The daemon
