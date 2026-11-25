@@ -89,10 +89,12 @@ export type IdeState = {
   /**
    * The file a Branch or Commits list read was told to open.
    *
-   * `diffPath` only moves when a reply lands, so while a list is out it can
-   * still name the previous file or nothing at all. A review resumed after a
-   * workspace round-trip must reopen the tab the load was started for, so the
-   * load records its preferred file here and a direct open clears it.
+   * Every list read records it here: entering a scope, the tab follow, a base
+   * or commit change, and an explicit Refresh. `diffPath` only moves when a
+   * reply lands, so while a list is out it can still name the previous file or
+   * nothing at all. A review resumed after a workspace round-trip must reopen
+   * the tab the load was started for, so the load records its preferred file
+   * here and a direct open clears it.
    */
   diffListPath: string | null;
   diffSource: DiffSource;
@@ -1034,20 +1036,23 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   /** Changes the branch the review compares against. */
   const setDiffBase = useCallback(
     async (base: string | null) => {
+      // A list that is still out will open the tab it was started for, so that
+      // tab is this read's file too; `diffPath` may still name the one before.
+      const preferred = stateRef.current.diffListPath ?? stateRef.current.diffPath;
       const token = beginDiffRequest();
       setState((current) => ({
         ...current,
         diffBase: base,
         diffCommit: null,
         diffCommits: null,
-        // This read prefers the diff's file, not a list read's tab.
-        diffListPath: null,
+        // Record the file this load will open, so a workspace round-trip
+        // reopens it and the tab follow leaves the resumed list alone.
+        diffListPath: preferred,
         // The body on screen was compared against the old base; keep it off
         // the screen while the new comparison's list loads.
         diff: null,
         diffError: null,
       }));
-      const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "base", base });
       if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "branch", preferred, { base: files?.base ?? base });
@@ -1058,15 +1063,16 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   /** Opens one commit's files. */
   const setDiffCommit = useCallback(
     async (sha: string) => {
+      // See `setDiffBase`: a pending list's tab is this read's file too.
+      const preferred = stateRef.current.diffListPath ?? stateRef.current.diffPath;
       const token = beginDiffRequest();
       setState((current) => ({
         ...current,
         diffCommit: sha,
-        diffListPath: null,
+        diffListPath: preferred,
         diff: null,
         diffError: null,
       }));
-      const preferred = stateRef.current.diffPath;
       const files = await fetchDiffFiles({ kind: "commit", sha });
       if (!diffRequestCurrent(token)) return;
       await showDiffForFiles(files, "commit", preferred, { commit: sha });
@@ -1078,10 +1084,13 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const refreshDiffLists = useCallback(async () => {
     beginDiffRequest();
     const current = stateRef.current;
+    // A list still out will open the tab it was started for, so Refresh reads
+    // that tab again; `diffPath` may still name the file from before it.
+    const preferred = current.diffListPath ?? current.diffPath;
     if (current.diffSource === "branch") {
-      await loadBranch(current.diffPath);
+      await loadBranch(preferred);
     } else if (current.diffSource === "commit") {
-      await loadCommit(current.diffPath);
+      await loadCommit(preferred);
     }
   }, [beginDiffRequest, loadBranch, loadCommit]);
 

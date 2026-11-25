@@ -67,6 +67,11 @@ settings. They cannot answer the agent's questions or approvals, change the
 model or permission mode, fork, revert, stop a turn, or run anything. Their
 composer names the thread's model but cannot change it.
 
+An agent error reaches the owner with its full diagnostic, which can name the
+workspace or a path on this machine. The guest sees a plain "The agent hit an
+error." instead, plus whether trying again is safe, so a startup failure's
+absolute path never leaves the machine.
+
 **Anything the agent read or printed can show**, such as a value from a file or
 a command's output. Tool output is part of the conversation. Share only threads
 you are comfortable showing to that person.
@@ -123,6 +128,42 @@ other message in the thread.
 The guest's text and files run with the thread's current permission mode once
 you send them. Check them first, as you would anything pasted from a chat.
 
+Over Connect a message's files are never uploaded before the daemon agrees to
+the exchange. A current daemon marks its relay socket as one that sends a hello,
+then says on that hello that it admits uploads. Until that hello arrives the
+socket is unknown, and Connect never streams to an unknown socket: the guest
+gets a retryable busy answer and the exchange is cancelled, so a hello that
+arrives late costs a retry, never an unaccepted body. A hello wakes every
+request waiting for it, so two uploads at once both learn what the daemon
+speaks. Once the hello names admission, Connect asks first and streams no body
+until that answer arrives; a refused message is answered without reading a byte
+of its body, and a current daemon that goes quiet is an error whose slot is
+released by a cancel rather than at the idle timeout. The whole exchange is
+pinned to the one relay socket it started on: capability, admission, the request
+and every chunk. If the daemon reconnects mid-upload, the exchange fails with a
+retryable answer instead of streaming to a socket whose hello and admission are
+unknown, and the capability is read once more as the deadline passes so a hello
+that arrives in that instant is still an answer. A socket opened by a build
+that predates hellos, or a hello that omits admission, keeps the bounded legacy
+path and that build's short pre-authorization buffer. The daemon holds a
+separate upload slot from the moment it admits the body until the body is
+complete, so a browser that trickles an upload never takes the slot a state read
+or a snapshot needs, and a browser that disappears gives its slot back at the
+next ping. A cancel releases that slot at once, even while the link check or the
+relay's outbound queue is still busy, and the admitted state is written before
+the go-ahead leaves, so the pre-authorization cap covers only bytes that arrived
+before authorization; a refusal gives the slot back before its answer waits for
+queue room. A chunk that waited for queue capacity is checked against its pinned
+connection once more as it is enqueued, so it can never enter a socket the
+daemon has replaced. A session belongs to the sockets that opened it: when the
+daemon reconnects, the replaced socket still closes its own sessions and tells
+the other device, and its frames can no longer reach the replacement under the
+old session. The replacement's presence is not overwritten by the old socket's
+close: presence updates are serialised per device and check the connection they
+belong to as they are written. A completed body keeps its slot until its answer
+actually holds a work slot, so uploads cannot pile up past the cap while every
+work slot is busy.
+
 ## What the daemon enforces
 
 The guest page is a small HTTP surface, not the device WebSocket protocol. Every
@@ -135,15 +176,60 @@ is read, requires a same-origin JSON POST, reserves the pending quota before it
 writes any file, and publishes the request only after the files are written. A
 request is written in two steps: a row that holds the quota and its files, then
 the card above your composer. Startup finishes or discards a request interrupted
-between them, so there is never a row that uses quota without a card. If the
+between them, so there is never a row that uses quota without a card. The card
+and the placement it causes exist only once the journal holds them: a failed
+append restores the state you last saw, so a publication that never happened
+leaves no pending count behind. The card is published only once its row says
+`pending`, the state Send and Dismiss claim, so a card you can see can always
+be answered; a failed last step publishes nothing and leaves the row for the
+sweep, which finishes it or discards it with its files when the link is gone,
+and a snapshot hides a journaled card whose row is not answerable yet. A Send
+or reservation interrupted by a shutdown
+is answered from the thread itself: the message carries the request's id in its
+item id, so recovery asks the journal before it decides anything about the link.
+A message that reached the thread resolves as sent, even when the link expired
+while the daemon was down; a row claimed before the append, whose message never
+arrived, resolves as dismissed and its files are removed. The item id travels
+with the message through the thread's queue, so a Send that arrives while the
+agent is working waits in the queue under the same id, is promoted under it, and
+a restart while it waits, while it may have been delivered or after it was taken
+still answers sent, never dismissed. A prompt whose append failed is not queued
+for delivery, so retrying a Send delivers it once, and the
+thread is left exactly as you last saw it: not Working with a turn nothing will
+deliver, and keeping the pause and auto-resume a limit had armed. A Send
+also records the attachment references it takes for the thread, so a crash
+between that step and the append releases exactly those references and the
+per-thread copy, without touching a file an earlier message of the same thread
+already uses. In both cases its resolution is raised and the row stays while the
+link lives, so the same browser's next poll clears its card; a row whose link is
+already gone is dropped once its answer is raised. A refused
+submission whose files cannot be removed keeps a cleanup record until the sweep
+retries, rather than losing the only row that names those files. If the
 link ended, expired, the Labs switch turned off or the thread settled while the
 files were being written, publication is refused and the files and row are
-deleted.
+deleted. The last placement check and the card's append happen under the same
+thread record lock, so a settle commits either before the check (and the card is
+refused) or after the card (and the settle hook resolves it); a settled thread
+never keeps an unanswerable card.
+
+A state read is answered under the link that allowed it, and the link is checked
+again after the journal was read. Stopping or replacing the link while a poll is
+in flight refuses that poll instead of delivering events recorded after your
+decision.
 
 Send, Dismiss and every cleanup pass claim a request with one conditional
 update, so a message can never be both sent and dismissed, and the sweep can
 never pull the files out from under a Send that already claimed them, even when
-it read the row just before that Send claimed it. A submission or a Send runs to
+it read the row just before that Send claimed it. A finished request keeps its
+row until its link ends, so a guest that polls after you dismissed its message
+still learns that the card resolved, and while the link lives a sweep also
+retries removing files a refused disk left behind. The answer is durable: if writing its event
+fails, the row records that it is still owed, and the sweep, a restart and Stop
+sharing all re-emit it before the row can go. Each answer is journaled once: the
+writer claims the row's marker before it appends, so a Dismiss and a sweep that
+both hold the finished row cannot each emit it. Ending the link only drops a
+finished row once both its files are gone and its answer is on the wire; anything
+else stays a cleanup record for the next sweep. A submission or a Send runs to
 completion on the daemon while it keeps running, even if the guest's browser
 disconnects or the owner's connection drops while it is writing, so a dropped
 connection cannot strand a half-written
@@ -182,6 +268,11 @@ public `/guest/<machine>/<token>` prefix. Every relayed answer is sandboxed with
 is sent as a download instead of opening in Connect's tab. Request and response
 bodies travel in bounded 512 KB frames, so a 10 MB upload never grows a shared
 relay socket frame; Connect refuses an exchange over the guest limit before it
-reaches the socket. Guest routes are traced by their template
+reaches the socket. A daemon announces on its relay hello that it admits uploads,
+and Connect waits for that admission frame before an upload's first chunk, so a
+request the daemon will refuse costs no body frames. A daemon that does not
+announce it keeps the older short wait and its own bounded buffer. If a relayed
+exchange fails or its answer times out, Connect forgets both its waiter and any
+half-arrived chunked body. Guest routes are traced by their template
 (`/guest/{token}/state`), never by the raw URI, so the token does not appear in
 logs.

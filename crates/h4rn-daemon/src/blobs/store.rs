@@ -183,6 +183,23 @@ pub trait AttachmentResolver: Send + Sync {
         thread_id: &ThreadId,
         ids: &[AttachmentId],
     ) -> Result<Vec<Attachment>, BlobError>;
+
+    /// Resolves the ids for a guest Send on behalf of `holder`.
+    ///
+    /// The references are recorded under `holder` in the same transaction that
+    /// takes them, so an interrupted Send can either confirm exactly the
+    /// references it took or release exactly those, never a reference another
+    /// message of the same thread already held. A resolver that cannot track
+    /// holds keeps the plain behaviour.
+    async fn resolve_for(
+        &self,
+        thread_id: &ThreadId,
+        ids: &[AttachmentId],
+        holder: &str,
+    ) -> Result<Vec<Attachment>, BlobError> {
+        let _ = holder;
+        self.resolve(thread_id, ids).await
+    }
 }
 
 /// The daemon's content-addressed blob store.
@@ -282,6 +299,22 @@ impl BlobStore {
                 thread_id TEXT NOT NULL,
                 refs      INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (blob_id, thread_id)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        // References a guest Send has taken for its thread but not yet
+        // confirmed by an append. The holder names the request, so recovery can
+        // release exactly what that Send took even when the same file is also
+        // attached to an earlier message in the thread. A hold is one reference
+        // per blob: taking it again for a retry is a no-op, so release always
+        // gives back exactly what was taken.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS blob_holds (
+                holder    TEXT NOT NULL,
+                blob_id   TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                PRIMARY KEY (holder, blob_id)
             )",
         )
         .execute(&self.pool)
@@ -675,18 +708,14 @@ impl BlobStore {
         let blob_path = self.blob_path(id);
         thumbnail_beside(&blob_path)
     }
-}
 
-#[async_trait]
-impl AttachmentResolver for BlobStore {
-    async fn resolve(
+    /// Looks up the blobs and writes the per-thread copy for each, without
+    /// taking a reference yet.
+    async fn materialise(
         &self,
         thread_id: &ThreadId,
         ids: &[AttachmentId],
     ) -> Result<Vec<Attachment>, BlobError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
         let directory = self.attachments_root.join(thread_id.as_str());
         create_private_dir(&directory)?;
 
@@ -706,7 +735,6 @@ impl AttachmentResolver for BlobStore {
                     std::fs::copy(&source, &destination)?;
                 }
             }
-            self.retain(thread_id, id).await?;
             resolved.push(Attachment {
                 id: id.clone(),
                 name: info.name,
@@ -715,6 +743,167 @@ impl AttachmentResolver for BlobStore {
                 local_path: destination.to_string_lossy().into_owned(),
             });
         }
+        Ok(resolved)
+    }
+
+    /// Removes one thread's copy of a blob, if this store materialised it.
+    fn remove_thread_copy(&self, thread_id: &str, id: &AttachmentId) {
+        let prefix = format!("{}-", &id.as_str()[..8]);
+        let directory = self.attachments_root.join(thread_id);
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// Drops the references held under `holder`, freeing what they kept alive.
+    ///
+    /// Only references recorded as taken are released, so recovery after a
+    /// crash can never decrement a reference an earlier message of the same
+    /// thread still needs. The per-thread copy goes once nothing else in the
+    /// thread references that blob.
+    pub async fn release_holds(&self, holder: &str) -> Result<usize, BlobError> {
+        let holds: Vec<(String, String)> =
+            sqlx::query_as("SELECT blob_id, thread_id FROM blob_holds WHERE holder = ?")
+                .bind(holder)
+                .fetch_all(&self.pool)
+                .await?;
+        let mut released = 0;
+        for (blob_id, thread_id) in holds {
+            let mut transaction = self.pool.begin().await?;
+            // The delete is the claim: a concurrent release or confirm that
+            // already took this hold must not decrement its reference twice.
+            let claimed = sqlx::query("DELETE FROM blob_holds WHERE holder = ? AND blob_id = ?")
+                .bind(holder)
+                .bind(&blob_id)
+                .execute(&mut *transaction)
+                .await?;
+            if claimed.rows_affected() == 0 {
+                transaction.rollback().await?;
+                continue;
+            }
+            sqlx::query("UPDATE blobs SET refcount = MAX(refcount - 1, 0) WHERE id = ?")
+                .bind(&blob_id)
+                .execute(&mut *transaction)
+                .await?;
+            let remaining = sqlx::query(
+                "UPDATE blob_thread_refs SET refs = MAX(refs - 1, 0)
+                 WHERE blob_id = ? AND thread_id = ?",
+            )
+            .bind(&blob_id)
+            .bind(&thread_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            let refs: i64 = if remaining == 0 {
+                0
+            } else {
+                sqlx::query_scalar(
+                    "SELECT refs FROM blob_thread_refs WHERE blob_id = ? AND thread_id = ?",
+                )
+                .bind(&blob_id)
+                .bind(&thread_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .unwrap_or(0)
+            };
+            if refs <= 0 {
+                sqlx::query("DELETE FROM blob_thread_refs WHERE blob_id = ? AND thread_id = ?")
+                    .bind(&blob_id)
+                    .bind(&thread_id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            transaction.commit().await?;
+            if refs <= 0 {
+                self.remove_thread_copy(&thread_id, &AttachmentId::new(blob_id));
+            }
+            released += 1;
+        }
+        Ok(released)
+    }
+
+    /// Forgets `holder`'s holds without releasing them: the append committed,
+    /// so the references now belong to the message they staged for.
+    pub async fn confirm_holds(&self, holder: &str) -> Result<(), BlobError> {
+        sqlx::query("DELETE FROM blob_holds WHERE holder = ?")
+            .bind(holder)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AttachmentResolver for BlobStore {
+    async fn resolve(
+        &self,
+        thread_id: &ThreadId,
+        ids: &[AttachmentId],
+    ) -> Result<Vec<Attachment>, BlobError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let resolved = self.materialise(thread_id, ids).await?;
+        for id in ids {
+            self.retain(thread_id, id).await?;
+        }
+        Ok(resolved)
+    }
+
+    async fn resolve_for(
+        &self,
+        thread_id: &ThreadId,
+        ids: &[AttachmentId],
+        holder: &str,
+    ) -> Result<Vec<Attachment>, BlobError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let resolved = self.materialise(thread_id, ids).await?;
+        // One transaction takes every reference and records it, so a crash
+        // leaves either the whole hold or none of it and recovery releases
+        // exactly what was taken.
+        let mut transaction = self.pool.begin().await?;
+        for id in ids {
+            let already: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM blob_holds WHERE holder = ? AND blob_id = ?")
+                    .bind(holder)
+                    .bind(id.as_str())
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            if already.is_some() {
+                // A retry after a failed append may have kept the hold when its
+                // release failed: the reference is already this request's.
+                continue;
+            }
+            let updated = sqlx::query("UPDATE blobs SET refcount = refcount + 1 WHERE id = ?")
+                .bind(id.as_str())
+                .execute(&mut *transaction)
+                .await?;
+            if updated.rows_affected() == 0 {
+                return Err(BlobError::NotFound(id.to_string()));
+            }
+            sqlx::query(
+                "INSERT INTO blob_thread_refs (blob_id, thread_id, refs) VALUES (?, ?, 1)
+                 ON CONFLICT(blob_id, thread_id) DO UPDATE SET refs = refs + 1",
+            )
+            .bind(id.as_str())
+            .bind(thread_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("INSERT INTO blob_holds (holder, blob_id, thread_id) VALUES (?, ?, ?)")
+                .bind(holder)
+                .bind(id.as_str())
+                .bind(thread_id.as_str())
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
         Ok(resolved)
     }
 }

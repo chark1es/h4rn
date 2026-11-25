@@ -452,6 +452,11 @@ impl ConnectClient {
             query.append_pair("proof", &proof);
             query.append_pair("timestamp", &timestamp.to_string());
             query.append_pair("nonce", &nonce);
+            // This socket sends a relay hello before any guest exchange. The
+            // marker is the connection's protocol, not a version guess: the
+            // relay fails closed for a marked socket whose hello is late, and
+            // keeps the legacy upload path only for a socket without it.
+            query.append_pair("hello", "1");
         }
         Ok(url.to_string())
     }

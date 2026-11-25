@@ -362,6 +362,13 @@ struct SendWork {
     ceiling: Option<RuntimeMode>,
     /// The outside grant whose work this message does, when one sent it.
     grant: Option<WorkGrant>,
+    /// The transcript item id this message must be journaled under.
+    ///
+    /// Only a guest Send names one: the id proves in the journal that this
+    /// exact message reached the thread, so recovery can answer the guest from
+    /// the journal. It also names the attachment hold, and it travels with a
+    /// queued row so a prompt that waits and is promoted later keeps it.
+    item_id: Option<String>,
 }
 
 /// Result of one queue change or read.
@@ -3470,13 +3477,42 @@ impl ThreadManager {
     ///
     /// The lifecycle raises a hand and wakes a snoozed thread, and the wire
     /// carries the request itself so every client can render the card.
+    ///
+    /// Placement is checked here, under the same thread-record lock that
+    /// appends the card. A settle commits under that lock too, so it cannot
+    /// slip between a check and the event that makes the card answerable.
     pub async fn emit_guest_request(
         &self,
         thread_id: &ThreadId,
         request: h4rn_protocol::GuestRequest,
     ) -> Result<u64, ManagerError> {
+        self.emit_guest_request_then(thread_id, request, || async { Ok(()) })
+            .await
+    }
+
+    /// [`Self::emit_guest_request`] with another durable half of the decision.
+    ///
+    /// `commit` runs once the journal owns the card and before any client can
+    /// see it. A guest submission makes its row say `pending` there, so a card
+    /// is never broadcast for a request Send or Dismiss would refuse as gone.
+    pub async fn emit_guest_request_then<F, Fut>(
+        &self,
+        thread_id: &ThreadId,
+        request: h4rn_protocol::GuestRequest,
+        commit: F,
+    ) -> Result<u64, ManagerError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), ManagerError>>,
+    {
         let handle = self.inner.handle(thread_id).await?;
         let mut record = handle.lock().await;
+        let tab = record.summary(&self.inner.options.settings, self.now()).tab;
+        if tab == h4rn_protocol::ThreadTab::Settled {
+            return Err(ManagerError::Conflict(
+                "This thread has settled. The owner can share it again after reopening it.".into(),
+            ));
+        }
         let now = self.now();
         let domain = vec![
             ThreadEvent::MessageReceived {
@@ -3492,10 +3528,40 @@ impl ThreadManager {
             thread_id: thread_id.clone(),
             request,
         }];
-        self.inner
-            .emit(&mut record, domain, wire)
+        let before = record.state.clone();
+        match self
+            .inner
+            .commit_emit(&mut record, domain, wire, commit)
             .await
-            .map(|(_, seq)| seq)
+        {
+            Ok((_, seq)) => Ok(seq),
+            Err(error) => {
+                record.state = before;
+                Err(error)
+            }
+        }
+    }
+
+    /// Appends a guest card's lifecycle change, keeping the record honest when
+    /// the write fails.
+    ///
+    /// The card and the placement it causes exist only once the journal holds
+    /// them. A failed append therefore restores the state the owner last saw:
+    /// no pending count can outlive the publication that never happened.
+    async fn emit_guest_card(
+        &self,
+        record: &mut ThreadRecord,
+        domain: Vec<ThreadEvent>,
+        wire: Vec<Event>,
+    ) -> Result<u64, ManagerError> {
+        let before = record.state.clone();
+        match self.inner.emit(record, domain, wire).await {
+            Ok((_, seq)) => Ok(seq),
+            Err(error) => {
+                record.state = before;
+                Err(error)
+            }
+        }
     }
 
     /// Records that a guest request was sent or dismissed.
@@ -3517,10 +3583,9 @@ impl ThreadManager {
             request_id: request_id.to_owned(),
             sent,
         }];
-        self.inner
-            .emit(&mut record, domain, wire)
-            .await
-            .map(|(_, seq)| seq)
+        // A resolution that never reached the journal must not take the card
+        // out of the owner's view; the row re-emits it on the next sweep.
+        self.emit_guest_card(&mut record, domain, wire).await
     }
 
     /// Drops approvals that a finished child leaves behind.
@@ -3779,7 +3844,7 @@ impl ThreadManager {
             .unwrap_or_else(ThreadId::new_uuid_v7);
         let resolved_attachments = self
             .inner
-            .resolve_attachments(&thread_id, &request.attachments)
+            .resolve_attachments(&thread_id, &request.attachments, None)
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
         // Worktree creation is the last fallible setup: once the checkout
@@ -4643,6 +4708,106 @@ impl ThreadManager {
         .await
     }
 
+    /// Appends a guest's message with an item id that names its request.
+    ///
+    /// The id is the durable proof that the message reached the thread: a
+    /// guest request claimed but interrupted before this call has no item, and
+    /// one whose append returned has it. Recovery reads the journal instead of
+    /// trusting a marker written apart from the append, so the guest is never
+    /// told a message was sent that its thread never received.
+    ///
+    /// The id travels with the work, so a prompt that waits in the queue and is
+    /// promoted later is journaled under the same id, and the attachment
+    /// references it stages are held under it until the thread keeps them.
+    pub async fn send_guest_message(
+        &self,
+        thread_id: &ThreadId,
+        text: String,
+        attachments: Vec<AttachmentId>,
+        request_id: &str,
+    ) -> Result<AcceptedMessage, ManagerError> {
+        self.send_message_with_work(
+            thread_id,
+            text,
+            attachments,
+            SendWork {
+                mode: SendMode::Queue,
+                item_id: Some(guest_item_id(request_id)),
+                ..SendWork::default()
+            },
+        )
+        .await
+    }
+
+    /// Whether a guest request's message is in the thread's journal.
+    ///
+    /// The journal is the record of what the thread received, so this is the
+    /// only honest answer to "was this request accepted". A message the thread
+    /// holds as a transcript item, or as a durable queue row waiting for its
+    /// turn (or a delivery claim for one that started), is accepted: it is in
+    /// the journal's record of the thread and a restart keeps it. A thread that
+    /// no longer exists cannot hold the message.
+    pub async fn guest_message_in_thread(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<bool, ManagerError> {
+        let item_id = guest_item_id(request_id);
+        let handle = self.inner.handle(thread_id).await?;
+        {
+            let record = handle.lock().await;
+            let named = |stored: &StoredQueuedMessage| stored.item_id.as_deref() == Some(&item_id);
+            if record.meta.queued.iter().any(named)
+                || record
+                    .meta
+                    .claimed
+                    .iter()
+                    .any(|claim| named(&claim.message))
+            {
+                return Ok(true);
+            }
+        }
+        let events = self
+            .inner
+            .journal
+            .read_wire_since(thread_id, 0)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        Ok(events.into_iter().any(|entry| {
+            matches!(
+                entry.event,
+                Event::ItemCompleted {
+                    item: Item::Message { item_id: id, .. },
+                    ..
+                } if id == item_id
+            )
+        }))
+    }
+
+    /// Whether the thread's journal holds a guest card for `request_id`.
+    ///
+    /// A publication journals its card before the row can be answered, so a
+    /// caller whose publication failed can tell the two halves apart: a card
+    /// the sweep still has to finish, or a submission that never existed.
+    pub async fn guest_card_in_thread(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<bool, ManagerError> {
+        let events = self
+            .inner
+            .journal
+            .read_wire_since(thread_id, 0)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        Ok(events.into_iter().any(|entry| {
+            matches!(
+                entry.event,
+                Event::GuestRequested { request, .. } if request.request_id == request_id
+            )
+        }))
+    }
+
     /// [`Self::send_message_with`] with a grant's ceiling and identity.
     async fn send_message_with_work(
         &self,
@@ -4656,11 +4821,12 @@ impl ThreadManager {
             turn_id,
             ceiling,
             grant,
+            item_id,
         } = work;
         let handle = self.inner.handle(thread_id).await?;
         let resolved_attachments = self
             .inner
-            .resolve_attachments(thread_id, &attachments)
+            .resolve_attachments(thread_id, &attachments, item_id.as_deref())
             .await?;
         let harness_attachments = harness_refs(&resolved_attachments);
 
@@ -4745,6 +4911,7 @@ impl ThreadManager {
                             },
                             ceiling,
                             grant: grant.clone(),
+                            item_id: item_id.clone(),
                         };
                         let claim_index = record.meta.queued.len() as u32;
                         record.meta.claimed.push(QueuedClaim {
@@ -4855,7 +5022,7 @@ impl ThreadManager {
                         thread_id: thread_id.clone(),
                         turn_id: active_turn_id.clone(),
                         item: Item::Message {
-                            item_id: fresh_item_id("user"),
+                            item_id: item_id.clone().unwrap_or_else(|| fresh_item_id("user")),
                             role: MessageRole::User,
                             text,
                             attachments: resolved_attachments,
@@ -4968,6 +5135,7 @@ impl ThreadManager {
                 message: queued.clone(),
                 ceiling,
                 grant,
+                item_id,
             });
             record.note_queue_change();
             domain.push(ThreadEvent::MessageReceived {
@@ -5031,12 +5199,17 @@ impl ThreadManager {
             // a moment later.
             drop(record);
             drop(_switch);
-            return Box::pin(self.send_message_for_work(
+            return Box::pin(self.send_message_with_work(
                 thread_id,
                 text,
                 attachments,
-                ceiling,
-                grant,
+                SendWork {
+                    mode: SendMode::Queue,
+                    ceiling,
+                    grant,
+                    item_id,
+                    ..SendWork::default()
+                },
             ))
             .await;
         }
@@ -5065,6 +5238,7 @@ impl ThreadManager {
                 message: queued.clone(),
                 ceiling,
                 grant,
+                item_id,
             });
             let front = record.meta.queued.remove(0);
             record.note_queue_change();
@@ -5077,7 +5251,7 @@ impl ThreadManager {
                 now,
                 queued_input(&front.message),
                 front.ceiling,
-                front.grant,
+                front.grant.clone(),
             );
             let turn_id = dispatch.turn_id.clone();
             record.meta.claimed.push(QueuedClaim {
@@ -5102,7 +5276,7 @@ impl ThreadManager {
                 ThreadEvent::TurnStarted { at: now },
             ]);
             let wire = vec![
-                queued_item_event(thread_id, &turn_id, &front.message),
+                stored_item_event(thread_id, &turn_id, &front),
                 Event::TurnStarted {
                     thread_id: thread_id.clone(),
                     turn_id: turn_id.clone(),
@@ -5178,7 +5352,7 @@ impl ThreadManager {
                 thread_id: thread_id.clone(),
                 turn_id: turn_id.clone(),
                 item: Item::Message {
-                    item_id: user_item_id(&turn_id),
+                    item_id: item_id.clone().unwrap_or_else(|| user_item_id(&turn_id)),
                     role: MessageRole::User,
                     text: text.clone(),
                     attachments: resolved_attachments,
@@ -5243,7 +5417,7 @@ impl ThreadManager {
             QueueAction::Edit { text, attachments } => {
                 let resolved = self
                     .inner
-                    .resolve_attachments(thread_id, &attachments)
+                    .resolve_attachments(thread_id, &attachments, None)
                     .await?;
                 let mut record = handle.lock().await;
                 if record.closed {
@@ -5581,7 +5755,10 @@ impl ThreadManager {
                 at: now,
             });
             let item = Item::Message {
-                item_id: fresh_item_id("user"),
+                item_id: message
+                    .item_id
+                    .clone()
+                    .unwrap_or_else(|| fresh_item_id("user")),
                 role: MessageRole::User,
                 text: message.message.text.clone(),
                 attachments: message.message.attachments.clone(),
@@ -5773,7 +5950,7 @@ impl ThreadManager {
             now,
             queued_input(&promoted.message),
             promoted.ceiling,
-            promoted.grant,
+            promoted.grant.clone(),
         );
         let turn_id = dispatch.turn_id.clone();
         // Removing the row and recording its delivery claim are one append: a
@@ -5794,7 +5971,7 @@ impl ThreadManager {
             ThreadEvent::TurnStarted { at: now },
         ]);
         let wire = vec![
-            queued_item_event(thread_id, &turn_id, &promoted.message),
+            stored_item_event(thread_id, &turn_id, &promoted),
             Event::TurnStarted {
                 thread_id: thread_id.clone(),
                 turn_id: turn_id.clone(),
@@ -7567,6 +7744,7 @@ impl Inner {
         &self,
         thread_id: &ThreadId,
         ids: &[AttachmentId],
+        hold: Option<&str>,
     ) -> Result<Vec<Attachment>, ManagerError> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -7576,15 +7754,19 @@ impl Inner {
                 "this daemon has no attachment store".into(),
             ));
         };
-        resolver
-            .resolve(thread_id, ids)
-            .await
-            .map_err(|error| match error {
-                BlobError::NotFound(id) => ManagerError::InvalidRequest(format!(
-                    "attachment {id} is no longer available; upload it again"
-                )),
-                other => ManagerError::Internal(other.to_string()),
-            })
+        let resolved = match hold {
+            // A guest Send records exactly the references it takes, so an
+            // interrupted Send releases those and nothing an earlier message
+            // of the same thread already holds.
+            Some(holder) => resolver.resolve_for(thread_id, ids, holder).await,
+            None => resolver.resolve(thread_id, ids).await,
+        };
+        resolved.map_err(|error| match error {
+            BlobError::NotFound(id) => ManagerError::InvalidRequest(format!(
+                "attachment {id} is no longer available; upload it again"
+            )),
+            other => ManagerError::Internal(other.to_string()),
+        })
     }
 
     async fn handle(&self, thread_id: &ThreadId) -> Result<ThreadHandle, ManagerError> {
@@ -7649,14 +7831,26 @@ impl Inner {
         }
     }
 
-    /// Applies `domain` to the lifecycle state, appends both logs, broadcasts,
-    /// and returns the new summary.
-    async fn emit(
+    /// Applies `domain`, appends both logs, runs `commit`, then broadcasts.
+    ///
+    /// The append is the decision; `commit` is another durable half of the same
+    /// decision, made here so no client hears about events the rest of the
+    /// system does not yet agree with. A guest card uses it for its row: the
+    /// card must not reach the owner while the row still says the request
+    /// cannot be answered. `commit` runs under the emit lock, after the journal
+    /// owns the events and before any broadcast, so a failed commit publishes
+    /// nothing; the caller restores what the failed commit left behind.
+    async fn commit_emit<F, Fut>(
         &self,
         record: &mut ThreadRecord,
         domain: Vec<ThreadEvent>,
         mut wire: Vec<Event>,
-    ) -> Result<(ThreadSummary, u64), ManagerError> {
+        commit: F,
+    ) -> Result<(ThreadSummary, u64), ManagerError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), ManagerError>>,
+    {
         for event in &domain {
             record.state = record.state.clone().apply(event);
         }
@@ -7684,10 +7878,23 @@ impl Inner {
             .append(&record.meta, &domain, &wire)
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        commit().await?;
         self.broadcast(&record.meta.thread_id, &wire, &seqs);
         record.last_signature = Some(SummarySignature::of(&summary));
         let seq = seqs.last().copied().unwrap_or(0);
         Ok((summary, seq))
+    }
+
+    /// Applies `domain` to the lifecycle state, appends both logs, broadcasts,
+    /// and returns the new summary.
+    async fn emit(
+        &self,
+        record: &mut ThreadRecord,
+        domain: Vec<ThreadEvent>,
+        wire: Vec<Event>,
+    ) -> Result<(ThreadSummary, u64), ManagerError> {
+        self.commit_emit(record, domain, wire, || async { Ok(()) })
+            .await
     }
 
     /// Writes a queue that a failed steer put back, retrying the append.
@@ -8303,7 +8510,7 @@ impl Inner {
                 now,
                 queued_input(&promoted.message),
                 promoted.ceiling,
-                promoted.grant,
+                promoted.grant.clone(),
             );
             // This turn is the daemon's next step, not a person's Send: if the
             // transport it inherits dies before it runs, it goes back to the
@@ -8324,10 +8531,10 @@ impl Inner {
             });
             attempt_domain.push(ThreadEvent::TurnQueued { at: now });
             attempt_domain.push(ThreadEvent::TurnStarted { at: now });
-            attempt_wire.push(queued_item_event(
+            attempt_wire.push(stored_item_event(
                 &record.meta.thread_id,
                 &next_id,
-                &promoted.message,
+                &promoted,
             ));
             attempt_wire.push(Event::TurnStarted {
                 thread_id: record.meta.thread_id.clone(),
@@ -12315,6 +12522,16 @@ fn user_item_id(turn_id: &TurnId) -> String {
     format!("item_user_{}", turn_suffix(turn_id))
 }
 
+/// The item id a guest request's message is journaled under.
+///
+/// It names the request, so recovery can ask the journal whether that message
+/// is in the thread: the stored row alone cannot tell an append that happened
+/// from one that was interrupted. The same name is the holder its attachment
+/// references are staged under until the append confirms them.
+pub(crate) fn guest_item_id(request_id: &str) -> String {
+    format!("item_guest_{request_id}")
+}
+
 /// Trims a requested effort and treats blank as "the harness default".
 fn normalize_effort(effort: Option<String>) -> Option<String> {
     effort
@@ -12471,15 +12688,25 @@ fn queued_input(message: &QueuedMessage) -> UserInput {
 }
 
 /// The transcript row a queued message gets when its turn starts.
-fn queued_item_event(thread_id: &ThreadId, turn_id: &TurnId, message: &QueuedMessage) -> Event {
+///
+/// A guest prompt keeps the item id its request named, so the journal still
+/// proves that exact message reached the thread after it waited in the queue.
+fn stored_item_event(
+    thread_id: &ThreadId,
+    turn_id: &TurnId,
+    stored: &StoredQueuedMessage,
+) -> Event {
     Event::ItemCompleted {
         thread_id: thread_id.clone(),
         turn_id: turn_id.clone(),
         item: Item::Message {
-            item_id: user_item_id(turn_id),
+            item_id: stored
+                .item_id
+                .clone()
+                .unwrap_or_else(|| user_item_id(turn_id)),
             role: MessageRole::User,
-            text: message.text.clone(),
-            attachments: message.attachments.clone(),
+            text: stored.message.text.clone(),
+            attachments: stored.message.attachments.clone(),
         },
         at: None,
     }
@@ -12898,6 +13125,36 @@ mod tests {
                 return turn_id;
             }
         }
+    }
+
+    /// The journal's stored record of one thread.
+    async fn persisted_meta(journal: &Arc<dyn Journal>, thread_id: &ThreadId) -> ThreadMeta {
+        journal
+            .list_threads()
+            .await
+            .expect("the journal")
+            .into_iter()
+            .find(|meta| &meta.thread_id == thread_id)
+            .expect("the thread's metadata")
+    }
+
+    /// Whether the thread's journal holds a transcript message with `item_id`.
+    async fn journaled_item(manager: &ThreadManager, thread_id: &ThreadId, item_id: &str) -> bool {
+        manager
+            .get_thread(thread_id, 0)
+            .await
+            .expect("the thread's events")
+            .events
+            .iter()
+            .any(|entry| {
+                matches!(
+                    &entry.event,
+                    Event::ItemCompleted {
+                        item: Item::Message { item_id: id, .. },
+                        ..
+                    } if id == item_id
+                )
+            })
     }
 
     async fn open_test_manager(harness: FakeHarness, host: HostId) -> ThreadManager {
@@ -19746,6 +20003,521 @@ mod tests {
                 .expect("the released turn completed instead of being stranded");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Completed);
+    }
+
+    /// A guest prompt whose append failed is not left queued for delivery.
+    ///
+    /// The card goes back to `pending` for a retry, so the prompt must not stay
+    /// behind the running turn: the turn would promote it, and the retry would
+    /// deliver the same message twice.
+    #[tokio::test]
+    async fn a_failed_guest_append_leaves_nothing_to_deliver() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let (harness, sends) = harness.with_send_count();
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "guest"))
+            .await
+            .expect("create");
+        let thread_id = created.thread_id.clone();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The thread is working: the second prompt is held in the harness
+        // write, so a guest prompt would queue behind it.
+        manager
+            .send_message(&thread_id, "holding".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            wait_until(|| sends.get() == 2).await,
+            "the running turn's prompt never reached the harness"
+        );
+
+        journal.fail_next_appends(1);
+        let error = manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await;
+        assert!(
+            error.is_err(),
+            "the injected journal failure was not reported"
+        );
+        assert_eq!(
+            manager.thread_queue_len(&thread_id).await,
+            Some(0),
+            "a guest prompt whose append failed was left queued for delivery"
+        );
+        assert!(
+            !manager
+                .guest_message_in_thread(&thread_id, "req-1")
+                .await
+                .expect("read the journal"),
+            "a failed append reached the journal"
+        );
+
+        // The retry commits and the running turn promotes it once.
+        manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await
+            .expect("retry");
+        assert_eq!(manager.thread_queue_len(&thread_id).await, Some(1));
+        gate.release();
+        assert!(
+            wait_until(|| sends.get() >= 3).await,
+            "the retried guest prompt never reached the harness"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if manager.thread_queue_len(&thread_id).await == Some(0)
+                    && !manager.turn_in_flight(&thread_id).await
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the thread never went idle");
+        assert_eq!(sends.get(), 3, "the guest prompt reached the harness twice");
+    }
+
+    /// A guest prompt whose append failed on an idle thread leaves no turn.
+    ///
+    /// The card goes back to `pending`, so the thread must look exactly as it
+    /// did: leaving the turn active would keep it Working with nothing to
+    /// deliver, and the retry would queue behind that turn forever.
+    #[tokio::test]
+    async fn a_failed_guest_append_on_an_idle_thread_leaves_no_turn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "guest"))
+            .await
+            .expect("create");
+        let thread_id = created.thread_id.clone();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sends.get(), 1);
+        wait_for_idle(&manager, &thread_id).await;
+        let before = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(before.agent_state, AgentState::Done);
+
+        journal.fail_next_appends(1);
+        let error = manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await;
+        assert!(
+            error.is_err(),
+            "the injected journal failure was not reported"
+        );
+        assert!(
+            !manager.turn_in_flight(&thread_id).await,
+            "a failed append left a turn nothing will deliver"
+        );
+        assert_eq!(manager.thread_queue_len(&thread_id).await, Some(0));
+        // The owner sees exactly the thread it saw before the send, and no
+        // scheduler may skip it as busy on a turn that never existed.
+        let after = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(
+            after.agent_state, before.agent_state,
+            "a failed append left the thread Thinking with no turn"
+        );
+        assert_eq!(
+            after.tab, before.tab,
+            "a failed append moved the thread Working"
+        );
+        assert_eq!(
+            after.resume_at, before.resume_at,
+            "a failed append changed the resume target"
+        );
+        assert!(
+            !manager.thread_is_busy(&thread_id).await,
+            "a failed append left the thread busy with no turn to finish"
+        );
+
+        // The retry is a normal send again, and it delivers the prompt once.
+        manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-1")
+            .await
+            .expect("retry");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sends.get(), 2, "the guest prompt was delivered twice");
+        assert!(
+            manager
+                .guest_message_in_thread(&thread_id, "req-1")
+                .await
+                .expect("read the journal"),
+            "the retried prompt is not in the thread"
+        );
+    }
+
+    /// A failed guest append keeps the auto-resume a limit left armed.
+    ///
+    /// An idle send replaces the pause it finds: the idle path clears the
+    /// limit and resume target and cancels the ledger schedule. If the append
+    /// then fails, all of that must come back, or the thread loses a resume
+    /// nothing would ever fire while it also calls itself busy with no turn.
+    #[tokio::test]
+    async fn a_failed_guest_append_leaves_an_armed_auto_resume_armed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let (harness, injector) = FakeHarness::new().with_event_injector();
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "guest"))
+            .await
+            .expect("create");
+        let thread_id = created.thread_id.clone();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &thread_id).await;
+
+        // The session's exit report arms a pause after its turn settled: the
+        // thread is idle and only the schedule is waiting.
+        injector.emit(HarnessEvent::TransportClosed {
+            message: "the agent exited".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
+            reset_at: Some(reset_at),
+        });
+        let handle = manager
+            .inner
+            .handle(&thread_id)
+            .await
+            .expect("thread handle");
+        assert!(
+            wait_until(|| {
+                handle
+                    .try_lock()
+                    .is_ok_and(|record| record.scheduled_limit.is_some())
+            })
+            .await,
+            "the exit report armed no pause"
+        );
+        let before = manager.thread_summary(&thread_id).await.expect("summary");
+        assert!(
+            before.resume_at.is_some(),
+            "the pause shows no resume target"
+        );
+        assert!(before.limit.is_some(), "the pause shows no limit");
+
+        journal.fail_next_appends(1);
+        let error = manager
+            .send_guest_message(&thread_id, "guest request".into(), Vec::new(), "req-2")
+            .await;
+        assert!(
+            error.is_err(),
+            "the injected journal failure was not reported"
+        );
+
+        let after = manager.thread_summary(&thread_id).await.expect("summary");
+        assert_eq!(
+            after.resume_at, before.resume_at,
+            "a failed append dropped the resume target"
+        );
+        assert_eq!(
+            after.limit, before.limit,
+            "a failed append dropped the limit the pause explains"
+        );
+        assert_eq!(
+            after.agent_state, before.agent_state,
+            "a failed append rewrote the pause as a running turn"
+        );
+        {
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_some(),
+                "a failed append dropped the armed schedule from the record"
+            );
+        }
+        let schedules = meter.schedules().await.expect("read the ledger");
+        assert!(
+            schedules
+                .iter()
+                .any(|schedule| schedule.thread_id == thread_id),
+            "a failed append cancelled the ledger schedule nothing can re-arm"
+        );
+    }
+
+    /// A guest card whose append failed raises no pending count.
+    ///
+    /// The lifecycle events reach the record only once the journal owns them.
+    /// A publication that was refused therefore leaves the thread exactly as
+    /// the owner last saw it, instead of showing a pending guest request that
+    /// has no card and nothing to answer.
+    #[tokio::test]
+    async fn a_failed_guest_publication_leaves_no_pending_count() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let journal = FlakyJournal::in_memory().await;
+        let host = HostId::new("host_test");
+        let manager =
+            open_test_manager_with_journal(FakeHarness::new(), host.clone(), journal.clone()).await;
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+
+        journal.fail_next_appends(1);
+        let error = manager
+            .emit_guest_request(
+                &created.thread_id,
+                h4rn_protocol::GuestRequest {
+                    request_id: "guest-request-1".into(),
+                    thread_id: created.thread_id.clone(),
+                    text: "hello".into(),
+                    attachments: Vec::new(),
+                    created_at: Utc::now(),
+                },
+            )
+            .await;
+        assert!(
+            error.is_err(),
+            "the injected journal failure was not reported"
+        );
+
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary.pending_guest_requests, 0,
+            "a failed publication raised a pending count with no card behind it"
+        );
+        assert_eq!(
+            manager
+                .get_thread(&created.thread_id, 0)
+                .await
+                .expect("snapshot")
+                .events
+                .iter()
+                .filter(|entry| matches!(entry.event, Event::GuestRequested { .. }))
+                .count(),
+            0,
+            "a failed publication reached the journal"
+        );
+    }
+
+    /// A guest prompt that waits in the queue is answered from the journal.
+    ///
+    /// The prompt is queued under the item id its request named and promoted
+    /// under the same id, with the delivery claim the promotion writes. A
+    /// daemon that stopped at each claim state recovers the same answer the
+    /// journal gives: `sent` while the thread owns the message, in its queue or
+    /// as its transcript item, and `dismissed` only for a request that never
+    /// reached the thread.
+    #[tokio::test]
+    async fn a_queued_guest_send_is_recovered_from_the_journal_at_every_claim_state() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, gate) = harness.with_send_gate_after(1);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut request = new_thread(host.clone(), workspace.path(), "guest queue");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        sends.wait_for(1).await;
+        let thread_id = created.thread_id.clone();
+
+        // A turn is running, so the guest's prompt has to wait in the queue.
+        manager
+            .send_guest_message(&thread_id, "guest prompt".into(), Vec::new(), "req-queued")
+            .await
+            .expect("queue the guest prompt");
+        let stored = persisted_meta(&journal, &thread_id).await;
+        assert_eq!(stored.queued.len(), 1, "the guest prompt was not queued");
+        assert_eq!(
+            stored.queued[0].item_id.as_deref(),
+            Some("item_guest_req-queued"),
+            "the queued row lost the item id its request named"
+        );
+        assert!(
+            manager
+                .guest_message_in_thread(&thread_id, "req-queued")
+                .await
+                .expect("read the journal"),
+            "the thread owns a queued guest prompt but calls it unaccepted"
+        );
+        assert!(
+            !journaled_item(&manager, &thread_id, "item_guest_req-queued").await,
+            "a queued guest prompt was journaled as a transcript row before it was sent"
+        );
+
+        // The running turn ends and its settlement promotes the guest prompt.
+        // The adapter's write is held, which is the crash image a `sending`
+        // claim leaves.
+        completion.release();
+        assert!(
+            wait_until(|| sends.get() == 2).await,
+            "the promoted guest prompt was never written"
+        );
+        let crash_image = persisted_meta(&journal, &thread_id).await;
+        assert!(crash_image.queued.is_empty(), "the promotion is durable");
+        assert_eq!(
+            crash_image
+                .claimed
+                .iter()
+                .map(|claim| (claim.state, claim.promoted))
+                .collect::<Vec<_>>(),
+            [(QueuedClaimState::Sending, true)],
+            "the promotion left no delivery record for the guest prompt"
+        );
+        assert_eq!(
+            crash_image.claimed[0].message.item_id.as_deref(),
+            Some("item_guest_req-queued"),
+            "the promoted claim lost the item id"
+        );
+        assert!(
+            journaled_item(&manager, &thread_id, "item_guest_req-queued").await,
+            "the promotion did not journal the guest prompt under its item id"
+        );
+        assert!(
+            manager
+                .guest_message_in_thread(&thread_id, "req-queued")
+                .await
+                .expect("read the journal")
+        );
+
+        // A crash while the adapter's write was in flight (`sending`): the row
+        // comes back as possibly delivered, still under the guest's item id.
+        let (fresh, restarted_sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted = open_test_manager_with_journal(fresh, host.clone(), journal.clone()).await;
+        let queue = restarted
+            .thread_queue(&thread_id, 0)
+            .await
+            .expect("queue after a crash while sending");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("guest prompt", true)],
+            "the crash lost the guest prompt or called it known unsent"
+        );
+        assert!(
+            restarted
+                .guest_message_in_thread(&thread_id, "req-queued")
+                .await
+                .expect("read the journal"),
+            "a guest prompt that may have been delivered was called unaccepted"
+        );
+        assert_eq!(
+            restarted_sends.get(),
+            0,
+            "the restart sent the unsure guest prompt on its own"
+        );
+        restarted.shutdown().await;
+        drop(restarted);
+
+        // A crash before the adapter was called (`claimed`) puts the prompt
+        // back in the queue, still accepted by the thread.
+        // The same crash image with the claim the adapter was never called
+        // for. It is built from the promotion's own image, so no earlier
+        // restart's recovery has rewritten it.
+        let mut meta = crash_image.clone();
+        for claim in &mut meta.claimed {
+            claim.state = QueuedClaimState::Claimed;
+            claim.message.message.delivery_unknown = false;
+        }
+        journal
+            .upsert_thread(&meta)
+            .await
+            .expect("the claimed image");
+        let (fresh, claimed_sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted = open_test_manager_with_journal(fresh, host.clone(), journal.clone()).await;
+        let queue = restarted
+            .thread_queue(&thread_id, 0)
+            .await
+            .expect("queue after a claimed crash");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("guest prompt", false)],
+            "a claimed guest prompt was not put back in the queue"
+        );
+        assert!(
+            restarted
+                .guest_message_in_thread(&thread_id, "req-queued")
+                .await
+                .expect("read the journal"),
+            "a claimed guest prompt was called unaccepted"
+        );
+        assert_eq!(claimed_sends.get(), 0, "a crash re-sent the prompt");
+        restarted.shutdown().await;
+        drop(restarted);
+
+        // A crash after the adapter took it (`delivered`) drops the claim, and
+        // the transcript item is what still proves the message arrived.
+        let mut meta = crash_image.clone();
+        for claim in &mut meta.claimed {
+            claim.state = QueuedClaimState::Delivered;
+        }
+        journal
+            .upsert_thread(&meta)
+            .await
+            .expect("the delivered image");
+        let (fresh, delivered_sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted = open_test_manager_with_journal(fresh, host, journal).await;
+        let queue = restarted
+            .thread_queue(&thread_id, 0)
+            .await
+            .expect("queue after a delivered crash");
+        assert!(
+            queue.queued.is_empty(),
+            "a delivered guest prompt came back to the queue"
+        );
+        assert!(
+            journaled_item(&restarted, &thread_id, "item_guest_req-queued").await,
+            "the delivered guest prompt is not in the journal"
+        );
+        assert!(
+            restarted
+                .guest_message_in_thread(&thread_id, "req-queued")
+                .await
+                .expect("read the journal"),
+            "a delivered guest prompt was called unaccepted"
+        );
+        assert!(
+            !restarted
+                .guest_message_in_thread(&thread_id, "req-never-arrived")
+                .await
+                .expect("read the journal"),
+            "a request that never reached the thread was called accepted"
+        );
+        assert_eq!(
+            delivered_sends.get(),
+            0,
+            "a delivered guest prompt was sent again"
+        );
+        restarted.shutdown().await;
+        // The first manager is still holding the adapter's write, which is the
+        // crash: release it only now, after every restart was read.
+        gate.release();
+        manager.shutdown().await;
     }
 
     /// A release the journal could not record is published on the next tick.
@@ -27453,6 +28225,7 @@ mod tests {
                 },
                 ceiling: None,
                 grant: None,
+                item_id: None,
             },
             index: 0,
             turn_id: TurnId::new_uuid_v7(),

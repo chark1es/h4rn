@@ -63,7 +63,8 @@ reaches git.
 
 Both wider scopes re-read their lists when you enter them, and the **Refresh** button in the diff bar
 reads the branch and commit lists again. A commit the agent made a moment ago appears without a
-reload.
+reload. Refresh keeps the file a list that is still out was started for, as a base or commit change
+does; it never moves the review back to the file from before the load.
 
 ## Review comments
 
@@ -122,7 +123,10 @@ until you press Send. The comments then leave the pane.
   same list twice when you come back (Commits still re-reads its commit list once, then the
   commit's files once), and reopens the tab it was started for even if the editor has moved
   since: the resumed load already opens that file, so the tab follow does not read the same list
-  again. A diff that was opening directly resumes the file it was opening.
+  again. A diff that was opening directly resumes the file it was opening. A base or commit
+  change made while a Branch or Commits list is still loading, or the **Refresh** button pressed
+  then, keeps that list's tab: the new comparison reopens the tab the read was started for, and a
+  round-trip in the middle of it still reads its list once.
 - Binary files and files over the 2 MiB read limit say so instead of showing mojibake, in the diff
   body only: the file list, source bar and comment actions stay usable, so another file or source
   is one click away. Both sides of `HEAD` and commit diffs are size-checked before they are read.

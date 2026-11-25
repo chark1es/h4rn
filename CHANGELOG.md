@@ -677,6 +677,12 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A base or commit change keeps the tab its review was started for.** When a
+  Branch or Commits list is still loading, changing the base or the commit now
+  reopens the tab that list was started for instead of the file from before it,
+  and leaving and returning mid-read still reads that list once. Pressing
+  **Refresh** while a list is still out does the same, so the review never
+  jumps back to the file it was on before the load began.
 - **A replaced transcript is offered as the new conversation it is.** When a
   session's path now holds a transcript with a different explicit session id, the
   scan offers it instead of hiding it behind the old path claim. The stored claim
@@ -756,6 +762,62 @@ All notable changes to h4rn are recorded here. The format follows
   never had a queue row (and the composer keeps the draft until the recovered row appears), and a
   prompt parked by a rate limit keeps its claim so a crash between the release and the write still
   recovers it.
+- **A guest link now shows only what it was allowed to show, at every moment.** An agent error
+  reaches you with its full diagnostic — including any path on this machine — while the guest
+  gets a plain "The agent hit an error." A thread that settles while a guest message is being
+  published no longer gets an unanswerable card: the last placement check and the card's append
+  happen under the same thread record lock, so a settle either refuses the card or resolves it.
+  A poll that read the journal under a link you stopped or replaced mid-read is refused instead
+  of delivering events from after your decision, and replacing the link does not make the old
+  browser's poll valid again. A Send or Dismiss never loses its answer: a failed journal write
+  leaves a durable marker that the sweep, a restart and Stop sharing all retry, and Stop sharing
+  keeps a finished row until its files are gone and its answer is on the wire. Over Connect a
+  daemon announces on its relay hello that it admits uploads, and Connect sends no body until
+  that admission arrives; a current daemon that stays quiet is an error, never mistaken for an
+  older build, while a daemon that does not announce it keeps the older bounded wait. Uploads
+  hold a separate capped slot from state and attachment reads, and an abandoned upload gives it
+  back at the next ping. A restart no longer loses the guest's answer: a Send is answered by the
+  thread's own journal, so a message that reached the thread recovers as sent and one that never
+  did recovers as dismissed with its files removed, and its row stays while the link lives so the
+  same browser's next poll clears its card. A journaled message is still answered as sent when the
+  link expired while the daemon was down, never dismissed along with the link. A Send whose append
+  failed leaves nothing queued, so an owner retry delivers the prompt to the agent exactly once,
+  and the attachment references it staged are released when the message never arrived — the
+  per-thread copy included — without touching a file an earlier message already uses. A guest
+  message sent while the agent is working waits in the owner's queue like any other, under the
+  same item id its request named, and the promotion keeps that id: the guest's answer is read from
+  the journal whichever way the message arrives, so a restart while it waits, while it may have
+  been delivered, or after it was taken still answers sent. A refused submission keeps a cleanup
+  record when its
+  files cannot be removed yet, and the periodic sweep retries that removal for a finished request
+  while its link still lives. A card whose journal append failed leaves no pending count behind.
+  A card is now published only once its row can be answered: the row's move to `pending` is the
+  append's second half, so a Send or Dismiss on a card you can see always succeeds. A card whose
+  last step failed is never published, a snapshot hides it until the sweep finishes it, and the
+  sweep (not just a restart) finishes a half-published row so a request is never stuck unanswerable.
+  Each answer is journaled once, so a Dismiss and a sweep that both hold the same finished row
+  cannot emit the same resolution twice. A Send whose append failed on an idle thread leaves the
+  thread exactly as you last saw it instead of Working with no turn, and keeps the pause and
+  auto-resume a limit had armed.
+  A completed upload keeps its slot until its answer holds a work slot, so finished bodies cannot
+  pile up past the cap; a cancel releases the daemon's upload slot at once even while its link
+  check or the relay queue is still busy, and the admitted state is committed before the go-ahead
+  is sent. A refusal gives its upload slot back before its answer waits for queue room, and a
+  chunk that waited for capacity is checked against its connection once more as it is enqueued.
+  A current daemon's relay socket is marked as one that sends a hello, and while that
+  hello is unknown Connect never streams a body: the guest gets a retryable answer instead.
+  Capability follows the socket, so a reconnect starts unknown and a hello from a replaced socket
+  is ignored; two guest requests waiting for the same hello both see it. A guest exchange over
+  Connect is pinned to the one socket it started on — capability, admission, the request and every
+  chunk — so a reconnect mid-upload fails retryably instead of streaming to a socket that never
+  admitted it, and the capability is read once more as the admission deadline passes. A browser
+  that disconnects while its chunked answer is arriving, during an exchange's cleanup or during
+  the page fetch takes its waiter and partial body with it. A socket a reconnect already replaced
+  no longer reports the machine offline when it closes; it closes exactly the sessions it opened
+  and tells their partners, and presence updates are written in order per device and checked
+  against the connection they belong to, so the replacement's online state is never overwritten.
+  The attach control's keyboard focus ring uses the design system's focus
+  colour in both themes.
 - **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan
