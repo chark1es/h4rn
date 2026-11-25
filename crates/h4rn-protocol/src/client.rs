@@ -1715,6 +1715,13 @@ pub enum ClientRequest {
         /// New setting. Turning it off disables every live link at once.
         enabled: bool,
     },
+    /// Read this machine's phone-alert publishing switch.
+    GetAgentAlertSettings,
+    /// Turn publishing of agent alerts to a phone on or off.
+    SetAgentAlertSettings {
+        /// New setting. Off stops every publish immediately.
+        enabled: bool,
+    },
     /// Find conversations that Claude Code and Codex already saved on a host.
     ///
     /// Discovery is read-only; nothing is imported until
@@ -1805,6 +1812,7 @@ impl ClientRequest {
             | Self::GetTextGenerationSettings
             | Self::GetGuestSharing { .. }
             | Self::GetGuestSettings
+            | Self::GetAgentAlertSettings
             | Self::ListSchedules
             | Self::ListScheduleRuns { .. }
             | Self::GitStatus { .. } => View,
@@ -1925,6 +1933,7 @@ impl ClientRequest {
             | Self::ShareThreadWithGuest { .. }
             | Self::StopGuestSharing { .. }
             | Self::SetGuestSettings { .. }
+            | Self::SetAgentAlertSettings { .. }
             | Self::CreateSchedule { .. }
             | Self::UpdateSchedule { .. }
             | Self::DeleteSchedule { .. }

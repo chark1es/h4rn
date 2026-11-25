@@ -21,6 +21,8 @@
  * shell, build pipeline and native integrations. A later UI pass replaces it.
  */
 
+import { openThread } from "@/lib/store/appStore";
+
 import { parsePairingUrl as classifyPairingUrl, isDirectPairingUrl } from "./pairingUrl";
 import { rememberConnectPair, rememberOidcCallback } from "./pending";
 import { getSecret, peekSecret, prepareSecrets, rememberSecret, setSecret } from "./secrets";
@@ -72,6 +74,28 @@ export function normaliseDaemon(raw: string): string {
   }
   if (url.pathname === "" || url.pathname === "/") url.pathname = "/ws";
   return url.toString();
+}
+
+/**
+ * Parses the notification deep link `h4rn://thread/<id>`.
+ *
+ * A tapped alert opens exactly one thread; returns null for every other link.
+ */
+export function parseThreadUrl(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "h4rn:") return null;
+    if (url.hostname !== "thread") return null;
+    const id = decodeURIComponent(url.pathname.replace(/^\/+/, "").replace(/\/+$/, ""));
+    return id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Opens a thread once the shell has rendered, for a cold-start tap. */
+function openThreadLink(threadId: string): void {
+  window.setTimeout(() => openThread(threadId), 0);
 }
 
 /** Parses `h4rn://connect|pair?...`, returning null for links the app consumes. */
@@ -165,6 +189,22 @@ export async function commitPairing(pairing: Pairing): Promise<void> {
   url.searchParams.set("daemon", pairing.daemon);
   url.searchParams.delete("token");
   window.location.replace(url.toString());
+}
+
+async function coldStartThread(): Promise<void> {
+  if (!internals) return;
+  try {
+    const urls = await internals.invoke<string[]>("deep_link_current");
+    for (const raw of urls) {
+      const thread = parseThreadUrl(raw);
+      if (thread) {
+        openThreadLink(thread);
+        return;
+      }
+    }
+  } catch {
+    // Older shells may not expose the command; taps still work while warm.
+  }
 }
 
 async function coldStartPairing(): Promise<Pairing | null> {
@@ -455,6 +495,9 @@ function renderConnect(initialMessage?: string): void {
 
 async function boot(): Promise<void> {
   safeAreaStyle();
+  // A tapped alert that cold-started the app names a thread; pair first only
+  // when there is no stored daemon to open it on.
+  await coldStartThread();
 
   // 1. A warm link or a cold-start intent wins over stored state: the person
   //    just chose to pair with a specific daemon.
@@ -501,6 +544,11 @@ function watchDeepLinks(): void {
     for (const raw of detail) {
       if (typeof raw !== "string") continue;
       try {
+        const thread = parseThreadUrl(raw);
+        if (thread) {
+          openThreadLink(thread);
+          return;
+        }
         const pairing = parsePairingUrl(raw);
         if (pairing) {
           void commitPairing(pairing).catch((error: unknown) => {

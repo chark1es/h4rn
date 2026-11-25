@@ -2288,3 +2288,53 @@ choice offered only where a complete checkpoint exists, so it can be held back
 while its remaining correctness gaps are closed without taking the conversation
 rewind with it. A provider that loses its native boundary degrades to a handoff
 rather than resuming the wrong history, and the person is told when it does.
+
+## ADR-051: Phone alerts carry a fixed thread transition, never conversation content
+
+**Status:** Accepted
+
+Android alerts are opt-in twice: the daemon switch is off by default, and a
+phone registers only after the person signs in to Connect and turns on **Device
+notifications**. When both are on, the daemon publishes a transition over its
+existing relay socket for five moments: a turn finished, a turn failed, an
+approval is waiting, an agent asked a question, or a turn stopped at a limit
+that will not resume by itself.
+
+The payload is a closed record — thread id, thread title, project name, state,
+transition id, timestamp. There is no field for a prompt, a reply, tool output,
+a diff, a file path or a credential, so no future caller can quietly add one
+without changing the protocol and this decision. The transition id is what
+separates a replay of one frame from a later event in the same state: Connect
+keeps a delivered baseline per (user, thread) keyed by it, so a reconnect cannot
+alert twice while a thread's second completion or second approval still does.
+The id is opaque metadata, not conversation content. A daemon that predates the
+field omits it; Connect falls back to the timestamp.
+
+Completion alerts come from the turn's own status, not from the agent state it
+lands in. A person's Stop ends a turn as `Interrupted` and is silent; `Completed`
+and `Failed` alert; `TokenLimit` and `TurnLimit` ask the person to come back with
+the `limit` state, as does a usage limit whose auto-resume is off. Alerting is
+skipped for finishing states older than two minutes, and transitions that
+arrive together are grouped into one "N agents need attention" or "N agents
+finished" notification. A grouped alert carries no thread id, so a phone that
+has one of its threads open cannot mute the whole group; the tap opens h4rn.
+The phone's switch is mirrored to the Android notification service, which drops
+data messages while it is off, and a removal that Connect did not confirm is
+retried on the next signed-in visit.
+
+This is stricter than ADR-027's wake-signal shape, because it includes a title
+and a project name so the phone can say which thread needs the person without
+opening the app. Those two strings still transit Connect and Google, so they
+are the whole disclosure, not part of a larger payload. The relay never sees
+message content: the activity frame is separate from the Noise-routed session
+and carries only this record.
+
+A phone is tied to the account that registered it. Registration only accepts
+the caller's own Connect device id, a rotated FCM token replaces the old one,
+signing out removes that phone's rows, revoking a device deletes them in the
+same transaction, and deleting the account removes them all. A revoked device
+is skipped even if a registration row survived. An operator who has not
+configured a Firebase service account has push off; Connect reports that state
+and never pretends to send. The Android build compiles and runs without
+`google-services.json`; the feature is then unavailable and Settings says so.
+

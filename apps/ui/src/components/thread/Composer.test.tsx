@@ -223,6 +223,7 @@ function log(prompts: string[]): ThreadLog {
     approvals: {},
     pending: [],
     guestRequests: [],
+    cutTurns: [],
   };
 }
 

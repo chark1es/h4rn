@@ -31,6 +31,8 @@ hex.workspace = true
 openidconnect.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["form"] }
+rsa = { version = "0.9.10", features = ["sha2"] }
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -52,3 +54,5 @@ reqwest = { workspace = true, features = ["cookies"] }
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
 tower = { workspace = true, features = ["util"] }
+wiremock.workspace = true
+rand_core = { version = "0.6.4", features = ["getrandom"] }

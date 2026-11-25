@@ -203,6 +203,37 @@ pub(crate) fn live_prompts(events: &[WireEvent]) -> Vec<LivePrompt> {
     prompts
 }
 
+/// The turns a thread's rewinds removed, in the order they were cut.
+///
+/// A prompt whose turn is no longer among the live prompts was cut by a rewind
+/// (a live steer shares its cue's turn, so it never adds one). A fork reads this
+/// to name a removed turn as removed instead of pretending the thread never had
+/// it.
+pub(crate) fn removed_turn_ids(events: &[WireEvent]) -> Vec<TurnId> {
+    let live: Vec<TurnId> = live_prompts(events)
+        .into_iter()
+        .map(|prompt| prompt.turn_id)
+        .collect();
+    let mut removed: Vec<TurnId> = Vec::new();
+    for wire in events {
+        if let Event::ItemCompleted {
+            item:
+                Item::Message {
+                    role: MessageRole::User,
+                    ..
+                },
+            turn_id,
+            ..
+        } = &wire.event
+            && !live.contains(turn_id)
+            && !removed.contains(turn_id)
+        {
+            removed.push(turn_id.clone());
+        }
+    }
+    removed
+}
+
 /// The turn ids a rewind at `index` removes, in turn order and without repeats.
 ///
 /// A message queued behind a running turn is journaled under its own delivered
@@ -763,6 +794,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["turn_c"],
             "editing C removes only C, not the prompt the earlier rewind removed"
+        );
+    }
+
+    #[test]
+    fn a_rewind_names_the_turns_it_removed_and_never_the_ones_still_live() {
+        let events = vec![
+            user(1, "item_user_a", "turn_a", "A"),
+            user(2, "item_user_b", "turn_b", "B"),
+            rewound(3, "item_user_b"),
+            user(4, "item_user_c", "turn_c", "C"),
+        ];
+        assert_eq!(
+            removed_turn_ids(&events)
+                .iter()
+                .map(TurnId::as_str)
+                .collect::<Vec<_>>(),
+            ["turn_b"],
+            "B left with its rewind; A and the later C are still live"
         );
     }
 

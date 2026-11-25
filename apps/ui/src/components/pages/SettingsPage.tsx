@@ -7,10 +7,26 @@ import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { GuestSettingsForm } from "@/features/guest/GuestSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import {
+  agentAlertsAvailabilityText,
+  agentAlertsSwitchEnabled,
+  loadAgentAlertSettings,
+  setAgentAlertsEnabled,
+  useAgentAlerts,
+} from "@/features/notifications/agentAlerts";
+import {
   type NotificationPermissionState,
   notificationChannel,
   useBrowserNotificationsUnavailable,
 } from "@/features/notifications/channel";
+import {
+  type DeviceAlertsState,
+  deviceAvailabilityNote,
+  deviceStatusLine,
+  deviceToggleUsable,
+  disableDeviceAlerts,
+  enableDeviceAlerts,
+  readDeviceAlerts,
+} from "@/features/notifications/devicePush";
 import {
   displayedNotificationSetting,
   hostOfflineVisibility,
@@ -54,6 +70,7 @@ import {
   useKeybindingsVersion,
 } from "@/lib/keybindings";
 import { desktopShellBridge, type ShellSettings } from "@/lib/platform/desktopShell";
+import { deviceAlertsShell } from "@/lib/platform/push";
 import { secretShell } from "@/lib/platform/secrets";
 import { setTheme, setUi, type Theme, useApp } from "@/lib/store/appStore";
 import { setTerminalMatchesApp, useTerminalMatchesApp } from "@/lib/terminalTheme";
@@ -450,6 +467,31 @@ function NotificationsForm() {
   const pageUnavailable = useBrowserNotificationsUnavailable();
   const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const agentAlerts = useAgentAlerts();
+  const daemonMachineId = useApp((state) => state.daemonMachineId);
+  const daemonPaired = daemonMachineId !== null;
+  const [device, setDevice] = useState<DeviceAlertsState | null>(null);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const alertsShell = deviceAlertsShell();
+
+  useEffect(() => {
+    void loadAgentAlertSettings();
+  }, []);
+
+  useEffect(() => {
+    if (!alertsShell) return;
+    if (!signedIn) {
+      setDevice(null);
+      return;
+    }
+    let cancelled = false;
+    void readDeviceAlerts().then((state) => {
+      if (!cancelled) setDevice(state);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [alertsShell, signedIn]);
 
   useEffect(() => {
     if (!channel) return;
@@ -493,9 +535,29 @@ function NotificationsForm() {
     setNotificationSetting(key, next);
   };
 
+  const changeAgentAlerts = async (next: boolean) => {
+    if (next && !signedIn && !daemonPaired) return;
+    await setAgentAlertsEnabled(next);
+  };
+
+  const changeDeviceAlerts = async (next: boolean) => {
+    if (deviceBusy) return;
+    setDeviceBusy(true);
+    try {
+      setDevice(next ? await enableDeviceAlerts() : await disableDeviceAlerts());
+    } catch (cause) {
+      // Never leave the row frozen: a failed turn-on reports why and stays off.
+      const state = await readDeviceAlerts();
+      setDevice({ ...state, enabled: false, error: describeError(cause) });
+    } finally {
+      setDeviceBusy(false);
+    }
+  };
+
   const rows = relayPresence
     ? NOTIFICATION_ROWS
     : NOTIFICATION_ROWS.filter((row) => row.key !== "hostOffline");
+  const availabilityNote = deviceAvailabilityNote(device);
 
   return (
     <div className="q-form">
@@ -553,6 +615,72 @@ function NotificationsForm() {
           </p>
         </div>
       )}
+      <div className="q-group">
+        <h2>Phone alerts</h2>
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Send agent alerts to my phone through Connect</div>
+            <div className="s">
+              Finished, failed, approval and question alerts for this machine.
+            </div>
+          </div>
+          <div className="ctl">
+            <Toggle
+              checked={agentAlerts.enabled === true}
+              label="Send agent alerts to my phone through Connect"
+              disabled={
+                !agentAlertsSwitchEnabled(
+                  agentAlerts.enabled,
+                  agentAlerts.saving,
+                  signedIn || daemonPaired,
+                )
+              }
+              onChange={(next) => void changeAgentAlerts(next)}
+            />
+          </div>
+        </div>
+        <p className="s q-muted">{agentAlertsAvailabilityText(daemonPaired)}</p>
+        {agentAlerts.error ? (
+          <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+            {agentAlerts.error}
+          </p>
+        ) : null}
+        {alertsShell ? (
+          <>
+            <div className="q-field">
+              <div className="lab">
+                <div className="t">Device notifications</div>
+                <div className="s">{deviceStatusLine(device, signedIn)}</div>
+              </div>
+              <div className="ctl">
+                <Toggle
+                  checked={device?.enabled === true && device?.permission === "granted"}
+                  label="Device notifications"
+                  disabled={!deviceToggleUsable(device, signedIn, deviceBusy)}
+                  onChange={(next) => void changeDeviceAlerts(next)}
+                />
+              </div>
+            </div>
+            {device?.permission === "denied" ? (
+              <p className="s q-muted">
+                Blocked in system settings. Allow notifications for h4rn there, then reopen this
+                page.
+              </p>
+            ) : null}
+            {device?.available === false ? (
+              <p className="s q-muted">
+                This build has no Firebase configuration, so it cannot receive alerts.
+              </p>
+            ) : null}
+            {availabilityNote ? <p className="s q-muted">{availabilityNote}</p> : null}
+            {device?.error ? (
+              <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+                {device.error}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }

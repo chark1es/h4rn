@@ -42,8 +42,33 @@ class MainActivity : TauriActivity() {
     )
   }
 
+  override fun onStart() {
+    super.onStart()
+    // A foreground alert is quiet only for the thread on screen. The shared UI
+    // updates the thread with `push_set_foreground_thread`; this flag says
+    // whether the window is really in front.
+    H4rnPushState.foreground = true
+  }
+
+  override fun onStop() {
+    H4rnPushState.foreground = false
+    super.onStop()
+  }
+
+  override fun onRequestPermissionsResult(
+    requestCode: Int,
+    permissions: Array<out String>,
+    grantResults: IntArray,
+  ) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (requestCode == H4rnPushPermission.REQUEST_CODE) {
+      H4rnPushPermission.resolved()
+    }
+  }
+
   override fun onDestroy() {
     h4rnWebView = null
+    H4rnPushState.foreground = false
     super.onDestroy()
   }
 }

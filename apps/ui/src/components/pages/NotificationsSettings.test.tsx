@@ -61,4 +61,13 @@ describe("notification settings", () => {
     // The OS permission is untouched: the page failure is its own sentence.
     expect(screen.queryByText("Blocked in system settings")).toBeNull();
   });
+
+  it("offers phone alerts but hides the device row outside the Android app", async () => {
+    render(<SettingsPage section="notifications" />);
+
+    expect(await screen.findByText("Send agent alerts to my phone through Connect")).toBeTruthy();
+    // jsdom is neither Android nor a Tauri shell, so there is no device toggle
+    // to promise an alert this build cannot receive.
+    expect(screen.queryByText("Device notifications")).toBeNull();
+  });
 });
