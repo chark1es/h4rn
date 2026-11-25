@@ -3303,6 +3303,10 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
+            steer: true,
         };
         assert!(guest_event(Event::ThreadUpserted(summary)).is_none());
         assert!(

@@ -275,7 +275,13 @@ describe("H4rnClient", () => {
     await settle();
 
     await expect(
-      client.request({ type: "send_message", thread_id: "t1", text: "hi", attachments: [] }),
+      client.request({
+        type: "send_message",
+        thread_id: "t1",
+        text: "hi",
+        attachments: [],
+        steer: false,
+      }),
     ).rejects.toMatchObject({ proto: { code: "internal" } });
   });
 
@@ -293,7 +299,13 @@ describe("H4rnClient", () => {
     await settle();
 
     await expect(
-      client.request({ type: "send_message", thread_id: "t1", text: "hi", attachments: [] }),
+      client.request({
+        type: "send_message",
+        thread_id: "t1",
+        text: "hi",
+        attachments: [],
+        steer: false,
+      }),
     ).rejects.toMatchObject({ proto: { code: "unsupported" } });
   });
 
@@ -345,7 +357,7 @@ describe("H4rnClient", () => {
 
     const text = "x".repeat(200 * 1024);
     const request = client.request(
-      { type: "send_message", thread_id: "t1", text, attachments: [] },
+      { type: "send_message", thread_id: "t1", text, attachments: [], steer: false },
       { timeoutMs: 20 },
     );
     await expect(request).rejects.toMatchObject({ proto: { code: "internal" } });
@@ -845,6 +857,7 @@ describe("H4rnClient", () => {
       const write = client.request({
         type: "send_message",
         thread_id: "t1",
+        steer: false,
         text: "hi",
         attachments: [],
       });

@@ -44,6 +44,9 @@ function summary(branch: string | null): ThreadSummary {
     unread: false,
     resume_at: null,
     limit: null,
+    queued_count: 0,
+    queue_revision: 0,
+    steer: false,
   } as ThreadSummary;
 }
 
@@ -126,6 +129,9 @@ const thread: ThreadSummary = {
   unread: false,
   resume_at: null,
   limit: null,
+  queued_count: 0,
+  queue_revision: 0,
+  steer: true,
 };
 
 describe("ThreadRow", () => {

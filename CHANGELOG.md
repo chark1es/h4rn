@@ -575,6 +575,28 @@ All notable changes to h4rn are recorded here. The format follows
   IME composition never opens or drives it. On a phone the same list is a sheet above the keyboard.
   Harness-native slash commands and skills are not listed: no harness publishes commands through
   h4rn and h4rn defines no skill invocation of its own.
+- **Steer a running turn, and edit or reorder the queue.** Settings → Chat chooses whether a reply
+  sent while the agent works waits in the queue or goes into the running turn; Cmd/Ctrl+Enter (or
+  adding Shift when Enter inserts a new line) uses the other action, and the send button shows which
+  one it will take. Steer is offered only for Codex, whose app-server has a real `turn/steer`: the
+  request names the turn the person saw, so a turn that ended in the meantime is refused instead of
+  catching a newer one. Claude Code's stream-json stdin is a queue of turns rather than a mid-turn
+  channel — a frame written while a turn runs is sometimes folded into it and sometimes becomes a
+  second turn, and its result stream cannot say which — so Claude is not offered Steer and the
+  daemon refuses it with a clear error instead of guessing; its follow-ups use the queue. A steer is
+  delivered at most once: the daemon records the delivery before the agent sees it, puts a message
+  back only when the agent definitely refused it, and reports a timeout without sending it twice.
+  Queued messages are durable across a restart, appear at the end of the thread as dashed rows, and
+  can be sent now, edited in the composer, removed or moved up and down without a promotion racing
+  the edit; an edit in the composer keeps the person's own draft separate, and a failed journal write
+  leaves the queue exactly as it was. Starting work by hand — a send, a Send now, an idle promotion
+  or a steer — cancels an armed auto-resume, so the message behind it is promoted instead of waiting
+  for a schedule that no longer fires. `Cmd/Ctrl+Shift+Enter` steers the oldest queued message (while
+  a turn is really running) and `Alt/Option+Up` at the start of the composer edits the newest; both
+  appear in Settings → Shortcuts. The queue's contents are not part of the thread summary, because a
+  full queue can be larger than a paired connection's frame: the summary counts the messages and the
+  client pages the rows in.
+
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
   thread's draft; for the same thread the most recent edit wins, including when both tabs type
@@ -629,6 +651,59 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The queue you see is the daemon's queue, even after a reload.** A reload or reconnect now
+  refetches waiting rows for every thread that has them, instead of leaving them invisible until
+  something unrelated happens, and a late reply can no longer put a message back that has already
+  started: a summary saying nothing waits is remembered at its own revision, so older answers are
+  ignored. A queue longer than one page is read page by page and started over if it changes halfway,
+  and a reply carrying only its first page no longer replaces the rows a client already has (editing
+  one of 150 waiting messages keeps all 150). Send now and Steer from the queue name the turn the
+  person saw and wait until the agent has accepted that turn's own prompt: a stale turn is refused,
+  and an unaccepted one moves the message to the front instead of racing it. A steer the agent
+  already took is reported as delivered even when its transcript row could not be written, so it is
+  never sent a second time, and a refused steer's row is written again instead of being kept only in
+  memory. Move down is disabled on the last queued row, and Cancel on an edit restores the draft
+  another tab saved while the edit was open.
+- **Send now never takes the running turn with it, and a message that may have been sent says so.**
+  Send now that falls back to the front of the queue leaves the running turn working, so it finishes
+  and then starts the reordered message. Only Send now or Steer that names the turn the person
+  actually saw can deliver mid-turn; a client that last saw an idle thread queues its message
+  instead. A steer marks itself `sending` durably before the agent is called, then `delivered` as
+  soon as it is accepted: a crash after the agent took the text keeps the payload as a **May have
+  been delivered** row that can be sent again or discarded, never re-sent automatically, while a
+  message the agent never saw goes back to the queue. A closed writer is now a definite pre-write
+  refusal in every adapter, so that message also returns to the queue. A failed Send now leaves an
+  armed auto-resume in place, a settlement storage refuses retries on its own until the waiting
+  message is promoted, a Save that is acknowledged after newer typing keeps the editor open with
+  that newer text, and the queue row's hint no longer promises a steer the daemon will move to the
+  front instead.
+- **A queued message or steer reaches the turn it belongs to, once, with the limits it was saved
+  with.** A queued message keeps its sender's grant and ceiling when it is steered: a revoked grant
+  is refused — checked again under the session lock immediately before the agent write, so a
+  revocation between the read and the write cannot slip through — and a message with its own
+  permission limit is never steered into a running turn (Send now puts it first in line instead). A
+  steer is held in a durable claim with a known state, so a daemon that stops before the agent
+  answers, or a refusal whose restore write failed, puts the message back in the queue at startup
+  instead of losing it. An unclear outcome stays marked `sending` and comes back after a restart as a
+  **May have been delivered** row the person can resend or discard; it is never recorded as delivered
+  and never sent again on its own. A queue promotion now writes the starting turn's delivery claim in
+  the same append that removes the queue row, so a daemon that stops before the agent accepts the
+  promoted prompt restores it (or shows it as unsure) instead of dropping the only copy. A direct
+  steer that names no turn — the client last saw the thread idle — waits in the queue instead of
+  landing in a turn that started afterwards, and a direct steer that names a turn that has ended is
+  refused even when the thread is idle. A **May have been delivered** row no longer blocks the rows
+  behind it: automatic promotion skips it and runs the next confirmed-unsent message. A promote or
+  Send now that starts a turn takes the same settings gate a live mode switch holds, a failed write
+  leaves no phantom running turn, and a settlement whose write fails keeps the waiting message queued
+  rather than handing the agent a prompt storage still lists as waiting. A delayed summary with an
+  older queue revision no longer clears loaded rows or ends an edit, and a late Save reply only
+  closes the edit that submitted it. Long unbroken text in a queued row wraps at phone width. Every
+  path into a turn now uses one delivery claim: a promoted prompt re-checks its sender's grant under
+  the session lock just before the write, a timeout after the frame was written stays **May have been
+  delivered** instead of being retried as unsent, a direct steer keeps a durable copy even though it
+  never had a queue row (and the composer keeps the draft until the recovered row appears), and a
+  prompt parked by a rate limit keeps its claim so a crash between the release and the write still
+  recovers it.
 - **A guest link now shows only what it was allowed to show, at every moment.** An agent error
   reaches you with its full diagnostic — including any path on this machine — while the guest
   gets a plain "The agent hit an error." A thread that settles while a guest message is being
@@ -650,8 +725,12 @@ All notable changes to h4rn are recorded here. The format follows
   link expired while the daemon was down, never dismissed along with the link. A Send whose append
   failed leaves nothing queued, so an owner retry delivers the prompt to the agent exactly once,
   and the attachment references it staged are released when the message never arrived — the
-  per-thread copy included — without touching a file an earlier message already uses. A refused
-  submission keeps a cleanup record when its
+  per-thread copy included — without touching a file an earlier message already uses. A guest
+  message sent while the agent is working waits in the owner's queue like any other, under the
+  same item id its request named, and the promotion keeps that id: the guest's answer is read from
+  the journal whichever way the message arrives, so a restart while it waits, while it may have
+  been delivered, or after it was taken still answers sent. A refused submission keeps a cleanup
+  record when its
   files cannot be removed yet, and the periodic sweep retries that removal for a finished request
   while its link still lives. A card whose journal append failed leaves no pending count behind.
   A card is now published only once its row can be answered: the row's move to `pending` is the
@@ -680,8 +759,7 @@ All notable changes to h4rn are recorded here. The format follows
   and tells their partners, and presence updates are written in order per device and checked
   against the connection they belong to, so the replacement's online state is never overwritten.
   The attach control's keyboard focus ring uses the design system's focus
-  colour in both themes.
-- **An imported conversation is not offered a second time.** When a Claude Code
+  colour in both themes.- **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan
   now also checks the identity stored for the transcript, so an already imported

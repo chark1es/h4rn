@@ -6,6 +6,7 @@ import type { LimitBrief } from "./LimitBrief";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
+import type { TurnId } from "./TurnId";
 import type { Usage } from "./Usage";
 
 /**
@@ -163,4 +164,39 @@ resume_at: string | null,
 /**
  * The limit currently blocking the thread, when one was observed.
  */
-limit: LimitBrief | null, };
+limit: LimitBrief | null, 
+/**
+ * How many messages wait for the thread's next turn.
+ *
+ * The contents are not in the summary: a full queue can be larger than the
+ * paired transport's frame. A client reads them with
+ * [`crate::ClientRequest::GetThreadQueue`] and refetches when
+ * `queue_revision` changes. A queued message is durable and not yet in the
+ * transcript; it is delivered as the next turn's first message, or steered
+ * into the running turn by an explicit Send now.
+ */
+queued_count: number, 
+/**
+ * A counter that changes whenever the queue's contents or order change.
+ *
+ * Clients compare it with the revision their cached queue came from: a
+ * different value means the cached rows are stale and must be refetched.
+ * It is a per-daemon-run counter, not a durable sequence.
+ */
+queue_revision: number, 
+/**
+ * The turn that is running now, when one is.
+ *
+ * A client steers by naming it, so a turn that ended in the meantime is
+ * refused rather than catching a newer one. It stays set while a running
+ * turn is paused by a limit, which is why it is the honest answer to "is a
+ * turn running" and `agent_state` alone is not.
+ */
+active_turn_id?: TurnId, 
+/**
+ * Whether the running harness can accept a message mid-turn.
+ *
+ * Capabilities are advertised per harness; a client offers Steer only when
+ * this is true and a turn is running.
+ */
+steer: boolean, };

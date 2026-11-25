@@ -189,8 +189,12 @@ is answered from the thread itself: the message carries the request's id in its
 item id, so recovery asks the journal before it decides anything about the link.
 A message that reached the thread resolves as sent, even when the link expired
 while the daemon was down; a row claimed before the append, whose message never
-arrived, resolves as dismissed and its files are removed. A prompt whose append
-failed is not queued for delivery, so retrying a Send delivers it once, and the
+arrived, resolves as dismissed and its files are removed. The item id travels
+with the message through the thread's queue, so a Send that arrives while the
+agent is working waits in the queue under the same id, is promoted under it, and
+a restart while it waits, while it may have been delivered or after it was taken
+still answers sent, never dismissed. A prompt whose append failed is not queued
+for delivery, so retrying a Send delivers it once, and the
 thread is left exactly as you last saw it: not Working with a turn nothing will
 deliver, and keeping the pause and auto-resume a limit had armed. A Send
 also records the attachment references it takes for the thread, so a crash

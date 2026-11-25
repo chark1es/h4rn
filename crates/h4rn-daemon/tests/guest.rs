@@ -83,6 +83,19 @@ async fn boot_with_tick(
 }
 
 /// Boots a daemon on the listener addresses a test names.
+/// Boots a daemon whose thread manager runs these harnesses.
+async fn boot_with_harness(harness: Arc<dyn h4rn_harness::Harness>) -> TestDaemon {
+    boot_full(
+        LifecycleSettings::default(),
+        None,
+        Duration::from_millis(20),
+        "127.0.0.1:0".parse().expect("bind"),
+        None,
+        harness,
+    )
+    .await
+}
+
 async fn boot_on(
     bind: std::net::SocketAddr,
     extra_bind: Option<std::net::SocketAddr>,
@@ -2665,6 +2678,107 @@ async fn startup_recovers_a_journaled_send_whose_link_expired_while_down() {
 }
 
 #[tokio::test]
+async fn a_guest_prompt_that_may_have_been_delivered_is_recovered_as_sent() {
+    // The thread's first turn is held, so the guest Send has to queue; the
+    // second write is held too, so the promoted prompt sits at a `sending`
+    // claim: the restart a crash there leaves shows it as "May have been
+    // delivered".
+    let (harness, completion) = FakeHarness::new().with_completion_gate();
+    let (harness, sends) = harness.with_send_count();
+    let (harness, write_gate) = harness.with_send_gate_after(1);
+    let daemon = boot_with_harness(Arc::new(harness)).await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "guest in flight").await;
+    sends.wait_for(1).await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("may have arrived"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The prompt is queued. The daemon stops here, after the append and before
+    // the row could record `sent`, so the row is claimed and the prompt waits.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::AfterAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending"),
+        "the simulated crash did not leave a claimed row"
+    );
+
+    // The running turn ends and its settlement promotes the guest prompt; the
+    // adapter's write is held, so the promotion's claim is `sending`.
+    completion.release();
+    sends.wait_for(2).await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+    let queue = daemon
+        .manager
+        .thread_queue(&thread_id, 0)
+        .await
+        .expect("queue");
+    assert!(
+        queue.queued.is_empty(),
+        "the promoted guest prompt is still listed as waiting"
+    );
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the thread owns the promoted prompt but calls it unaccepted"
+    );
+
+    // Startup recovery asks the journal. The item exists, so the guest is told
+    // its message was sent and never that it was dismissed.
+    let resume = browser.state(0).await.next_seq;
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sent"),
+        "a guest prompt that may have been delivered was resolved as never sent"
+    );
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: true, .. } if id == &request_id
+        )),
+        "the guest never learned its prompt was sent: {:?}",
+        later.events
+    );
+    assert!(
+        !later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "a guest prompt whose item exists was resolved as dismissed"
+    );
+    write_gate.release();
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_crashed_send_releases_the_thread_attachment_it_staged() {
     let daemon = boot().await;
     let base = format!("http://{}", daemon.addr);
@@ -4344,6 +4458,8 @@ async fn a_send_message_mid_append_still_delivers_after_the_socket_resets() {
             thread_id: thread_id.clone(),
             text: "deliver me anyway".into(),
             attachments: Vec::new(),
+            steer: false,
+            turn_id: None,
         },
     };
     ws.send(Message::Text(
