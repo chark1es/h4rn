@@ -201,6 +201,45 @@ pub enum ClientRequest {
         #[serde(default)]
         offset: u32,
     },
+    /// Edit an earlier prompt: remove it and everything after it.
+    ///
+    /// The chosen message and every later item leave the active thread and
+    /// the harness's own history. The prompt and its attachments come back in
+    /// the answer for the composer. `restore_files` also puts the workspace
+    /// back to the checkpoint taken before that message; it is only offered
+    /// for a thread in its own worktree (ADR-050).
+    RewindThread {
+        /// Thread to rewind.
+        thread_id: ThreadId,
+        /// The sent user message everything is removed from.
+        before_item_id: String,
+        /// Also restore the workspace to the pre-message snapshot.
+        #[serde(default)]
+        restore_files: bool,
+    },
+    /// What rewinding one prompt would really do.
+    ///
+    /// Answered with [`crate::ResponseBody::RewindPlan`]. The thread summary
+    /// only says what the harness can do; this names the method for the
+    /// selected prompt, and whether file restore is both available and turned
+    /// on for this machine.
+    RewindPlan {
+        /// Thread the prompt belongs to.
+        thread_id: ThreadId,
+        /// The sent user message a rewind would remove from.
+        before_item_id: String,
+    },
+    /// This machine's Labs switches for rewinding.
+    ///
+    /// Answered with [`crate::ResponseBody::RewindSettings`].
+    GetRewindSettings,
+    /// Turn file restore on or off for this machine.
+    ///
+    /// Answered with the saved [`crate::ResponseBody::RewindSettings`].
+    SetRewindSettingsEnabled {
+        /// New value.
+        enabled: bool,
+    },
     /// Interrupt the running turn.
     Interrupt {
         /// Thread whose turn should stop.
@@ -1736,6 +1775,8 @@ impl ClientRequest {
             | Self::GetThreadQueue { .. }
             | Self::ListWorktrees
             | Self::GetWorktreeSettings
+            | Self::RewindPlan { .. }
+            | Self::GetRewindSettings
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
             | Self::ForgeListPrs { .. }
@@ -1770,6 +1811,7 @@ impl ClientRequest {
             Self::CreateThread { .. }
             | Self::ForkThread { .. }
             | Self::SendMessage { .. }
+            | Self::RewindThread { .. }
             | Self::QueueMessage { .. }
             | Self::Interrupt { .. }
             | Self::RespondApproval { .. }
@@ -1874,6 +1916,7 @@ impl ClientRequest {
             | Self::UpdateHarness { .. }
             | Self::ClearWorktrees { .. }
             | Self::SetWorktreeSettings { .. }
+            | Self::SetRewindSettingsEnabled { .. }
             | Self::AddTextGenerator { .. }
             | Self::UpdateTextGenerator { .. }
             | Self::RemoveTextGenerator { .. }

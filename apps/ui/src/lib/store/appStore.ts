@@ -13,6 +13,8 @@ import type {
   QueueAction,
   QueuedMessage,
   ResumeSchedule,
+  RewindPlan,
+  RewoundPrompt,
   RuntimeMode,
   ThreadId,
   ThreadSummary,
@@ -88,6 +90,18 @@ export type UiState = {
   preview: { threadId: ThreadId; path: string } | null;
   /** The preview is open full-width in the main area instead of the panel. */
   previewExpanded: boolean;
+  /**
+   * A prompt a rewind returned, waiting for its composer to adopt it.
+   *
+   * The draft that was already in the box stays above it; the token lets the
+   * composer consume exactly one restore and lets a newer one win.
+   */
+  composerRestore: {
+    threadId: ThreadId;
+    token: number;
+    prompt: string;
+    attachments: Attachment[];
+  } | null;
   pendingRouteFocus: boolean;
   layout: LayoutState;
 };
@@ -282,6 +296,7 @@ function createInitialState(): AppState {
       ideActivePath: null,
       preview: null,
       previewExpanded: false,
+      composerRestore: null,
       pendingRouteFocus: true,
       layout: {
         ...readLayout(),
@@ -830,6 +845,25 @@ function enqueueEvent(envelope: EventEnvelope): void {
   scheduleFlush();
 }
 
+/**
+ * Says a rewind fell back to a handoff, once and only for live news.
+ *
+ * The daemon journals the fallback, so a replay folds it into the history
+ * without repeating a toast the person already saw. `replayed` is the one
+ * signal that tells the two apart.
+ */
+export function noticeRewindFallback(envelope: EventEnvelope): void {
+  if (envelope.replayed || envelope.event.type !== "rewind_fell_back") return;
+  const harness = getState().threads[envelope.event.thread_id]?.harness;
+  pushToast({
+    variant: "info",
+    title: "The rewind fell back to a fresh session",
+    description: harness
+      ? `${harnessName(harness)} could not use the recorded rewind point. The next turn continues from a handoff of the kept conversation.`
+      : "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
+  });
+}
+
 export function startConnection(): void {
   if (started) return;
   started = true;
@@ -841,6 +875,10 @@ export function startConnection(): void {
 
   app.onEvent((envelope) => {
     enqueueEvent(envelope);
+    // A planned native rewind can still be refused when the next session
+    // starts. The daemon journals that moment; say it once, live, and let a
+    // replay fold the event without repeating the news.
+    noticeRewindFallback(envelope);
     for (const listener of appEventListeners) listener(envelope);
   });
 
@@ -1504,6 +1542,176 @@ export async function respondApproval(
 
 let localCounter = 0;
 
+let composerRestoreToken = 0;
+
+/**
+ * What rewinding one prompt would really do.
+ *
+ * The thread row only says what the harness *can* do. A prompt recorded before
+ * its provider boundary was kept, and a conversation with no provider session,
+ * can only use a handoff, so the dialog asks the daemon for the selected
+ * prompt's plan instead of promising the thread-wide method.
+ *
+ * Throws when the plan cannot be read; the dialog shows the reason.
+ */
+export async function planRewind(threadId: ThreadId, beforeItemId: string): Promise<RewindPlan> {
+  const response = await getClient().request({
+    type: "rewind_plan",
+    thread_id: threadId,
+    before_item_id: beforeItemId,
+  });
+  if (response.type !== "rewind_plan") {
+    throw new Error("The daemon answered a rewind plan with the wrong shape.");
+  }
+  return response.plan;
+}
+
+/**
+ * Edits an earlier prompt: the daemon removes it and everything after it.
+ *
+ * On success the prompt and its attachments wait in `ui.composerRestore`, and
+ * the composer keeps whatever draft was already there above them.
+ */
+export async function rewindThread(
+  threadId: ThreadId,
+  beforeItemId: string,
+  restoreFiles: boolean,
+): Promise<RewoundPrompt | null> {
+  const state = getState();
+  setState({
+    ...state,
+    pendingActions: { ...state.pendingActions, [threadId]: "Rewinding" },
+  });
+  try {
+    const response = await getClient().request({
+      type: "rewind_thread",
+      thread_id: threadId,
+      before_item_id: beforeItemId,
+      restore_files: restoreFiles,
+    });
+    if (response.type !== "rewound") return null;
+    const prompt = response.prompt;
+    composerRestoreToken += 1;
+    const current = getState();
+    setState({
+      ...current,
+      ui: {
+        ...current.ui,
+        composerRestore: {
+          threadId,
+          token: composerRestoreToken,
+          prompt: prompt.prompt,
+          attachments: prompt.attachments,
+        },
+        focusComposerNonce: current.ui.focusComposerNonce + 1,
+      },
+    });
+    // Say what the harness really did, not what the thread row advertises: the
+    // answer names the method the daemon recorded for this cut.
+    const harness = current.threads[threadId]?.harness;
+    pushToast({
+      title: "Thread rewound",
+      description:
+        prompt.method === "native" && harness
+          ? `${harnessName(harness)} dropped the removed turns from its own history.`
+          : "A fresh session will continue from the kept conversation.",
+    });
+    return prompt;
+  } catch (error) {
+    const proto = toProtoError(error);
+    pushToast({
+      variant: "error",
+      title: `Couldn't rewind ${getState().threads[threadId]?.title ?? "the thread"}.`,
+      description: proto.hint ?? proto.message,
+    });
+    return null;
+  } finally {
+    const current = getState();
+    setState({
+      ...current,
+      pendingActions: { ...current.pendingActions, [threadId]: undefined },
+    });
+  }
+}
+
+/** Marks one restored prompt as adopted by its composer. */
+export function consumeComposerRestore(token: number): void {
+  const state = getState();
+  if (state.ui.composerRestore?.token !== token) return;
+  setState({ ...state, ui: { ...state.ui, composerRestore: null } });
+}
+
+/** The prompt and everything after it leave the active thread. */
+export function rewindRefusal(
+  summary: ThreadSummary | undefined,
+  log: ThreadLog | undefined,
+  queued?: QueuedMessage[] | undefined,
+): string | null {
+  if (!summary) return "The thread is not loaded yet.";
+  if (summary.rewind === "unsupported") {
+    return `${harnessName(summary.harness)} cannot drop turns from its own history.`;
+  }
+  if (summary.agent_state === "awaiting_approval" || pendingApprovalIn(log)) {
+    return "Answer the pending approval first.";
+  }
+  // A message the daemon is unsure it delivered may already be in the
+  // provider conversation, and the rewind would remove the turn that holds it.
+  if (queued?.some((message) => message.delivery_unknown)) {
+    return "A message may have reached the agent. Resend or discard it first.";
+  }
+  if (summary.agent_state === "queued") {
+    return "A message is waiting to run. Let it finish first.";
+  }
+  if (
+    summary.agent_state === "thinking" ||
+    summary.agent_state === "searching" ||
+    summary.agent_state === "reading" ||
+    summary.agent_state === "editing" ||
+    summary.agent_state === "running_tool"
+  ) {
+    return "Wait for the current turn to finish, or stop it first.";
+  }
+  // Only a real armed resume blocks the edit. A cancelled resume can leave the
+  // thread's last state saying "rate_limited" with nothing scheduled.
+  if (summary.resume_at != null || summary.agent_state === "scheduled") {
+    return "Cancel the automatic resume first.";
+  }
+  return null;
+}
+
+/**
+ * Whether every removed turn has a complete pre-turn file checkpoint.
+ *
+ * The checkpoint, not the diff list, decides whether "Revert files too" can
+ * cover a shell command or another change no tool call named. A turn without
+ * one refuses the file choice rather than quietly restoring a partial set.
+ */
+export function filesRewindAvailable(
+  log: ThreadLog | undefined,
+  beforeItemId: string | null,
+): boolean {
+  if (!log || !beforeItemId) return false;
+  const index = log.turns.findIndex((turn) =>
+    turn.items.some((item) => item.kind === "message" && item.itemId === beforeItemId),
+  );
+  if (index < 0) return false;
+  return log.turns.slice(index).every((turn) => turn.changes?.complete === true);
+}
+
+function harnessName(harness: ThreadSummary["harness"]): string {
+  switch (harness) {
+    case "claude_code":
+      return "Claude Code";
+    case "codex":
+      return "Codex";
+    case "opencode":
+      return "OpenCode";
+    case "antigravity":
+      return "Antigravity";
+    case "acp":
+      return "This agent";
+  }
+}
 export type SendOptions = {
   /** Deliver into the running turn instead of queuing for the next one. */
   steer?: boolean;
@@ -1978,6 +2186,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     pending_guest_requests: 0,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
     ttft_ms: null,
     context_window: null,

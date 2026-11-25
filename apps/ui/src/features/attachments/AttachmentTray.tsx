@@ -48,7 +48,7 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
   return (
     <div
       className={cn("q-att", failed && "bad")}
-      title={`${task.file.name} · ${formatBytes(task.file.size)}`}
+      title={`${task.file.name} · ${formatBytes(task.restored?.size ?? task.file.size)}`}
     >
       <span className="q-att-ic" aria-hidden>
         {task.previewUrl ? (

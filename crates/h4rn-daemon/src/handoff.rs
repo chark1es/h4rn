@@ -40,6 +40,8 @@ pub enum HandoffKind {
     Imported,
     /// A copy of an h4rn thread's transcript, made by a fork.
     Forked,
+    /// The kept part of an edited conversation, continuing after a rewind.
+    Rewound,
 }
 
 impl HandoffKind {
@@ -51,6 +53,9 @@ impl HandoffKind {
             }
             Self::Forked => {
                 "Earlier conversation history, forked from another thread. Older messages may be omitted.\n\n"
+            }
+            Self::Rewound => {
+                "Earlier conversation history, after an earlier message was edited and the turns after it removed. Older messages may be omitted.\n\n"
             }
         }
     }
@@ -94,7 +99,7 @@ pub fn build(messages: &[HandoffMessage<'_>], budget: usize, request: &str) -> O
 /// Builds a handoff that says where its history came from.
 ///
 /// The selection, budget and return value are exactly [`build`]'s; only the
-/// header differs so a forked thread does not claim it was imported.
+/// header differs so a forked or rewound thread does not claim it was imported.
 pub fn build_for(
     kind: HandoffKind,
     messages: &[HandoffMessage<'_>],

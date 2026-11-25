@@ -110,6 +110,8 @@ function summary(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     limit: null,
     queued_count: 0,
     queue_revision: 0,
+    rewind: "native",
+    file_rewind: false,
     steer: true,
     ...overrides,
   };

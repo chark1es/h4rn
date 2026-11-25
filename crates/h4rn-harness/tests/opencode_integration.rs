@@ -61,6 +61,7 @@ fn spec(workspace: &std::path::Path, resume_id: Option<String>) -> SessionSpec {
         env_overrides,
         attachments: Vec::new(),
         agent_id: None,
+        rewind: None,
     }
 }
 

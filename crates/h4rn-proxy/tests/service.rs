@@ -56,6 +56,7 @@ fn spec_for(applied: &AppliedOverride) -> SessionSpec {
         env_overrides: applied.env.clone(),
         attachments: Vec::new(),
         agent_id: None,
+        rewind: None,
     }
 }
 

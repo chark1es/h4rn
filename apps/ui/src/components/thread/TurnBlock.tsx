@@ -8,6 +8,7 @@ import {
   GitForkIcon,
   MoreHorizontalIcon,
   PauseIcon,
+  PencilLineIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -75,10 +76,14 @@ function TurnMenu({
 function UserMessage({
   item,
   at,
+  onEdit,
+  editDisabledReason = null,
   fork,
 }: {
   item: MessageItem;
   at: string;
+  onEdit?: ((item: MessageItem) => void) | undefined;
+  editDisabledReason?: string | null | undefined;
   fork?: { threadId: string; turnId: string; label: string } | undefined;
 }) {
   return (
@@ -87,6 +92,18 @@ function UserMessage({
       <MessageAttachments attachments={item.attachments} align="end" />
       <div className="q-you-meta">
         <span>{absoluteTime(at)}</span>
+        {onEdit ? (
+          <button
+            type="button"
+            className="q-btn ghost q-edit-here"
+            disabled={Boolean(editDisabledReason)}
+            title={editDisabledReason ?? "Edit this prompt and resend it"}
+            onClick={() => onEdit(item)}
+          >
+            <PencilLineIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            Edit from here
+          </button>
+        ) : null}
         {fork ? <TurnMenu {...fork} /> : null}
       </div>
     </div>
@@ -229,6 +246,8 @@ export function TurnBlock({
   threadId,
   summary,
   onReply,
+  onEditFromHere,
+  editDisabledReason = null,
   staleAt = null,
 }: {
   turn: StreamTurn;
@@ -238,11 +257,19 @@ export function TurnBlock({
   summary: ThreadSummary;
   /** Focus the composer so the person can reply to a stopped or failed turn. */
   onReply: () => void;
+  /** Rewind to before one of this turn's sent prompts. */
+  onEditFromHere?: ((item: MessageItem) => void) | undefined;
+  /** Why the action is unavailable right now, if it is. */
+  editDisabledReason?: string | null | undefined;
   staleAt?: number | null;
 }) {
   const userItems = turn.items.filter(
     (item): item is MessageItem => item.kind === "message" && item.role === "user",
   );
+  // Only a turn's first user item is its cue. A steer is journaled as another
+  // user item inside the running turn, and editing it would also drop the cue
+  // before it, so the action is offered on the cue alone.
+  const cueItemId = userItems[0]?.itemId;
   const isUserTurn = turn.items.length > 0 && userItems.length === turn.items.length;
   const runningTool = [...turn.items]
     .reverse()
@@ -274,6 +301,8 @@ export function TurnBlock({
             key={item.itemId}
             item={item}
             at={turn.startedAt}
+            onEdit={item.itemId === cueItemId ? onEditFromHere : undefined}
+            editDisabledReason={editDisabledReason}
             fork={
               forkTurnId
                 ? {
@@ -321,7 +350,13 @@ export function TurnBlock({
     flushTools();
     content.push(
       item.kind === "message" && item.role === "user" ? (
-        <UserMessage key={`${turn.id}:${item.itemId}`} item={item} at={turn.startedAt} />
+        <UserMessage
+          key={`${turn.id}:${item.itemId}`}
+          item={item}
+          at={turn.startedAt}
+          onEdit={item.itemId === cueItemId ? onEditFromHere : undefined}
+          editDisabledReason={editDisabledReason}
+        />
       ) : (
         <Item key={`${turn.id}:${item.itemId}`} item={item} threadId={threadId} />
       ),

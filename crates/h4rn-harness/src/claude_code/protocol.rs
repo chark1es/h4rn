@@ -211,6 +211,8 @@ pub struct ClaudeStreamParser {
     denied_tools: HashMap<String, ()>,
     touched: Vec<String>,
     last_turn: Option<TurnReport>,
+    /// The most recent assistant message's provider uuid.
+    last_assistant_uuid: Option<String>,
     limit_seen: bool,
     error_seen: bool,
 }
@@ -243,6 +245,7 @@ impl ClaudeStreamParser {
             denied_tools: HashMap::new(),
             touched: Vec::new(),
             last_turn: None,
+            last_assistant_uuid: None,
             limit_seen: false,
             error_seen: false,
         }
@@ -311,6 +314,11 @@ impl ClaudeStreamParser {
     /// The most recent completed turn.
     pub fn last_turn(&self) -> Option<&TurnReport> {
         self.last_turn.as_ref()
+    }
+
+    /// The uuid of the most recent assistant message, when the CLI named it.
+    pub fn last_assistant_uuid(&self) -> Option<&str> {
+        self.last_assistant_uuid.as_deref()
     }
 
     fn on_system(&mut self, frame: SystemFrame) -> Vec<HarnessEvent> {
@@ -408,6 +416,9 @@ impl ClaudeStreamParser {
         }
 
         let synthetic = frame.message.model.as_deref() == Some("<synthetic>");
+        if !synthetic && let Some(uuid) = frame.uuid.as_deref().filter(|uuid| !uuid.is_empty()) {
+            self.last_assistant_uuid = Some(uuid.to_string());
+        }
         let blocks = frame.message.content;
         let mut events = Vec::new();
 
@@ -856,6 +867,9 @@ struct StreamDelta {
 #[derive(Debug, Deserialize)]
 struct AssistantFrame {
     message: AssistantMessage,
+    /// Claude Code's uuid for this message, when the CLI reports one.
+    #[serde(default)]
+    uuid: Option<String>,
     #[serde(default)]
     parent_tool_use_id: Option<String>,
 }
@@ -974,6 +988,21 @@ mod tests {
         let read = serde_json::json!({"file_path": "/tmp/a.rs"});
         assert_eq!(tool_summary("Read", Some(&read)), "/tmp/a.rs");
         assert_eq!(tool_summary("Bash", None), "");
+    }
+
+    #[test]
+    fn an_assistant_frame_records_the_uuid_a_truncating_resume_names() {
+        let mut parser = ClaudeStreamParser::new();
+        parser.push_line(
+            r#"{"type":"assistant","uuid":"message-7","message":{"model":"claude","content":[{"type":"text","text":"done"}]}}"#,
+        );
+        assert_eq!(parser.last_assistant_uuid(), Some("message-7"));
+        // A synthetic failure message is the CLI reporting an error, not a
+        // provider message a resume can name.
+        parser.push_line(
+            r#"{"type":"assistant","uuid":"synthetic-1","message":{"model":"<synthetic>","content":[{"type":"text","text":"limit"}]}}"#,
+        );
+        assert_eq!(parser.last_assistant_uuid(), Some("message-7"));
     }
 
     #[test]

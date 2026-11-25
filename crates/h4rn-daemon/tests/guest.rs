@@ -3355,9 +3355,10 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         &self,
         thread_id: &ThreadId,
         switch_generation: u64,
+        rewind_fallback: bool,
     ) -> Result<bool, h4rn_daemon::journal::JournalError> {
         self.0
-            .fall_back_from_native_resume(thread_id, switch_generation)
+            .fall_back_from_native_resume(thread_id, switch_generation, rewind_fallback)
             .await
     }
 

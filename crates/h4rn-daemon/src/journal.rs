@@ -21,6 +21,7 @@ use h4rn_protocol::{
     ScheduleDestination, ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask,
     ScheduleTaskId, SubagentId, ThreadId, Usage, WorktreeRequest,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 
@@ -57,6 +58,37 @@ impl TitleSource {
             _ => Self::Prompt,
         }
     }
+}
+
+/// The git registration a thread's linked worktree had when it was created.
+///
+/// A rewind verifies this at restore time: a moved worktree whose old path now
+/// holds a different checkout must never receive its files.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeIdentity {
+    /// The checkout's own git dir (`rev-parse --git-dir`).
+    pub git_dir: String,
+    /// The repository's common git dir (`rev-parse --git-common-dir`).
+    pub common_dir: String,
+}
+
+/// The provider's own id for one delivered prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTurnRecord {
+    /// Codex's provider turn id.
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    /// Claude Code's uuid for the assistant message before the prompt.
+    #[serde(default)]
+    pub last_message_id: Option<String>,
+    /// The provider session that recorded this boundary.
+    ///
+    /// A boundary only truncates the history of the session that produced it.
+    /// A record from an older spelling of this row has none, and is read as
+    /// "not native": a handoff is safer than pairing the id with a session
+    /// that never saw it.
+    #[serde(default)]
+    pub provider_session: Option<String>,
 }
 
 /// Everything the daemon needs to rebuild a thread row without replaying it.
@@ -114,6 +146,16 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// A provider-history rewind the next session start must apply.
+    ///
+    /// The thread's transcript is already truncated when this is written; it
+    /// survives a restart so the provider conversation is truncated too, even
+    /// if the daemon stops before the next prompt.
+    pub pending_rewind: Option<h4rn_protocol::PendingRewind>,
+    /// The git registration this thread's linked worktree had at creation.
+    pub worktree_identity: Option<WorktreeIdentity>,
+    /// The provider ids of each delivered prompt, keyed by the thread's turn.
+    pub provider_turns: std::collections::BTreeMap<String, ProviderTurnRecord>,
 
     /// The switch this thread's durable row last committed to.
     ///
@@ -775,6 +817,7 @@ pub trait Journal: Send + Sync {
         &self,
         thread_id: &ThreadId,
         switch_generation: u64,
+        rewind_fallback: bool,
     ) -> Result<bool, JournalError>;
 
     /// Forgets a pending item once a provider accepted its prompt.
@@ -971,6 +1014,9 @@ impl SqliteJournal {
                 agent_fingerprint TEXT,
                 parked_json    TEXT,
                 imported_json  TEXT,
+                rewind_json    TEXT,
+                worktree_identity_json TEXT,
+                provider_turns_json TEXT,
                 forked_json    TEXT,
                 handoff_pending INTEGER NOT NULL DEFAULT 0,
                 switch_generation INTEGER NOT NULL DEFAULT 0,
@@ -1002,6 +1048,12 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "imported_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "rewind_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "worktree_identity_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "provider_turns_json", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "forked_json", "TEXT")
             .await?;
@@ -1516,11 +1568,14 @@ async fn upsert_thread_on(
     let queued_json = serde_json::to_string(&meta.queued)?;
     let claimed_json = serde_json::to_string(&meta.claimed)?;
     let imported_json = serde_json::to_string(&meta.imported)?;
+    let rewind_json = serde_json::to_string(&meta.pending_rewind)?;
+    let worktree_identity_json = serde_json::to_string(&meta.worktree_identity)?;
+    let provider_turns_json = serde_json::to_string(&meta.provider_turns)?;
     let forked_json = serde_json::to_string(&meta.forked_from)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, forked_json, handoff_pending, switch_generation)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -1539,9 +1594,12 @@ async fn upsert_thread_on(
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json,
+            imported_json = excluded.imported_json,
+            rewind_json = excluded.rewind_json,
+            worktree_identity_json = excluded.worktree_identity_json,
+            provider_turns_json = excluded.provider_turns_json,
             queued_json = excluded.queued_json,
             claimed_json = excluded.claimed_json,
-            imported_json = excluded.imported_json,
             forked_json = excluded.forked_json,
             handoff_pending = excluded.handoff_pending,
             switch_generation = excluded.switch_generation",
@@ -1568,6 +1626,9 @@ async fn upsert_thread_on(
     .bind(queued_json)
     .bind(claimed_json)
     .bind(imported_json)
+    .bind(rewind_json)
+    .bind(worktree_identity_json)
+    .bind(provider_turns_json)
     .bind(forked_json)
     .bind(meta.handoff_pending as i64)
     .bind(meta.switch_generation as i64)
@@ -1697,7 +1758,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, forked_json, handoff_pending, switch_generation
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, rewind_json, worktree_identity_json, provider_turns_json, forked_json, handoff_pending, switch_generation
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -1759,6 +1820,16 @@ impl Journal for SqliteJournal {
                 imported: row
                     .try_get::<Option<String>, _>("imported_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
+                pending_rewind: row
+                    .try_get::<Option<String>, _>("rewind_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                worktree_identity: row
+                    .try_get::<Option<String>, _>("worktree_identity_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                provider_turns: row
+                    .try_get::<Option<String>, _>("provider_turns_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
                 forked_from: row
                     .try_get::<Option<String>, _>("forked_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
@@ -2289,15 +2360,22 @@ impl Journal for SqliteJournal {
         &self,
         thread_id: &ThreadId,
         switch_generation: u64,
+        rewind_fallback: bool,
     ) -> Result<bool, JournalError> {
         // One statement, one field: the resume id this fallback could not use is
         // cleared, the history is owed, and the import's one native resume is
-        // spent. The generation guard means a fallback that lost its thread to a
-        // later switch changes nothing at all.
+        // spent. A fallback that replaces a refused native rewind also records
+        // that the next session starts from a handoff. The generation guard
+        // means a fallback that lost its thread to a later switch changes
+        // nothing at all.
+        let rewind_json = rewind_fallback
+            .then(|| serde_json::to_string(&h4rn_protocol::PendingRewind::Handoff))
+            .transpose()?;
         let result = sqlx::query(
             "UPDATE daemon_threads
                 SET resume_id = NULL,
                     handoff_pending = 1,
+                    rewind_json = COALESCE(?, rewind_json),
                     imported_json = CASE
                         WHEN json_valid(imported_json)
                             THEN json_set(imported_json, '$.native_resume', json('false'))
@@ -2305,6 +2383,7 @@ impl Journal for SqliteJournal {
                     END
               WHERE thread_id = ? AND switch_generation = ?",
         )
+        .bind(rewind_json.as_deref())
         .bind(thread_id.as_str())
         .bind(switch_generation as i64)
         .execute(&self.pool)
@@ -3165,6 +3244,9 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "resume_id": meta.resume_id,
         "agent_fingerprint": meta.agent_fingerprint,
         "parked": meta.parked,
+        "pending_rewind": meta.pending_rewind,
+        "worktree_identity": meta.worktree_identity,
+        "provider_turns": meta.provider_turns,
     })
 }
 
@@ -3201,6 +3283,9 @@ mod tests {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            pending_rewind: None,
+            worktree_identity: None,
+            provider_turns: Default::default(),
             queued: Vec::new(),
             claimed: Vec::new(),
             imported: None,
@@ -3244,6 +3329,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            rewind: Default::default(),
+            file_rewind: false,
             queued_count: 0,
             queue_revision: 0,
             active_turn_id: None,
@@ -3780,7 +3867,7 @@ mod tests {
 
         assert!(
             !journal
-                .fall_back_from_native_resume(&one.thread_id, 3)
+                .fall_back_from_native_resume(&one.thread_id, 3, false)
                 .await
                 .unwrap(),
             "an older switch's write was accepted"
@@ -3790,7 +3877,7 @@ mod tests {
 
         assert!(
             journal
-                .fall_back_from_native_resume(&one.thread_id, 4)
+                .fall_back_from_native_resume(&one.thread_id, 4, false)
                 .await
                 .unwrap(),
             "the fallback on the current switch was refused"
@@ -3808,6 +3895,41 @@ mod tests {
         assert_eq!(row.title, "keep me");
         assert_eq!(row.model, "keep-the-model");
         assert_eq!(row.switch_generation, 4);
+        assert!(
+            row.pending_rewind.is_none(),
+            "a plain fallback invented a rewind"
+        );
+    }
+
+    /// A fallback that replaces a refused native boundary records the handoff,
+    /// in the same generation-checked statement.
+    #[tokio::test]
+    async fn a_rewind_fallback_records_the_handoff_it_replaces_it_with() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let mut one = meta("th_one");
+        one.resume_id = Some("saved-session".into());
+        one.pending_rewind = Some(h4rn_protocol::PendingRewind::Native {
+            session: h4rn_protocol::SessionRewind::ResumeAtMessage {
+                message: "msg_1".into(),
+            },
+        });
+        one.switch_generation = 2;
+        journal.upsert_thread(&one).await.unwrap();
+
+        assert!(
+            journal
+                .fall_back_from_native_resume(&one.thread_id, 2, true)
+                .await
+                .unwrap(),
+            "the fallback on the current switch was refused"
+        );
+        let row = journal.list_threads().await.unwrap().remove(0);
+        assert_eq!(
+            row.pending_rewind,
+            Some(h4rn_protocol::PendingRewind::Handoff),
+            "the refused native boundary was not replaced by the handoff"
+        );
+        assert!(row.handoff_pending);
     }
 
     #[tokio::test]
@@ -5037,6 +5159,7 @@ mod tests {
                 before_etag: None,
                 after_etag: Some("etag".into()),
             }],
+            complete: false,
             note: None,
         };
         journal

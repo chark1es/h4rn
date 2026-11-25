@@ -70,6 +70,8 @@ pub struct AppState {
     pub worktrees: Arc<crate::worktrees::WorktreeTracker>,
     /// This machine's defaults for new thread worktrees.
     pub worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
+    /// This machine's Labs switches for rewinding a thread.
+    pub rewind_settings: Arc<crate::rewind::RewindSettingsStore>,
     /// Host inventory.
     pub hosts: Arc<HostInventory>,
     /// Daemon-owned PTY terminals.
@@ -1709,6 +1711,62 @@ impl Connection {
                         unrecorded: accepted.unrecorded,
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::RewindThread {
+                    thread_id,
+                    before_item_id,
+                    restore_files,
+                } => {
+                    let result = self
+                        .state
+                        .manager
+                        .rewind_thread(&thread_id, &before_item_id, restore_files)
+                        .await;
+                    if let Ok(prompt) = &result {
+                        self.audit(
+                            "thread.rewound",
+                            Some("thread"),
+                            Some(thread_id.as_ref()),
+                            json!({
+                                "before_item_id": before_item_id,
+                                "files_restored": prompt.files_restored,
+                                "method": prompt.method,
+                            }),
+                        );
+                    }
+                    result
+                        .map(|prompt| ResponseBody::Rewound { prompt })
+                        .map_err(crate::threads::ManagerError::into_proto)
+                }
+                ClientRequest::RewindPlan {
+                    thread_id,
+                    before_item_id,
+                } => self
+                    .state
+                    .manager
+                    .rewind_plan(&thread_id, &before_item_id)
+                    .await
+                    .map(|plan| ResponseBody::RewindPlan { plan })
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::GetRewindSettings => Ok(ResponseBody::RewindSettings {
+                    settings: self.state.rewind_settings.get(),
+                }),
+                ClientRequest::SetRewindSettingsEnabled { enabled } => {
+                    match self.state.rewind_settings.set_files_enabled(enabled) {
+                        Ok(settings) => {
+                            // The thread manager enforces the switch at the
+                            // moment of the request and advertises it in every
+                            // summary.
+                            self.state
+                                .manager
+                                .set_file_rewind_enabled(settings.files_enabled);
+                            Ok(ResponseBody::RewindSettings { settings })
+                        }
+                        Err(error) => Err(ProtoError::plain(
+                            ProtoErrorCode::Internal,
+                            format!("could not save the rewind switch: {error}"),
+                        )),
+                    }
+                }
                 ClientRequest::GetThreadQueue { thread_id, offset } => self
                     .state
                     .manager
@@ -3108,6 +3166,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            rewind: Default::default(),
+            file_rewind: false,
             queued_count: 0,
             queue_revision: 0,
             active_turn_id: None,

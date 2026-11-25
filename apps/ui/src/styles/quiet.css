@@ -1480,6 +1480,86 @@ fieldset.q-seg-fs {
   gap: 8px;
   align-items: center;
 }
+
+/* Edit from here: a quiet action under a sent message. */
+.q-edit-here {
+  height: 22px;
+  padding: 0 6px;
+  margin-right: -6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-3);
+  gap: 4px;
+}
+.q-edit-here:hover {
+  color: var(--fg);
+}
+.q-rewind-choices {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+.q-rewind-choice {
+  display: flex;
+  gap: 10px;
+  padding: 11px 12px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+.q-rewind-choice + .q-rewind-choice {
+  border-top: 1px solid var(--line);
+}
+.q-rewind-choice:hover {
+  background: var(--hover);
+}
+.q-rewind-choice.on {
+  background: var(--sel);
+}
+.q-rewind-choice input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  flex: none;
+}
+.q-rewind-tx {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 18px;
+}
+.q-rewind-tx b {
+  font-weight: 500;
+  color: var(--fg);
+}
+.q-rewind-tx span {
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 17px;
+}
+.q-rewind-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--fg-2);
+}
+.q-rewind-warning {
+  display: flex;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 17px;
+}
+.q-rewind-warning .q-icon {
+  flex: none;
+  margin-top: 1px;
+}
 .q-attach {
   display: inline-flex;
   align-items: center;
