@@ -51,9 +51,12 @@ The fork keeps:
   together with the per-thread files it materialised. A journal write that fails
   after adoption rolls back the same way.
 
-A queued message is its own turn from the moment it arrives; it is never part of
-the turn it waits behind, and a fork at that turn does not copy it. A turn
-interrupted by a restart is settled as interrupted.
+A queued message is not a turn: it waits in the thread's queue, and a fork of
+the turn it waits behind does not copy it. A delivery claim is no turn either,
+so a message a claim is starting is not copied. A message the queue promotes
+after the copy began waits for the copy gate like any other send, so it cannot
+reach the fork's reading of the source. A turn interrupted by a restart is
+settled as interrupted.
 
 Journals written before queued prompts had their own turn id are read the same
 way: a prompt filed under the running turn goes to the next turn that starts and

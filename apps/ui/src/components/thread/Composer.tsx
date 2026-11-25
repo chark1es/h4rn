@@ -1,12 +1,23 @@
-import { ArrowUpIcon, AtSignIcon, PaperclipIcon, PlusIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowUpIcon,
+  AtSignIcon,
+  CheckIcon,
+  CornerDownRightIcon,
+  ListEndIcon,
+  PaperclipIcon,
+  PlusIcon,
+  XIcon,
+} from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
 import { useWorkspaceFiles } from "@/features/composer/workspaceFiles";
-import type { ThreadSummary } from "@/gen";
+import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { isTurnRunning } from "@/lib/agent";
+import { useFollowUpBehavior, useMultilineEnter } from "@/lib/chatSettings";
 import { composerCommands } from "@/lib/composerCommands";
 import { caretOnFirstLine, sentPrompts, stepPromptHistory } from "@/lib/composerHistory";
 import {
@@ -30,8 +41,9 @@ import {
   writeThreadDraft,
 } from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
+import { chordFromEvent, matchCommand } from "@/lib/keybindings";
 import { openPhonePanel } from "@/lib/phonePanels";
-import { getState, sendMessage, useApp } from "@/lib/store/appStore";
+import { editQueuedMessage, getState, sendMessage, setUi, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { ComposerMenu, type ComposerMenuRow } from "./ComposerMenu";
 import { ThreadControls } from "./ThreadControls";
@@ -117,6 +129,44 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [dragging, setDragging] = useState(false);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   const [anchor, setAnchor] = useState({ left: 0, bottom: 0, lineHeight: 21 });
+  /**
+   * The queued message open for editing, with the text it replaced.
+   *
+   * Two texts stay separate: the box while editing (the edit buffer) and the
+   * saved text of the message being edited. The thread's own draft stays in
+   * storage untouched, so Cancel reads it back and restores whatever is really
+   * saved — including text another tab wrote during the edit.
+   */
+  const [editing, setEditing] = useState<{
+    messageId: string;
+    /** The message's text when the edit began, to tell changed text apart. */
+    originalText: string;
+  } | null>(null);
+  /**
+   * The edit session on screen now, for a reply that started before it.
+   *
+   * A Save's answer may arrive after the person opened another message; it
+   * belongs to the edit that submitted it and must not close the new one.
+   */
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  /**
+   * The edit buffer's revision, counted from the edit's own text.
+   *
+   * A Save names the revision it submitted. Its acknowledgement may arrive
+   * after the person typed again; the editor then stays open with the newer
+   * text instead of discarding it.
+   */
+  const editRevision = useRef(0);
+  const followUp = useFollowUpBehavior();
+  const multiline = useMultilineEnter();
+  const running = isTurnRunning(summary);
+  const canSteer = summary.steer;
+  const defaultAction = running && canSteer ? followUp : "queue";
+  const beginEditRef = useRef<(message: QueuedMessage) => void>(() => {});
+  // Rows come from the queue cache, which the daemon serves separately from
+  // the summary; a bounded page is all this composer needs to act on.
+  const queued = useApp((state) => state.queues[summary.thread_id]?.queued);
   const ref = useRef<HTMLTextAreaElement | null>(null);
   /** True from compositionstart to compositionend; IME never drives the menu. */
   const composing = useRef(false);
@@ -199,6 +249,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     revision.current = entry.revision;
     historyIndex.current = -1;
     historyDraft.current = "";
+    setEditing(null);
+    setUi({ queuedEdit: null });
     setMenu(null);
     dismissed.current = null;
     requestAnimationFrame(() => {
@@ -224,18 +276,20 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   }, [focusNonce]);
 
   // Another tab may edit this thread's draft. Adopt its text only while this
-  // composer has no unsaved edit of its own.
+  // composer has no unsaved edit of its own: an active queue edit owns the box,
+  // and adopting a draft would silently replace the text being edited.
   useEffect(() => {
     return subscribeDraftChanges((change) => {
       if (change.scope !== "thread") return;
       if (change.host !== summary.host || change.target !== summary.thread_id) return;
+      if (editing) return;
       historyIndex.current = -1;
       historyDraft.current = "";
       revision.current = change.revision;
       setText(change.text);
       setMenu(null);
     });
-  }, [summary.host, summary.thread_id]);
+  }, [summary.host, summary.thread_id, editing]);
 
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, !newThreadOpen);
@@ -251,7 +305,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     historyIndex.current = -1;
     historyDraft.current = "";
     setText(value);
-    revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
+    // While editing a queued message the box holds that message, not the
+    // thread's draft; the draft stays in storage untouched for Cancel.
+    if (!editing) {
+      revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
+    } else {
+      editRevision.current += 1;
+    }
   };
 
   const recall = (direction: "backward" | "forward"): boolean => {
@@ -279,8 +339,12 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     return true;
   };
 
-  const submit = async () => {
+  const submit = async (opposite = false) => {
     if (!writable || sending || attachments.blockedReason) return;
+    if (editing) {
+      await saveEdit();
+      return;
+    }
     if (!text.trim() && attachments.attachments.length === 0) return;
     setMenu(null);
     dismissed.current = null;
@@ -299,13 +363,24 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     const preservedDraft = historyDraft.current;
     /** Where in history this send started; a newer recall replaces the restore. */
     const submittedHistoryIndex = historyIndex.current;
+    // The button and the send shortcut agree: a running turn on a harness with
+    // mid-turn input now gets Steer when the client's default says so; the
+    // opposite shortcut always means the other action.
+    let steer = false;
+    if (running) {
+      const action = opposite ? (defaultAction === "steer" ? "queue" : "steer") : defaultAction;
+      steer = action === "steer" && canSteer;
+    }
     // Store the draft before the send waits so a second tab's edit during the
     // request is not hidden behind this tab's pending write.
     flushDrafts();
     setSending(true);
-    const ok = await sendMessage(submittedThread, value, attachments.attachments);
+    const outcome = await sendMessage(submittedThread, value, attachments.attachments, { steer });
     setSending(false);
-    if (!ok) return;
+    // A send the daemon could not confirm may already be in the turn. Keep the
+    // draft until the recovered "May have been delivered" row appears, so the
+    // person's text is never lost while they decide.
+    if (outcome === "failed" || outcome === "unclear") return;
     // Clear only the draft that was sent. If this tab typed again, or another
     // tab saved newer text, that text stays in the box and in storage.
     const cleared = recalled
@@ -334,6 +409,112 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     attachments.clear();
     requestAnimationFrame(autosize);
   };
+
+  const beginEdit = (message: QueuedMessage) => {
+    if (sending) return;
+    editRevision.current += 1;
+    // A second Edit while one is open only points the edit at the other
+    // message: the thread's draft is in storage, so nothing is displaced.
+    setEditing({
+      messageId: message.message_id,
+      originalText: message.text,
+    });
+    setText(message.text);
+    setUi({
+      queuedEdit: { threadId: summary.thread_id, messageId: message.message_id },
+    });
+    requestAnimationFrame(() => {
+      const element = ref.current;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(message.text.length, message.text.length);
+      autosize();
+    });
+  };
+  beginEditRef.current = beginEdit;
+
+  /** Leaves edit mode and either restores the draft or hands the text back. */
+  const endEdit = useCallback(
+    (restoreDraft: boolean) => {
+      const current = editing;
+      if (!current) return;
+      setEditing(null);
+      setUi({ queuedEdit: null });
+      // Read the draft storage rather than the copy taken when the edit began:
+      // another tab may have saved newer text while this box held the queued
+      // message, and that text is what the person's thread really has.
+      const stored = readThreadDraftEntry(summary.host, summary.thread_id);
+      if (restoreDraft) {
+        setText(stored.text);
+        revision.current = stored.revision;
+        return;
+      }
+      // The queued message vanished while it was being edited (its turn
+      // started, or another client removed it). Changed text moves into the
+      // composer only when there was no draft to restore and something was
+      // actually changed; otherwise the draft wins and the edit is dropped.
+      if (stored.text.trim().length > 0 || text === current.originalText) {
+        setText(stored.text);
+        revision.current = stored.revision;
+        return;
+      }
+      revision.current = writeThreadDraft(summary.host, summary.thread_id, text);
+    },
+    [editing, text, summary.host, summary.thread_id],
+  );
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    const submitted = editing;
+    const submittedRevision = editRevision.current;
+    const message = queued?.find((item) => item.message_id === submitted.messageId);
+    if (!message) {
+      endEdit(false);
+      return;
+    }
+    const ok = await editQueuedMessage(
+      summary.thread_id,
+      submitted.messageId,
+      text,
+      message.attachments,
+    );
+    if (!ok) return;
+    // A reply that lands after another message was opened (or after the edit
+    // ended) must not touch the box: it acknowledges the message it saved, not
+    // whatever the person is editing now.
+    if (editingRef.current !== submitted) return;
+    // The acknowledgement names the text it submitted. If the person typed
+    // again while it was in flight, that newer text stays in the open editor;
+    // closing it here would silently discard what they just wrote.
+    if (editRevision.current !== submittedRevision) return;
+    endEdit(true);
+    requestAnimationFrame(autosize);
+  };
+
+  const cancelEdit = () => {
+    endEdit(true);
+    requestAnimationFrame(autosize);
+  };
+
+  // Another pane (or the queue at the end of the thread) asks for a message to
+  // be edited here.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId: string; message: QueuedMessage }>).detail;
+      if (!detail || detail.threadId !== summary.thread_id) return;
+      beginEditRef.current(detail.message);
+    };
+    window.addEventListener("h4rn:edit-queued", handler);
+    return () => window.removeEventListener("h4rn:edit-queued", handler);
+  }, [summary.thread_id]);
+
+  // A message can start (or be removed elsewhere) while it is open here. The
+  // edit ends; changed text stays only when there was no draft to restore.
+  useEffect(() => {
+    if (!editing) return;
+    if (queued?.some((item) => item.message_id === editing.messageId)) return;
+    endEdit(false);
+  }, [queued, editing, endEdit]);
 
   const canSend =
     writable &&
@@ -493,6 +674,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       }}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing) return;
+        const element = event.currentTarget;
         // While the picker is open its arrows and accept keys belong to it,
         // not to history recall or send.
         if (menu) {
@@ -523,14 +705,55 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             return;
           }
         }
-        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-          event.preventDefault();
-          void submit();
+        if (event.key === "Enter") {
+          const mod = event.metaKey || event.ctrlKey;
+          if (editing) {
+            if (!event.shiftKey) {
+              event.preventDefault();
+              void saveEdit();
+            }
+            return;
+          }
+          if (multiline) {
+            if (mod) {
+              // Cmd/Ctrl+Enter sends with the default action; adding Shift is
+              // the opposite action. With only a queued message to act on, let
+              // the global "steer the oldest" shortcut have it.
+              if (event.shiftKey && !text.trim()) return;
+              event.preventDefault();
+              void submit(event.shiftKey);
+            }
+            return;
+          }
+          if (mod && !event.shiftKey) {
+            event.preventDefault();
+            void submit(true);
+            return;
+          }
+          if (!mod && !event.shiftKey) {
+            event.preventDefault();
+            void submit(false);
+          }
           return;
+        }
+        // Alt/Option+Up with the caret at the very start edits the newest
+        // queued message; the chord is rebindable in Settings → Shortcuts.
+        if (!editing && (queued?.length ?? 0) > 0) {
+          const chord = chordFromEvent(event);
+          if (
+            chord &&
+            matchCommand(chord) === "thread.editQueuedMessage" &&
+            (element.selectionStart ?? 0) === 0 &&
+            (element.selectionEnd ?? 0) === 0
+          ) {
+            event.preventDefault();
+            const newest = queued?.[(queued?.length ?? 0) - 1];
+            if (newest) beginEdit(newest);
+            return;
+          }
         }
         if (
           (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
-          event.nativeEvent.isComposing ||
           event.metaKey ||
           event.ctrlKey ||
           event.altKey ||
@@ -538,7 +761,6 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         ) {
           return;
         }
-        const element = event.currentTarget;
         if (event.key === "ArrowUp") {
           // The first-line rule decides whether recall starts; once history
           // mode is open the caret sits at the top of the recalled text and
@@ -603,21 +825,50 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       type="button"
       className={cn("q-send", canSend && "ready")}
       disabled={!canSend}
-      onClick={() => void submit()}
+      onClick={() => void (editing ? saveEdit() : submit())}
       title={
-        attachments.blockedReason ??
-        disabledReason ??
-        (attachments.attachments.length > 0
-          ? `Send with ${attachments.attachments.length} attachment${
-              attachments.attachments.length === 1 ? "" : "s"
-            } (Enter)`
-          : "Send (Enter)")
+        editing
+          ? "Save the queued message"
+          : (attachments.blockedReason ??
+            disabledReason ??
+            (defaultAction === "steer" && running && canSteer
+              ? "Steer into the running turn (Enter)"
+              : running
+                ? "Queue for the next turn (Enter)"
+                : "Send (Enter)"))
       }
-      aria-label="Send reply"
+      aria-label={editing ? "Save queued message" : "Send reply"}
+      data-action={editing ? "save" : defaultAction}
     >
-      <ArrowUpIcon className="q-icon" strokeWidth={2} aria-hidden />
+      {editing ? (
+        <CheckIcon className="q-icon" strokeWidth={2} aria-hidden />
+      ) : defaultAction === "steer" && running && canSteer ? (
+        <CornerDownRightIcon className="q-icon" strokeWidth={2} aria-hidden />
+      ) : running ? (
+        <ListEndIcon className="q-icon" strokeWidth={2} aria-hidden />
+      ) : (
+        <ArrowUpIcon className="q-icon" strokeWidth={2} aria-hidden />
+      )}
     </button>
   );
+
+  const editBar = editing ? (
+    <div className="q-edit-bar">
+      <span className="t">
+        Editing a queued message
+        {running && !canSteer ? " · this agent cannot take it mid-turn" : ""}
+      </span>
+      <span className="grow" />
+      <button type="button" className="q-btn ghost" onClick={cancelEdit}>
+        <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        Cancel
+      </button>
+      <button type="button" className="q-btn ghost" onClick={() => void saveEdit()}>
+        <CheckIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        Save
+      </button>
+    </div>
+  ) : null;
 
   if (isPhone) {
     return (
@@ -648,6 +899,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
           </button>
           <div className="in">
+            {editBar}
             {inputBlock}
             {canSend ? sendButton : null}
           </div>
@@ -716,6 +968,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           onRemove={attachments.remove}
           onRetry={attachments.retry}
         />
+
+        {editBar}
 
         {inputBlock}
 

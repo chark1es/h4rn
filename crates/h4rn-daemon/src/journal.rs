@@ -112,6 +112,18 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// Messages waiting for the next turn, oldest first.
+    ///
+    /// Stored with the row so the queue survives a daemon restart in its order,
+    /// and so does the ceiling or outside grant each message carries.
+    pub queued: Vec<StoredQueuedMessage>,
+    /// Messages taken from the queue for a steer into a running turn.
+    ///
+    /// A claim keeps its payload until delivery is known, so a crash before the
+    /// adapter took it, or a refused message whose restore write failed, is
+    /// never lost. A delivered claim is only remembered to prove it must not be
+    /// sent again.
+    pub claimed: Vec<QueuedClaim>,
     /// The saved conversation this thread was imported from, when it was.
     ///
     /// An imported thread starts with no live session. The kept messages, with
@@ -148,6 +160,83 @@ pub struct ForkOrigin {
     /// turn when the source has moved on since the fork was made.
     #[serde(default)]
     pub provider_turn_id: Option<String>,
+}
+
+/// One message waiting for a thread's next turn, with the identity of the work
+/// it does.
+///
+/// The queue outlives the request that filled it, so this stores the sender's
+/// permission ceiling and, for an outside grant, the token family that asked.
+/// The family is daemon-internal: a client only ever sees the
+/// [`h4rn_protocol::QueuedMessage`] half, which the flatten keeps stored rows
+/// shaped like the wire message.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredQueuedMessage {
+    /// The message as a client sees it.
+    #[serde(flatten)]
+    pub message: h4rn_protocol::QueuedMessage,
+    /// The permission ceiling the sender attached to this message, if any.
+    ///
+    /// It survives a restart with the message, so a supervised prompt is not
+    /// promoted at a more permissive mode just because the daemon restarted.
+    #[serde(default)]
+    pub ceiling: Option<h4rn_protocol::RuntimeMode>,
+    /// The outside grant whose work this message does, when one sent it.
+    ///
+    /// Re-checked when the message is delivered, so work asked for under a
+    /// family that was revoked while it waited never runs.
+    #[serde(default)]
+    pub grant: Option<h4rn_protocol::WorkGrant>,
+}
+
+/// One message taken from the queue to steer into a running turn.
+///
+/// The claim is written before the adapter sees the text and removed only once
+/// the outcome is known: a message that never reached the turn goes back to the
+/// queue at startup, one the adapter definitely refused is restored, and one it
+/// took (or may have taken) is never sent a second time.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueuedClaim {
+    /// The message exactly as it waited in the queue, with its ceiling and grant.
+    pub message: StoredQueuedMessage,
+    /// The queue position it waited in, so a restore puts it back where it was.
+    pub index: u32,
+    /// The turn it was claimed for.
+    pub turn_id: h4rn_protocol::TurnId,
+    /// What is known about its delivery.
+    pub state: QueuedClaimState,
+    /// Whether this claim is the turn's own promoted prompt, not a steer.
+    ///
+    /// A promoted prompt's claim is what recovery uses when the daemon stops
+    /// between removing the queue row and handing the text to the adapter. A
+    /// steer's claim is kept for its message alone, so the two are told apart:
+    /// settling a turn drops its promoted claim but never an unclear steer's.
+    #[serde(default)]
+    pub promoted: bool,
+}
+
+/// What a [`QueuedClaim`] knows about its message's delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedClaimState {
+    /// Written down, but the adapter has not been called yet.
+    ///
+    /// On startup this is known not to have reached the turn, so it goes back
+    /// to the queue rather than being dropped.
+    Claimed,
+    /// The adapter call has started, so delivery is unknown.
+    ///
+    /// A restart keeps the payload and shows it as a row that may have been
+    /// delivered. It is never sent automatically again, and the person can
+    /// resend or discard it.
+    Sending,
+    /// The adapter took the message.
+    ///
+    /// A restart never delivers it again.
+    Delivered,
+    /// The adapter definitely refused it and its queue row still has to be put
+    /// back. A startup restores it.
+    Refused,
 }
 
 /// The saved conversation a thread was imported from.
@@ -703,6 +792,8 @@ impl SqliteJournal {
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
                 parked_json    TEXT,
+                queued_json    TEXT NOT NULL DEFAULT '[]',
+                claimed_json   TEXT NOT NULL DEFAULT '[]',
                 imported_json  TEXT,
                 forked_json    TEXT
             )",
@@ -742,6 +833,18 @@ impl SqliteJournal {
             "daemon_threads",
             "title_source",
             "TEXT NOT NULL DEFAULT 'prompt'",
+        )
+        .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "queued_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "claimed_json",
+            "TEXT NOT NULL DEFAULT '[]'",
         )
         .await?;
 
@@ -942,12 +1045,14 @@ async fn upsert_thread_on(
     let runtime_mode = runtime_mode.trim_matches('"').to_owned();
     let worktree_json = serde_json::to_string(&meta.worktree)?;
     let parked_json = serde_json::to_string(&meta.parked)?;
+    let queued_json = serde_json::to_string(&meta.queued)?;
+    let claimed_json = serde_json::to_string(&meta.claimed)?;
     let imported_json = serde_json::to_string(&meta.imported)?;
     let forked_json = serde_json::to_string(&meta.forked_from)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, forked_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, forked_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -966,6 +1071,8 @@ async fn upsert_thread_on(
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json,
+            queued_json = excluded.queued_json,
+            claimed_json = excluded.claimed_json,
             imported_json = excluded.imported_json,
             forked_json = excluded.forked_json",
     )
@@ -988,6 +1095,8 @@ async fn upsert_thread_on(
     .bind(meta.agent_id.as_deref())
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
+    .bind(queued_json)
+    .bind(claimed_json)
     .bind(imported_json)
     .bind(forked_json)
     .execute(&mut *conn)
@@ -1116,7 +1225,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json, forked_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json, forked_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -1167,6 +1276,14 @@ impl Journal for SqliteJournal {
                 parked: row
                     .try_get::<Option<String>, _>("parked_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
+                queued: row
+                    .try_get::<Option<String>, _>("queued_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
+                claimed: row
+                    .try_get::<Option<String>, _>("claimed_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
                 imported: row
                     .try_get::<Option<String>, _>("imported_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
@@ -2413,6 +2530,8 @@ mod tests {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            queued: Vec::new(),
+            claimed: Vec::new(),
             imported: None,
             forked_from: None,
         }
@@ -2451,6 +2570,10 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
+            steer: false,
         }
     }
 
