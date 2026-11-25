@@ -13316,7 +13316,8 @@ impl Inner {
                         let switch_generation = record.meta.switch_generation;
                         if let Err(error) = self
                             .journal
-                            .fall_back_from_native_resume(&fork_id, switch_generation)
+                            // No rewind is pending on a fork's first turn.
+                            .fall_back_from_native_resume(&fork_id, switch_generation, false)
                             .await
                         {
                             tracing::warn!(
