@@ -462,10 +462,10 @@ mod tests {
             self.calls.lock().unwrap().push(format!("forge:{number}"));
             if *self.forge_missing.lock().unwrap() {
                 // GitHub's own words when the number is really a pull request,
-                // through the same conversion a real forge miss takes.
-                return Err(ForgeError::NotFound(format!(
+                // through the same conversions a real forge miss takes.
+                return Err(ForgeServiceError::Forge(ForgeError::NotFound(format!(
                     "#{number} is a pull request, not an issue"
-                ))
+                )))
                 .into());
             }
             if *self.fail.lock().unwrap() {
@@ -496,8 +496,12 @@ mod tests {
                 .unwrap()
                 .push(format!("linear:{issue_id}"));
             if *self.missing.lock().unwrap() {
-                // The client's own error, through the production conversion.
-                return Err(ForgeError::NotFound("Linear issue was not found".into()).into());
+                // The client's own error, wrapped the way the live refresh
+                // path wraps it, through both production conversions.
+                return Err(ForgeServiceError::Forge(ForgeError::NotFound(
+                    "Linear issue was not found".into(),
+                ))
+                .into());
             }
             if *self.fail.lock().unwrap() {
                 return Err(IssueLinkError::Tracker("linear is down".into()));
