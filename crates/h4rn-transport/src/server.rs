@@ -82,7 +82,7 @@ pub struct SecureOptions {
 }
 
 impl SecureOptions {
-    /// Shipping defaults: pairing closed, a one-second path timeout and a
+    /// Shipping defaults: pairing closed, a two-second path timeout and a
     /// 25 ms tick (matching the client's failover budget).
     pub fn new(identity: DeviceIdentity) -> Self {
         Self {

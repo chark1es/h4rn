@@ -198,11 +198,13 @@ impl SecureClient {
             daemon.service.public_identity().noise_public,
         );
         engine.psk = psk;
-        // These tests boot the daemon in the same process and runtime as the
-        // client, and the daemon's journal is SQLite: a large write or read can
-        // hold the runtime for a second or two on a loaded machine. That is not
+        // These tests boot the daemon in the same process and tokio runtime as
+        // the client. On a loaded machine the daemon's CPU work on a large
+        // payload (JSON, debug-build Noise on frames up to 512 KiB) can keep the
+        // client's liveness tick from running for a second or two. That is not
         // a dead path, so a liveness timeout measured in single seconds would
-        // make these framing tests flaky. Failover timings have their own tests
+        // make these framing tests flaky. (The journal itself does not block the
+        // runtime: sqlx runs each SQLite connection on its own thread.) Failover timings have their own tests
         // in `h4rn-transport`; here the timeout only needs to be out of reach.
         engine.path_timeout_ms = 60_000;
         let paths = vec![ClientPath::websocket(
@@ -475,17 +477,18 @@ fn device_identity() -> DeviceIdentity {
 
 /// How long a test waits for a secure event before calling it lost.
 ///
-/// The daemon boots in this process and its journal is synchronous SQLite, so
-/// on a loaded machine one call can hold a runtime worker for several seconds.
-/// Every wait here is on an event; this bound only turns a real loss into a
-/// failure instead of a hang.
+/// The daemon boots in this process and shares the client's tokio runtime, so
+/// on a loaded machine its CPU work on a large payload can delay the client for
+/// a second or more. Every wait here is on an event; this bound only turns a
+/// real loss into a failure instead of a hang.
 const SECURE_WAIT: Duration = Duration::from_secs(60);
 
 /// Builds the daemon's secure service for these tests.
 ///
-/// The daemon shares this process and runtime with the client, so a slow
-/// journal call can pause the transport for longer than the shipping two-second
-/// path deadline. These tests check framing, replay, pairing and authorisation,
+/// The daemon shares this process and runtime with the client, so daemon CPU
+/// work on a large payload can pause the transport for longer than the shipping
+/// two-second path deadline. This is belt-and-braces for a shared test runtime,
+/// not cover for a blocking journal: sqlx runs SQLite on its own threads. These tests check framing, replay, pairing and authorisation,
 /// never liveness, so the deadline is pushed out of reach: scheduling noise must
 /// not close a live path. Liveness has its own test below, with its own service.
 fn secure(mut options: SecureOptions) -> SecureService {
@@ -546,8 +549,8 @@ async fn secure_transport_creates_a_thread() {
 
 /// A queue can be larger than a paired transport's frame, so the summary only
 /// counts it and the contents come in bounded pages.
-// The daemon's journal work for this payload is synchronous; keep the
-// transport's tasks off the worker that runs it.
+// Client and daemon share this runtime; give the daemon's CPU work on this
+// payload its own workers so the client's transport tasks keep running.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_queue_stays_out_of_the_summary_and_comes_in_pages() {
     let client_identity = device_identity();
@@ -1009,7 +1012,7 @@ async fn legacy_rows_replay_whole_and_in_order_over_the_paired_transport() {
     daemon.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_quiet_session_keeps_its_path_on_probes_alone() {
     // The daemon closes a path that carries no authenticated packet for its
     // `path_timeout`. A health probe is an authenticated control record, so an
@@ -1018,7 +1021,7 @@ async fn a_quiet_session_keeps_its_path_on_probes_alone() {
     let client_identity = device_identity();
     let mut options = SecureOptions::new(device_identity())
         .with_policy(PairingPolicy::new([client_identity.public().noise_public]));
-    options.path_timeout = Duration::from_millis(500);
+    options.path_timeout = Duration::from_secs(1);
     // Deliberately not the test helper: this test is about the daemon's own
     // path deadline, so it must keep the short one.
     let service = Arc::new(SecureService::new(options));
@@ -1027,8 +1030,9 @@ async fn a_quiet_session_keeps_its_path_on_probes_alone() {
     client.hello().await;
 
     // Three times the daemon's deadline with nothing to say: the client's own
-    // 250 ms probes are the only traffic on the path.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    // 250 ms probes are the only traffic on the path. The deadline leaves 750 ms
+    // of scheduling slack over the probe interval.
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     client.hello().await;
     assert_eq!(
