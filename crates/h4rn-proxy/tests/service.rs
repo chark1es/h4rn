@@ -50,6 +50,8 @@ fn spec_for(applied: &AppliedOverride) -> SessionSpec {
         reasoning_effort: None,
         fast: false,
         resume_id: None,
+        native_fork: false,
+        native_fork_turn: None,
         mcp_endpoint: None,
         env_overrides: applied.env.clone(),
         attachments: Vec::new(),

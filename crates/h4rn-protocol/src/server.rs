@@ -189,6 +189,16 @@ pub enum ResponseBody {
         /// Current projection of the new thread.
         summary: ThreadSummary,
     },
+    /// A thread was forked at a settled turn.
+    ///
+    /// The new thread starts with the copied transcript and no live session;
+    /// its first message starts one. The source thread is unchanged.
+    ThreadForked {
+        /// New thread id.
+        thread_id: ThreadId,
+        /// Current projection of the new thread.
+        summary: crate::ThreadSummary,
+    },
     /// A thread moved to another harness.
     ///
     /// `dropped` names the settings the new harness does not offer, so the

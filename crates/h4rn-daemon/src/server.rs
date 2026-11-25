@@ -1647,6 +1647,39 @@ impl Connection {
                         Err(error) => Err(error.into_proto()),
                     }
                 }
+                ClientRequest::ForkThread { thread_id, turn_id } => {
+                    match self.state.manager.fork_thread(&thread_id, &turn_id).await {
+                        Ok(forked) => {
+                            // A fork runs in its source's workspace, which is
+                            // normally already an authorised IDE root; authorise
+                            // it again so a fork made against a restored source is
+                            // reachable from IDE mode too.
+                            if let Err(error) =
+                                self.state.fs.allow_root(&forked.summary.workspace_path)
+                            {
+                                tracing::warn!(
+                                    workspace_path = %forked.summary.workspace_path,
+                                    %error,
+                                    "IDE root not authorised"
+                                );
+                            }
+                            self.audit(
+                                "thread.forked",
+                                Some("thread"),
+                                Some(forked.thread_id.as_ref()),
+                                json!({
+                                    "source_thread": thread_id.as_str(),
+                                    "source_turn": turn_id.as_str(),
+                                }),
+                            );
+                            Ok(ResponseBody::ThreadForked {
+                                thread_id: forked.thread_id,
+                                summary: forked.summary,
+                            })
+                        }
+                        Err(error) => Err(error.into_proto()),
+                    }
+                }
                 ClientRequest::SendMessage {
                     thread_id,
                     text,
@@ -3052,6 +3085,7 @@ mod tests {
             title,
             workspace_path: "/tmp/work".into(),
             project_path: None,
+            forked_from: None,
             branch: None,
             model: "test-model".into(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,

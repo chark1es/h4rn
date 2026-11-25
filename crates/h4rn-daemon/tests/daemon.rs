@@ -1023,6 +1023,87 @@ async fn send_message_starts_a_new_turn_and_clears_a_pin() {
     daemon.stop().await;
 }
 
+/// The wire request copies a finished turn and answers with the new thread,
+/// leaving the source row alone.
+#[tokio::test]
+async fn fork_thread_returns_the_new_thread_with_its_lineage() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_host(&mut client, host, "first", HarnessKind::ClaudeCode).await;
+    let thread_id = summary.thread_id.clone();
+    client.wait_for_turn_completed().await;
+    client.wait_for_tab(ThreadTab::Done).await;
+
+    let ResponseBody::Thread { events, .. } = client
+        .request(ClientRequest::GetThread {
+            thread_id: thread_id.clone(),
+            since_seq: 0,
+        })
+        .await
+        .expect("read the source")
+    else {
+        panic!("expected a thread replay");
+    };
+    let turn_id = events
+        .iter()
+        .find_map(|seq_event| match &seq_event.event {
+            Event::ItemCompleted {
+                turn_id,
+                item: h4rn_protocol::Item::Message { role, .. },
+                ..
+            } if *role == h4rn_protocol::MessageRole::User => Some(turn_id.clone()),
+            _ => None,
+        })
+        .expect("the first turn");
+
+    let fork = client
+        .request(ClientRequest::ForkThread {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+        })
+        .await
+        .expect("fork");
+    let ResponseBody::ThreadForked {
+        thread_id: fork_id,
+        summary: fork_summary,
+    } = fork
+    else {
+        panic!("expected a fork response: {fork:?}");
+    };
+    assert_eq!(fork_summary.title, format!("{} (fork)", summary.title));
+    assert_eq!(
+        fork_summary.forked_from,
+        Some(h4rn_protocol::ForkRef {
+            thread_id: thread_id.clone(),
+            turn_id,
+        })
+    );
+    assert_eq!(fork_summary.workspace_path, summary.workspace_path);
+
+    let source = client
+        .request(ClientRequest::GetThread {
+            thread_id: thread_id.clone(),
+            since_seq: 0,
+        })
+        .await
+        .expect("read the source again");
+    let ResponseBody::Thread {
+        summary: source_summary,
+        ..
+    } = source
+    else {
+        panic!("expected the source thread");
+    };
+    assert_eq!(source_summary.title, summary.title);
+    assert!(source_summary.forked_from.is_none());
+    assert_ne!(fork_id, thread_id);
+
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn auto_settle_moves_a_done_thread_to_settled() {
     let clock = ManualClock::new();

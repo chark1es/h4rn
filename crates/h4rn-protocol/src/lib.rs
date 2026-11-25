@@ -68,7 +68,7 @@ pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, Uploa
 pub use client::{ClientFrame, ClientRequest, QueueAction, QueueDirection};
 pub use common::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, DroppedSetting,
-    DroppedSettingKind, HarnessKind, HostSummary, Item, MatchUnit, MessageRole, PlanStep,
+    DroppedSettingKind, ForkRef, HarnessKind, HostSummary, Item, MatchUnit, MessageRole, PlanStep,
     QUEUE_PAGE_BYTES, QUEUE_PAGE_MESSAGES, QueuedMessage, RuntimeMode, ThreadFilter, ThreadSummary,
     ThreadTab, ToolCall, ToolCallStatus, ToolStats, Topic, TurnStatus, Usage, WorktreeRequest,
     queue_page,

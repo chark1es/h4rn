@@ -178,6 +178,73 @@ All notable changes to h4rn are recorded here. The format follows
   is split into chunks the client joins, so no message is shortened to fit.
   Message text is never logged and
   token shapes are redacted before storage. See [docs/import.md](docs/import.md).
+- **Fork a thread at any finished turn and carry on separately.** Each finished
+  turn has a **Fork from here** action, and the thread menu and command palette
+  can fork from the latest turn while it is settled. The fork is an ordinary
+  thread with the same project, workspace, harness, model, permissions and
+  reasoning settings, titled `<original> (fork)`, and its transcript is
+  everything the source showed through the one turn you chose — messages with
+  their attachments, tool calls, delegated rows, plans, error and limit rows,
+  and a reply that was still streaming — each with its own time and in the
+  order the source showed it, by the journal's own sequence, so a prompt sits
+  above its reply and a prompt queued behind a running turn stays above that
+  turn's reply. Each copied turn starts at its own first record's time. A
+  copied turn keeps its completion's token usage, change set and real status: a
+  turn the daemon lost to a restart copies as interrupted, not as a success,
+  and a delegated row shows its child's final state. An imported turn has no
+  completion of its own, so it copies as completed rather than as an
+  interruption. A turn is only offered
+  when the journal has evidence it ended: copied history, or a turn that
+  really started and settled (or was interrupted by a restart). An older
+  journal that stored a host loss without the turn's completion is read the
+  same way: the stored loss ends the turn it interrupted, so a later settled
+  turn stays forkable, and a restart writes that turn's missing completion so a
+  thread that was running when an older daemon stopped leaves Working. A prompt that
+  never started is not a turn, so it is left out of a later turn's copy and
+  cannot itself be forked. The copy owns its attachment blobs and adopts them
+  all or nothing: if any file is gone, the fork fails and the retains made so
+  far are rolled back, along with their per-thread files, instead of a
+  transcript pointing at the source's files; a failed journal write rolls back
+  the same way.
+  A prompt that has an answerless finished turn can be forked too. The provider
+  keeps its own conversation where it can copy the chosen turn: Codex's
+  `thread/fork` copies through that provider turn, so an earlier turn is still
+  exact after the source carries on, and Claude Code's `--resume <id>
+  --fork-session` is used only while the chosen turn is still the source
+  session's tip, re-checked when the fork starts. While Claude Code reads that
+  saved conversation, the source's next send is acknowledged at once (it has a
+  turn and a durable row) but its dispatch waits, and that wait never holds the
+  thread's session-switch lock, so a later send is still answered at once. The
+  fork's first message is written before its copy is waited on, and the deadline
+  runs from that write: Claude Code reports its session only after the first user
+  frame, so a fork that waited for that report first would never copy at all. A
+  provider still reading the source at the deadline has its process shut down and
+  fenced, and the source is released there — after the copy is stopped, before
+  the handoff session starts — so a message sent afterwards can never reach the
+  fork. A thread that has not started a session of its own
+  never lends a borrowed session id to another fork. Any other case — a harness
+  without native forks, a source that moved on, or a native fork that dies
+  before it starts — sends a bounded handoff of the copied history instead,
+  stopping before the current turn so a message queued during the startup is
+  never sent twice. A fork shares no live session, queued message, approval,
+  parked prompt or rate-limit schedule with its source; a queued or claimed
+  message is not a turn, so it is never copied into the turn it waited behind.
+  A source's queued message that is later promoted waits for the copy gate too,
+  exactly as a send does, so the fork cannot read it either way. An older
+  journal that filed a queued prompt under the running turn keeps the prompt
+  with the next turn that starts and has no prompt of its own; one that never
+  became a turn is not given to a later turn, and a fork at or after that point
+  is refused with a clear message — fork from an earlier turn or start a new
+  thread — rather than copied without a row the source showed. Only the new
+  thread's summary is published on the live feed, in the same append lock scope
+  as the copy, so no later event can arrive first and make a client drop it as
+  stale; a fork of hundreds of turns never stalls other threads, and the copied
+  transcript arrives through the same paged history as any thread. A fork of a worktree
+  thread starts in the same workspace path. The thread header says **Forked
+  from** with a link back, and the lineage survives a restart; deleting or
+  archiving the source never affects the fork. A turn that is still running or
+  waiting in the queue is refused with a message to wait for it. New request:
+  `ForkThread`. See [docs/fork.md](docs/fork.md).
 - **A prompt can run on a schedule or when a webhook fires.** Settings →
   Scheduled tasks creates a task with a workspace, harness, model, permissions
   and prompt, then runs it once, every N minutes or hours, daily or weekly at a
@@ -665,6 +732,25 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A native fork starts by sending its own prompt.** Claude Code prints nothing
+  for a natively forked session until the first user frame arrives, so waiting
+  for its session report before writing the prompt made every Claude fork wait
+  out the whole copy deadline and fall back to the handoff. The fork's prompt is
+  written first and the deadline runs from that write. A provider that never
+  reports its session still confirms the copy with its first output, and one
+  that stays silent is shut down and fenced; the source is released after the
+  copy is stopped and before the handoff session starts.
+- **A steered message stays in the turn it was written into.** A replay read
+  every extra user row in a running turn as an old daemon's queued prompt, so a
+  fork of a steered turn dropped the steer and the next turn was refused as
+  ambiguous. Steered rows now say what they are, so a fork keeps the steer in
+  order and every later turn stays forkable; a prompt an older journal really
+  filed under a running turn is still recovered the same way.
+- **A thread that was running when an older daemon stopped leaves Working.**
+  The journal's host-loss recovery already ends that turn for forks, but the
+  restart's repair looked only for a turn with no status at all, so its
+  completion and the finished phase were never written. The restart now finds
+  the turn in the wire rows too and finishes it.
 - **A worktree location is refused wherever it would put a checkout in a working
   tree.** Saving the location and creating a thread now find the real main
   checkout even when the repository keeps its git directory elsewhere — a

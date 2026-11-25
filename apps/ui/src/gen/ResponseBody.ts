@@ -192,6 +192,14 @@ turn_id: TurnId,
 /**
  * Current projection of the new thread.
  */
+summary: ThreadSummary, } | { "type": "thread_forked", 
+/**
+ * New thread id.
+ */
+thread_id: ThreadId, 
+/**
+ * Current projection of the new thread.
+ */
 summary: ThreadSummary, } | { "type": "thread_switched", 
 /**
  * The thread after the switch.
