@@ -56,7 +56,10 @@ All notable changes to h4rn are recorded here. The format follows
   grouped alert names no single thread, so it is never quiet for the thread already on screen;
   tapping it opens h4rn. Tapping a single alert opens its thread; only that exact thread already on
   screen stays quiet. Turning Device notifications off retries the removal until Connect confirms
-  the row is gone, and the Android service drops data messages while the switch is off. Revoking a
+  the row is gone, and the Android service drops data messages while the switch is off. Signing out
+  turns that service flag off at once even when Connect is unreachable, so the old account's titles
+  never reach the lock screen, and a removal that could not run is retried when the phone signs in
+  again. Revoking a
   phone deletes its registration, so a lost device stops receiving thread titles at once, and
   Settings reports this phone's own registration rather than the account's device count. Operators
   configure one Firebase service account on Connect and supply `google-services.json` only when

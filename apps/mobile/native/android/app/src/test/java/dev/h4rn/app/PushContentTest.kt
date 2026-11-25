@@ -88,4 +88,20 @@ class PushContentTest {
   fun aTapOpensTheThreadDeepLink() {
     assertEquals("h4rn://thread/th_one", PushContent.deepLink("th_one"))
   }
+
+  @Test
+  fun aSingleAlertKeepsItsThreadNotificationId() {
+    assertEquals("th_one".hashCode(), PushContent.notificationId("th_one", 0))
+    // The group sequence is irrelevant when the alert names a thread.
+    assertEquals("th_one".hashCode(), PushContent.notificationId("th_one", 7))
+  }
+
+  @Test
+  fun eachGroupedAlertGetsItsOwnNotificationId() {
+    val first = PushContent.notificationId(null, 1)
+    val second = PushContent.notificationId(null, 2)
+    assertTrue("two groups shared a notification id", first != second)
+    // Neither group id may replace a single-thread alert on the same phone.
+    assertTrue(first != "th_one".hashCode())
+  }
 }

@@ -99,6 +99,23 @@ export function devicePushEnabled(): boolean {
   }
 }
 
+/** Whether this install is signed in to Connect right now. */
+function signedIn(): boolean {
+  return remoteStore.getState().phase === "signed_in";
+}
+
+/**
+ * Mirrors "signed in and switched on" to the Android notification service.
+ *
+ * The service runs without the WebView, so it reads this persisted flag before
+ * showing a data message. Signing out must drop it even when the switch is
+ * still on: the row may outlive the credentials, and the old account's titles
+ * must never reach the lock screen.
+ */
+function mirrorNativeFlag(): void {
+  void nativeSetPushEnabled(devicePushEnabled() && signedIn());
+}
+
 function rememberEnabled(enabled: boolean): void {
   try {
     if (enabled) window.localStorage.setItem(ENABLED_KEY, "1");
@@ -106,9 +123,7 @@ function rememberEnabled(enabled: boolean): void {
   } catch {
     // A locked-down webview still keeps the in-memory registration.
   }
-  // The notification service cannot read localStorage; mirror the switch so a
-  // data message that still arrives while Off is dropped on the phone.
-  void nativeSetPushEnabled(enabled);
+  mirrorNativeFlag();
 }
 
 /**
@@ -209,6 +224,14 @@ export async function registerDeviceAlerts(): Promise<void> {
     packageName: PACKAGE_NAME,
     appVersion: result.status.appVersion,
   });
+  // The switch, or the whole session, may have been turned off while the PUT
+  // was in flight. A fresh registration must not revive a phone the person
+  // already silenced: keep the removal marker and finish the removal instead.
+  if (!devicePushEnabled() || !signedIn()) {
+    rememberDeregistrationPending(true);
+    await reconcileDeviceDeregistration();
+    return;
+  }
   // A fresh registration supersedes any removal that was still pending.
   rememberDeregistrationPending(false);
   lastRegistered = true;
@@ -289,13 +312,25 @@ export async function reconcileDeviceDeregistration(): Promise<void> {
  * Best-effort deregistration before credentials are forgotten at sign-out.
  *
  * Also performed by `POST /v1/auth/logout`; this keeps the removal immediate
- * when the sign-out starts from this phone.
+ * when the sign-out starts from this phone. The native flag goes off first and
+ * unconditionally, because it is the one guarantee that survives a relay that
+ * cannot be reached: the notification service stops showing data messages even
+ * while the row is still on Connect. A removal that does not answer in time is
+ * recorded and retried at the next signed-in launch.
  */
 export function deregisterDeviceAlertsOnSignOut(): void {
-  const client = currentConnectClient();
-  if (!client || !devicePushEnabled()) return;
+  // The local switch is this device's preference for the next sign-in; the
+  // native flag is "signed in and switched on", so it can never stay on here.
+  void nativeSetPushEnabled(false);
   lastRegistered = false;
-  void client.deregisterPushDevice(client.device.id).catch(() => undefined);
+  if (!devicePushEnabled()) return;
+  rememberDeregistrationPending(true);
+  const client = currentConnectClient();
+  if (!client) return;
+  void client
+    .deregisterPushDevice(client.device.id)
+    .then(() => rememberDeregistrationPending(false))
+    .catch(() => undefined);
 }
 
 /**
@@ -324,7 +359,12 @@ export function startDevicePush(): void {
     const { phase } = remoteStore.getState();
     if (phase === lastPhase) return;
     lastPhase = phase;
-    if (phase !== "signed_in") return;
+    if (phase !== "signed_in") {
+      // "Signed in and switched on": never re-arm while signed out, and drop
+      // the flag the moment the session ends, however it ended.
+      void nativeSetPushEnabled(false);
+      return;
+    }
     void (async () => {
       await reconcileDeviceDeregistration();
       if (!devicePushEnabled()) return;
@@ -351,5 +391,6 @@ export function startDevicePush(): void {
 
   // Launch is one of the signed-in moments a pending removal is retried:
   // `syncAccount` above runs once here when the account is already signed in.
-  void nativeSetPushEnabled(devicePushEnabled());
+  // While signed out the flag stays off even if the switch was left on.
+  mirrorNativeFlag();
 }

@@ -37,6 +37,15 @@ signed in and opened, so the row does not linger and the phone does not keep
 alerting. While the switch is off the Android notification service also drops
 any data message that still arrives, as a second line of defence.
 
+Signing out does two things. The Android notification service's local flag goes
+off at once, whatever the relay can be reached for, so the signed-out phone never
+shows the old account's thread titles on the lock screen. A pending removal is
+kept as well and retried the next time this phone signs in, because the relay
+row belongs to the account that signed out. After the credentials are gone the
+app cannot retry on its own; the local flag is the guarantee until then, and
+signing out through `POST /v1/auth/logout` also deletes the token-scoped row on
+the relay. Turning the switch on again after signing in re-registers the phone.
+
 ## What leaves the daemon
 
 Each alert carries exactly this record:

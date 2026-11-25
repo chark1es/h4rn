@@ -92,17 +92,17 @@ pub struct ActivityThread {
 impl ActivityThread {
     /// Reads the fields the payload may carry from a summary.
     ///
-    /// A thread running in a worktree lives under `<worktrees_root>/<project>/
+    /// A thread running in a worktree lives under `<location>/<project>/
     /// <branch>`, so its own folder is the branch, not the project. Naming the
     /// branch folder would tell the person the wrong project, so the folder
-    /// under the root is used; without a known root the workspace's own folder
-    /// is the best answer available.
-    pub fn from_summary(summary: &ThreadSummary, worktrees_root: Option<&Path>) -> Self {
+    /// under a known worktree location is used; without one the workspace's own
+    /// folder is the best answer available.
+    pub fn from_summary(summary: &ThreadSummary, worktree_roots: &[PathBuf]) -> Self {
         let path = summary
             .project_path
             .as_deref()
             .unwrap_or(&summary.workspace_path);
-        let project = project_name(path, worktrees_root);
+        let project = project_name(path, worktree_roots);
         Self {
             id: summary.thread_id.clone(),
             title: summary.title.clone(),
@@ -111,16 +111,77 @@ impl ActivityThread {
     }
 }
 
+/// Where this daemon may have put worktree checkouts.
+///
+/// The location is a live setting (Settings → Worktrees), so it is resolved
+/// when an alert is built rather than captured once at startup. The default
+/// `<data_dir>/worktrees` stays in the list as well, because a thread created
+/// before the location changed still lives under it.
+#[derive(Clone)]
+pub struct WorktreeRoots {
+    settings: Option<Arc<crate::worktrees::settings::WorktreeSettingsStore>>,
+    data_dir: Option<PathBuf>,
+    /// A fixed list, used by tests instead of the live settings.
+    roots: Option<Arc<Vec<PathBuf>>>,
+}
+
+impl WorktreeRoots {
+    /// Reads the configured location and keeps the default root as a fallback.
+    pub fn configured(
+        settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
+        data_dir: PathBuf,
+    ) -> Self {
+        Self {
+            settings: Some(settings),
+            data_dir: Some(data_dir),
+            roots: None,
+        }
+    }
+
+    /// A fixed list for tests.
+    pub fn fixed(roots: Vec<PathBuf>) -> Self {
+        Self {
+            settings: None,
+            data_dir: None,
+            roots: Some(Arc::new(roots)),
+        }
+    }
+
+    fn roots_list(&self) -> Vec<PathBuf> {
+        if let Some(roots) = &self.roots {
+            return roots.to_vec();
+        }
+        let mut roots = Vec::new();
+        if let Some(settings) = &self.settings
+            && let Some(location) = settings.get().location
+        {
+            let home = dirs::home_dir();
+            if let Ok(path) =
+                crate::worktrees::settings::expand_location(&location, home.as_deref())
+            {
+                roots.push(path);
+            }
+        }
+        if let Some(data_dir) = &self.data_dir {
+            roots.push(data_dir.join("worktrees"));
+        }
+        roots
+    }
+}
+
 /// The project folder to show for a thread's checkout.
 ///
 /// `project_path` (an import or fork) already names the project, so the caller
-/// resolves that first. A worktree checkout is identified by living below the
-/// daemon's worktree root with a branch folder under a project folder;
-/// everything else keeps today's behaviour: the workspace's own folder name.
-fn project_name(path: &str, worktrees_root: Option<&Path>) -> String {
-    if let Some(root) = worktrees_root
-        && let Ok(relative) = Path::new(path).strip_prefix(root)
-    {
+/// resolves that first. A worktree checkout is identified by living directly
+/// below one of the daemon's worktree locations with a project folder and a
+/// branch folder under it. The location is the configured one, not a path
+/// heuristic, so a custom Settings → Worktrees location names the project too.
+/// Everything else keeps today's behaviour: the workspace's own folder name.
+fn project_name(path: &str, worktree_roots: &[PathBuf]) -> String {
+    for root in worktree_roots {
+        let Ok(relative) = Path::new(path).strip_prefix(root) else {
+            continue;
+        };
         let mut parts = relative.components().filter_map(|part| match part {
             std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
             _ => None,
@@ -225,8 +286,8 @@ pub struct AgentAlertService {
     settings: Arc<AgentAlertSettingsStore>,
     manager: Option<Arc<dyn ThreadLookup>>,
     publisher: Arc<dyn ActivityPublisher>,
-    /// Where this daemon creates worktree checkouts, when known.
-    worktrees_root: Option<PathBuf>,
+    /// Where this daemon may have put worktree checkouts, when known.
+    worktree_roots: Option<WorktreeRoots>,
     published: Mutex<HashMap<ThreadId, ThreadAlerts>>,
     watcher: Mutex<Option<JoinHandle<()>>>,
 }
@@ -245,13 +306,13 @@ impl AgentAlertService {
         settings: Arc<AgentAlertSettingsStore>,
         manager: Option<Arc<dyn ThreadLookup>>,
         publisher: Arc<dyn ActivityPublisher>,
-        worktrees_root: Option<PathBuf>,
+        worktree_roots: Option<WorktreeRoots>,
     ) -> Self {
         Self {
             settings,
             manager,
             publisher,
-            worktrees_root,
+            worktree_roots,
             published: Mutex::new(HashMap::new()),
             watcher: Mutex::new(None),
         }
@@ -383,10 +444,12 @@ impl AgentAlertService {
         if summary.parent_thread_id.is_some() {
             return None;
         }
-        Some(ActivityThread::from_summary(
-            &summary,
-            self.worktrees_root.as_deref(),
-        ))
+        let roots = self
+            .worktree_roots
+            .as_ref()
+            .map(WorktreeRoots::roots_list)
+            .unwrap_or_default();
+        Some(ActivityThread::from_summary(&summary, &roots))
     }
 
     /// Publishes one transition if the switch is on and it is new.
@@ -515,6 +578,8 @@ mod tests {
             active_turn_id: None,
             steer: true,
             forked_from: None,
+            rewind: h4rn_protocol::RewindMethod::Unsupported,
+            file_rewind: false,
         }
     }
 
@@ -818,9 +883,9 @@ mod tests {
     fn a_worktree_thread_alerts_with_its_project_name() {
         let mut summary = summary(&ThreadId::new("th_worktree"), None);
         summary.workspace_path = "/data/worktrees/h4rn/fix-the-login".into();
-        let root = Path::new("/data/worktrees");
+        let roots = vec![PathBuf::from("/data/worktrees")];
 
-        let worktree = ActivityThread::from_summary(&summary, Some(root));
+        let worktree = ActivityThread::from_summary(&summary, &roots);
         assert_eq!(
             worktree.project, "h4rn",
             "the alert named the branch folder instead of the project"
@@ -829,15 +894,58 @@ mod tests {
         // A project_path (an import or fork) is already the checkout itself.
         summary.project_path = Some("/code/h4rn".into());
         assert_eq!(
-            ActivityThread::from_summary(&summary, Some(root)).project,
+            ActivityThread::from_summary(&summary, &roots).project,
             "h4rn"
         );
 
         // Without a known root there is nothing better than the folder name.
         summary.project_path = None;
         assert_eq!(
-            ActivityThread::from_summary(&summary, None).project,
+            ActivityThread::from_summary(&summary, &[]).project,
             "fix-the-login"
+        );
+    }
+
+    #[test]
+    fn a_custom_worktree_location_still_names_the_project() {
+        // Settings → Worktrees can put checkouts anywhere; the alert must read
+        // the configured location rather than the default data folder.
+        let mut summary = summary(&ThreadId::new("th_worktree"), None);
+        summary.workspace_path = "/mnt/fast/h4rn/fix-the-login".into();
+        let roots = WorktreeRoots::fixed(vec![PathBuf::from("/mnt/fast")]);
+        let roots = roots.roots_list();
+
+        assert_eq!(
+            ActivityThread::from_summary(&summary, &roots).project,
+            "h4rn",
+            "a custom location made the alert name the branch folder"
+        );
+    }
+
+    #[test]
+    fn the_configured_location_is_read_when_the_alert_is_built() {
+        let settings = Arc::new(crate::worktrees::settings::WorktreeSettingsStore::in_memory());
+        let roots = WorktreeRoots::configured(Arc::clone(&settings), PathBuf::from("/data"));
+        assert_eq!(
+            roots.roots_list(),
+            vec![PathBuf::from("/data/worktrees")],
+            "the default root is the fallback before a location is set"
+        );
+
+        settings
+            .set(h4rn_protocol::WorktreeSettings {
+                location: Some("/mnt/fast".into()),
+                ..Default::default()
+            })
+            .expect("save the location");
+
+        let mut summary = summary(&ThreadId::new("th_worktree"), None);
+        summary.workspace_path = "/mnt/fast/h4rn/fix-the-login".into();
+        let roots = roots.roots_list();
+        assert_eq!(roots.first(), Some(&PathBuf::from("/mnt/fast")));
+        assert_eq!(
+            ActivityThread::from_summary(&summary, &roots).project,
+            "h4rn"
         );
     }
 }

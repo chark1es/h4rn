@@ -47,6 +47,15 @@ class PushPlugin(private val activity: android.app.Activity) : Plugin(activity) 
      * removal.
      */
     const val ENABLED_KEY = "alerts_enabled"
+
+    /**
+     * The last group notification id handed out.
+     *
+     * A grouped alert names no thread, so it cannot use a thread-derived id.
+     * The counter persists so a relaunch never reuses a group id still visible
+     * in the tray.
+     */
+    const val GROUP_SEQUENCE_KEY = "group_notification_sequence"
   }
 
   private val preferences by lazy {

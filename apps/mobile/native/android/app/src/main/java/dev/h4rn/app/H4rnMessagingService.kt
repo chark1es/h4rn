@@ -61,7 +61,15 @@ class H4rnMessagingService : FirebaseMessagingService() {
       .setAutoCancel(true)
       .setContentIntent(intentFor(content.threadId))
       .build()
-    manager.notify((content.threadId ?: content.title).hashCode(), notification)
+    val preferences = getSharedPreferences(PushPlugin.PREFERENCES, Context.MODE_PRIVATE)
+    val groupSequence = if (content.threadId == null) {
+      val next = preferences.getInt(PushPlugin.GROUP_SEQUENCE_KEY, 0) + 1
+      preferences.edit().putInt(PushPlugin.GROUP_SEQUENCE_KEY, next).apply()
+      next
+    } else {
+      0
+    }
+    manager.notify(PushContent.notificationId(content.threadId, groupSequence), notification)
   }
 
   private fun intentFor(threadId: String?): PendingIntent {

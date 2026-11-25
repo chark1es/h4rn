@@ -17,6 +17,15 @@ data class PushContent(
     const val CHANNEL_ID = "h4rn_alerts"
     const val CHANNEL_NAME = "Agent alerts"
 
+    /**
+     * Group notification ids start here and increase by one per group.
+     *
+     * Thread ids are hashed, so this only has to be a range groups can use
+     * without colliding with each other; a group id is never reused, so a
+     * second group adds a notification instead of replacing the first.
+     */
+    const val GROUP_NOTIFICATION_BASE = 1_000_000
+
     /** Builds the notification from the data map, with quiet fallbacks. */
     fun from(data: Map<String, String>): PushContent {
       val title = data["title"].orEmpty().trim().ifEmpty { "h4rn" }
@@ -52,5 +61,16 @@ data class PushContent(
 
     /** The deep link a tap opens. */
     fun deepLink(threadId: String): String = "h4rn://thread/$threadId"
+
+    /**
+     * The notification id for one alert.
+     *
+     * A single-thread alert keeps an id derived from its thread, so a later
+     * alert for the same thread replaces the earlier one. A grouped alert names
+     * no thread; it gets a fresh id from the caller's sequence so two groups do
+     * not replace each other in the tray.
+     */
+    fun notificationId(threadId: String?, groupSequence: Int): Int =
+      threadId?.hashCode() ?: (GROUP_NOTIFICATION_BASE + groupSequence)
   }
 }

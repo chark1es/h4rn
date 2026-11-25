@@ -3,10 +3,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ConnectClient } from "@/features/remote/connect";
+import { remoteStore } from "@/features/remote/remoteStore";
 import { setConnectClient } from "@/features/remote/session";
 
 import {
   type DeviceAlertsState,
+  deregisterDeviceAlertsOnSignOut,
   deviceAvailabilityNote,
   deviceStatusLine,
   deviceToggleUsable,
@@ -14,6 +16,7 @@ import {
   enableDeviceAlerts,
   readDeviceAlerts,
   reconcileDeviceDeregistration,
+  registerDeviceAlerts,
 } from "./devicePush";
 
 function state(patch: Partial<DeviceAlertsState> = {}): DeviceAlertsState {
@@ -57,6 +60,7 @@ function shellInvoke(): ReturnType<typeof vi.fn> {
 afterEach(() => {
   setConnectClient(null);
   window.localStorage.clear();
+  remoteStore.setState({ ...remoteStore.getState(), phase: "loading" });
   vi.unstubAllGlobals();
 });
 
@@ -278,5 +282,101 @@ describe("turning device notifications on", () => {
     expect(enabled.enabled).toBe(true);
     expect(enabled.error).toBeNull();
     expect(deviceStatusLine(enabled, true)).toBe("Registered with this phone.");
+  });
+});
+
+describe("the native switch mirror", () => {
+  function grantedShell(): void {
+    stubAndroidShell();
+    shellInvoke().mockImplementation(async (command: string) => {
+      if (command === "push_token") return "fcm-token";
+      if (command !== "push_status") return null;
+      return {
+        available: true,
+        permission: "granted",
+        token: "fcm-token",
+        channel: true,
+        appVersion: "1.2.3",
+      };
+    });
+  }
+
+  it("follows this phone's switch while signed in", async () => {
+    grantedShell();
+    remoteStore.setState({ ...remoteStore.getState(), phase: "signed_in" });
+    setConnectClient({
+      device: { id: "device-1" },
+      registerPushDevice: vi.fn(async () => undefined),
+      deregisterPushDevice: vi.fn(async () => undefined),
+      pushStatus: vi.fn(async () => ({ configured: true, devices: 1, registered: true })),
+    } as unknown as ConnectClient);
+
+    await enableDeviceAlerts();
+    const invoke = shellInvoke();
+    expect(invoke).toHaveBeenCalledWith("push_set_enabled", { enabled: true });
+
+    invoke.mockClear();
+    await disableDeviceAlerts();
+    expect(invoke).toHaveBeenCalledWith("push_set_enabled", { enabled: false });
+  });
+
+  it("turns off on sign-out and records the removal for the next sign-in", async () => {
+    grantedShell();
+    window.localStorage.setItem("h4rn.push.deviceAlerts", "1");
+    remoteStore.setState({ ...remoteStore.getState(), phase: "signed_in" });
+    const deregisterPushDevice = vi.fn(async (): Promise<void> => {
+      throw new Error("connect is unreachable");
+    });
+    setConnectClient({
+      device: { id: "device-1" },
+      deregisterPushDevice,
+    } as unknown as ConnectClient);
+
+    deregisterDeviceAlertsOnSignOut();
+
+    const invoke = shellInvoke();
+    expect(invoke).toHaveBeenCalledWith("push_set_enabled", { enabled: false });
+    expect(window.localStorage.getItem("h4rn.push.deregisterPending")).toBe("1");
+    await vi.waitFor(() => expect(deregisterPushDevice).toHaveBeenCalledOnce());
+    // The failed removal stays marked for the next signed-in launch.
+    expect(window.localStorage.getItem("h4rn.push.deregisterPending")).toBe("1");
+  });
+});
+
+describe("a registration that finishes after the switch went off", () => {
+  it("keeps the removal pending and removes the late registration", async () => {
+    stubAndroidShell();
+    window.localStorage.setItem("h4rn.push.deviceAlerts", "1");
+    remoteStore.setState({ ...remoteStore.getState(), phase: "signed_in" });
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const registerPushDevice = vi.fn(async () => held);
+    const deregisterPushDevice = vi.fn(async (): Promise<void> => {
+      throw new Error("connect is unreachable");
+    });
+    setConnectClient({
+      device: { id: "device-1" },
+      registerPushDevice,
+      deregisterPushDevice,
+      pushStatus: vi.fn(async () => ({ configured: true, devices: 1, registered: true })),
+    } as unknown as ConnectClient);
+
+    const registering = registerDeviceAlerts();
+    await vi.waitFor(() => expect(registerPushDevice).toHaveBeenCalledOnce());
+
+    // The person turns the switch off while the PUT is still in flight.
+    const off = await disableDeviceAlerts();
+    expect(off.enabled).toBe(false);
+    expect(window.localStorage.getItem("h4rn.push.deregisterPending")).toBe("1");
+
+    release();
+    await registering;
+
+    // The PUT's own success must not clear the marker: the removal ran again.
+    expect(deregisterPushDevice).toHaveBeenCalledTimes(2);
+    expect(window.localStorage.getItem("h4rn.push.deregisterPending")).toBe("1");
   });
 });

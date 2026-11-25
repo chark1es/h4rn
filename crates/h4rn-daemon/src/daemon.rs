@@ -762,7 +762,10 @@ impl DaemonBuilder {
             alert_settings,
             Some(Arc::clone(&manager) as Arc<dyn crate::alerts::ThreadLookup>),
             publisher,
-            Some(self.config.data_dir.join("worktrees")),
+            Some(crate::alerts::WorktreeRoots::configured(
+                Arc::clone(&worktree_settings),
+                self.config.data_dir.clone(),
+            )),
         ));
 
         Ok(Daemon {

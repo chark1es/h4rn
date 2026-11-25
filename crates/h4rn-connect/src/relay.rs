@@ -1509,7 +1509,125 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
 mod tests {
     use std::sync::Arc;
 
+    use sqlx::postgres::PgPoolOptions;
+
     use super::*;
+    use crate::alerts::AlertService;
+    use crate::config::Config;
+    use crate::crypto::{Envelope, Keystore, b64, random_bytes};
+    use crate::dpop::ReplayCache;
+    use crate::jwt::AccessClaims;
+    use crate::oidc::OidcRegistry;
+    use crate::push::FcmClient;
+    use crate::rate_limit::RateLimiter;
+    use crate::store::{DeviceRow, SessionRow, Store, UserRow};
+
+    /// An `AppState` whose database is never dialled.
+    ///
+    /// The Activity arm answers before it touches storage, so a lazy pool is
+    /// enough to drive the real `dispatch` path without Postgres.
+    fn inert_state() -> AppState {
+        let config = Arc::new(Config {
+            public_base_url: "http://localhost:8787".to_string(),
+            database_url: "postgres://inert:inert@127.0.0.1:1/h4rn".to_string(),
+            kek: b64(&random_bytes(32)),
+            signing_key: Some(b64(&random_bytes(32))),
+            allow_insecure: true,
+            ..Config::default()
+        });
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(&config.database_url)
+            .expect("a well-formed lazy pool URL");
+        let store = Store::from_pool(pool);
+        let http = reqwest::Client::new();
+        let push = Arc::new(FcmClient::new(&config, http.clone()));
+        AppState {
+            keystore: Keystore::from_config(&config).expect("signing key"),
+            envelope: Envelope::from_config(&config).expect("kek"),
+            oidc: Arc::new(OidcRegistry::new(Arc::clone(&config)).expect("oidc")),
+            relay: Arc::new(RelayHub::new()),
+            rate: Arc::new(RateLimiter::new()),
+            replay: Arc::new(ReplayCache::default()),
+            alerts: Arc::new(AlertService::new(
+                store.clone(),
+                Arc::clone(&push),
+                Duration::from_millis(1),
+                Duration::from_secs(120),
+            )),
+            store,
+            config,
+            http,
+            push,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn authed(kind: &str) -> Authed {
+        let user = UserRow {
+            id: Uuid::now_v7(),
+            email: None,
+            display_name: None,
+            avatar_url: None,
+            created_at: Utc::now(),
+        };
+        let device = DeviceRow {
+            id: Uuid::now_v7(),
+            user_id: user.id,
+            machine_id: (kind == "daemon").then(Uuid::now_v7),
+            kind: kind.to_string(),
+            name: "test device".to_string(),
+            proof_public_key: vec![0; 32],
+            noise_static_public_key: None,
+            platform: None,
+            last_seen: None,
+            revoked_at: None,
+            created_at: Utc::now(),
+        };
+        let session = SessionRow {
+            id: Uuid::now_v7(),
+            family_id: Uuid::now_v7(),
+            user_id: user.id,
+            device_id: device.id,
+            refresh_hash: "inert".to_string(),
+            access_jti: Uuid::now_v7(),
+            issued_at: Utc::now(),
+            expires_at: Utc::now(),
+            rotated_at: None,
+            replaced_by: None,
+            successor_secret: None,
+            revoked_at: None,
+            revoke_reason: None,
+        };
+        let claims = AccessClaims {
+            iss: "h4rn-connect".to_string(),
+            sub: user.id.to_string(),
+            aud: "h4rn".to_string(),
+            iat: Utc::now().timestamp(),
+            exp: Utc::now().timestamp() + 60,
+            jti: Uuid::now_v7().to_string(),
+            device_id: device.id.to_string(),
+            session_id: session.id.to_string(),
+            family_id: session.family_id.to_string(),
+            typ: "access".to_string(),
+            scp: Vec::new(),
+        };
+        Authed {
+            claims,
+            user,
+            device,
+            session,
+            scopes: Vec::new(),
+        }
+    }
+
+    fn frame(payload: Vec<u8>) -> RelayFrame {
+        RelayFrame {
+            conn_id: String::new(),
+            kind: RelayFrameKind::Activity,
+            payload,
+        }
+    }
 
     fn peer(
         device_id: Uuid,
@@ -2424,5 +2542,36 @@ mod tests {
             activity_payload("daemon", &payload).expect("a daemon frame is read"),
             Some(activity)
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_a_phones_activity_frame_and_refuses_a_malformed_daemon_one() {
+        // The gate must hold on the real frame path, not just in the payload
+        // parser: a phone must never alert the account, and a daemon's broken
+        // payload must be a wire error.
+        let state = inert_state();
+        let activity = h4rn_protocol::AgentActivity {
+            thread_id: h4rn_protocol::ThreadId::new("th_test"),
+            thread_title: "Fix the thing".into(),
+            project_name: "h4rn".into(),
+            state: h4rn_protocol::AgentAlertState::Approval,
+            at: Utc::now(),
+            transition: "t1".into(),
+        };
+        let payload = serde_json::to_vec(&activity).expect("serialise activity");
+
+        dispatch(&state, &authed("mobile"), frame(payload), Uuid::now_v7())
+            .await
+            .expect("a phone's activity frame is ignored, not an error");
+
+        let error = dispatch(
+            &state,
+            &authed("daemon"),
+            frame(b"{ not json".to_vec()),
+            Uuid::now_v7(),
+        )
+        .await
+        .expect_err("a malformed daemon payload is refused");
+        assert_eq!(error.body().code, "activity_invalid");
     }
 }

@@ -33,18 +33,29 @@ describe("a pending removal is retried without a relaunch", () => {
       }),
     });
     window.localStorage.setItem("h4rn.push.deregisterPending", "1");
+    window.localStorage.setItem("h4rn.push.deviceAlerts", "1");
 
     const deregisterPushDevice = vi.fn(async (): Promise<void> => {
       throw new Error("connect is unreachable");
     });
+    const registerPushDevice = vi.fn(async () => undefined);
     setConnectClient({
       device: { id: "device-1" },
       deregisterPushDevice,
+      registerPushDevice,
       pushStatus: vi.fn(async () => ({ configured: true, devices: 1, registered: true })),
     } as unknown as ConnectClient);
 
     remoteStore.setState({ ...remoteStore.getState(), phase: "signed_in" });
     startDevicePush();
+
+    // Launch re-arms the service only for a signed-in phone with its switch on.
+    const invoke = (
+      window as unknown as { __TAURI_INTERNALS__: { invoke: ReturnType<typeof vi.fn> } }
+    ).__TAURI_INTERNALS__.invoke;
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("push_set_enabled", { enabled: true }),
+    );
 
     // Launch already retried once and could not reach Connect.
     await vi.waitFor(() => expect(deregisterPushDevice).toHaveBeenCalledOnce());
