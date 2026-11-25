@@ -256,7 +256,9 @@ pub struct ServerSession {
     pub attached: BTreeSet<PathId>,
     /// Creation time on the daemon's monotonic clock.
     pub created_ms: u64,
-    /// Last time the session carried traffic.
+    /// Last authenticated record on any path, health probes included (see
+    /// [`ServerSession::mark_seen`]). The resume grace counts from here, so
+    /// narrowing this to application frames evicts idle devices on resume.
     pub last_seen_ms: u64,
 }
 

@@ -1177,17 +1177,18 @@ async fn an_idle_session_resumes_after_its_path_detaches() {
     let client_identity = device_identity();
     let allowed = PairingPolicy::new([client_identity.public().noise_public]);
     let mut options = SecureOptions::new(device_identity()).with_policy(allowed);
-    // The grace is four path timeouts. Idle well past it on probes alone, so
-    // without the fix the session's last_seen_ms is stale by the detach.
-    options.path_timeout = Duration::from_secs(1);
+    // The grace is four path timeouts (eight seconds here). Idle well past it
+    // on probes alone, so without the fix the session's last_seen_ms is stale
+    // by the detach, while the resume itself still has the whole grace.
+    options.path_timeout = Duration::from_secs(2);
     let service = Arc::new(SecureService::new(options));
     let daemon = boot(Arc::clone(&service)).await;
 
     let client = SecureClient::connect(&daemon, client_identity.clone(), None).await;
     let ticket = client.ticket.expect("the daemon issues a resume ticket");
-    // Six seconds is 1.5x the four-second grace; the client's 250 ms probes
-    // are the only traffic and keep the path open the whole time.
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // Twelve seconds is 1.5x the eight-second grace; the client's 250 ms
+    // probes are the only traffic and keep the path open the whole time.
+    tokio::time::sleep(Duration::from_secs(12)).await;
     assert_eq!(
         service.session_count(),
         1,
