@@ -2920,10 +2920,6 @@ impl ThreadRecord {
         // conversation in the session that answered: that session must keep
         // using it, without the journaled history in front of every prompt.
         // The durable flag still owns the handoff for the session after it.
-        // A native fork confirmed by its first output already has its copied
-        // conversation in the session that answered: that session must keep
-        // using it, without the journaled history in front of every prompt.
-        // The durable flag still owns the handoff for the session after it.
         // A pending rewind handoff is never exempt: it cuts that conversation.
         matches!(
             self.meta.pending_rewind,
