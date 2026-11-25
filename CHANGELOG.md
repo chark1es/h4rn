@@ -823,6 +823,13 @@ All notable changes to h4rn are recorded here. The format follows
   even when the thread started in a linked worktree under a metadata folder's
   parent, while a linked worktree nested in its own main checkout
   (`repo/.worktrees/one`) still works.
+- **A metadata parent no longer passes for the main checkout on a tracked name
+  from inside its own worktree.** With the metadata directory at `meta/.git` and
+  a linked worktree at `meta/docs`, the tracked `docs/README.md` resolved to the
+  worktree's own file and made `meta` look like the main checkout. A tracked
+  name now counts only when it is the folder's own file, not one inside the
+  workspace or another registered worktree, so that location is refused when
+  saved and when a checkout is made.
 - **A worktree create interrupted before it registered its checkout no longer
   stays behind.** When the destination's claim proves the create and there is no
   admin dir, the next start removes an empty destination folder, deletes the
