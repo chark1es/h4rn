@@ -51,6 +51,9 @@ const thread: ThreadSummary = {
   placed_by_user: false,
   resume_at: null,
   limit: null,
+  queued_count: 0,
+  queue_revision: 0,
+  steer: true,
 };
 
 const summary: ForgePrSummary = {

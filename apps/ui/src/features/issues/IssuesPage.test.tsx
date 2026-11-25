@@ -132,6 +132,8 @@ const mock = vi.hoisted(() => {
     page2Gate: null as Promise<void> | null,
     /** Blocks one repository's first page, for a superseded listing. */
     page1Gate: null as { repo: string; account?: string; promise: Promise<void> } | null,
+    /** Blocks a Linear listing's first page, for a superseded team. */
+    linearPageGate: null as Promise<void> | null,
     /** A request type that fails, as a tracker that is briefly unreachable. */
     fail: null as string | null,
     /** Details that differ from the list row. */
@@ -194,16 +196,40 @@ const mock = vi.hoisted(() => {
         };
       case "linear_project_teams":
         return { type: "linear_project_teams", teams: state.mappings as never[] };
-      case "linear_list_issues":
+      case "linear_list_issues": {
+        // The daemon resolves the project's team from its mapping, so the
+        // response follows whatever team is mapped when the read lands.
+        const mapped = (
+          state.mappings as { team_id?: string; team_key?: string; team_name?: string }[]
+        )[0];
+        const teamId = mapped?.team_id ?? "team_1";
+        const teamKey = mapped?.team_key ?? "ENG";
+        if (request.cursor === null && state.linearPageGate) await state.linearPageGate;
+        if (request.cursor !== null && state.page2Gate) await state.page2Gate;
         return {
           type: "linear_issues",
           issues:
             request.cursor === null
               ? [
                   {
-                    id: "iss_1",
-                    identifier: "ENG-1",
-                    title: "Rate limit the import",
+                    id: `issue_${teamId}`,
+                    identifier: teamId === "team_1" ? "ENG-1" : "OPS-2",
+                    title: teamId === "team_1" ? "Rate limit the import" : "Operations queue",
+                    state_name: "In Progress",
+                    state_type: "started",
+                    team_id: teamId,
+                    team_key: teamKey,
+                    assignees: ["Alice"],
+                    labels: [],
+                    updated_at: "2026-01-02T00:00:00Z",
+                    url: `https://linear.app/acme/issue/${teamId === "team_1" ? "ENG-1" : "OPS-2"}`,
+                  },
+                ]
+              : [
+                  {
+                    id: "iss_stale",
+                    identifier: "ENG-99",
+                    title: "Stale Linear page row",
                     state_name: "In Progress",
                     state_type: "started",
                     team_id: "team_1",
@@ -211,13 +237,13 @@ const mock = vi.hoisted(() => {
                     assignees: ["Alice"],
                     labels: [],
                     updated_at: "2026-01-02T00:00:00Z",
-                    url: "https://linear.app/acme/issue/ENG-1",
+                    url: "https://linear.app/acme/issue/ENG-99",
                   },
-                ]
-              : [],
+                ],
           next_cursor: request.cursor === null ? "cur_1" : null,
           read_only: false,
         };
+      }
       case "forge_detect_repo": {
         const detected = state.repos[request.workspace];
         return {
@@ -382,6 +408,8 @@ const mock = vi.hoisted(() => {
                   account_id: "acct_1",
                   state: { tracker: "forge", issue: issue(repo).summary },
                   error: null,
+                  identifier: null,
+                  title: "Dark mode flickers",
                   linked_at: "2026-01-05T00:00:00Z",
                 },
               ]
@@ -397,6 +425,8 @@ const mock = vi.hoisted(() => {
             account_id: "acct_1",
             state: { tracker: "forge", issue: issue(repo).summary },
             error: null,
+            identifier: null,
+            title: "Dark mode flickers",
             linked_at: "2026-01-05T00:00:00Z",
           },
         };
@@ -465,6 +495,8 @@ function resetTracker(
   mock.state.hasMore = options.hasMore ?? {};
   mock.state.page2Gate = null;
   mock.state.page1Gate = null;
+  mock.state.linearPageGate = null;
+  mock.state.connection = { status: "ready" };
   mock.state.fail = options.fail ?? null;
   mock.state.linked = false;
   mock.state.detailLabels = options.detailLabels ?? null;
@@ -1295,6 +1327,53 @@ describe("issue paging", () => {
 
     releaseList();
     await waitFor(() => expect(screen.queryByText("GitHub · alice")).toBeNull());
+  });
+
+  it("drops a page that arrives after the Linear team changed", async () => {
+    const mapping = (team_id: string, team_key: string, team_name: string) => ({
+      project_id: "proj_1",
+      account_id: "lin_1",
+      team_id,
+      team_key,
+      team_name,
+    });
+    resetTracker({
+      mappings: [mapping("team_1", "ENG", "Engineering")],
+      linearAccounts: [
+        { account_id: "lin_1", name: "Acme", email: null, created_at: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    let releasePage = () => {};
+    mock.state.page2Gate = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    const { rerender } = render(<IssuesPage />);
+    expect(await screen.findByText("Linear · Acme")).toBeTruthy();
+    expect(await screen.findByText("ENG-1")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+
+    // The team was changed in Settings. The page learns of it on the next
+    // start of the connection, and the new team's first page is held so the
+    // old team's page lands while the listing is still being replaced.
+    let releaseList = () => {};
+    mock.state.linearPageGate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    mock.state.mappings = [mapping("team_2", "OPS", "Operations")];
+    mock.state.connection = { status: "connecting" };
+    rerender(<IssuesPage />);
+    mock.state.connection = { status: "ready" };
+    rerender(<IssuesPage />);
+    await waitFor(() => expect(requestsOfType("linear_list_issues").length).toBeGreaterThan(3));
+
+    releasePage();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The old team's page belongs to a listing that no longer exists.
+    expect(screen.queryByText("Stale Linear page row")).toBeNull();
+
+    releaseList();
+    expect(await screen.findByText("OPS-2")).toBeTruthy();
+    expect(screen.queryByText("ENG-1")).toBeNull();
   });
 
   it("does not page a group that a new listing replaced", async () => {

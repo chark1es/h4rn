@@ -112,12 +112,101 @@ pub struct ThreadMeta {
     /// restart would forget the prompt and fire the policy's resume prompt
     /// instead, so the person's message would silently turn into "continue".
     pub parked: Option<ParkedPrompt>,
+    /// Messages waiting for the next turn, oldest first.
+    ///
+    /// Stored with the row so the queue survives a daemon restart in its order,
+    /// and so does the ceiling or outside grant each message carries.
+    pub queued: Vec<StoredQueuedMessage>,
+    /// Messages taken from the queue for a steer into a running turn.
+    ///
+    /// A claim keeps its payload until delivery is known, so a crash before the
+    /// adapter took it, or a refused message whose restore write failed, is
+    /// never lost. A delivered claim is only remembered to prove it must not be
+    /// sent again.
+    pub claimed: Vec<QueuedClaim>,
     /// The saved conversation this thread was imported from, when it was.
     ///
     /// An imported thread starts with no live session. The kept messages, with
     /// their timestamps, are what its first new turn hands to a fresh session
     /// (or a native resume, when the harness can take one).
     pub imported: Option<ImportedOrigin>,
+}
+
+/// One message waiting for a thread's next turn, with the identity of the work
+/// it does.
+///
+/// The queue outlives the request that filled it, so this stores the sender's
+/// permission ceiling and, for an outside grant, the token family that asked.
+/// The family is daemon-internal: a client only ever sees the
+/// [`h4rn_protocol::QueuedMessage`] half, which the flatten keeps stored rows
+/// shaped like the wire message.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredQueuedMessage {
+    /// The message as a client sees it.
+    #[serde(flatten)]
+    pub message: h4rn_protocol::QueuedMessage,
+    /// The permission ceiling the sender attached to this message, if any.
+    ///
+    /// It survives a restart with the message, so a supervised prompt is not
+    /// promoted at a more permissive mode just because the daemon restarted.
+    #[serde(default)]
+    pub ceiling: Option<h4rn_protocol::RuntimeMode>,
+    /// The outside grant whose work this message does, when one sent it.
+    ///
+    /// Re-checked when the message is delivered, so work asked for under a
+    /// family that was revoked while it waited never runs.
+    #[serde(default)]
+    pub grant: Option<h4rn_protocol::WorkGrant>,
+}
+
+/// One message taken from the queue to steer into a running turn.
+///
+/// The claim is written before the adapter sees the text and removed only once
+/// the outcome is known: a message that never reached the turn goes back to the
+/// queue at startup, one the adapter definitely refused is restored, and one it
+/// took (or may have taken) is never sent a second time.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueuedClaim {
+    /// The message exactly as it waited in the queue, with its ceiling and grant.
+    pub message: StoredQueuedMessage,
+    /// The queue position it waited in, so a restore puts it back where it was.
+    pub index: u32,
+    /// The turn it was claimed for.
+    pub turn_id: h4rn_protocol::TurnId,
+    /// What is known about its delivery.
+    pub state: QueuedClaimState,
+    /// Whether this claim is the turn's own promoted prompt, not a steer.
+    ///
+    /// A promoted prompt's claim is what recovery uses when the daemon stops
+    /// between removing the queue row and handing the text to the adapter. A
+    /// steer's claim is kept for its message alone, so the two are told apart:
+    /// settling a turn drops its promoted claim but never an unclear steer's.
+    #[serde(default)]
+    pub promoted: bool,
+}
+
+/// What a [`QueuedClaim`] knows about its message's delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedClaimState {
+    /// Written down, but the adapter has not been called yet.
+    ///
+    /// On startup this is known not to have reached the turn, so it goes back
+    /// to the queue rather than being dropped.
+    Claimed,
+    /// The adapter call has started, so delivery is unknown.
+    ///
+    /// A restart keeps the payload and shows it as a row that may have been
+    /// delivered. It is never sent automatically again, and the person can
+    /// resend or discard it.
+    Sending,
+    /// The adapter took the message.
+    ///
+    /// A restart never delivers it again.
+    Delivered,
+    /// The adapter definitely refused it and its queue row still has to be put
+    /// back. A startup restores it.
+    Refused,
 }
 
 /// The saved conversation a thread was imported from.
@@ -490,6 +579,8 @@ impl SqliteJournal {
                 agent_id       TEXT,
                 agent_fingerprint TEXT,
                 parked_json    TEXT,
+                queued_json    TEXT NOT NULL DEFAULT '[]',
+                claimed_json   TEXT NOT NULL DEFAULT '[]',
                 imported_json  TEXT
             )",
         )
@@ -526,6 +617,18 @@ impl SqliteJournal {
             "daemon_threads",
             "title_source",
             "TEXT NOT NULL DEFAULT 'prompt'",
+        )
+        .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "queued_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        .await?;
+        self.ensure_column(
+            "daemon_threads",
+            "claimed_json",
+            "TEXT NOT NULL DEFAULT '[]'",
         )
         .await?;
 
@@ -583,12 +686,21 @@ impl SqliteJournal {
                 scope_key  TEXT NOT NULL,
                 scope_json TEXT NOT NULL,
                 issue_id   TEXT NOT NULL,
+                identifier TEXT,
+                title      TEXT,
                 linked_at  TEXT NOT NULL,
                 PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
             )",
         )
         .execute(&self.pool)
         .await?;
+        // A database written before the link stored its human identity still
+        // opens: the two columns are added empty, and the UI falls back to a
+        // generic label for those links.
+        self.ensure_column("daemon_issue_links", "identifier", "TEXT")
+            .await?;
+        self.ensure_column("daemon_issue_links", "title", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_issue_links_thread
@@ -682,21 +794,113 @@ impl SqliteJournal {
         column: &str,
         definition: &str,
     ) -> Result<(), JournalError> {
-        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
-            .fetch_all(&self.pool)
-            .await?;
-        let exists = rows.iter().any(|row| {
-            row.try_get::<String, _>("name")
-                .is_ok_and(|name| name == column)
-        });
-        if !exists {
-            sqlx::query(&format!(
-                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-            ))
-            .execute(&self.pool)
-            .await?;
+        // Two daemons may open the same journal at once. The check and the
+        // `ALTER TABLE` run inside one write transaction (`BEGIN IMMEDIATE`),
+        // so the second process can only look after the first committed and
+        // sees the column it added, instead of both seeing it missing and
+        // racing to add it.
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        match add_column(&mut conn, table, column, definition).await {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(error)
+            }
         }
-        Ok(())
+    }
+}
+
+/// Test-only pause between a column's check and its `ALTER`.
+///
+/// A test that wants two daemons to contend must keep the first one inside
+/// that window, otherwise the two finishes arrive one after the other and the
+/// race never happens. Production builds have no gate.
+#[cfg(test)]
+mod migration_gate {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    /// How often the duplicate-column fallback ran. A properly locked upgrade
+    /// never needs it, so a test can prove the lock did the work.
+    static FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn arm() {
+        ARMED.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn disarm() {
+        ARMED.store(false, Ordering::SeqCst);
+    }
+
+    pub(super) async fn pause() {
+        if ARMED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub(super) fn record_fallback() {
+        FALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn reset_fallbacks() {
+        FALLBACKS.store(0, Ordering::SeqCst);
+    }
+
+    pub(super) fn fallbacks() -> usize {
+        FALLBACKS.load(Ordering::SeqCst)
+    }
+}
+
+/// Adds one column when it is missing, on the caller's locked connection.
+async fn add_column(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), JournalError> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(&mut *conn)
+        .await?;
+    let exists = rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .is_ok_and(|name| name == column)
+    });
+    if exists {
+        return Ok(());
+    }
+    #[cfg(test)]
+    migration_gate::pause().await;
+    alter_add_column(conn, table, column, definition).await
+}
+
+/// Runs the `ALTER`, treating a column another writer already added as done.
+async fn alter_add_column(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), JournalError> {
+    match sqlx::query(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
+    .execute(&mut *conn)
+    .await
+    {
+        Ok(_) => Ok(()),
+        // A writer that never took the lock (an older build, or another
+        // tool) may have added the column after the check. That is exactly
+        // the state this migration wants, so it is already applied.
+        Err(sqlx::Error::Database(error)) if error.message().contains("duplicate column name") => {
+            #[cfg(test)]
+            migration_gate::record_fallback();
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -712,11 +916,13 @@ async fn upsert_thread_on(
     let runtime_mode = runtime_mode.trim_matches('"').to_owned();
     let worktree_json = serde_json::to_string(&meta.worktree)?;
     let parked_json = serde_json::to_string(&meta.parked)?;
+    let queued_json = serde_json::to_string(&meta.queued)?;
+    let claimed_json = serde_json::to_string(&meta.claimed)?;
     let imported_json = serde_json::to_string(&meta.imported)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -735,6 +941,8 @@ async fn upsert_thread_on(
             agent_id = excluded.agent_id,
             agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json,
+            queued_json = excluded.queued_json,
+            claimed_json = excluded.claimed_json,
             imported_json = excluded.imported_json",
     )
     .bind(meta.thread_id.as_str())
@@ -756,6 +964,8 @@ async fn upsert_thread_on(
     .bind(meta.agent_id.as_deref())
     .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
+    .bind(queued_json)
+    .bind(claimed_json)
     .bind(imported_json)
     .execute(&mut *conn)
     .await?;
@@ -798,7 +1008,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, imported_json
+            "SELECT thread_id, host, harness, title, title_source, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, reasoning_effort, fast, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json, queued_json, claimed_json, imported_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -849,6 +1059,14 @@ impl Journal for SqliteJournal {
                 parked: row
                     .try_get::<Option<String>, _>("parked_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
+                queued: row
+                    .try_get::<Option<String>, _>("queued_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
+                claimed: row
+                    .try_get::<Option<String>, _>("claimed_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
                 imported: row
                     .try_get::<Option<String>, _>("imported_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
@@ -1118,10 +1336,13 @@ impl Journal for SqliteJournal {
             .map_err(|error| JournalError::Database(sqlx::Error::Protocol(error.to_string())))?;
         sqlx::query(
             "INSERT INTO daemon_issue_links
-                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id,
+                 identifier, title, linked_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(thread_id, scope_kind, scope_key, issue_id) DO UPDATE SET
-                account_id = excluded.account_id",
+                account_id = excluded.account_id,
+                identifier = excluded.identifier,
+                title = excluded.title",
         )
         .bind(link.thread_id.as_str())
         .bind(&link.account_id)
@@ -1129,6 +1350,8 @@ impl Journal for SqliteJournal {
         .bind(key)
         .bind(scope_json)
         .bind(&link.issue_id)
+        .bind(&link.identifier)
+        .bind(&link.title)
         .bind(link.linked_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -1160,7 +1383,7 @@ impl Journal for SqliteJournal {
         thread_id: &ThreadId,
     ) -> Result<Vec<IssueLinkRecord>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, account_id, scope_json, issue_id, linked_at
+            "SELECT thread_id, account_id, scope_json, issue_id, identifier, title, linked_at
              FROM daemon_issue_links WHERE thread_id = ?
              ORDER BY linked_at ASC, rowid ASC",
         )
@@ -1695,6 +1918,8 @@ fn issue_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<IssueLinkRecord, 
             )))
         })?,
         issue_id: row.try_get("issue_id")?,
+        identifier: row.try_get("identifier")?,
+        title: row.try_get("title")?,
         linked_at: DateTime::parse_from_rfc3339(&linked_at)
             .map(|value| value.with_timezone(&Utc))
             .map_err(|error| {
@@ -1756,6 +1981,8 @@ mod tests {
             resume_id: None,
             agent_fingerprint: None,
             parked: None,
+            queued: Vec::new(),
+            claimed: Vec::new(),
             imported: None,
         }
     }
@@ -1792,6 +2019,10 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
+            steer: false,
         }
     }
 
@@ -1871,6 +2102,156 @@ mod tests {
         assert_eq!(threads[0].thread_id.as_str(), "th_old");
         assert_eq!(threads[0].agent_id, None);
         assert_eq!(threads[0].harness, HarnessKind::ClaudeCode);
+    }
+
+    /// The issue-link table as daemons wrote it before the identity columns,
+    /// with one row that must survive the upgrade.
+    async fn old_issue_links_schema(path: &std::path::Path) {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("open old database");
+        sqlx::query(
+            "CREATE TABLE daemon_issue_links (
+                thread_id  TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                scope_key  TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                issue_id   TEXT NOT NULL,
+                linked_at  TEXT NOT NULL,
+                PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old schema");
+        sqlx::query(
+            "INSERT INTO daemon_issue_links
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
+             VALUES ('th_1', 'lin_1', 'linear', 'team_1',
+                     '{\"tracker\":\"linear\",\"team_id\":\"team_1\"}', 'issue_uuid_1',
+                     '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("old row");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_issue_link_written_before_the_identity_was_stored_migrates_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("old-links.db");
+        old_issue_links_schema(&path).await;
+
+        let journal = SqliteJournal::connect(&path).await.expect("open journal");
+        let links = journal
+            .issue_links_for_thread(&ThreadId::new("th_1"))
+            .await
+            .expect("list");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].issue_id, "issue_uuid_1");
+        assert_eq!(links[0].identifier, None);
+        assert_eq!(links[0].title, None);
+    }
+
+    /// The fallback counter is process-wide, so the tests that read it take
+    /// turns even though cargo runs tests in parallel.
+    fn fallback_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Arms the contention gate and disarms it on drop, so a failing
+    /// assertion cannot leave every later test pausing at its migration.
+    struct ArmedGate;
+
+    impl ArmedGate {
+        fn arm() -> Self {
+            migration_gate::arm();
+            Self
+        }
+    }
+
+    impl Drop for ArmedGate {
+        fn drop(&mut self) {
+            migration_gate::disarm();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_daemons_open_one_old_journal_without_a_race() {
+        let _counting = fallback_lock().lock().await;
+        // Hold every daemon at its column check long enough for the other one
+        // to reach the same point, so the two upgrades really contend.
+        let _gate = ArmedGate::arm();
+        for attempt in 0..3 {
+            migration_gate::reset_fallbacks();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("old-links-race.db");
+            // The core schema is applied once, so the only upgrade left is
+            // the daemon's own, which both processes run at startup.
+            drop(SqliteEventStore::connect(&path).await.expect("core schema"));
+            old_issue_links_schema(&path).await;
+
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                handles.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    SqliteJournal::connect(&path).await
+                }));
+            }
+            let mut opened = Vec::new();
+            for handle in handles {
+                let journal = handle
+                    .await
+                    .expect("the daemon task ran")
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "both daemons must open the same journal (attempt {attempt}): {error}"
+                        )
+                    });
+                opened.push(journal);
+            }
+            let links = opened[0]
+                .issue_links_for_thread(&ThreadId::new("th_1"))
+                .await
+                .expect("list");
+            assert_eq!(links.len(), 1, "the row survives the upgrade");
+            assert_eq!(links[0].issue_id, "issue_uuid_1");
+            assert_eq!(links[0].identifier, None);
+            // The lock, not the duplicate-column fallback, is what makes the
+            // second opener see the first one's column.
+            assert_eq!(
+                migration_gate::fallbacks(),
+                0,
+                "a locked upgrade never reached the duplicate-column fallback (attempt {attempt})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_column_another_writer_already_added_counts_as_applied() {
+        let _counting = fallback_lock().lock().await;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let mut conn = journal.pool.acquire().await.expect("connection");
+        sqlx::query("CREATE TABLE probe (id TEXT)")
+            .execute(&mut *conn)
+            .await
+            .expect("probe table");
+        migration_gate::reset_fallbacks();
+        add_column(&mut conn, "probe", "note", "TEXT")
+            .await
+            .expect("add the column");
+        // A writer that did not check first (an older build) reaches its own
+        // `ALTER` after ours: the column is already there.
+        alter_add_column(&mut conn, "probe", "note", "TEXT")
+            .await
+            .expect("a duplicate column is already applied");
+        assert_eq!(migration_gate::fallbacks(), 1, "the fallback ran once");
     }
 
     #[tokio::test]
