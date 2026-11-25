@@ -106,9 +106,11 @@ and content fingerprint when it names none) is recorded, so running the import
 again only adds conversations h4rn has not seen. The stored identity names the
 kind of claim it is — `session:` before a session id, `path:` before a file — so
 a session id that is spelled exactly like a path key still counts as the session
-it is. A database written before kinds were stored is classified once, inside a
-write transaction when the journal opens, using the rules that were in force
-then. The id used for the claim comes
+it is. A database written before kinds were stored is upgraded once, inside one
+write transaction when the journal opens: every claim is read first and written
+back under its own key with its own thread and path, so two claims can never
+merge, and a session whose id is spelled like a path key takes its kind from the
+import metadata its thread already stores. The id used for the claim comes
 from the full parse, not the scan's head, so two differently named copies whose
 session id sits in a later record still import once. The scan also checks the
 identity stored for each transcript, not only the one its head revealed, so an
@@ -135,8 +137,9 @@ secure transport is split into chunks the client joins before reading it, so a
 stored byte budget and its event cap, and one statement returns both the page and
 whether anything follows it, so a replay is a consistent snapshot and asking for
 the next page reads one page rather than the rest of the thread. The lookahead
-row that says a page has more returns only that flag: its own stored text is not
-read out, so a tiny page followed by a 32 MiB event never fetches that body. A
+row that says a page has more returns only that flag: each row is measured with
+`octet_length` and a body is read only for the events the page accepted, so a
+tiny page followed by a 32 MiB event never reads that body. A
 page of history written by an older daemon can therefore end at a different
 event than it used to, but every event still arrives once and in order.
 

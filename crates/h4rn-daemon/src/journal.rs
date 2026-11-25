@@ -11,6 +11,8 @@
 //! what a client subscribed to several threads needs. `GetThread` replays by
 //! that global sequence and filters one thread.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
@@ -315,6 +317,9 @@ pub enum JournalError {
     /// A projected event could not be serialised.
     #[error("journal serialisation error: {0}")]
     Serialisation(#[from] serde_json::Error),
+    /// A one-time upgrade cannot be applied without losing or merging data.
+    #[error("journal upgrade refused: {0}")]
+    Migration(String),
 }
 
 /// Durable log of domain and projected events.
@@ -759,6 +764,11 @@ impl SqliteJournal {
     }
 
     /// Gives every claim written before kinds were stored its stored identity.
+    ///
+    /// The whole table is read before anything is written: each row keeps its
+    /// own thread and path, and the new keys are checked to be distinct. Two
+    /// rows can never collapse into one claim, and a rename cannot land on a
+    /// row that has not been renamed yet.
     async fn migrate_import_claims(&self) -> Result<(), JournalError> {
         const MIGRATION: &str = "import_claim_kinds";
         let mut tx = self.pool.begin().await?;
@@ -776,22 +786,51 @@ impl SqliteJournal {
                 .fetch_optional(&mut *tx)
                 .await?;
         if applied.is_none() {
-            let keys: Vec<String> =
-                sqlx::query_scalar("SELECT source_key FROM daemon_imported_sources")
-                    .fetch_all(&mut *tx)
-                    .await?;
-            for key in keys {
-                let Some(migrated) = h4rn_protocol::migrated_claim_key(&key) else {
-                    continue;
-                };
-                // Keep one row when both spellings of the same claim exist: a
-                // partially migrated database must not abort the upgrade.
+            // The thread's stored import metadata names the conversation's own
+            // session id, which is the only trustworthy way to tell a legacy
+            // session claim whose id looks like a path key from a path claim.
+            let rows = sqlx::query(
+                "SELECT claim.source_key, claim.thread_id, claim.path, claim.imported_at,
+                        thread.imported_json
+                   FROM daemon_imported_sources AS claim
+                   LEFT JOIN daemon_threads AS thread
+                     ON thread.thread_id = claim.thread_id",
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            let mut claims: Vec<(String, String, String, String)> = Vec::with_capacity(rows.len());
+            let mut seen: HashSet<String> = HashSet::with_capacity(rows.len());
+            for row in rows {
+                let key: String = row.try_get("source_key")?;
+                let imported_json: Option<String> = row.try_get("imported_json")?;
+                let migrated = migrated_claim_key(&key, imported_json.as_deref());
+                if !seen.insert(migrated.clone()) {
+                    return Err(JournalError::Migration(format!(
+                        "two import claims would become {migrated}"
+                    )));
+                }
+                claims.push((
+                    migrated,
+                    row.try_get("thread_id")?,
+                    row.try_get("path")?,
+                    row.try_get("imported_at")?,
+                ));
+            }
+            // Every row is written back under its own new key. Deleting first
+            // means no rename can replace a row that is still waiting.
+            sqlx::query("DELETE FROM daemon_imported_sources")
+                .execute(&mut *tx)
+                .await?;
+            for (key, thread_id, path, imported_at) in claims {
                 sqlx::query(
-                    "UPDATE OR REPLACE daemon_imported_sources
-                        SET source_key = ? WHERE source_key = ?",
+                    "INSERT INTO daemon_imported_sources
+                        (source_key, thread_id, path, imported_at)
+                     VALUES (?, ?, ?, ?)",
                 )
-                .bind(migrated)
-                .bind(&key)
+                .bind(key)
+                .bind(thread_id)
+                .bind(path)
+                .bind(imported_at)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -826,6 +865,36 @@ impl SqliteJournal {
             .await?;
         }
         Ok(())
+    }
+}
+
+/// The key a legacy import claim should become.
+///
+/// When the claim's thread still records the conversation it came from, that
+/// metadata names the original session id, and a non-empty id makes the claim a
+/// session claim even when the id itself is spelled like a path key. Without
+/// metadata the old spelling rules decide, which is all an older database can
+/// offer.
+fn migrated_claim_key(key: &str, imported_json: Option<&str>) -> String {
+    if let Some(origin) =
+        imported_json.and_then(|json| serde_json::from_str::<ImportedOrigin>(json).ok())
+    {
+        return match origin
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(id) => h4rn_protocol::source_key(origin.source, Some(id), &origin.source_path),
+            // The thread's metadata names no session, so the claim is about a
+            // file version and already carries its path, size and fingerprint.
+            None => key.to_owned(),
+        };
+    }
+    match h4rn_protocol::migrated_claim_key(key) {
+        Some(migrated) => migrated,
+        // A path claim already pins its file.
+        None => key.to_owned(),
     }
 }
 
@@ -1465,18 +1534,20 @@ impl SqliteJournal {
     /// whole.
     ///
     /// The walk also yields the first row that did not fit, marked `stopped`.
-    /// Only that flag is returned for it: the outer select replaces its stored
-    /// text with NULL, so a rejected event body is never fetched out of the
-    /// walk even when it is far larger than the whole page. Its presence is the
-    /// page's `more` flag, and the answer comes from inside the same statement
-    /// as the page, inside one implicit read transaction, so an append cannot
-    /// land between them and turn an empty page into `more=true` with an
-    /// unchanged cursor. The tests check this through `page_hook` and measure
-    /// the query's SQLite VM steps, so a walk that scanned the thread only to
+    /// Only that flag comes out of the walk: neither its text nor its length is
+    /// carried, and the outer select reads a body only for the rows the page
+    /// accepted. A rejected event is therefore never fetched, however large it
+    /// is. Its presence is the page's `more` flag, and the answer comes from
+    /// inside the same statement as the page, inside one implicit read
+    /// transaction, so an append cannot land between them and turn an empty
+    /// page into `more=true` with an unchanged cursor. The tests check this
+    /// through `page_hook` and measure the query's SQLite VM steps and the
+    /// largest allocation it makes, so a walk that scanned the thread only to
     /// trim its output fails them.
     ///
     /// The budget counts each row's stored `event_json` bytes, not the event
-    /// re-serialized by this build. A page boundary for history written by an
+    /// re-serialized by this build. `octet_length` keeps SQLite from loading a
+    /// row's text just to measure it. A page boundary for history written by an
     /// older protocol version can therefore land elsewhere than a
     /// re-serialized count would put it; nothing is lost either way, because
     /// the next page starts at the following seq, and the outbound frame of a
@@ -1490,18 +1561,18 @@ impl SqliteJournal {
         max_bytes: usize,
     ) -> Result<Vec<PageRow>, JournalError> {
         let rows = sqlx::query(
-            "WITH RECURSIVE page(seq, event_json, used, n, stopped) AS (
-                 SELECT seq, event_json, length(CAST(event_json AS BLOB)), 1, 0
+            "WITH RECURSIVE page(seq, used, n, stopped) AS (
+                 SELECT seq, octet_length(event_json), 1, 0
                    FROM daemon_wire_events
                   WHERE thread_id = ?1
                     AND seq = (SELECT MIN(seq) FROM daemon_wire_events
                                 WHERE thread_id = ?1 AND seq > ?2)
                  UNION ALL
-                 SELECT next.seq, next.event_json,
-                        page.used + length(CAST(next.event_json AS BLOB)),
+                 SELECT next.seq,
+                        page.used + octet_length(next.event_json),
                         page.n + 1,
                         CASE WHEN page.n >= ?4
-                                  OR page.used + length(CAST(next.event_json AS BLOB)) > ?3
+                                  OR page.used + octet_length(next.event_json) > ?3
                              THEN 1 ELSE 0 END
                    FROM page
                    JOIN daemon_wire_events AS next
@@ -1510,8 +1581,13 @@ impl SqliteJournal {
                                      WHERE thread_id = ?1 AND seq > page.seq)
                   WHERE page.stopped = 0
              )
-             SELECT seq, CASE WHEN stopped = 0 THEN event_json END AS event_json, stopped
-               FROM page ORDER BY seq",
+             SELECT page.seq, events.event_json, page.stopped
+               FROM page
+               LEFT JOIN daemon_wire_events AS events
+                 ON events.thread_id = ?1
+                AND events.seq = page.seq
+                AND page.stopped = 0
+              ORDER BY page.seq",
         )
         .bind(thread_id.as_str())
         .bind(after as i64)
@@ -2375,6 +2451,35 @@ mod tests {
         (page, steps)
     }
 
+    /// The largest single allocation SQLite has made since the last reset.
+    ///
+    /// `SQLITE_STATUS_MALLOC_SIZE` is 5. Reading a row's text needs a buffer as
+    /// large as the row; a walk that only measures it with `octet_length` does
+    /// not. The counter is global, so the caller holds `PAGE_VM_STEPS_GUARD`
+    /// while measuring and no other test is inserting a large event.
+    fn sqlite_largest_allocation(reset: bool) -> i64 {
+        unsafe extern "C" {
+            fn sqlite3_status64(
+                op: std::os::raw::c_int,
+                current: *mut i64,
+                highwater: *mut i64,
+                reset: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        const SQLITE_STATUS_MALLOC_SIZE: std::os::raw::c_int = 5;
+        let mut current = 0;
+        let mut highwater = 0;
+        unsafe {
+            sqlite3_status64(
+                SQLITE_STATUS_MALLOC_SIZE,
+                &mut current,
+                &mut highwater,
+                i32::from(reset),
+            );
+        }
+        highwater
+    }
+
     #[tokio::test]
     async fn a_thread_with_gaps_pages_where_the_old_pager_did() {
         const PAGE: usize = 64 * 1024;
@@ -2642,6 +2747,9 @@ mod tests {
     #[tokio::test]
     async fn a_lookahead_row_returns_only_its_flag() {
         const BIG: usize = 32 * 1024 * 1024;
+        // The allocation counter is process-wide, and this is the only test
+        // that writes an event this large.
+        let guard = PAGE_VM_STEPS_GUARD.lock().await;
         let journal = SqliteJournal::in_memory().await.unwrap();
         let thread_id = ThreadId::new("th_lookahead");
         journal.upsert_thread(&meta("th_lookahead")).await.unwrap();
@@ -2656,10 +2764,12 @@ mod tests {
             .await
             .unwrap();
 
+        sqlite_largest_allocation(true);
         let rows = journal
             .page_rows(&thread_id, 0, 4096, 256 * 1024)
             .await
             .unwrap();
+        let largest_allocation = sqlite_largest_allocation(false);
         assert_eq!(rows.len(), 2, "the page and the row that ended it");
         assert!(!rows[0].stopped);
         assert!(rows[1].stopped);
@@ -2676,6 +2786,11 @@ mod tests {
             fetched < 1024 * 1024,
             "the page fetched {fetched} bytes: the 32 MiB lookahead body was read into the answer"
         );
+        assert!(
+            largest_allocation < 4 * 1024 * 1024,
+            "the walk made a {largest_allocation}-byte allocation: it read the 32 MiB lookahead body"
+        );
+        drop(guard);
     }
 
     #[tokio::test]
@@ -2775,16 +2890,50 @@ mod tests {
             .last()
             .expect("first event")
             .seq;
+        // Another thread on the same journal, so a read of it must leave the
+        // hook armed too.
+        let other = ThreadId::new("th_between_other");
+        journal
+            .upsert_thread(&meta("th_between_other"))
+            .await
+            .unwrap();
+        journal
+            .append_wire(&other, &[page_event(&other, 0, 8)])
+            .await
+            .unwrap();
 
         // A second connection writes just before the read answers, where the
         // old two-statement pager ran its `more` probe.
         let writer = SqliteJournal::connect(&database).await.unwrap();
         page_hook::set(page_hook::Between {
             reader: journal.test_instance(),
-            journal: writer,
+            journal: writer.clone(),
             thread_id: thread_id.clone(),
             events: vec![page_event(&thread_id, 1, 8)],
         });
+
+        // A read on another journal leaves the arm in place.
+        writer
+            .read_wire_page(&thread_id, cursor, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.read_wire_since(&thread_id, 0).await.unwrap().len(),
+            1,
+            "another journal's read fired the hook"
+        );
+
+        // A read of another thread on the intended journal leaves it in place.
+        journal
+            .read_wire_page(&other, 0, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.read_wire_since(&thread_id, 0).await.unwrap().len(),
+            1,
+            "another thread's read fired the hook"
+        );
+
         let page = journal
             .read_wire_page(&thread_id, cursor, 4096, 256 * 1024)
             .await

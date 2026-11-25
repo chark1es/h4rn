@@ -1402,6 +1402,7 @@ pub(crate) fn record_limit(records: usize) -> Result<(), SkipReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::{ImportedOrigin, ImportedSourceRecord, SqliteJournal};
 
     #[test]
     fn github_remotes_become_owner_name() {
@@ -1651,12 +1652,28 @@ mod tests {
     #[test]
     fn a_restored_version_counts_for_a_full_folder() {
         let home = tempfile::tempdir().expect("home");
-        let path = home.path().join("rollout.jsonl");
+        let home_path = home.path();
+        let workspace = home_path.join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home_path.join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        // Fill the project's quota, with one more so the scan reaches its cap
+        // before the restored transcript.
+        for index in 0..MAX_CONVERSATIONS_PER_PROJECT + 1 {
+            let session = format!("session-{index:03}");
+            std::fs::write(
+                project.join(format!("{session}.jsonl")),
+                claude_transcript(&workspace, &session, &format!("conversation {index}")),
+            )
+            .expect("transcript");
+        }
+
+        let path = project.join("restored.jsonl");
         let shown = path.display().to_string();
         std::fs::write(&path, "first body\n").expect("first transcript");
         let first_size = std::fs::metadata(&path).expect("metadata").len();
         let first = h4rn_protocol::path_source_key(
-            ImportSource::Codex,
+            ImportSource::ClaudeCode,
             &shown,
             first_size,
             &content_fingerprint(&path, first_size),
@@ -1667,20 +1684,40 @@ mod tests {
         let second_size = std::fs::metadata(&path).expect("metadata").len();
         assert_ne!(second_size, first_size);
         let second = h4rn_protocol::path_source_key(
-            ImportSource::Codex,
+            ImportSource::ClaudeCode,
             &shown,
             second_size,
             &content_fingerprint(&path, second_size),
         );
 
-        // Restored to the version that was imported first.
+        // Restored to the version that was imported first, and made the oldest
+        // so the quota fills before the scan reaches it.
         std::fs::write(&path, "first body\n").expect("restored");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("restored transcript")
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+            )
+            .expect("old mtime");
 
-        let mut imported = ImportedSources::default();
-        imported.keys.insert(first.clone());
-        imported.keys.insert(second.clone());
-        imported.by_path.insert(shown, vec![first, second]);
-
+        // The journal's own loader reads the claims back; both versions of the
+        // file were imported, so both claims must survive it.
+        let imported = ImportedSources::from_records(vec![
+            ImportedSourceRecord {
+                key: first,
+                thread_id: h4rn_protocol::ThreadId::new("th_first"),
+                path: shown.clone(),
+                imported_at: Utc::now(),
+            },
+            ImportedSourceRecord {
+                key: second,
+                thread_id: h4rn_protocol::ThreadId::new("th_second"),
+                path: shown,
+                imported_at: Utc::now(),
+            },
+        ]);
         assert!(
             imported.covers_file(&path, first_size),
             "every claim for the path counts, not only the newest"
@@ -1688,6 +1725,251 @@ mod tests {
         assert!(
             !imported.covers_file(&path, second_size),
             "the newer version is not the file that is here"
+        );
+
+        let outcome = scan_blocking(
+            home_path,
+            &home_path.join(".claude"),
+            &home_path.join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects.len(), 1);
+        assert_eq!(
+            outcome.scan.projects[0].conversations,
+            MAX_CONVERSATIONS_PER_PROJECT + 1,
+            "the restored version still counts for its project"
+        );
+        assert_eq!(
+            outcome.scan.projects[0].importable, MAX_CONVERSATIONS_PER_PROJECT,
+            "the restored version is not offered again"
+        );
+    }
+
+    /// Opens a database as an older daemon left it, letting the journal run its
+    /// one-time claim upgrade.
+    async fn upgraded_journal(
+        database: &Path,
+        threads: &[(&str, &str)],
+        claims: &[(&str, &str, &str)],
+    ) -> SqliteJournal {
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(database)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("old database");
+        sqlx::query(
+            "CREATE TABLE daemon_imported_sources (
+                source_key  TEXT PRIMARY KEY,
+                thread_id   TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                imported_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old claims table");
+        if !threads.is_empty() {
+            sqlx::query(
+                "CREATE TABLE daemon_threads (
+                    thread_id     TEXT PRIMARY KEY,
+                    imported_json TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("old threads table");
+            for (thread_id, imported_json) in threads {
+                sqlx::query("INSERT INTO daemon_threads (thread_id, imported_json) VALUES (?, ?)")
+                    .bind(thread_id)
+                    .bind(imported_json)
+                    .execute(&pool)
+                    .await
+                    .expect("old thread");
+            }
+        }
+        for (key, thread_id, path) in claims {
+            sqlx::query(
+                "INSERT INTO daemon_imported_sources
+                    (source_key, thread_id, path, imported_at)
+                 VALUES (?, ?, ?, '2026-11-20T10:00:00Z')",
+            )
+            .bind(key)
+            .bind(thread_id)
+            .bind(path)
+            .execute(&pool)
+            .await
+            .expect("old claim");
+        }
+        pool.close().await;
+        SqliteJournal::connect(database).await.expect("upgrade")
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_keeps_every_legacy_claim_with_its_own_thread_and_path() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = home.path().join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home.path().join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let first = project.join("first.jsonl");
+        let second = project.join("second.jsonl");
+        std::fs::write(
+            &first,
+            claude_transcript_with_session(&workspace, Some("abc"), "first"),
+        )
+        .expect("first transcript");
+        // The second claim's own session id is spelled `session:abc`, which the
+        // old migration renamed on top of the first claim's new key.
+        std::fs::write(
+            &second,
+            claude_transcript_with_session(&workspace, Some("session:abc"), "second"),
+        )
+        .expect("second transcript");
+        let first_shown = first.display().to_string();
+        let second_shown = second.display().to_string();
+
+        let database = home.path().join("old.db");
+        let journal = upgraded_journal(
+            &database,
+            &[],
+            &[
+                ("claude_code:abc", "th_first", &first_shown),
+                ("claude_code:session:abc", "th_second", &second_shown),
+            ],
+        )
+        .await;
+
+        let records = journal.list_imported_sources().await.unwrap();
+        assert_eq!(records.len(), 2, "one claim was lost");
+        let first_claim = records
+            .iter()
+            .find(|record| record.key == "claude_code:session:abc")
+            .expect("the first claim");
+        assert_eq!(first_claim.thread_id.as_str(), "th_first");
+        assert_eq!(first_claim.path, first_shown);
+        let second_claim = records
+            .iter()
+            .find(|record| record.key == "claude_code:session:session:abc")
+            .expect("the second claim");
+        assert_eq!(second_claim.thread_id.as_str(), "th_second");
+        assert_eq!(second_claim.path, second_shown);
+
+        // Opening the database again reclassifies nothing.
+        drop(journal);
+        let journal = SqliteJournal::connect(&database).await.expect("reopen");
+        let again = journal.list_imported_sources().await.unwrap();
+        assert_eq!(again.len(), 2);
+        assert!(
+            again
+                .iter()
+                .any(|record| record.key == "claude_code:session:abc"
+                    && record.thread_id.as_str() == "th_first"
+                    && record.path == first_shown)
+        );
+        assert!(
+            again
+                .iter()
+                .any(|record| record.key == "claude_code:session:session:abc"
+                    && record.thread_id.as_str() == "th_second"
+                    && record.path == second_shown)
+        );
+
+        // Neither transcript is offered again.
+        let imported = ImportedSources::from_records(again);
+        let outcome = scan_blocking(
+            home.path(),
+            &home.path().join(".claude"),
+            &home.path().join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects.len(), 1);
+        assert_eq!(outcome.scan.projects[0].conversations, 2);
+        assert_eq!(
+            outcome.scan.projects[0].importable, 0,
+            "an upgraded claim must still hide its own transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_keeps_a_legacy_session_whose_id_looks_like_a_path() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = home.path().join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home.path().join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let path = project.join("odd.jsonl");
+        let shown = path.display().to_string();
+        // The conversation's session id is spelled exactly like a canonical
+        // path key, so nothing in the key itself says it is a session.
+        let digest = "a".repeat(64);
+        let id = format!("path:{shown}:42:{digest}");
+        std::fs::write(
+            &path,
+            claude_transcript_with_session(&workspace, Some(&id), "odd session id"),
+        )
+        .expect("odd transcript");
+        let size = std::fs::metadata(&path).expect("metadata").len();
+
+        // An older daemon stored `source:<id>` for a session. Its thread still
+        // records the id it came from, which says the claim is a session.
+        let legacy_key = format!("claude_code:{id}");
+        assert!(
+            h4rn_protocol::path_keyed_source_key(&legacy_key),
+            "the fixture's legacy key does look like a path claim"
+        );
+        let origin = ImportedOrigin {
+            source: ImportSource::ClaudeCode,
+            source_path: shown.clone(),
+            session_id: Some(id.clone()),
+            project_path: None,
+            native_resume: true,
+        };
+        let imported_json = serde_json::to_string(&origin).expect("origin");
+        let database = home.path().join("old.db");
+        let journal = upgraded_journal(
+            &database,
+            &[("th_odd", &imported_json)],
+            &[(legacy_key.as_str(), "th_odd", &shown)],
+        )
+        .await;
+
+        let expected = h4rn_protocol::source_key(ImportSource::ClaudeCode, Some(&id), &shown);
+        let records = journal.list_imported_sources().await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].key, expected,
+            "the stored import metadata names the claim's kind"
+        );
+
+        let imported = ImportedSources::from_records(records);
+        let outcome = scan_blocking(
+            home.path(),
+            &home.path().join(".claude"),
+            &home.path().join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects.len(), 1);
+        assert_eq!(outcome.scan.projects[0].conversations, 1);
+        assert_eq!(
+            outcome.scan.projects[0].importable, 0,
+            "the upgraded scan must not offer the imported session again"
+        );
+
+        // A retry computes the same key, so the unique claim rejects it and no
+        // second thread can be created.
+        assert!(
+            imported.contains(&imported_key(
+                ImportSource::ClaudeCode,
+                Some(&id),
+                &path,
+                size
+            )),
+            "a retried import finds the claim already stored"
         );
     }
 
