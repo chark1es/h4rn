@@ -440,6 +440,11 @@ pub struct JournaledTurn {
     ///
     /// A native fork that can copy through a named turn uses it.
     pub native_turn_id: Option<String>,
+    /// The item ids in `items` that are steers written into the running turn.
+    ///
+    /// A fork keeps this mark for its own copy, or a later fork would read the
+    /// steered row as an older daemon's queued prompt and drop it (ADR-047).
+    pub steers: Vec<String>,
 }
 
 impl JournaledTurn {
@@ -792,6 +797,20 @@ pub trait Journal: Send + Sync {
         domain: &[ThreadEvent],
         wire: &[Event],
         steer_item: &str,
+    ) -> Result<Vec<u64>, JournalError>;
+
+    /// Appends a fork's copied transcript with the steers it keeps.
+    ///
+    /// A copy reproduces the source's rows, including the steers written into
+    /// a running turn. Those rows need their own marks under the fork's thread
+    /// id in the same append, or a replay of the fork cannot tell them from a
+    /// queued prompt and silently drops them from a later fork.
+    async fn append_fork(
+        &self,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+        steer_items: &[&str],
     ) -> Result<Vec<u64>, JournalError>;
 
     /// Clears the handoff flag only when the row is still on `switch_generation`.
@@ -1739,6 +1758,7 @@ fn turn_index(turns: &mut Vec<JournaledTurn>, turn_id: &h4rn_protocol::TurnId) -
                 changes: None,
                 copied: false,
                 native_turn_id: None,
+                steers: Vec::new(),
             });
             turns.len() - 1
         }
@@ -1846,7 +1866,7 @@ impl Journal for SqliteJournal {
         domain: &[ThreadEvent],
         wire: &[Event],
     ) -> Result<Vec<u64>, JournalError> {
-        self.append_with_marks(meta, domain, wire, None, None).await
+        self.append_with_marks(meta, domain, wire, None, &[]).await
     }
 
     async fn append_sent(
@@ -1856,7 +1876,7 @@ impl Journal for SqliteJournal {
         wire: &[Event],
         item_id: &str,
     ) -> Result<Vec<u64>, JournalError> {
-        self.append_with_marks(meta, domain, wire, Some(item_id), None)
+        self.append_with_marks(meta, domain, wire, Some(item_id), &[])
             .await
     }
 
@@ -1867,7 +1887,18 @@ impl Journal for SqliteJournal {
         wire: &[Event],
         steer_item: &str,
     ) -> Result<Vec<u64>, JournalError> {
-        self.append_with_marks(meta, domain, wire, None, Some(steer_item))
+        self.append_with_marks(meta, domain, wire, None, &[steer_item])
+            .await
+    }
+
+    async fn append_fork(
+        &self,
+        meta: &ThreadMeta,
+        domain: &[ThreadEvent],
+        wire: &[Event],
+        steer_items: &[&str],
+    ) -> Result<Vec<u64>, JournalError> {
+        self.append_with_marks(meta, domain, wire, None, steer_items)
             .await
     }
 
@@ -2107,6 +2138,9 @@ impl Journal for SqliteJournal {
                         &item,
                         Item::Message { item_id, .. } if steer_items.contains(item_id)
                     );
+                    if steered && let Item::Message { item_id, .. } = &item {
+                        turns[index].steers.push(item_id.clone());
+                    }
                     if is_user_message(&item)
                         && !steered
                         && open_turn == Some(index)
@@ -2442,6 +2476,11 @@ impl Journal for SqliteJournal {
                         WHEN json_valid(imported_json)
                             THEN json_set(imported_json, '$.native_resume', json('false'))
                         ELSE imported_json
+                    END,
+                    forked_json = CASE
+                        WHEN json_valid(forked_json)
+                            THEN json_set(forked_json, '$.native_fork', json('false'))
+                        ELSE forked_json
                     END
               WHERE thread_id = ? AND switch_generation = ?",
         )
@@ -2897,7 +2936,7 @@ impl SqliteJournal {
     }
 
     /// One transaction for a thread row, its events and the marks that go with
-    /// them: a prompt no provider has taken yet, and a steer that belongs to
+    /// them: a prompt no provider has taken yet, and the steers that belong to
     /// the running turn.
     async fn append_with_marks(
         &self,
@@ -2905,7 +2944,7 @@ impl SqliteJournal {
         domain: &[ThreadEvent],
         wire: &[Event],
         pending_item: Option<&str>,
-        steer_item: Option<&str>,
+        steer_items: &[&str],
     ) -> Result<Vec<u64>, JournalError> {
         // One transaction: the thread row, the domain log and the wire log
         // commit together or not at all, so a crash or a failed insert cannot
@@ -2919,7 +2958,7 @@ impl SqliteJournal {
         if let Some(item_id) = pending_item {
             mark_item_pending_on(&mut tx, &meta.thread_id, item_id).await?;
         }
-        if let Some(item_id) = steer_item {
+        for item_id in steer_items {
             mark_steer_item_on(&mut tx, &meta.thread_id, item_id).await?;
         }
         let seqs = if wire.is_empty() {
@@ -3910,6 +3949,9 @@ mod tests {
 
     /// The fallback from a dead native resume changes only its own fields, and
     /// only on the switch it saw.
+    ///
+    /// It spends both native origins: an import's saved conversation and a
+    /// fork's copy, each of which must never be tried again after the fallback.
     #[tokio::test]
     async fn a_fallback_write_is_generation_checked_and_field_limited() {
         let journal = SqliteJournal::in_memory().await.unwrap();
@@ -3924,6 +3966,13 @@ mod tests {
             project_path: None,
             native_resume: true,
         });
+        one.forked_from = Some(ForkOrigin {
+            thread_id: ThreadId::new("th_source"),
+            turn_id: h4rn_protocol::TurnId::new("turn_source"),
+            project_path: None,
+            native_fork: true,
+            provider_turn_id: None,
+        });
         one.switch_generation = 4;
         journal.upsert_thread(&one).await.unwrap();
 
@@ -3936,6 +3985,12 @@ mod tests {
         );
         let row = journal.list_threads().await.unwrap().remove(0);
         assert_eq!(row.resume_id.as_deref(), Some("saved-session"));
+        assert!(
+            row.forked_from
+                .as_ref()
+                .is_some_and(|forked| forked.native_fork),
+            "a refused fallback spent the fork's native attempt"
+        );
 
         assert!(
             journal
@@ -3952,6 +4007,12 @@ mod tests {
                 .as_ref()
                 .is_some_and(|imported| !imported.native_resume),
             "the import's native resume was not spent"
+        );
+        assert!(
+            row.forked_from
+                .as_ref()
+                .is_some_and(|forked| !forked.native_fork),
+            "the fork's native attempt was not spent"
         );
         // Everything the fallback does not own is left exactly as it was.
         assert_eq!(row.title, "keep me");
