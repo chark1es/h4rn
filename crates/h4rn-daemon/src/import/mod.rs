@@ -69,7 +69,16 @@ pub(crate) struct Peek {
     /// Working directory the conversation ran in.
     pub cwd: PathBuf,
     /// Harness-native session id, when the record names one.
+    ///
+    /// A harness that names a transcript by its file falls back to the file
+    /// stem here, so a scan always has a provisional identity to group by.
     pub session_id: Option<String>,
+    /// Whether a record in the head itself named the session id.
+    ///
+    /// The file-name fallback is not the conversation's own name: a late id
+    /// found by the full parse still has to be recognised by path, while an
+    /// explicit id at a path is a claim about that conversation.
+    pub named_session: bool,
     /// Whether the head already showed a visible message.
     ///
     /// A rollout that only wrote setup metadata is not a conversation and must
@@ -970,18 +979,25 @@ fn canonical(path: &str) -> PathBuf {
 pub(crate) struct ImportedSources {
     /// Every claimed source key.
     keys: HashSet<String>,
-    /// The claim key for each transcript path.
+    /// Every claim stored for each transcript path, oldest first.
     ///
-    /// A file's path is enough to recognise an already-imported source without
-    /// reading its head again, which is what lets a full project stop early.
-    by_path: HashMap<String, String>,
+    /// A path can hold several claims: a transcript that was rewritten and
+    /// imported again, then restored to an earlier version, still matches the
+    /// claim that pinned that version. A file's path is enough to recognise an
+    /// already-imported source without reading its head again, which is what
+    /// lets a full project stop early.
+    by_path: HashMap<String, Vec<String>>,
 }
 
 impl ImportedSources {
     fn from_records(records: Vec<crate::journal::ImportedSourceRecord>) -> Self {
         let mut sources = Self::default();
         for record in records {
-            sources.by_path.insert(record.path, record.key.clone());
+            sources
+                .by_path
+                .entry(record.path)
+                .or_default()
+                .push(record.key.clone());
             sources.keys.insert(record.key);
         }
         sources
@@ -991,32 +1007,67 @@ impl ImportedSources {
         self.keys.contains(key)
     }
 
-    fn key_for_path(&self, path: &Path) -> Option<&str> {
+    fn keys_for_path(&self, path: &Path) -> &[String] {
         self.by_path
             .get(path.to_string_lossy().as_ref())
-            .map(String::as_str)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
-    /// Whether the claim stored for this path is one this daemon made.
+    /// Whether any claim stored for this path names its conversation, not its
+    /// file version.
     ///
     /// Only a session-id claim is matched by path. A path-keyed claim pins the
     /// file's size and content fingerprint, so a transcript that kept growing
     /// is a new conversation and must be offered again, just as the scan did
     /// before it looked at paths at all.
     fn contains_path(&self, path: &Path) -> bool {
-        self.key_for_path(path)
-            .filter(|key| !h4rn_protocol::path_keyed_source_key(key))
-            .is_some_and(|key| self.contains(key))
+        self.keys_for_path(path)
+            .iter()
+            .any(|key| !h4rn_protocol::path_keyed_source_key(key))
     }
 
     /// Whether this transcript was already imported, however it was named.
     ///
     /// `head_key` is only what the cheap peek could compute. A transcript whose
     /// session id appears later in the file was claimed under its full-parse
-    /// key, which is the identity the journal stored against the path, so both
-    /// have to be checked or the session would be offered a second time.
-    fn contains_transcript(&self, path: &Path, head_key: &str) -> bool {
-        self.contains(head_key) || self.contains_path(path)
+    /// key, which is the identity the journal stored against the path; a head
+    /// that named no session of its own therefore falls back to the path claim.
+    /// A head that did name one has spoken about the conversation itself, and
+    /// the path claim only hides it when that claim is the same id: a
+    /// different id at the same path is another conversation, such as a
+    /// transcript that was replaced in place.
+    fn contains_transcript(&self, path: &Path, head_key: &str, named_session: bool) -> bool {
+        self.contains(head_key) || (!named_session && self.contains_path(path))
+    }
+
+    /// Whether a claim stored for this path already covers this exact file.
+    ///
+    /// Used when a project's quota is spent and no head is read. A claim that
+    /// names the conversation still counts the transcript for its project. A
+    /// path-keyed claim pins the file's size and content fingerprint, so a
+    /// transcript that grew or was rewritten in place is a new conversation and
+    /// is not counted as the imported file.
+    ///
+    /// Every claim for the path is checked, not only the newest: a transcript
+    /// imported, rewritten and imported again, then restored to the version
+    /// that was imported first, matches the older claim and counts.
+    fn covers_file(&self, path: &Path, size: u64) -> bool {
+        let keys = self.keys_for_path(path);
+        if keys.is_empty() {
+            return false;
+        }
+        if keys
+            .iter()
+            .any(|key| !h4rn_protocol::path_keyed_source_key(key))
+        {
+            return true;
+        }
+        let fingerprint = content_fingerprint(path, size);
+        keys.iter().any(|key| {
+            h4rn_protocol::path_keyed_source_size(key) == Some(size)
+                && h4rn_protocol::path_keyed_source_fingerprint(key) == Some(fingerprint.as_str())
+        })
     }
 }
 
@@ -1073,7 +1124,7 @@ fn scan_blocking(
             // The quota is spent: no head is read. An already-imported source
             // still counts for its project, so older conversations are not
             // hidden behind it on a later attempt.
-            if imported.contains_path(&candidate.path)
+            if imported.covers_file(&candidate.path, candidate.size)
                 && let Some(group) = groups.get_mut(key)
             {
                 group.files.push(ConversationFile {
@@ -1139,7 +1190,8 @@ fn scan_blocking(
             &candidate.path,
             candidate.size,
         );
-        let already_imported = imported.contains_transcript(&candidate.path, &head_key);
+        let already_imported =
+            imported.contains_transcript(&candidate.path, &head_key, peek.named_session);
         let group_key = key.clone();
         let group = groups.entry(key).or_insert_with(|| Group {
             key: group_key.clone(),
@@ -1350,6 +1402,7 @@ pub(crate) fn record_limit(records: usize) -> Result<(), SkipReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::{ImportedOrigin, ImportedSourceRecord, SqliteJournal};
 
     #[test]
     fn github_remotes_become_owner_name() {
@@ -1463,16 +1516,19 @@ mod tests {
     }
 
     fn claude_transcript(cwd: &Path, session: &str, prompt: &str) -> String {
-        let user = serde_json::json!({
+        claude_transcript_with_session(cwd, Some(session), prompt)
+    }
+
+    /// A transcript whose records name no session id at all.
+    fn claude_transcript_with_session(cwd: &Path, session: Option<&str>, prompt: &str) -> String {
+        let mut user = serde_json::json!({
             "type": "user",
-            "sessionId": session,
             "cwd": cwd.display().to_string(),
             "timestamp": "2026-11-20T10:00:00Z",
             "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
         });
-        let assistant = serde_json::json!({
+        let mut assistant = serde_json::json!({
             "type": "assistant",
-            "sessionId": session,
             "cwd": cwd.display().to_string(),
             "timestamp": "2026-11-20T10:00:01Z",
             "message": {
@@ -1481,7 +1537,499 @@ mod tests {
                 "content": [{"type": "text", "text": "done"}],
             },
         });
+        if let Some(session) = session {
+            user["sessionId"] = serde_json::json!(session);
+            assistant["sessionId"] = serde_json::json!(session);
+        }
         format!("{user}\n{assistant}\n")
+    }
+
+    fn imported_claim(path: &Path, key: &str) -> ImportedSources {
+        let mut imported = ImportedSources::default();
+        imported.keys.insert(key.to_owned());
+        imported
+            .by_path
+            .insert(path.display().to_string(), vec![key.to_owned()]);
+        imported
+    }
+
+    #[test]
+    fn a_transcript_replaced_by_another_session_is_offered() {
+        let path = PathBuf::from("/home/me/.claude/projects/-code-api/conversation.jsonl");
+        let shown = path.display().to_string();
+        let imported = imported_claim(
+            &path,
+            &h4rn_protocol::source_key(ImportSource::ClaudeCode, Some("session-a"), &shown),
+        );
+
+        assert!(
+            imported.contains_transcript(
+                &path,
+                &h4rn_protocol::source_key(ImportSource::ClaudeCode, Some("session-a"), &shown),
+                true
+            ),
+            "the same session is not offered again"
+        );
+        assert!(
+            !imported.contains_transcript(
+                &path,
+                &h4rn_protocol::source_key(ImportSource::ClaudeCode, Some("session-b"), &shown),
+                true
+            ),
+            "an explicit, different session id at the same path is a new conversation"
+        );
+        // The head named no session of its own, so the path claim hides the
+        // transcript even though the peek's provisional key is the file name.
+        assert!(
+            imported.contains_transcript(&path, "claude_code:conversation", false),
+            "a late session id is still recognised by the path claim"
+        );
+    }
+
+    #[test]
+    fn a_late_session_id_spelled_like_a_path_key_stays_hidden() {
+        let path = PathBuf::from("/home/me/.claude/projects/-code-api/conversation.jsonl");
+        let shown = path.display().to_string();
+        let digest = "a".repeat(64);
+        // The id the full parse found is the whole tail of a canonical path
+        // key. The stored claim still says it is a session claim.
+        let id = format!("path:{shown}:42:{digest}");
+        let key = h4rn_protocol::source_key(ImportSource::ClaudeCode, Some(&id), &shown);
+        assert!(
+            !h4rn_protocol::path_keyed_source_key(&key),
+            "the claim kind is stored, not guessed from the id"
+        );
+        let imported = imported_claim(&path, &key);
+
+        // The scan's head read named no session, so it knows only the file.
+        let head_key =
+            h4rn_protocol::path_source_key(ImportSource::ClaudeCode, &shown, 42, &digest);
+        assert!(h4rn_protocol::path_keyed_source_key(&head_key));
+        assert!(
+            imported.contains_transcript(&path, &head_key, false),
+            "the session claim recorded for the path still hides the transcript"
+        );
+        assert!(imported.contains_transcript(&path, &key, true));
+    }
+
+    #[test]
+    fn a_session_id_and_a_path_key_spelled_the_same_do_not_collide() {
+        let digest = "a".repeat(64);
+        let path_key =
+            h4rn_protocol::path_source_key(ImportSource::Codex, "/tmp/a.jsonl", 42, &digest);
+        let id = path_key
+            .strip_prefix("codex:")
+            .expect("a path key names its source");
+        let session_key = h4rn_protocol::source_key(ImportSource::Codex, Some(id), "/tmp/a.jsonl");
+        assert_ne!(session_key, path_key);
+
+        let other = PathBuf::from("/tmp/other.jsonl");
+        let mut imported = ImportedSources::default();
+        imported.keys.insert(session_key.clone());
+        imported.keys.insert(path_key.clone());
+        imported
+            .by_path
+            .insert(other.display().to_string(), vec![session_key.clone()]);
+        imported
+            .by_path
+            .insert("/tmp/a.jsonl".to_owned(), vec![path_key.clone()]);
+
+        assert!(
+            imported.contains(&session_key),
+            "the session claim is stored"
+        );
+        assert!(imported.contains(&path_key), "the path claim is stored too");
+        assert!(
+            imported.contains_path(&other),
+            "the session claim still hides its transcript by path"
+        );
+        assert!(
+            !imported.contains_path(Path::new("/tmp/a.jsonl")),
+            "the path claim is a file version, not a conversation"
+        );
+    }
+
+    #[test]
+    fn a_restored_version_counts_for_a_full_folder() {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = home.path();
+        let workspace = home_path.join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home_path.join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        // Fill the project's quota, with one more so the scan reaches its cap
+        // before the restored transcript.
+        for index in 0..MAX_CONVERSATIONS_PER_PROJECT + 1 {
+            let session = format!("session-{index:03}");
+            std::fs::write(
+                project.join(format!("{session}.jsonl")),
+                claude_transcript(&workspace, &session, &format!("conversation {index}")),
+            )
+            .expect("transcript");
+        }
+
+        let path = project.join("restored.jsonl");
+        let shown = path.display().to_string();
+        std::fs::write(&path, "first body\n").expect("first transcript");
+        let first_size = std::fs::metadata(&path).expect("metadata").len();
+        let first = h4rn_protocol::path_source_key(
+            ImportSource::ClaudeCode,
+            &shown,
+            first_size,
+            &content_fingerprint(&path, first_size),
+        );
+
+        // Rewritten and imported as another conversation.
+        std::fs::write(&path, "second body, longer than the first\n").expect("rewritten");
+        let second_size = std::fs::metadata(&path).expect("metadata").len();
+        assert_ne!(second_size, first_size);
+        let second = h4rn_protocol::path_source_key(
+            ImportSource::ClaudeCode,
+            &shown,
+            second_size,
+            &content_fingerprint(&path, second_size),
+        );
+
+        // Restored to the version that was imported first, and made the oldest
+        // so the quota fills before the scan reaches it.
+        std::fs::write(&path, "first body\n").expect("restored");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("restored transcript")
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+            )
+            .expect("old mtime");
+
+        // The journal's own loader reads the claims back; both versions of the
+        // file were imported, so both claims must survive it.
+        let imported = ImportedSources::from_records(vec![
+            ImportedSourceRecord {
+                key: first,
+                thread_id: h4rn_protocol::ThreadId::new("th_first"),
+                path: shown.clone(),
+                imported_at: Utc::now(),
+            },
+            ImportedSourceRecord {
+                key: second,
+                thread_id: h4rn_protocol::ThreadId::new("th_second"),
+                path: shown,
+                imported_at: Utc::now(),
+            },
+        ]);
+        assert!(
+            imported.covers_file(&path, first_size),
+            "every claim for the path counts, not only the newest"
+        );
+        assert!(
+            !imported.covers_file(&path, second_size),
+            "the newer version is not the file that is here"
+        );
+
+        let outcome = scan_blocking(
+            home_path,
+            &home_path.join(".claude"),
+            &home_path.join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects.len(), 1);
+        assert_eq!(
+            outcome.scan.projects[0].conversations,
+            MAX_CONVERSATIONS_PER_PROJECT + 1,
+            "the restored version still counts for its project"
+        );
+        assert_eq!(
+            outcome.scan.projects[0].importable, MAX_CONVERSATIONS_PER_PROJECT,
+            "the restored version is not offered again"
+        );
+    }
+
+    /// Opens a database as an older daemon left it, letting the journal run its
+    /// one-time claim upgrade.
+    async fn upgraded_journal(
+        database: &Path,
+        threads: &[(&str, &str)],
+        claims: &[(&str, &str, &str)],
+    ) -> SqliteJournal {
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(database)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("old database");
+        sqlx::query(
+            "CREATE TABLE daemon_imported_sources (
+                source_key  TEXT PRIMARY KEY,
+                thread_id   TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                imported_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old claims table");
+        if !threads.is_empty() {
+            sqlx::query(
+                "CREATE TABLE daemon_threads (
+                    thread_id     TEXT PRIMARY KEY,
+                    imported_json TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("old threads table");
+            for (thread_id, imported_json) in threads {
+                sqlx::query("INSERT INTO daemon_threads (thread_id, imported_json) VALUES (?, ?)")
+                    .bind(thread_id)
+                    .bind(imported_json)
+                    .execute(&pool)
+                    .await
+                    .expect("old thread");
+            }
+        }
+        for (key, thread_id, path) in claims {
+            sqlx::query(
+                "INSERT INTO daemon_imported_sources
+                    (source_key, thread_id, path, imported_at)
+                 VALUES (?, ?, ?, '2026-11-20T10:00:00Z')",
+            )
+            .bind(key)
+            .bind(thread_id)
+            .bind(path)
+            .execute(&pool)
+            .await
+            .expect("old claim");
+        }
+        pool.close().await;
+        SqliteJournal::connect(database).await.expect("upgrade")
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_keeps_every_legacy_claim_with_its_own_thread_and_path() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = home.path().join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home.path().join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let first = project.join("first.jsonl");
+        let second = project.join("second.jsonl");
+        std::fs::write(
+            &first,
+            claude_transcript_with_session(&workspace, Some("abc"), "first"),
+        )
+        .expect("first transcript");
+        // The second claim's own session id is spelled `session:abc`, which the
+        // old migration renamed on top of the first claim's new key.
+        std::fs::write(
+            &second,
+            claude_transcript_with_session(&workspace, Some("session:abc"), "second"),
+        )
+        .expect("second transcript");
+        let first_shown = first.display().to_string();
+        let second_shown = second.display().to_string();
+
+        let database = home.path().join("old.db");
+        let journal = upgraded_journal(
+            &database,
+            &[],
+            &[
+                ("claude_code:abc", "th_first", &first_shown),
+                ("claude_code:session:abc", "th_second", &second_shown),
+            ],
+        )
+        .await;
+
+        let records = journal.list_imported_sources().await.unwrap();
+        assert_eq!(records.len(), 2, "one claim was lost");
+        let first_claim = records
+            .iter()
+            .find(|record| record.key == "claude_code:session:abc")
+            .expect("the first claim");
+        assert_eq!(first_claim.thread_id.as_str(), "th_first");
+        assert_eq!(first_claim.path, first_shown);
+        let second_claim = records
+            .iter()
+            .find(|record| record.key == "claude_code:session:session:abc")
+            .expect("the second claim");
+        assert_eq!(second_claim.thread_id.as_str(), "th_second");
+        assert_eq!(second_claim.path, second_shown);
+
+        // Opening the database again reclassifies nothing.
+        drop(journal);
+        let journal = SqliteJournal::connect(&database).await.expect("reopen");
+        let again = journal.list_imported_sources().await.unwrap();
+        assert_eq!(again.len(), 2);
+        assert!(
+            again
+                .iter()
+                .any(|record| record.key == "claude_code:session:abc"
+                    && record.thread_id.as_str() == "th_first"
+                    && record.path == first_shown)
+        );
+        assert!(
+            again
+                .iter()
+                .any(|record| record.key == "claude_code:session:session:abc"
+                    && record.thread_id.as_str() == "th_second"
+                    && record.path == second_shown)
+        );
+
+        // Neither transcript is offered again.
+        let imported = ImportedSources::from_records(again);
+        let outcome = scan_blocking(
+            home.path(),
+            &home.path().join(".claude"),
+            &home.path().join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects.len(), 1);
+        assert_eq!(outcome.scan.projects[0].conversations, 2);
+        assert_eq!(
+            outcome.scan.projects[0].importable, 0,
+            "an upgraded claim must still hide its own transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_keeps_a_legacy_session_whose_id_looks_like_a_path() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = home.path().join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home.path().join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let path = project.join("odd.jsonl");
+        let shown = path.display().to_string();
+        // The conversation's session id is spelled exactly like a canonical
+        // path key, so nothing in the key itself says it is a session.
+        let digest = "a".repeat(64);
+        let id = format!("path:{shown}:42:{digest}");
+        std::fs::write(
+            &path,
+            claude_transcript_with_session(&workspace, Some(&id), "odd session id"),
+        )
+        .expect("odd transcript");
+        let size = std::fs::metadata(&path).expect("metadata").len();
+
+        // An older daemon stored `source:<id>` for a session. Its thread still
+        // records the id it came from, which says the claim is a session.
+        let legacy_key = format!("claude_code:{id}");
+        assert!(
+            h4rn_protocol::path_keyed_source_key(&legacy_key),
+            "the fixture's legacy key does look like a path claim"
+        );
+        let origin = ImportedOrigin {
+            source: ImportSource::ClaudeCode,
+            source_path: shown.clone(),
+            session_id: Some(id.clone()),
+            project_path: None,
+            native_resume: true,
+        };
+        let imported_json = serde_json::to_string(&origin).expect("origin");
+        let database = home.path().join("old.db");
+        let journal = upgraded_journal(
+            &database,
+            &[("th_odd", &imported_json)],
+            &[(legacy_key.as_str(), "th_odd", &shown)],
+        )
+        .await;
+
+        let expected = h4rn_protocol::source_key(ImportSource::ClaudeCode, Some(&id), &shown);
+        let records = journal.list_imported_sources().await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].key, expected,
+            "the stored import metadata names the claim's kind"
+        );
+
+        let imported = ImportedSources::from_records(records);
+        let outcome = scan_blocking(
+            home.path(),
+            &home.path().join(".claude"),
+            &home.path().join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(outcome.scan.projects.len(), 1);
+        assert_eq!(outcome.scan.projects[0].conversations, 1);
+        assert_eq!(
+            outcome.scan.projects[0].importable, 0,
+            "the upgraded scan must not offer the imported session again"
+        );
+
+        // A retry computes the same key, so the unique claim rejects it and no
+        // second thread can be created.
+        assert!(
+            imported.contains(&imported_key(
+                ImportSource::ClaudeCode,
+                Some(&id),
+                &path,
+                size
+            )),
+            "a retried import finds the claim already stored"
+        );
+    }
+
+    #[test]
+    fn a_grown_path_claim_does_not_count_for_a_full_folder() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("rollout.jsonl");
+        std::fs::write(&path, "first body\n").expect("transcript");
+        let size = std::fs::metadata(&path).expect("metadata").len();
+        let key = h4rn_protocol::path_source_key(
+            ImportSource::Codex,
+            &path.display().to_string(),
+            size,
+            &content_fingerprint(&path, size),
+        );
+        let imported = imported_claim(&path, &key);
+
+        assert!(imported.covers_file(&path, size), "the same file counts");
+        assert!(
+            !imported.covers_file(&path, size + 1),
+            "a grown rollout is a new conversation, not the imported file"
+        );
+        assert!(
+            !imported.contains_transcript(&path, "codex:path", false),
+            "a path claim is not a session claim"
+        );
+    }
+
+    #[test]
+    fn a_path_claim_counts_only_content_it_pinned() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("rollout.jsonl");
+        std::fs::write(&path, "first body\n").expect("transcript");
+        let size = std::fs::metadata(&path).expect("metadata").len();
+        let key = h4rn_protocol::path_source_key(
+            ImportSource::Codex,
+            &path.display().to_string(),
+            size,
+            &content_fingerprint(&path, size),
+        );
+        let imported = imported_claim(&path, &key);
+
+        // Same size, different content: a transcript rewritten in place.
+        std::fs::write(&path, "other body\n").expect("rewritten transcript");
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            size,
+            "the rewrite keeps the size"
+        );
+        assert!(
+            !imported.covers_file(&path, size),
+            "a same-size rewrite is a new conversation, not the imported file"
+        );
+    }
+
+    #[test]
+    fn a_session_claim_counts_for_any_size_of_its_file() {
+        let path = PathBuf::from("/home/me/.claude/projects/-code-api/session.jsonl");
+        let imported = imported_claim(&path, "claude_code:session");
+        assert!(imported.covers_file(&path, 4_096));
     }
 
     /// Parsing a transcript must not hold the async runtime.
@@ -1593,14 +2141,15 @@ mod tests {
         // so it keeps its place rather than vanishing from the list.
         let old = project.join("session-000.jsonl");
         let mut imported = ImportedSources::default();
-        imported.keys.insert(h4rn_protocol::source_key(
+        let old_key = h4rn_protocol::source_key(
             ImportSource::ClaudeCode,
             Some("session-000"),
             &old.display().to_string(),
-        ));
+        );
+        imported.keys.insert(old_key.clone());
         imported
             .by_path
-            .insert(old.display().to_string(), "claude_code:session-000".into());
+            .insert(old.display().to_string(), vec![old_key]);
         let outcome = scan_blocking(
             home_path,
             &home_path.join(".claude"),
@@ -1610,6 +2159,73 @@ mod tests {
         );
         assert_eq!(outcome.scan.projects[0].conversations, 101);
         assert_eq!(outcome.scan.projects[0].importable, 100);
+    }
+
+    #[test]
+    fn a_full_folder_counts_an_imported_transcript_that_names_no_session() {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = home.path();
+        let workspace = home_path.join("code").join("api");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let project = home_path.join(".claude/projects/-code-api");
+        std::fs::create_dir_all(&project).expect("project dir");
+        for index in 0..MAX_CONVERSATIONS_PER_PROJECT + 1 {
+            let session = format!("session-{index:03}");
+            let body = claude_transcript(&workspace, &session, &format!("conversation {index}"));
+            std::fs::write(project.join(format!("{session}.jsonl")), body).expect("transcript");
+        }
+        // The oldest transcript names no session id, and its file stem trims
+        // to nothing, so even the file-name fallback is empty: its identity is
+        // the path, size and fingerprint, never a session.
+        let old = project.join(" .jsonl");
+        std::fs::write(
+            &old,
+            claude_transcript_with_session(&workspace, None, "oldest"),
+        )
+        .expect("oldest transcript");
+        // Make it the oldest transcript, so the quota fills before the scan
+        // reaches it and it is only recognised by its stored claim.
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .expect("old transcript")
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+            )
+            .expect("old mtime");
+        let old_size = std::fs::metadata(&old).expect("old metadata").len();
+        let old_key = h4rn_protocol::path_source_key(
+            ImportSource::ClaudeCode,
+            &old.display().to_string(),
+            old_size,
+            &content_fingerprint(&old, old_size),
+        );
+        assert!(
+            h4rn_protocol::path_keyed_source_key(&old_key),
+            "the oldest transcript is claimed by its path"
+        );
+        let imported = imported_claim(&old, &old_key);
+
+        let outcome = scan_blocking(
+            home_path,
+            &home_path.join(".claude"),
+            &home_path.join(".codex"),
+            &imported,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            outcome.peeks,
+            u64::from(MAX_CONVERSATIONS_PER_PROJECT) + 1,
+            "the quota filled before the oldest transcript was reached"
+        );
+        assert_eq!(
+            outcome.scan.projects[0].conversations, 101,
+            "the imported, id-less transcript still counts for its project"
+        );
+        assert_eq!(
+            outcome.scan.projects[0].importable, 100,
+            "it is not offered again"
+        );
     }
 
     fn group() -> Group {
