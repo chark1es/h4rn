@@ -1195,6 +1195,8 @@ export class MockForge {
       state:
         scope.tracker === "forge" ? { tracker: "forge", issue: { ...this.issue.summary } } : null,
       error: null,
+      identifier: null,
+      title: this.issue.summary.title,
       linked_at: now(),
     };
   }

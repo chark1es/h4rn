@@ -272,8 +272,9 @@ pub(crate) async fn update(
 /// token scopes are repository-only: `GET /orgs/{org}/labels` needs an
 /// organization scope. Names that are not already applied are looked up in
 /// the repository catalogue and, for names it does not carry, the
-/// organization's catalogue. A `403` from the organization catalogue names
-/// the labels that could not be found instead of claiming the request failed.
+/// organization's catalogue. A `403` from the organization catalogue leaves
+/// repository labels resolved and names the organization labels that could
+/// not be found; no replacement is sent.
 async fn label_ids(
     http: &ForgeHttp,
     api: &str,
@@ -335,11 +336,14 @@ async fn label_ids(
 /// looked up again.
 ///
 /// A catalogue may need a scope the token does not have: `GET
-/// /orgs/{org}/labels` answers `403` for a repository-only token. That is
-/// reported as the missing labels the walk was still looking for, so the
-/// person is told which label to create rather than shown a permission error
-/// with no next step. A `404` from the organization catalogue means the owner
-/// is not an organization.
+/// /orgs/{org}/labels` answers `403` for a repository-only token. Repository
+/// labels keep working because the issue's own label list and the repository
+/// catalogue are read first; the organization labels are left out of the
+/// lookup, so a requested name that only the organization carries cannot be
+/// found. That is reported by naming the missing labels and sending no
+/// replacement, so the person is told which label to create rather than shown
+/// a permission error with no next step. A `404` from the organization
+/// catalogue means the owner is not an organization.
 async fn read_label_catalogue(
     http: &ForgeHttp,
     catalog: &str,

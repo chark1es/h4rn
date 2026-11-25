@@ -11,6 +11,8 @@
 //! what a client subscribed to several threads needs. `GetThread` replays by
 //! that global sequence and filters one thread.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
@@ -506,12 +508,78 @@ pub struct WirePage {
     pub more: bool,
 }
 
-// Rows a test reader actually fetched, for the one-page assertion.
+/// One row the page walk yielded.
+///
+/// The walk visits the page plus the first row that did not fit. That last row
+/// is only the `more` flag: its stored event text is not selected, so the page
+/// never fetches the body of an event it is going to drop.
+struct PageRow {
+    /// Stored sequence number.
+    seq: u64,
+    /// The stored event text, absent on the lookahead row.
+    event_json: Option<String>,
+    /// Whether this row is past the page.
+    stopped: bool,
+}
+
+// A write a test can land between the page statement and its answer.
 //
-// Thread-local so tests running in parallel cannot add to each other's count.
+// The page and its `more` flag come from one statement, so in production there
+// is no window between them. The hook exists to prove that: with the old
+// two-statement probe, an append placed here turns an empty page into
+// `more=true` at an unchanged cursor.
 #[cfg(test)]
-thread_local! {
-    pub(crate) static WIRE_PAGE_ROWS_FETCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+pub(crate) mod page_hook {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use h4rn_protocol::{Event, ThreadId};
+
+    use super::SqliteJournal;
+
+    /// The writer and the event it will append.
+    pub(crate) struct Between {
+        /// The journal instance whose next page read fires the hook.
+        pub(crate) reader: u64,
+        /// A separate connection, standing in for another writer.
+        pub(crate) journal: SqliteJournal,
+        /// Thread the event belongs to.
+        pub(crate) thread_id: ThreadId,
+        /// Event to append.
+        pub(crate) events: Vec<Event>,
+    }
+
+    static BETWEEN: Mutex<Option<Between>> = Mutex::new(None);
+    static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
+    /// A new journal instance's identity, allocated when it opens.
+    pub(crate) fn next_instance() -> u64 {
+        NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Arms the next matching page read to append just before it answers.
+    pub(crate) fn set(between: Between) {
+        *BETWEEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(between);
+    }
+
+    /// Takes the armed write when it belongs to this exact read.
+    ///
+    /// A page read from another journal instance or another thread leaves the
+    /// arm in place: a test running in parallel cannot consume it, so its own
+    /// snapshot test always finds the append it armed.
+    pub(crate) fn take(reader: u64, thread_id: &ThreadId) -> Option<Between> {
+        let mut armed = BETWEEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match armed.as_ref() {
+            Some(between) if between.reader == reader && between.thread_id == *thread_id => {
+                armed.take()
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Journal failures.
@@ -529,6 +597,9 @@ pub enum JournalError {
     /// A projected event could not be serialised.
     #[error("journal serialisation error: {0}")]
     Serialisation(#[from] serde_json::Error),
+    /// A one-time upgrade cannot be applied without losing or merging data.
+    #[error("journal upgrade refused: {0}")]
+    Migration(String),
 }
 
 /// Durable log of domain and projected events.
@@ -569,10 +640,12 @@ pub trait Journal: Send + Sync {
     /// At most one page of a thread's projected events with `seq > after`.
     ///
     /// The database stops after `max_events` rows or as soon as the page's
-    /// serialized text would pass `max_bytes`, so a long replay never loads
-    /// the whole thread to hand back its first page. The first event is always
-    /// included even when it alone is larger than the budget: an oversized
-    /// event is carried whole in its own page rather than dropped or cut.
+    /// stored text would pass `max_bytes`, so a long replay never loads the
+    /// whole thread to hand back its first page. The page and its `more` flag
+    /// come from one statement, so they are one snapshot. The first event is
+    /// always included even when it alone is larger than the budget: an
+    /// oversized event is carried whole in its own page rather than dropped or
+    /// cut.
     async fn read_wire_page(
         &self,
         thread_id: &ThreadId,
@@ -737,6 +810,10 @@ pub trait Journal: Send + Sync {
 pub struct SqliteJournal {
     store: SqliteEventStore,
     pool: SqlitePool,
+    /// Identifies this journal in tests, so a page hook fires only for its own
+    /// read.
+    #[cfg(test)]
+    instance: u64,
 }
 
 impl SqliteJournal {
@@ -765,7 +842,12 @@ impl SqliteJournal {
 
     async fn from_store(store: SqliteEventStore) -> Result<Self, JournalError> {
         let pool = store.pool().clone();
-        let journal = Self { store, pool };
+        let journal = Self {
+            store,
+            pool,
+            #[cfg(test)]
+            instance: page_hook::next_instance(),
+        };
         journal.ensure_schema().await?;
         Ok(journal)
     }
@@ -916,12 +998,21 @@ impl SqliteJournal {
                 scope_key  TEXT NOT NULL,
                 scope_json TEXT NOT NULL,
                 issue_id   TEXT NOT NULL,
+                identifier TEXT,
+                title      TEXT,
                 linked_at  TEXT NOT NULL,
                 PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
             )",
         )
         .execute(&self.pool)
         .await?;
+        // A database written before the link stored its human identity still
+        // opens: the two columns are added empty, and the UI falls back to a
+        // generic label for those links.
+        self.ensure_column("daemon_issue_links", "identifier", "TEXT")
+            .await?;
+        self.ensure_column("daemon_issue_links", "title", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_issue_links_thread
@@ -1006,6 +1097,92 @@ impl SqliteJournal {
         .execute(&self.pool)
         .await?;
 
+        // A claim used to spell its kind only in the id that followed, so a
+        // session id that looked like a path key was read as one. Store the
+        // kind on rows written before that, once, in one write transaction.
+        self.migrate_import_claims().await?;
+
+        Ok(())
+    }
+
+    /// Gives every claim written before kinds were stored its stored identity.
+    ///
+    /// The whole table is read before anything is written: each row keeps its
+    /// own thread and path, and the new keys are checked to be distinct. Two
+    /// rows can never collapse into one claim, and a rename cannot land on a
+    /// row that has not been renamed yet.
+    async fn migrate_import_claims(&self) -> Result<(), JournalError> {
+        const MIGRATION: &str = "import_claim_kinds";
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_migrations (
+                name       TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let applied: Option<String> =
+            sqlx::query_scalar("SELECT name FROM daemon_migrations WHERE name = ?")
+                .bind(MIGRATION)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if applied.is_none() {
+            // The thread's stored import metadata names the conversation's own
+            // session id, which is the only trustworthy way to tell a legacy
+            // session claim whose id looks like a path key from a path claim.
+            let rows = sqlx::query(
+                "SELECT claim.source_key, claim.thread_id, claim.path, claim.imported_at,
+                        thread.imported_json
+                   FROM daemon_imported_sources AS claim
+                   LEFT JOIN daemon_threads AS thread
+                     ON thread.thread_id = claim.thread_id",
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            let mut claims: Vec<(String, String, String, String)> = Vec::with_capacity(rows.len());
+            let mut seen: HashSet<String> = HashSet::with_capacity(rows.len());
+            for row in rows {
+                let key: String = row.try_get("source_key")?;
+                let imported_json: Option<String> = row.try_get("imported_json")?;
+                let migrated = migrated_claim_key(&key, imported_json.as_deref());
+                if !seen.insert(migrated.clone()) {
+                    return Err(JournalError::Migration(format!(
+                        "two import claims would become {migrated}"
+                    )));
+                }
+                claims.push((
+                    migrated,
+                    row.try_get("thread_id")?,
+                    row.try_get("path")?,
+                    row.try_get("imported_at")?,
+                ));
+            }
+            // Every row is written back under its own new key. Deleting first
+            // means no rename can replace a row that is still waiting.
+            sqlx::query("DELETE FROM daemon_imported_sources")
+                .execute(&mut *tx)
+                .await?;
+            for (key, thread_id, path, imported_at) in claims {
+                sqlx::query(
+                    "INSERT INTO daemon_imported_sources
+                        (source_key, thread_id, path, imported_at)
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(key)
+                .bind(thread_id)
+                .bind(path)
+                .bind(imported_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query("INSERT INTO daemon_migrations (name, applied_at) VALUES (?, ?)")
+                .bind(MIGRATION)
+                .bind(Utc::now().to_rfc3339())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1015,21 +1192,143 @@ impl SqliteJournal {
         column: &str,
         definition: &str,
     ) -> Result<(), JournalError> {
-        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
-            .fetch_all(&self.pool)
-            .await?;
-        let exists = rows.iter().any(|row| {
-            row.try_get::<String, _>("name")
-                .is_ok_and(|name| name == column)
-        });
-        if !exists {
-            sqlx::query(&format!(
-                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-            ))
-            .execute(&self.pool)
-            .await?;
+        // Two daemons may open the same journal at once. The check and the
+        // `ALTER TABLE` run inside one write transaction (`BEGIN IMMEDIATE`),
+        // so the second process can only look after the first committed and
+        // sees the column it added, instead of both seeing it missing and
+        // racing to add it.
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        match add_column(&mut conn, table, column, definition).await {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(error)
+            }
         }
-        Ok(())
+    }
+}
+
+/// Test-only pause between a column's check and its `ALTER`.
+///
+/// A test that wants two daemons to contend must keep the first one inside
+/// that window, otherwise the two finishes arrive one after the other and the
+/// race never happens. Production builds have no gate.
+#[cfg(test)]
+mod migration_gate {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    /// How often the duplicate-column fallback ran. A properly locked upgrade
+    /// never needs it, so a test can prove the lock did the work.
+    static FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn arm() {
+        ARMED.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn disarm() {
+        ARMED.store(false, Ordering::SeqCst);
+    }
+
+    pub(super) async fn pause() {
+        if ARMED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub(super) fn record_fallback() {
+        FALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn reset_fallbacks() {
+        FALLBACKS.store(0, Ordering::SeqCst);
+    }
+
+    pub(super) fn fallbacks() -> usize {
+        FALLBACKS.load(Ordering::SeqCst)
+    }
+}
+
+/// Adds one column when it is missing, on the caller's locked connection.
+async fn add_column(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), JournalError> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(&mut *conn)
+        .await?;
+    let exists = rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .is_ok_and(|name| name == column)
+    });
+    if exists {
+        return Ok(());
+    }
+    #[cfg(test)]
+    migration_gate::pause().await;
+    alter_add_column(conn, table, column, definition).await
+}
+
+/// Runs the `ALTER`, treating a column another writer already added as done.
+async fn alter_add_column(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), JournalError> {
+    match sqlx::query(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
+    .execute(&mut *conn)
+    .await
+    {
+        Ok(_) => Ok(()),
+        // A writer that never took the lock (an older build, or another
+        // tool) may have added the column after the check. That is exactly
+        // the state this migration wants, so it is already applied.
+        Err(sqlx::Error::Database(error)) if error.message().contains("duplicate column name") => {
+            #[cfg(test)]
+            migration_gate::record_fallback();
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The key a legacy import claim should become.
+///
+/// When the claim's thread still records the conversation it came from, that
+/// metadata names the original session id, and a non-empty id makes the claim a
+/// session claim even when the id itself is spelled like a path key. Without
+/// metadata the old spelling rules decide, which is all an older database can
+/// offer.
+fn migrated_claim_key(key: &str, imported_json: Option<&str>) -> String {
+    if let Some(origin) =
+        imported_json.and_then(|json| serde_json::from_str::<ImportedOrigin>(json).ok())
+    {
+        return match origin
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(id) => h4rn_protocol::source_key(origin.source, Some(id), &origin.source_path),
+            // The thread's metadata names no session, so the claim is about a
+            // file version and already carries its path, size and fingerprint.
+            None => key.to_owned(),
+        };
+    }
+    match h4rn_protocol::migrated_claim_key(key) {
+        Some(migrated) => migrated,
+        // A path claim already pins its file.
+        None => key.to_owned(),
     }
 }
 
@@ -1364,71 +1663,37 @@ impl Journal for SqliteJournal {
         max_events: usize,
         max_bytes: usize,
     ) -> Result<WirePage, JournalError> {
-        // The recursive walk takes one row at a time over the (thread_id, seq)
-        // index and stops as soon as the page's stored text would pass the
-        // budget, so the database reads one page instead of the whole replay.
-        // The first row is taken unconditionally, which keeps an oversized
-        // event whole.
-        //
-        // The budget counts each row's stored `event_json` bytes, not the
-        // event re-serialized by this build. A page boundary for history
-        // written by an older protocol version can therefore land elsewhere
-        // than a re-serialized count would put it; nothing is lost either way,
-        // because the next page starts at the following seq.
-        let rows = sqlx::query(
-            "WITH RECURSIVE page(seq, event_json, used) AS (
-                 SELECT seq, event_json, length(CAST(event_json AS BLOB))
-                   FROM daemon_wire_events
-                  WHERE thread_id = ?1
-                    AND seq = (SELECT MIN(seq) FROM daemon_wire_events
-                                WHERE thread_id = ?1 AND seq > ?2)
-                 UNION ALL
-                 SELECT next.seq, next.event_json,
-                        page.used + length(CAST(next.event_json AS BLOB))
-                   FROM page
-                   JOIN daemon_wire_events AS next
-                     ON next.thread_id = ?1
-                    AND next.seq = (SELECT MIN(seq) FROM daemon_wire_events
-                                     WHERE thread_id = ?1 AND seq > page.seq)
-                  WHERE page.used + length(CAST(next.event_json AS BLOB)) <= ?3
-             )
-             SELECT seq, event_json FROM page ORDER BY seq LIMIT ?4",
-        )
-        .bind(thread_id.as_str())
-        .bind(after as i64)
-        .bind(max_bytes as i64)
-        .bind(max_events as i64)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = self
+            .page_rows(thread_id, after, max_events, max_bytes)
+            .await?;
 
-        #[cfg(test)]
-        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(fetched.get() + rows.len()));
-
+        let mut more = false;
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
-            let seq: i64 = row.try_get("seq")?;
-            let event_json: String = row.try_get("event_json")?;
+            if row.stopped {
+                more = true;
+                continue;
+            }
+            let Some(event_json) = row.event_json else {
+                continue;
+            };
             events.push(WireEvent {
-                seq: seq as u64,
+                seq: row.seq,
                 thread_id: thread_id.clone(),
                 event: serde_json::from_str(&event_json)?,
             });
         }
-        // One indexed probe says whether anything follows the page; this keeps
-        // the `more` flag exact even when the row cap ended the page.
-        let last = events.last().map(|event| event.seq).unwrap_or(after);
-        let more: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM daemon_wire_events
-                            WHERE thread_id = ? AND seq > ?)",
-        )
-        .bind(thread_id.as_str())
-        .bind(last as i64)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(WirePage {
-            events,
-            more: more != 0,
-        })
+        // A test's append lands where the old two-statement pager would probe
+        // for `more`; the page above is already one snapshot and must not
+        // change because of it.
+        #[cfg(test)]
+        if let Some(between) = page_hook::take(self.instance, thread_id) {
+            between
+                .journal
+                .append_wire(&between.thread_id, &between.events)
+                .await?;
+        }
+        Ok(WirePage { events, more })
     }
 
     async fn read_wire_since_global(&self, after: u64) -> Result<Vec<WireEvent>, JournalError> {
@@ -1892,10 +2157,13 @@ impl Journal for SqliteJournal {
             .map_err(|error| JournalError::Database(sqlx::Error::Protocol(error.to_string())))?;
         sqlx::query(
             "INSERT INTO daemon_issue_links
-                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id,
+                 identifier, title, linked_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(thread_id, scope_kind, scope_key, issue_id) DO UPDATE SET
-                account_id = excluded.account_id",
+                account_id = excluded.account_id,
+                identifier = excluded.identifier,
+                title = excluded.title",
         )
         .bind(link.thread_id.as_str())
         .bind(&link.account_id)
@@ -1903,6 +2171,8 @@ impl Journal for SqliteJournal {
         .bind(key)
         .bind(scope_json)
         .bind(&link.issue_id)
+        .bind(&link.identifier)
+        .bind(&link.title)
         .bind(link.linked_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -1934,7 +2204,7 @@ impl Journal for SqliteJournal {
         thread_id: &ThreadId,
     ) -> Result<Vec<IssueLinkRecord>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, account_id, scope_json, issue_id, linked_at
+            "SELECT thread_id, account_id, scope_json, issue_id, identifier, title, linked_at
              FROM daemon_issue_links WHERE thread_id = ?
              ORDER BY linked_at ASC, rowid ASC",
         )
@@ -2131,6 +2401,96 @@ impl Journal for SqliteJournal {
         };
         tx.commit().await?;
         Ok(Some(seqs))
+    }
+}
+
+impl SqliteJournal {
+    /// The rows the page walk visited: the page plus one lookahead row.
+    ///
+    /// The recursive walk takes one row at a time over the (thread_id, seq)
+    /// index and stops as soon as the page would pass its byte budget or its
+    /// row cap, so the database reads one page instead of the whole replay.
+    /// The first row is taken unconditionally, which keeps an oversized event
+    /// whole.
+    ///
+    /// The walk also yields the first row that did not fit, marked `stopped`.
+    /// Only that flag comes out of the walk: neither its text nor its length is
+    /// carried, and the outer select reads a body only for the rows the page
+    /// accepted. A rejected event is therefore never fetched, however large it
+    /// is. Its presence is the page's `more` flag, and the answer comes from
+    /// inside the same statement as the page, inside one implicit read
+    /// transaction, so an append cannot land between them and turn an empty
+    /// page into `more=true` with an unchanged cursor. The tests check this
+    /// through `page_hook` and measure the query's SQLite VM steps and the
+    /// largest allocation it makes, so a walk that scanned the thread only to
+    /// trim its output fails them.
+    ///
+    /// The budget counts each row's stored `event_json` bytes, not the event
+    /// re-serialized by this build. `octet_length` keeps SQLite from loading a
+    /// row's text just to measure it. A page boundary for history written by an
+    /// older protocol version can therefore land elsewhere than a
+    /// re-serialized count would put it; nothing is lost either way, because
+    /// the next page starts at the following seq, and the outbound frame of a
+    /// paired session is chunked below the transport's frame limit regardless
+    /// of its size.
+    async fn page_rows(
+        &self,
+        thread_id: &ThreadId,
+        after: u64,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<PageRow>, JournalError> {
+        let rows = sqlx::query(
+            "WITH RECURSIVE page(seq, used, n, stopped) AS (
+                 SELECT seq, octet_length(event_json), 1, 0
+                   FROM daemon_wire_events
+                  WHERE thread_id = ?1
+                    AND seq = (SELECT MIN(seq) FROM daemon_wire_events
+                                WHERE thread_id = ?1 AND seq > ?2)
+                 UNION ALL
+                 SELECT next.seq,
+                        page.used + octet_length(next.event_json),
+                        page.n + 1,
+                        CASE WHEN page.n >= ?4
+                                  OR page.used + octet_length(next.event_json) > ?3
+                             THEN 1 ELSE 0 END
+                   FROM page
+                   JOIN daemon_wire_events AS next
+                     ON next.thread_id = ?1
+                    AND next.seq = (SELECT MIN(seq) FROM daemon_wire_events
+                                     WHERE thread_id = ?1 AND seq > page.seq)
+                  WHERE page.stopped = 0
+             )
+             SELECT page.seq, events.event_json, page.stopped
+               FROM page
+               LEFT JOIN daemon_wire_events AS events
+                 ON events.thread_id = ?1
+                AND events.seq = page.seq
+                AND page.stopped = 0
+              ORDER BY page.seq",
+        )
+        .bind(thread_id.as_str())
+        .bind(after as i64)
+        .bind(max_bytes as i64)
+        .bind(max_events as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut page = Vec::with_capacity(rows.len());
+        for row in rows {
+            page.push(PageRow {
+                seq: row.try_get::<i64, _>("seq")? as u64,
+                event_json: row.try_get("event_json")?,
+                stopped: row.try_get::<i64, _>("stopped")? != 0,
+            });
+        }
+        Ok(page)
+    }
+
+    /// The identity a test hook matches against.
+    #[cfg(test)]
+    pub(crate) fn test_instance(&self) -> u64 {
+        self.instance
     }
 }
 
@@ -2469,6 +2829,8 @@ fn issue_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<IssueLinkRecord, 
             )))
         })?,
         issue_id: row.try_get("issue_id")?,
+        identifier: row.try_get("identifier")?,
+        title: row.try_get("title")?,
         linked_at: DateTime::parse_from_rfc3339(&linked_at)
             .map(|value| value.with_timezone(&Utc))
             .map_err(|error| {
@@ -2506,8 +2868,15 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use h4rn_protocol::{AgentState, ThreadSummary};
+
+    /// SQLite virtual-machine instructions run by the measured page query.
+    static PAGE_VM_STEPS: AtomicUsize = AtomicUsize::new(0);
+    /// Serialises measurements: the progress handler is process-wide here.
+    static PAGE_VM_STEPS_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn meta(thread_id: &str) -> ThreadMeta {
         ThreadMeta {
@@ -2653,6 +3022,156 @@ mod tests {
         assert_eq!(threads[0].thread_id.as_str(), "th_old");
         assert_eq!(threads[0].agent_id, None);
         assert_eq!(threads[0].harness, HarnessKind::ClaudeCode);
+    }
+
+    /// The issue-link table as daemons wrote it before the identity columns,
+    /// with one row that must survive the upgrade.
+    async fn old_issue_links_schema(path: &std::path::Path) {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("open old database");
+        sqlx::query(
+            "CREATE TABLE daemon_issue_links (
+                thread_id  TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                scope_key  TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                issue_id   TEXT NOT NULL,
+                linked_at  TEXT NOT NULL,
+                PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old schema");
+        sqlx::query(
+            "INSERT INTO daemon_issue_links
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
+             VALUES ('th_1', 'lin_1', 'linear', 'team_1',
+                     '{\"tracker\":\"linear\",\"team_id\":\"team_1\"}', 'issue_uuid_1',
+                     '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("old row");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_issue_link_written_before_the_identity_was_stored_migrates_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("old-links.db");
+        old_issue_links_schema(&path).await;
+
+        let journal = SqliteJournal::connect(&path).await.expect("open journal");
+        let links = journal
+            .issue_links_for_thread(&ThreadId::new("th_1"))
+            .await
+            .expect("list");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].issue_id, "issue_uuid_1");
+        assert_eq!(links[0].identifier, None);
+        assert_eq!(links[0].title, None);
+    }
+
+    /// The fallback counter is process-wide, so the tests that read it take
+    /// turns even though cargo runs tests in parallel.
+    fn fallback_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Arms the contention gate and disarms it on drop, so a failing
+    /// assertion cannot leave every later test pausing at its migration.
+    struct ArmedGate;
+
+    impl ArmedGate {
+        fn arm() -> Self {
+            migration_gate::arm();
+            Self
+        }
+    }
+
+    impl Drop for ArmedGate {
+        fn drop(&mut self) {
+            migration_gate::disarm();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_daemons_open_one_old_journal_without_a_race() {
+        let _counting = fallback_lock().lock().await;
+        // Hold every daemon at its column check long enough for the other one
+        // to reach the same point, so the two upgrades really contend.
+        let _gate = ArmedGate::arm();
+        for attempt in 0..3 {
+            migration_gate::reset_fallbacks();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("old-links-race.db");
+            // The core schema is applied once, so the only upgrade left is
+            // the daemon's own, which both processes run at startup.
+            drop(SqliteEventStore::connect(&path).await.expect("core schema"));
+            old_issue_links_schema(&path).await;
+
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                handles.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    SqliteJournal::connect(&path).await
+                }));
+            }
+            let mut opened = Vec::new();
+            for handle in handles {
+                let journal = handle
+                    .await
+                    .expect("the daemon task ran")
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "both daemons must open the same journal (attempt {attempt}): {error}"
+                        )
+                    });
+                opened.push(journal);
+            }
+            let links = opened[0]
+                .issue_links_for_thread(&ThreadId::new("th_1"))
+                .await
+                .expect("list");
+            assert_eq!(links.len(), 1, "the row survives the upgrade");
+            assert_eq!(links[0].issue_id, "issue_uuid_1");
+            assert_eq!(links[0].identifier, None);
+            // The lock, not the duplicate-column fallback, is what makes the
+            // second opener see the first one's column.
+            assert_eq!(
+                migration_gate::fallbacks(),
+                0,
+                "a locked upgrade never reached the duplicate-column fallback (attempt {attempt})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_column_another_writer_already_added_counts_as_applied() {
+        let _counting = fallback_lock().lock().await;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let mut conn = journal.pool.acquire().await.expect("connection");
+        sqlx::query("CREATE TABLE probe (id TEXT)")
+            .execute(&mut *conn)
+            .await
+            .expect("probe table");
+        migration_gate::reset_fallbacks();
+        add_column(&mut conn, "probe", "note", "TEXT")
+            .await
+            .expect("add the column");
+        // A writer that did not check first (an older build) reaches its own
+        // `ALTER` after ours: the column is already there.
+        alter_add_column(&mut conn, "probe", "note", "TEXT")
+            .await
+            .expect("a duplicate column is already applied");
+        assert_eq!(migration_gate::fallbacks(), 1, "the fallback ran once");
     }
 
     #[tokio::test]
@@ -3180,6 +3699,73 @@ mod tests {
         pages
     }
 
+    /// Reads one page and counts the SQLite VM steps it ran.
+    ///
+    /// The journal's pool holds a single connection, so a progress handler set
+    /// on it is the connection the page query runs on. `num_ops = 1` invokes
+    /// the handler for every virtual-machine instruction; counting the calls
+    /// counts the work, not the rows the statement happened to return.
+    async fn page_with_steps(
+        journal: &SqliteJournal,
+        thread_id: &ThreadId,
+        after: u64,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> (WirePage, usize) {
+        let guard = PAGE_VM_STEPS_GUARD.lock().await;
+        PAGE_VM_STEPS.store(0, Ordering::SeqCst);
+        {
+            let mut connection = journal.pool.acquire().await.expect("connection");
+            let mut handle = connection.lock_handle().await.expect("handle");
+            handle.set_progress_handler(1, || {
+                PAGE_VM_STEPS.fetch_add(1, Ordering::Relaxed);
+                // `true` continues the statement; `false` would interrupt it.
+                true
+            });
+        }
+        let page = journal
+            .read_wire_page(thread_id, after, max_events, max_bytes)
+            .await
+            .expect("page");
+        let steps = PAGE_VM_STEPS.load(Ordering::SeqCst);
+        {
+            let mut connection = journal.pool.acquire().await.expect("connection");
+            let mut handle = connection.lock_handle().await.expect("handle");
+            handle.remove_progress_handler();
+        }
+        drop(guard);
+        (page, steps)
+    }
+
+    /// The largest single allocation SQLite has made since the last reset.
+    ///
+    /// `SQLITE_STATUS_MALLOC_SIZE` is 5. Reading a row's text needs a buffer as
+    /// large as the row; a walk that only measures it with `octet_length` does
+    /// not. The counter is global, so the caller holds `PAGE_VM_STEPS_GUARD`
+    /// while measuring and no other test is inserting a large event.
+    fn sqlite_largest_allocation(reset: bool) -> i64 {
+        unsafe extern "C" {
+            fn sqlite3_status64(
+                op: std::os::raw::c_int,
+                current: *mut i64,
+                highwater: *mut i64,
+                reset: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        const SQLITE_STATUS_MALLOC_SIZE: std::os::raw::c_int = 5;
+        let mut current = 0;
+        let mut highwater = 0;
+        unsafe {
+            sqlite3_status64(
+                SQLITE_STATUS_MALLOC_SIZE,
+                &mut current,
+                &mut highwater,
+                i32::from(reset),
+            );
+        }
+        highwater
+    }
+
     #[tokio::test]
     async fn a_thread_with_gaps_pages_where_the_old_pager_did() {
         const PAGE: usize = 64 * 1024;
@@ -3365,22 +3951,385 @@ mod tests {
         }
         journal.append_wire(&thread_id, &wire).await.unwrap();
 
-        WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.set(0));
-        let page = journal
-            .read_wire_page(&thread_id, 0, 4096, 8 * 1024)
-            .await
-            .unwrap();
-        let fetched = WIRE_PAGE_ROWS_FETCHED.with(|fetched| fetched.get());
-        assert_eq!(
-            fetched,
-            page.events.len(),
-            "the query returned only the page"
-        );
+        let (page, page_steps) = page_with_steps(&journal, &thread_id, 0, 4096, 8 * 1024).await;
         assert!(
             page.events.len() < 200,
             "the page is a small prefix, not the whole thread"
         );
         assert!(page.more);
+
+        // The whole thread in one page, as the measure of a full walk. The
+        // paged query must cost a small fraction of it: a walk that scanned
+        // the thread and trimmed with an outer LIMIT costs nearly as much.
+        let (all, all_steps) = page_with_steps(&journal, &thread_id, 0, 4096, 1024 * 1024).await;
+        assert_eq!(all.events.len(), 200);
+        assert!(
+            page_steps.saturating_mul(5) < all_steps,
+            "{page_steps} VM steps for a {} event page, {all_steps} for all 200",
+            page.events.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_that_ends_at_the_last_event_has_nothing_more() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_last");
+        journal.upsert_thread(&meta("th_last")).await.unwrap();
+        journal
+            .append_wire(
+                &thread_id,
+                &[
+                    page_event(&thread_id, 0, 1024),
+                    page_event(&thread_id, 1, 1024),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // A budget that carries both events: the walk ends with the thread, so
+        // no lookahead row and no `more`.
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, 4 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert!(!page.more, "nothing follows the last event");
+
+        // The same two events split by a one-event budget: the page always has
+        // its first event and `more` is true, never an empty page with more.
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 1, "the oversized event is carried whole");
+        assert!(page.more, "the second event follows");
+    }
+
+    #[tokio::test]
+    async fn the_row_cap_stops_the_walk_instead_of_trimming_it() {
+        const EVENTS: usize = 5_000;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_cap");
+        journal.upsert_thread(&meta("th_cap")).await.unwrap();
+        let mut wire = Vec::new();
+        for index in 0..EVENTS {
+            wire.push(page_event(&thread_id, index, 8));
+        }
+        journal.append_wire(&thread_id, &wire).await.unwrap();
+
+        let (page, page_steps) = page_with_steps(&journal, &thread_id, 0, 100, 256 * 1024).await;
+        assert_eq!(page.events.len(), 100, "the cap fills the page");
+        assert!(page.more, "the rest follows");
+
+        let (all, all_steps) =
+            page_with_steps(&journal, &thread_id, 0, EVENTS, 16 * 1024 * 1024).await;
+        assert_eq!(all.events.len(), EVENTS);
+        assert!(
+            page_steps.saturating_mul(5) < all_steps,
+            "{page_steps} VM steps to page 100 of {EVENTS}, {all_steps} for all {EVENTS}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lookahead_row_returns_only_its_flag() {
+        const BIG: usize = 32 * 1024 * 1024;
+        // The allocation counter is process-wide, and this is the only test
+        // that writes an event this large.
+        let guard = PAGE_VM_STEPS_GUARD.lock().await;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_lookahead");
+        journal.upsert_thread(&meta("th_lookahead")).await.unwrap();
+        journal
+            .append_wire(
+                &thread_id,
+                &[
+                    page_event(&thread_id, 0, 16),
+                    page_event(&thread_id, 1, BIG),
+                ],
+            )
+            .await
+            .unwrap();
+
+        sqlite_largest_allocation(true);
+        let rows = journal
+            .page_rows(&thread_id, 0, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        let largest_allocation = sqlite_largest_allocation(false);
+        assert_eq!(rows.len(), 2, "the page and the row that ended it");
+        assert!(!rows[0].stopped);
+        assert!(rows[1].stopped);
+        assert_eq!(
+            rows[1].event_json, None,
+            "the rejected row is only a flag, not its 32 MiB body"
+        );
+        let fetched: usize = rows
+            .iter()
+            .filter_map(|row| row.event_json.as_ref())
+            .map(String::len)
+            .sum();
+        assert!(
+            fetched < 1024 * 1024,
+            "the page fetched {fetched} bytes: the 32 MiB lookahead body was read into the answer"
+        );
+        assert!(
+            largest_allocation < 4 * 1024 * 1024,
+            "the walk made a {largest_allocation}-byte allocation: it read the 32 MiB lookahead body"
+        );
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn claims_written_before_kinds_were_stored_are_classified_on_upgrade() {
+        let dir = tempfile::tempdir().expect("dir");
+        let database = dir.path().join("old.db");
+        let pool = SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("old database");
+        sqlx::query(
+            "CREATE TABLE daemon_imported_sources (
+                source_key  TEXT PRIMARY KEY,
+                thread_id   TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                imported_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old claims table");
+        let path_key = format!("codex:path:/tmp/a.jsonl:42:{}", "a".repeat(64));
+        let claims = [
+            ("claude_code:abc", "/tmp/abc.jsonl"),
+            ("claude_code:path:/tmp/legacy.jsonl", "/tmp/legacy.jsonl"),
+            // An old session id that itself began with `session:`.
+            ("claude_code:session:old-id", "/tmp/old.jsonl"),
+            (path_key.as_str(), "/tmp/a.jsonl"),
+        ];
+        for (key, path) in claims {
+            sqlx::query(
+                "INSERT INTO daemon_imported_sources
+                    (source_key, thread_id, path, imported_at)
+                 VALUES (?, 'th_old', ?, '2026-11-20T10:00:00Z')",
+            )
+            .bind(key)
+            .bind(path)
+            .execute(&pool)
+            .await
+            .expect("old claim");
+        }
+        pool.close().await;
+
+        let journal = SqliteJournal::connect(&database).await.expect("upgrade");
+        let mut keys: Vec<String> = journal
+            .list_imported_sources()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.key)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "claude_code:session:abc".to_owned(),
+                "claude_code:session:path:/tmp/legacy.jsonl".to_owned(),
+                "claude_code:session:session:old-id".to_owned(),
+                path_key.clone(),
+            ]
+        );
+
+        // The upgrade is marked, so opening the database again classifies
+        // nothing a second time.
+        drop(journal);
+        let journal = SqliteJournal::connect(&database).await.expect("reopen");
+        let mut again: Vec<String> = journal
+            .list_imported_sources()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.key)
+            .collect();
+        again.sort();
+        assert_eq!(again, keys);
+    }
+
+    #[tokio::test]
+    async fn an_append_between_the_page_and_its_answer_keeps_the_snapshot() {
+        let dir = tempfile::tempdir().expect("dir");
+
+        let database = dir.path().join("events.db");
+        let journal = SqliteJournal::connect(&database).await.unwrap();
+        let thread_id = ThreadId::new("th_between");
+        journal.upsert_thread(&meta("th_between")).await.unwrap();
+        journal
+            .append_wire(&thread_id, &[page_event(&thread_id, 0, 8)])
+            .await
+            .unwrap();
+        let cursor = journal
+            .read_wire_since(&thread_id, 0)
+            .await
+            .unwrap()
+            .last()
+            .expect("first event")
+            .seq;
+        // Another thread on the same journal, so a read of it must leave the
+        // hook armed too.
+        let other = ThreadId::new("th_between_other");
+        journal
+            .upsert_thread(&meta("th_between_other"))
+            .await
+            .unwrap();
+        journal
+            .append_wire(&other, &[page_event(&other, 0, 8)])
+            .await
+            .unwrap();
+
+        // A second connection writes just before the read answers, where the
+        // old two-statement pager ran its `more` probe.
+        let writer = SqliteJournal::connect(&database).await.unwrap();
+        page_hook::set(page_hook::Between {
+            reader: journal.test_instance(),
+            journal: writer.clone(),
+            thread_id: thread_id.clone(),
+            events: vec![page_event(&thread_id, 1, 8)],
+        });
+
+        // A read on another journal leaves the arm in place.
+        writer
+            .read_wire_page(&thread_id, cursor, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.read_wire_since(&thread_id, 0).await.unwrap().len(),
+            1,
+            "another journal's read fired the hook"
+        );
+
+        // A read of another thread on the intended journal leaves it in place.
+        journal
+            .read_wire_page(&other, 0, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.read_wire_since(&thread_id, 0).await.unwrap().len(),
+            1,
+            "another thread's read fired the hook"
+        );
+
+        let page = journal
+            .read_wire_page(&thread_id, cursor, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            page.events.is_empty(),
+            "the page was taken before the append"
+        );
+        assert!(
+            !page.more,
+            "an empty page must not promise more at an unchanged cursor"
+        );
+
+        // The appended event is still there, in the next page.
+        let next = journal
+            .read_wire_page(&thread_id, cursor, 4096, 256 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(next.events.len(), 1, "the append is not lost");
+        assert!(!next.more);
+    }
+
+    /// A page of rows written before `at` existed.
+    ///
+    /// Their stored text omits `at`, so re-serializing them adds `"at":null`.
+    /// That makes the page boundary land elsewhere than the pre-SQL pager's
+    /// did, but every event still arrives exactly once and in order.
+    #[tokio::test]
+    async fn a_legacy_page_may_differ_but_delivers_every_event_once() {
+        const BUDGET: usize = 256 * 1024;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_legacy");
+
+        // Two rows whose stored text exactly fills the budget between them.
+        let mut seqs = Vec::new();
+        for (index, target) in [BUDGET / 2, BUDGET / 2].into_iter().enumerate() {
+            let mut value = serde_json::json!({
+                "type": "item_completed",
+                "thread_id": thread_id.as_str(),
+                "turn_id": "turn_page",
+                "item": {
+                    "kind": "message",
+                    "item_id": format!("legacy-{index}"),
+                    "role": "user",
+                    "text": "",
+                    "attachments": [],
+                },
+            });
+            let empty = value.to_string().len();
+            value["item"]["text"] = serde_json::Value::String("l".repeat(target - empty));
+            let text = value.to_string();
+            assert_eq!(text.len(), target, "the row is exactly the target size");
+            let seq: i64 = sqlx::query_scalar(
+                "INSERT INTO daemon_wire_events (thread_id, event_json, recorded_at)
+                 VALUES (?, ?, '2026-11-20T10:00:00Z') RETURNING seq",
+            )
+            .bind(thread_id.as_str())
+            .bind(text)
+            .fetch_one(&journal.pool)
+            .await
+            .unwrap();
+            seqs.push(seq as u64);
+        }
+
+        let all = journal.read_wire_since(&thread_id, 0).await.unwrap();
+        let before = old_pages(&all, BUDGET);
+        assert_eq!(before.len(), 2, "the old pager split the two rows");
+        assert_eq!(before[0].0, vec![seqs[0]], "one event in the first page");
+        assert!(before[0].1, "the old pager had more to send");
+
+        let page = journal
+            .read_wire_page(&thread_id, 0, 4096, BUDGET)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            seqs,
+            "the stored-byte budget carries both rows in one page"
+        );
+        assert!(!page.more, "nothing is left after the page");
+        let serialized: usize = page
+            .events
+            .iter()
+            .map(|event| serde_json::to_string(&event.event).unwrap().len())
+            .sum();
+        assert!(
+            serialized > BUDGET,
+            "the re-serialized page ({serialized}) passes the stored-byte budget"
+        );
+
+        // Walking a smaller budget delivers every event exactly once, in
+        // order, with an exact `more` each time.
+        let mut after = 0;
+        let mut walked = Vec::new();
+        loop {
+            let page = journal
+                .read_wire_page(&thread_id, after, 4096, BUDGET / 2)
+                .await
+                .unwrap();
+            assert!(!page.events.is_empty(), "a page with more is never empty");
+            walked.extend(page.events.iter().map(|event| event.seq));
+            after = *walked.last().unwrap();
+            if !page.more {
+                break;
+            }
+        }
+        assert_eq!(walked, seqs, "every legacy event arrives once, in order");
     }
 
     #[tokio::test]

@@ -716,6 +716,32 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A replaced transcript is offered as the new conversation it is.** When a
+  session's path now holds a transcript with a different explicit session id, the
+  scan offers it instead of hiding it behind the old path claim. The stored claim
+  still hides the transcript when its head names no session of its own, or names
+  the same id.
+- **A stored import claim is matched for what it really is.** A session id that
+  merely looks like a path key (`path:vendor:42:nightly`) stays a session id, so
+  a transcript whose id appears only late in the file is not offered again. The
+  claim's kind is now stored in the key itself — `session:` before an id,
+  `path:` before a file — so a session id spelled exactly like a canonical path
+  key cannot be read as one or collide with a different transcript's path
+  claim. A database written before that is upgraded once, inside one write
+  transaction when the journal opens: every claim is read first and written back
+  with its own thread and path, so two claims can never merge into one, and a
+  session whose original id is spelled like a path key is classified from the
+  import metadata its thread already stores rather than from that spelling.
+  When a full project recognises a transcript by path, the file must still match
+  the size and content fingerprint stored with it, and every claim stored for
+  that path is checked rather than only the newest: a transcript imported,
+  rewritten and imported again, then restored to the version imported first,
+  still counts.
+- **A replay page's lookahead row does not read the body it rejects.** The one
+  statement that returns a page and its `more` flag now measures each row with
+  `octet_length` instead of carrying its text, and fetches a body only for the
+  rows the page accepted, so a tiny page followed by a 32 MiB event never reads
+  that body at all.
 - **The queue you see is the daemon's queue, even after a reload.** A reload or reconnect now
   refetches waiting rows for every thread that has them, instead of leaving them invisible until
   something unrelated happens, and a late reply can no longer put a message back that has already
@@ -777,6 +803,15 @@ All notable changes to h4rn are recorded here. The format follows
   then skipped again. A transcript that names no session id is still keyed by its
   path, size and fingerprint, so a Codex rollout that keeps growing is offered
   again as a new conversation.
+- **A linked Linear issue keeps its name when the tracker cannot be reached.**
+  The link now stores the issue's human identifier (`ENG-123`) and title, so a
+  failed refresh shows those instead of the provider's internal UUID, including
+  when Linear reports the issue missing. Links made before this change show
+  "Linear issue".
+- **Two daemons can open the same old journal at once.** Each column the
+  startup upgrade adds now has its check and its change inside one SQLite write
+  transaction, so a second daemon waits for the first and sees the column
+  instead of aborting startup with a duplicate-column error.
 - **Guest links name a listener that can reach them, and survive a dropped owner.** A direct link
   now names the first listener that really serves direct guest routes: an IPv6 loopback bind keeps
   `[::1]`, a loopback `--extra-bind` supplies its own port when the primary bind is a LAN address,
