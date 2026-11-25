@@ -686,7 +686,7 @@ impl HarnessSession for AcpSession {
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         let harness = self.policy.harness;
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
-            return Err(HarnessError::Transport {
+            return Err(HarnessError::NotSent {
                 harness,
                 message: "session is shut down".into(),
             });
@@ -789,6 +789,10 @@ impl HarnessSession for AcpSession {
                         subtype: Some("error".into()),
                     });
                 }
+                // A closed writer before the prompt frame was accepted is a
+                // definite pre-write failure: the agent never saw the text, so
+                // the daemon can put it back instead of treating it as unclear.
+                let unwritten = matches!(error, AcpError::Closed { .. });
                 let mapped = map_acp_error(error, harness);
                 // A parsed limit travels as its own typed error so the daemon
                 // can arm the resume without parsing the text of a failure
@@ -801,6 +805,12 @@ impl HarnessSession for AcpSession {
                         limit,
                     },
                     None => match mapped {
+                        HarnessError::Transport { harness, .. } if unwritten => {
+                            HarnessError::NotSent {
+                                harness,
+                                message: detail,
+                            }
+                        }
                         HarnessError::Transport { harness, .. } => HarnessError::Transport {
                             harness,
                             message: detail,
@@ -2198,6 +2208,44 @@ mod tests {
         }
         drop(events);
         agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    /// An agent whose stdin is gone is a definite pre-write failure: the
+    /// prompt frame never reached it, so the daemon can put the message back.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_closed_writer_is_a_definite_pre_write_failure() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+        });
+
+        let spec = acp_spec(workspace.path());
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("start session")
+            .into_session();
+        let mut events = session.events();
+        match events.next().await.expect("session started") {
+            HarnessEvent::SessionStarted { .. } => {}
+            other => panic!("unexpected first event {other:?}"),
+        }
+        // The agent task owns both ends; it drops them when the handshake is
+        // done, closing the client's writer.
+        agent.await.expect("agent");
+
+        let error = session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("the writer is gone");
+        assert!(
+            matches!(error, HarnessError::NotSent { .. }),
+            "a frame the writer never accepted is not an uncertain transport failure: {error:?}"
+        );
         session.shutdown().await.expect("shutdown");
     }
 

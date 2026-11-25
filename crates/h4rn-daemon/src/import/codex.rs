@@ -96,6 +96,7 @@ pub(crate) fn peek(path: &Path) -> Option<Peek> {
     let cwd = cwd?;
     Some(Peek {
         cwd,
+        named_session: session_id.is_some(),
         session_id,
         has_visible,
     })

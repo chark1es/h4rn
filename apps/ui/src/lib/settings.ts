@@ -29,6 +29,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { key: "general", label: "General", icon: SettingsIcon },
   { key: "appearance", label: "Appearance", icon: SunIcon },
   { key: "notifications", label: "Notifications", icon: BellIcon },
+  { key: "chat", label: "Chat", icon: MessageSquareIcon },
   { key: "shortcuts", label: "Shortcuts", icon: CommandIcon },
   { key: "threads", label: "Threads", icon: MessageSquareIcon },
   { key: "schedules", label: "Scheduled tasks", icon: CalendarClockIcon },

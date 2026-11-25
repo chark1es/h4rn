@@ -1651,17 +1651,79 @@ impl Connection {
                     thread_id,
                     text,
                     attachments,
+                    steer,
+                    turn_id,
                 } => self
                     .state
                     .manager
-                    .send_message(&thread_id, text, attachments)
+                    .send_message_with(
+                        &thread_id,
+                        text,
+                        attachments,
+                        if steer {
+                            crate::threads::SendMode::Steer
+                        } else {
+                            crate::threads::SendMode::Queue
+                        },
+                        turn_id,
+                    )
                     .await
                     .map(|accepted| ResponseBody::MessageAccepted {
                         thread_id: accepted.thread_id,
                         turn_id: accepted.turn_id,
                         seq: accepted.seq,
+                        queued_message_id: accepted.queued_message_id,
+                        unrecorded: accepted.unrecorded,
                     })
                     .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::GetThreadQueue { thread_id, offset } => self
+                    .state
+                    .manager
+                    .thread_queue(&thread_id, offset)
+                    .await
+                    .map(|page| ResponseBody::ThreadQueue {
+                        thread_id: page.thread_id,
+                        next_offset: offset.saturating_add(page.queued.len() as u32),
+                        queued: page.queued,
+                        total: page.total,
+                        revision: page.revision,
+                    })
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::QueueMessage {
+                    thread_id,
+                    message_id,
+                    action,
+                } => {
+                    let audit_action = match &action {
+                        h4rn_protocol::QueueAction::Edit { .. } => "thread.queue.edited",
+                        h4rn_protocol::QueueAction::Remove => "thread.queue.removed",
+                        h4rn_protocol::QueueAction::Move { .. } => "thread.queue.moved",
+                        h4rn_protocol::QueueAction::SendNow { .. } => "thread.queue.sent_now",
+                        h4rn_protocol::QueueAction::Steer { .. } => "thread.queue.steered",
+                    };
+                    let result = self
+                        .state
+                        .manager
+                        .queue_message(&thread_id, &message_id, action)
+                        .await;
+                    if result.is_ok() {
+                        self.audit(
+                            audit_action,
+                            Some("thread"),
+                            Some(thread_id.as_str()),
+                            json!({}),
+                        );
+                    }
+                    result
+                        .map(|update| ResponseBody::QueueUpdated {
+                            thread_id: update.thread_id,
+                            queued: update.queued,
+                            total: update.total,
+                            revision: update.revision,
+                            seq: update.seq,
+                        })
+                        .map_err(crate::threads::ManagerError::into_proto)
+                }
                 ClientRequest::Interrupt { thread_id } => self
                     .state
                     .manager
@@ -3012,6 +3074,10 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
+            steer: true,
         }
     }
 

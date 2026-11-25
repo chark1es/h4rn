@@ -27,6 +27,8 @@ import type { ProxyFailoverPolicy } from "./ProxyFailoverPolicy";
 import type { ProxyProfileDraft } from "./ProxyProfileDraft";
 import type { ProxyProfileId } from "./ProxyProfileId";
 import type { ProxyProfilePatch } from "./ProxyProfilePatch";
+import type { QueueAction } from "./QueueAction";
+import type { QueuedMessageId } from "./QueuedMessageId";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { ScheduleDraft } from "./ScheduleDraft";
 import type { ScheduleTaskId } from "./ScheduleTaskId";
@@ -135,7 +137,43 @@ text: string,
 /**
  * Attachments uploaded before this request.
  */
-attachments: Array<AttachmentId>, } | { "type": "interrupt", 
+attachments: Array<AttachmentId>, 
+/**
+ * Deliver into the running turn instead of queuing for the next one.
+ *
+ * Refused when the harness has no real mid-turn input. With no turn
+ * running this behaves like an ordinary send.
+ */
+steer: boolean, 
+/**
+ * The running turn this client observed, when it knows one.
+ *
+ * A steer names its target so a turn that ended between the person's
+ * click and the request is refused instead of catching a newer turn.
+ * Omitted (or `None`) means the client last saw an idle thread: while a
+ * turn runs the message waits in the queue.
+ */
+turn_id?: TurnId, } | { "type": "queue_message", 
+/**
+ * Thread owning the queue.
+ */
+thread_id: ThreadId, 
+/**
+ * Message to change.
+ */
+message_id: QueuedMessageId, 
+/**
+ * What to do with it.
+ */
+action: QueueAction, } | { "type": "get_thread_queue", 
+/**
+ * Thread owning the queue.
+ */
+thread_id: ThreadId, 
+/**
+ * How many messages to skip, for the next page.
+ */
+offset: number, } | { "type": "interrupt", 
 /**
  * Thread whose turn should stop.
  */
