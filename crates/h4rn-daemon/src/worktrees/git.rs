@@ -715,6 +715,163 @@ pub(crate) fn repo_of_with(workspace: &Path, commons: &CommonDirs) -> Option<Pat
     }
 }
 
+/// The repository facts one containment decision may trust.
+pub(crate) struct Layout {
+    /// The common git directory.
+    pub common: PathBuf,
+    /// The real main working tree, never the metadata directory.
+    pub main: PathBuf,
+    /// Every registration, complete or not.
+    pub snapshot: RegistrationSnapshot,
+}
+
+/// One complete, cross-checked view of the repository containing `workspace`.
+///
+/// Containment decisions use this rather than taking separate snapshots:
+/// `complete` is false when an admin entry could not be read, so a missing
+/// sibling can never be mistaken for an absent one.
+///
+/// The main checkout is never guessed. It is `core.worktree`, the workspace
+/// itself when its `.git` file points at the common dir, a nearby directory
+/// whose `.git` does, or a registration whose own `.git` proves it. A
+/// registration alone proves nothing: `git worktree list` reports the metadata
+/// directory as the main entry of a `--separate-git-dir` repository, and a
+/// linked worktree is registered too. When none of those resolves, this is an
+/// error rather than the first non-bare registration, because a checkout
+/// placed against the wrong folder could land inside the real main checkout.
+pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
+    let common = common_dir(workspace, OBSERVATION_GIT_TIMEOUT)?;
+    let snapshot = registrations_in(
+        workspace,
+        &common,
+        OBSERVATION_GIT_TIMEOUT,
+        &CommonDirs::default(),
+    )?;
+    if !snapshot.complete {
+        return Err("git could not read every worktree registration of this repository".to_owned());
+    }
+    let main = if let Some(repo) = repo_of(workspace).filter(|repo| {
+        // `repo_of` answers a bare repository with its common dir itself,
+        // which is git's fact rather than an inference. Any other answer is
+        // the parent of a common dir named `.git`, which a metadata directory
+        // can carry while the real checkout lives elsewhere, so it counts
+        // only when that folder proves it holds the working tree.
+        *repo == common || holds_working_tree(repo, workspace, &common, OBSERVATION_GIT_TIMEOUT)
+    }) {
+        repo
+    } else if let Some(worktree) = core_worktree(&common, OBSERVATION_GIT_TIMEOUT)? {
+        worktree
+    } else if gitdir_points_at(workspace, &common) {
+        // The main checkout of a `--separate-git-dir` repository (or a
+        // submodule) is the directory whose `.git` file names the common dir.
+        workspace.to_path_buf()
+    } else if let Some(found) = find_checkout_pointing_at(&common) {
+        found
+    } else if let Some(registered) = snapshot
+        .iter()
+        .filter(|registration| !registration.bare && registration.path != common)
+        .find(|registration| gitdir_points_at(&registration.path, &common))
+        .map(|registration| registration.path.clone())
+    {
+        // A registration counts only when its own `.git` still points at this
+        // common dir, which a linked worktree's never does.
+        registered
+    } else {
+        return Err("the project's main checkout could not be found".to_owned());
+    };
+    Ok(Layout {
+        common,
+        main: norm(&main),
+        snapshot,
+    })
+}
+
+/// Whether `candidate` really holds the working tree of the repository whose
+/// common dir is `common`.
+///
+/// [`repo_of`] infers a non-bare repository's main checkout as the parent of a
+/// common dir named `.git`, and `git worktree list` reports a
+/// `--separate-git-dir` repository's metadata directory the same way. A
+/// metadata directory is not a working tree, so the inference counts only when
+/// the workspace is inside the candidate, or `core.worktree` is unset and the
+/// candidate holds the working tree: its `.git` resolves to the common dir, or
+/// a path tracked in `HEAD` exists there.
+fn holds_working_tree(candidate: &Path, workspace: &Path, common: &Path, limit: Duration) -> bool {
+    if norm(workspace).starts_with(norm(candidate)) {
+        return true;
+    }
+    match core_worktree(common, limit) {
+        // Unset: the `.git` name is all the inference had, so the folder
+        // itself has to prove it holds the checkout.
+        Ok(None) => {}
+        // Set (or unreadable): the repository names its own working tree, and
+        // an inferred parent must never override it.
+        Ok(Some(_)) | Err(_) => return false,
+    }
+    // Only a `.git` *file* proves a checkout whose git directory lives
+    // elsewhere. A `.git` directory equal to the common dir proves nothing:
+    // the parent of a metadata dir named `.git` has exactly that shape too.
+    if gitdir_points_at(candidate, common) {
+        return true;
+    }
+    tracked_path_exists(candidate, common, limit)
+}
+
+/// Whether any path tracked by the repository's `HEAD` exists in `candidate`.
+///
+/// The last proof that a folder holds a working tree: a metadata directory
+/// named `.git` holds none of the repository's files beside its git directory.
+fn tracked_path_exists(candidate: &Path, common: &Path, limit: Duration) -> bool {
+    let Ok(listing) = run_bytes_with_timeout(
+        common,
+        ["--git-dir=.", "ls-tree", "-r", "-z", "--name-only", "HEAD"],
+        limit,
+    ) else {
+        return false;
+    };
+    listing.split(|byte| *byte == 0).any(|name| {
+        std::str::from_utf8(name)
+            .ok()
+            .is_some_and(|name| !name.is_empty() && candidate.join(name).exists())
+    })
+}
+
+/// Whether `checkout/.git` is a file whose target is `common`.
+fn gitdir_points_at(checkout: &Path, common: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(checkout.join(".git")) else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let target = Path::new(target.trim());
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        checkout.join(target)
+    };
+    norm(&target) == norm(common)
+}
+
+/// A nearby directory whose `.git` file points at `common`.
+///
+/// This covers the main checkout of a `--separate-git-dir` repository when the
+/// caller started in a linked worktree and `core.worktree` is unset. Only
+/// immediate children of the metadata directory's parent are considered, and
+/// a candidate must still exist as a directory.
+fn find_checkout_pointing_at(common: &Path) -> Option<PathBuf> {
+    let parent = common.parent()?;
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let path = entry.path();
+        if path.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+            && gitdir_points_at(&path, common)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Whether the repository whose common dir is `common` is bare, as git
 /// itself answers (`git --git-dir=<common> rev-parse --is-bare-repository`).
 ///
@@ -1343,7 +1500,7 @@ fn open_nonblocking(path: &Path, _follow: bool) -> std::io::Result<std::fs::File
 
 /// Reads a `HEAD` file (a symlink to a regular file is followed, as git does).
 /// Unreadable, oversized or unparseable is [`Head::Unknown`].
-fn read_head(path: &Path) -> Head {
+pub(crate) fn read_head(path: &Path) -> Head {
     let Some(text) = read_bounded_following(path).and_then(|bytes| String::from_utf8(bytes).ok())
     else {
         return Head::Unknown;

@@ -35,6 +35,95 @@ use crate::supervisor::ProcessSupervisor;
 use crate::terminal::{FileAudit, TerminalManager};
 use crate::threads::{McpSessionProvider, ThreadManager, ThreadManagerOptions};
 
+/// An exclusive, OS-released lock on one daemon data directory.
+///
+/// The file itself may remain after a crash; the operating system releases the
+/// lock when the process exits, so it is never stale.
+struct DataDirLock {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for DataDirLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // Closing the descriptor releases an flock, but an explicit unlock
+        // makes the handoff to a restarted daemon immediate even if a copy of
+        // the descriptor was inherited elsewhere.
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+impl DataDirLock {
+    fn acquire(data_dir: &std::path::Path) -> anyhow::Result<Self> {
+        let path = data_dir.join(".h4rn-daemon.lock");
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|error| {
+                    anyhow::anyhow!("could not open the daemon lock {}: {error}", path.display())
+                })?;
+            // A forked child briefly inherits every open descriptor until it
+            // execs, including another thread's lock. Retry just long enough
+            // for that child to exec before treating the folder as owned.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            loop {
+                let locked =
+                    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if locked == 0 {
+                    return Ok(Self { _file: file });
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow::anyhow!(
+                        "another h4rn daemon is already using {} ({error})",
+                        data_dir.display()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Windows has no flock; denying every other open is the same
+            // process-scoped guarantee and is released by the OS on exit.
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(&path)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "another h4rn daemon is already using {} ({error})",
+                        data_dir.display()
+                    )
+                })?;
+            Ok(Self { _file: file })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Err(anyhow::anyhow!(
+                "this platform has no daemon data-directory lock"
+            ))
+        }
+    }
+}
+
 /// Builds a daemon with injectable storage, harnesses and lifecycle timings.
 pub struct DaemonBuilder {
     config: Config,
@@ -210,6 +299,11 @@ impl DaemonBuilder {
     /// Builds the daemon, opening storage and restoring thread projections.
     pub async fn build(self) -> anyhow::Result<Daemon> {
         self.config.ensure_data_dir()?;
+        // One daemon per data directory. This is taken before the journal is
+        // restored or any recovery sweep runs, and held until shutdown: a
+        // second process on the same directory must not adopt or clear what
+        // the first one owns.
+        let data_lock = DataDirLock::acquire(&self.config.data_dir)?;
         // Resolve the daemon-owned setting once: it decides whether the secure
         // transport is exposed on a LAN interface and is persisted so the CLI
         // and the desktop agree.
@@ -295,10 +389,11 @@ impl DaemonBuilder {
             crate::worktrees::settings::WorktreeSettingsStore::open(&self.config.data_dir)
                 .map_err(|error| anyhow::anyhow!("open worktree settings: {error}"))?,
         );
-        manager.set_worktree_creator(Arc::new(crate::worktrees::create::WorktreeCreator::new(
+        let worktree_creator = Arc::new(crate::worktrees::create::WorktreeCreator::new(
             self.config.data_dir.clone(),
             Arc::clone(&worktree_settings),
-        )));
+        ));
+        manager.set_worktree_creator(Arc::clone(&worktree_creator));
 
         // Scheduled tasks share the journal so the timer, secrets and run
         // history survive a restart. The runner starts once the worktree
@@ -658,6 +753,7 @@ impl DaemonBuilder {
 
         Ok(Daemon {
             config: self.config,
+            _data_lock: data_lock,
             acp_agents,
             harness_versions,
             projects,
@@ -665,6 +761,7 @@ impl DaemonBuilder {
             manager,
             subagents,
             worktrees,
+            worktree_creator,
             worktree_settings,
             hosts,
             terminals,
@@ -697,9 +794,12 @@ impl DaemonBuilder {
 /// A built daemon that has not bound sockets yet.
 pub struct Daemon {
     config: Config,
+    _data_lock: DataDirLock,
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    /// Waits for a create's rollback when the daemon stops.
+    worktree_creator: Arc<crate::worktrees::create::WorktreeCreator>,
     worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
@@ -1078,6 +1178,7 @@ impl Daemon {
         }
 
         Ok(BoundDaemon {
+            _data_lock: self._data_lock,
             state,
             network,
             listeners,
@@ -1085,6 +1186,7 @@ impl Daemon {
             manager: self.manager,
             subagents: self.subagents,
             worktrees: self.worktrees,
+            worktree_creator: self.worktree_creator,
             hosts: self.hosts,
             terminals: self.terminals,
             forge: self.forge,
@@ -1102,6 +1204,7 @@ impl Daemon {
 
 /// A daemon with sockets bound, ready for [`BoundDaemon::serve`].
 pub struct BoundDaemon {
+    _data_lock: DataDirLock,
     state: AppState,
     /// The dedicated LAN/tailnet listener, when network access is on.
     network: Arc<NetworkAccess>,
@@ -1112,6 +1215,7 @@ pub struct BoundDaemon {
     manager: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
+    worktree_creator: Arc<crate::worktrees::create::WorktreeCreator>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
@@ -1197,6 +1301,7 @@ impl BoundDaemon {
         shutdown: impl std::future::Future<Output = ()>,
     ) -> anyhow::Result<()> {
         let Self {
+            _data_lock,
             state,
             network,
             listeners,
@@ -1204,6 +1309,7 @@ impl BoundDaemon {
             manager,
             subagents,
             worktrees,
+            worktree_creator,
             hosts: _,
             terminals,
             forge,
@@ -1232,6 +1338,10 @@ impl BoundDaemon {
             routes
         };
         server::serve_all(routes, shutdown).await?;
+        // An upgraded WebSocket task can outlive the listener. Close create
+        // admission now, before anything is torn down, and drain the creates
+        // already admitted before the thread manager stops.
+        worktree_creator.close_admission();
         // Close the LAN/tailnet listener before the services it routes to go
         // away, so no new remote session starts during shutdown.
         network.shutdown().await;
@@ -1244,11 +1354,21 @@ impl BoundDaemon {
         forge.shutdown();
         pr_links.shutdown();
         mcp.shutdown().await;
+        // Every admitted create has now either committed a thread (and called
+        // `keep`) or started its rollback. No create can appear after this.
+        worktree_creator.drain_admissions().await;
         worktrees.shutdown().await;
         subagents.shutdown().await;
         manager.shutdown().await;
+        // Every create whose thread never started rolls back here; the wait
+        // keeps a shutdown from losing that cleanup with the process. A thread
+        // that committed while admission drained keeps its checkout.
+        let in_use = manager.workspace_paths().await;
+        worktree_creator.shutdown(&in_use).await;
         terminals.shutdown().await;
         supervisor.shutdown().await;
+        // Release the data folder only after every service has stopped.
+        drop(_data_lock);
         tracing::info!("h4rn daemon stopped");
         Ok(())
     }
@@ -1639,6 +1759,85 @@ mod tests {
 
         // A concrete LAN bind with no loopback socket has nowhere to serve.
         assert_eq!(mcp_serving_socket(&[bound("192.168.1.5:47800")]), None);
+    }
+
+    /// Stopping the daemon waits for a worktree rollback that has already
+    /// started, instead of exiting while the checkout is still on disk.
+    #[tokio::test]
+    async fn shutdown_waits_for_a_started_worktree_rollback() {
+        let data = tempfile::tempdir().expect("data");
+        let repo = tempfile::tempdir().expect("repo");
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "wt@h4rn.invalid"]);
+        run(&["config", "user.name", "h4rn test"]);
+        std::fs::write(repo.path().join("README.md"), "hello\n").expect("readme");
+        run(&["add", "README.md"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        let config = Config {
+            data_dir: data.path().to_path_buf(),
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            extra_bind: None,
+            log_level: "off".to_owned(),
+            tailscale: TailscaleMode::Auto,
+            network_access: None,
+            network_port: 0,
+        };
+        let daemon = DaemonBuilder::new(config)
+            .without_title_agents()
+            .with_catalog(Arc::new(StaticHarnessCatalog::with(Arc::new(
+                h4rn_harness::FakeHarness::new(),
+            ))))
+            .build()
+            .await
+            .expect("daemon");
+        let creator = Arc::clone(&daemon.worktree_creator);
+        let bound = daemon.bind().await.expect("bind");
+        let (shutdown, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            bound
+                .serve(async move {
+                    let _ = rx.await;
+                })
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let created = creator
+            .create_for_thread(
+                repo.path().to_str().expect("path"),
+                &h4rn_protocol::WorktreeRequest::Named("shutdown/daemon".into()),
+                "shutdown",
+            )
+            .await
+            .expect("create");
+        let path = created.path.clone();
+        crate::worktrees::create::test_hooks::hold_rollback(
+            path.clone(),
+            std::time::Duration::from_secs(2),
+        );
+        crate::threads::rollback_worktree_for_test(created);
+        let started = std::time::Instant::now();
+        let _ = shutdown.send(());
+        task.await.expect("serve task").expect("serve");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(1),
+            "shutdown waited for the rollback it had started"
+        );
+        assert!(!path.exists(), "the checkout is gone");
+        crate::worktrees::create::test_hooks::clear_rollback();
     }
 
     /// Only a real loopback listener serves OAuth, so only it is advertised.
