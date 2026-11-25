@@ -5169,9 +5169,11 @@ impl ThreadManager {
                     .map(|events| crate::rewind::removed_turn_ids(&events))
                     .unwrap_or_default();
                 if removed.contains(turn_id) {
-                    return Err(ManagerError::Conflict(
-                        "This message was removed by an edit, so there is nothing to fork.".into(),
-                    ));
+                    return Err(ManagerError::Refused {
+                        message: "This message was removed by an edit, so there is nothing to fork."
+                            .into(),
+                        hint: Some("Fork from a message that is still in the thread".into()),
+                    });
                 }
                 return Err(ManagerError::NotFound(format!(
                     "thread {thread_id} has no turn {turn_id}"
@@ -5689,9 +5691,10 @@ impl ThreadManager {
             .iter()
             .any(|claim| in_flight.contains(&claim.message.message.message_id))
         {
-            return Err(ManagerError::Conflict(
-                "a message is still being delivered; try again in a moment".into(),
-            ));
+            return Err(ManagerError::Refused {
+                message: "A message is still being delivered.".into(),
+                hint: Some("Wait a moment, then try the edit again".into()),
+            });
         }
 
         let events = self
@@ -30918,7 +30921,7 @@ mod tests {
             .await
             .expect_err("the edit waits for the steer in flight");
         assert!(
-            matches!(refused, ManagerError::Conflict(_))
+            matches!(refused, ManagerError::Refused { .. })
                 && refused.to_string().contains("still being delivered"),
             "{refused}"
         );
@@ -31078,7 +31081,7 @@ mod tests {
             .await
             .expect_err("the edit waits for the steer still being written");
         assert!(
-            matches!(refused, ManagerError::Conflict(_))
+            matches!(refused, ManagerError::Refused { .. })
                 && refused.to_string().contains("still being delivered"),
             "{refused}"
         );
@@ -36077,7 +36080,7 @@ mod tests {
             .await
             .expect_err("a removed turn is not a fork point");
         assert!(
-            matches!(refused, ManagerError::Conflict(_))
+            matches!(refused, ManagerError::Refused { .. })
                 && refused.to_string().contains("removed by an edit"),
             "{refused}"
         );

@@ -2305,8 +2305,9 @@ impl Journal for SqliteJournal {
                     for turn in turns.drain(cut..) {
                         removed_turns.insert(turn.turn_id);
                     }
-                    // A prompt an older journal showed before the cut and never
-                    // gave a turn of its own leaves with it.
+                    // A prompt an older journal held without a turn of its own
+                    // stays held when it was shown before the cut item, and
+                    // leaves with the cut when it was shown after it.
                     held_prompts.retain(|(seq, _)| cut_seq.is_some_and(|cut_seq| *seq < cut_seq));
                     // Streamed text still refers to turn indexes the cut dropped.
                     streaming.retain(|_, (turn, _)| *turn < cut);
