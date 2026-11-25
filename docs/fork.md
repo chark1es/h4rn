@@ -86,9 +86,12 @@ conversation over:
   on. Claude Code is started with `--resume <session-id> --fork-session`, which
   copies the whole saved conversation, so it is used only while the chosen turn
   is still the source session's tip; h4rn re-checks that when the fork starts.
-  While that provider reads the source's saved session, the source's next message
-  is accepted at once — it already has its turn and its durable row — but it
-  cannot reach the harness until the copy is over. The copy is over when
+  A whole-session copy is only offered while the source really is at the
+  chosen tip, so a message still waiting in the source's queue or a claim it is
+  starting makes the fork hand off instead. While a provider reads the source's
+  saved session, the source's next message is accepted at once — it already has
+  its turn and its durable row — but it cannot reach the harness until the copy
+  is over. The copy is over when
   the fork reports its session or the startup fails. The deadline covers the
   whole copy, not just the child starting: a provider returns from its start as
   soon as the process is up and only then reads the source, so the fork holds
@@ -136,8 +139,8 @@ The source and the fork share no live state:
 
 - no harness session: a native fork asks the provider to copy the conversation,
   and a handoff starts a new one;
-- no queued message or pending approval (a message queued behind the running
-  turn is its own turn and is never copied into the one it waits behind);
+- no queued message, delivery claim or pending approval (a queued or claimed
+  message is not a turn, so it is never copied into the turn it waits behind);
 - no parked prompt and no rate-limit auto-resume schedule.
 
 A fork that has not yet sent a message has no live session, so it costs nothing
