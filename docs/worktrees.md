@@ -55,13 +55,14 @@ because its git directory is named `.git` counts only when it really holds the
 checkout: the workspace's own git directory is that git directory, or a file
 the repository tracks is there as the folder's own file. The workspace merely
 sitting inside the folder is not enough on its own, because a linked worktree
-can sit inside the parent of a metadata directory named `.git`, and a tracked
-name that resolves inside the workspace or any other registered worktree proves
-nothing about the folder: with the metadata directory at `meta/.git` and a
-linked worktree at `meta/docs`, the tracked `docs/README.md` is that worktree's
-own file, not a file `meta` holds. A linked worktree nested inside its real main
-checkout (`repo/.worktrees/one`) still passes, because that checkout holds the
-tracked files itself. As a last check no folder on the destination's way up
+can sit inside the parent of a metadata directory named `.git`. A tracked name
+counts only when it resolves inside the folder and outside the workspace and
+every registered worktree below the folder: with the metadata directory at
+`meta/.git` and a linked worktree at `meta/docs`, the tracked `docs/README.md`
+is that worktree's own file, not a file `meta` holds. A linked worktree nested
+inside its real main checkout (`repo/.worktrees/one`) still passes, because that
+checkout holds the tracked files itself, and so does a main checkout moved
+inside one of its own linked worktrees. As a last check no folder on the destination's way up
 may belong to the same repository. Metadata directories such as `api.git` or an
 admin directory are never mistaken for a working tree, and a linked worktree is
 never accepted as the main one. When none of those can prove where the main

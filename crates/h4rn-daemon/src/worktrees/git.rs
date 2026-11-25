@@ -852,10 +852,12 @@ fn workspace_is_main(workspace: &Path, common: &Path, limit: Duration) -> bool {
 /// candidate: with the metadata dir at `meta/.git` and a linked worktree at
 /// `meta/docs`, the tracked `docs/README.md` is the worktree's own
 /// `meta/docs/README.md`. Such a match says nothing about the candidate, so a
-/// name is skipped when it falls inside the workspace or any other registered
-/// worktree. The candidate itself is not "another worktree": its own tracked
-/// files still prove it, as for a linked worktree nested inside its main
-/// checkout (`repo/.worktrees/one`).
+/// name counts only when it resolves inside the candidate and outside the
+/// workspace and every registered worktree that lies strictly below the
+/// candidate. The candidate itself, and a worktree that contains it, are not
+/// excluded: its own tracked files still prove it, as for a linked worktree
+/// nested inside its main checkout (`repo/.worktrees/one`) or a main checkout
+/// moved inside its own linked worktree.
 fn tracked_path_exists(
     candidate: &Path,
     workspace: &Path,
@@ -872,12 +874,19 @@ fn tracked_path_exists(
     };
     let candidate = norm(candidate);
     let workspace = norm(workspace);
-    // Registration paths are already normalised as listings are (see
-    // `norm_listed`); the candidate is excluded so its own tree still counts.
-    let other_worktrees: Vec<&Path> = snapshot
-        .iter()
-        .map(|registration| registration.path.as_path())
-        .filter(|path| *path != candidate)
+    // Only a worktree strictly below the candidate can lend it a file. The
+    // candidate itself and any worktree that contains it (a main checkout
+    // moved inside its own linked worktree) are not excluded, or the
+    // candidate's own tree could never count. Registration paths are already
+    // normalised as listings are (see `norm_listed`).
+    let below_candidate = |path: &Path| path != candidate && path.starts_with(&candidate);
+    let excluded: Vec<&Path> = std::iter::once(workspace.as_path())
+        .chain(
+            snapshot
+                .iter()
+                .map(|registration| registration.path.as_path()),
+        )
+        .filter(|path| below_candidate(path))
         .collect();
     listing.split(|byte| *byte == 0).any(|name| {
         let Ok(name) = std::str::from_utf8(name) else {
@@ -893,10 +902,8 @@ fn tracked_path_exists(
         // Resolve the match before asking where it lives, so a symlink cannot
         // smuggle a link to another checkout in as the candidate's own file.
         let resolved = norm(&path);
-        !resolved.starts_with(&workspace)
-            && !other_worktrees
-                .iter()
-                .any(|other| resolved.starts_with(other))
+        resolved.starts_with(&candidate)
+            && !excluded.iter().any(|other| resolved.starts_with(other))
     })
 }
 
