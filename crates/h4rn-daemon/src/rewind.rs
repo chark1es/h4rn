@@ -23,6 +23,12 @@ use serde::{Deserialize, Serialize};
 use crate::fs::{SnapshotStore, normalize_relative};
 use crate::journal::WireEvent;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: make every durability flush in a restore fail.
+    static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The machine-wide Labs switch for "Rewind files with Edit from here".
 ///
 /// The setting lives in `<data_dir>/rewind-settings.json`. It is off by
@@ -258,15 +264,26 @@ pub(crate) struct FileRestore {
     pub deleted: usize,
 }
 
-/// One file the checkpoint puts back.
+/// One path the checkpoint puts back.
 #[derive(Debug)]
 struct RestoreOp {
+    /// Path relative to the repository root, as the journal records it.
     path: String,
     absolute: PathBuf,
-    /// Bytes to write; `None` removes the entry.
-    bytes: Option<Vec<u8>>,
+    change: RestoreChange,
     /// The leaf was a symlink when the restore was prepared.
     leaf_symlink: bool,
+}
+
+/// What one path becomes.
+#[derive(Debug)]
+enum RestoreChange {
+    /// Write these bytes and set the executable bit.
+    File { bytes: Vec<u8>, executable: bool },
+    /// Replace the entry with this symlink.
+    Symlink { target: PathBuf },
+    /// Remove the entry: it did not exist at the checkpoint.
+    Remove,
 }
 
 /// The bytes one path had before the restore, kept durably for rollback.
@@ -274,8 +291,8 @@ struct RestoreOp {
 enum Backup {
     /// The path did not exist.
     Absent,
-    /// The path held these bytes.
-    File(Vec<u8>),
+    /// The path held these bytes with this executable bit.
+    File { bytes: Vec<u8>, executable: bool },
     /// The path was a symlink to this target.
     Symlink(PathBuf),
 }
@@ -289,13 +306,49 @@ pub(crate) struct PreparedRestore {
     record_path: PathBuf,
 }
 
+/// A restore journal read back at startup, before anything is touched.
+#[derive(Debug)]
+pub(crate) struct PendingRestore {
+    record: RestoreRecord,
+}
+
+impl PendingRestore {
+    /// The thread whose rewind the journal belongs to.
+    pub(crate) fn thread_id(&self) -> &ThreadId {
+        &self.record.thread_id
+    }
+
+    /// The worktree the journal recorded, canonicalised when it was written.
+    pub(crate) fn workspace(&self) -> &Path {
+        Path::new(&self.record.workspace)
+    }
+}
+
 /// The on-disk restore journal.
 #[derive(Debug, Serialize, Deserialize)]
 struct RestoreRecord {
     restore_id: String,
     thread_id: ThreadId,
+    /// The thread's worktree, used to prove it is still the same checkout.
     workspace: String,
+    /// The repository root the entry paths are relative to.
+    ///
+    /// A journal written before this field existed used the workspace as the
+    /// base, which is what a missing value falls back to.
+    #[serde(default)]
+    root: String,
     entries: Vec<RestoreRecordEntry>,
+}
+
+impl RestoreRecord {
+    /// The folder the journal's paths are relative to.
+    fn base(&self) -> &Path {
+        if self.root.is_empty() {
+            Path::new(&self.workspace)
+        } else {
+            Path::new(&self.root)
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -308,8 +361,14 @@ struct RestoreRecordEntry {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum BackupRecord {
     Absent,
-    File { blob: String },
-    Symlink { target: String },
+    File {
+        blob: String,
+        #[serde(default)]
+        executable: bool,
+    },
+    Symlink {
+        target: String,
+    },
 }
 
 impl PreparedRestore {
@@ -338,57 +397,111 @@ pub(crate) fn prepare_restore(
             workspace.display()
         )
     })?;
-
-    let mut targets: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
-    for turn in turns {
-        // A complete git checkpoint covers shell commands and every tracked
-        // file. The per-path snapshots fill in untracked files a tool named.
-        if let Some(commit) = store.checkpoint(thread_id, turn) {
-            for (path, bytes) in crate::worktrees::git::checkpoint_changes(&root, &commit)? {
-                targets.entry(path).or_insert(bytes);
-            }
+    // Git paths are relative to the repository root, which is not the same
+    // folder as a thread created in a subdirectory. Resolve them there and
+    // refuse anything that would fall outside the thread's own worktree.
+    let repo = crate::worktrees::git::toplevel(&root)
+        .ok_or_else(|| format!("{} is not inside a git worktree", root.display()))?;
+    let Some(first) = turns.first() else {
+        return Err("there is no turn to restore files for".into());
+    };
+    let checkpoint = store.checkpoint(thread_id, first).ok_or_else(|| {
+        format!(
+            "{} has no complete file checkpoint, so its files cannot be restored",
+            first.as_str()
+        )
+    })?;
+    let mut targets: BTreeMap<String, Option<crate::worktrees::git::CheckpointValue>> =
+        BTreeMap::new();
+    // One checkpoint decides the whole restore: the pre-turn state of the
+    // first removed turn. A later removed turn is after that message, so its
+    // checkpoint can only describe work the person asked to undo.
+    for change in crate::worktrees::git::checkpoint_changes(&repo, &checkpoint)? {
+        targets.insert(change.path, change.value);
+    }
+    // The turn's per-path captures are the pre-turn bytes for paths the git
+    // checkpoint does not contain: ignored files, and anything git did not
+    // stage. A capture never overrides a path the checkpoint has (the tree is
+    // the earlier, whole-worktree evidence), but captured bytes beat the
+    // checkpoint's absence, so a file that existed before the turn is put back
+    // instead of deleted.
+    for entry in store.entries(thread_id, first) {
+        let relative = normalize_relative(&entry.path)
+            .map_err(|error| format!("{} cannot be restored: {error}", entry.path))?;
+        let absolute = root.join(&relative);
+        let repo_relative = absolute.strip_prefix(&repo).map_err(|_| {
+            format!(
+                "{} is outside the worktree, so it cannot be restored",
+                entry.path
+            )
+        })?;
+        let path = path_string(repo_relative)?;
+        if matches!(targets.get(&path), Some(Some(_))) {
+            // The checkpoint tree has the path: it is the earlier, whole-tree
+            // evidence and wins over a later per-path capture.
+            continue;
         }
-        for entry in store.entries(thread_id, turn) {
-            if entry.existed && entry.skipped {
-                return Err(format!(
-                    "{} was too large to capture before this message, so it cannot be restored",
-                    entry.path
-                ));
-            }
-            let bytes = if entry.existed {
-                let blob = entry.blob.as_deref().ok_or_else(|| {
+        if entry.existed {
+            let blob = entry.blob.as_deref().ok_or_else(|| {
+                if entry.skipped {
+                    format!(
+                        "{} was too large to capture before this message, so it cannot be restored",
+                        entry.path
+                    )
+                } else {
                     format!(
                         "{} has no captured contents, so it cannot be restored",
                         entry.path
                     )
-                })?;
-                Some(store.read_blob(blob).ok_or_else(|| {
-                    format!(
-                        "the captured contents of {} are missing, so it cannot be restored",
-                        entry.path
-                    )
-                })?)
-            } else {
-                None
-            };
-            targets.entry(entry.path.clone()).or_insert(bytes);
+                }
+            })?;
+            let bytes = store.read_blob(blob).ok_or_else(|| {
+                format!(
+                    "the captured contents of {} are missing, so it cannot be restored",
+                    entry.path
+                )
+            })?;
+            let executable = current_is_executable(&absolute);
+            targets.insert(
+                path,
+                Some(crate::worktrees::git::CheckpointValue::File { bytes, executable }),
+            );
+        } else if !targets.contains_key(&path) && absolute.symlink_metadata().is_ok() {
+            // Captured as absent before the turn and present now: the turn
+            // created it.
+            targets.insert(path, None);
         }
     }
 
     let mut ops = Vec::with_capacity(targets.len());
-    for (path, bytes) in targets {
+    for (path, value) in targets {
         let relative = normalize_relative(&path)
             .map_err(|error| format!("{path} cannot be restored: {error}"))?;
-        let absolute = root.join(&relative);
-        preflight_target(&root, &relative, &path)?;
+        let absolute = repo.join(&relative);
+        let inside = absolute.strip_prefix(&root).map_err(|_| {
+            format!("{path} is outside the thread's worktree, so it cannot be restored")
+        })?;
+        if inside.as_os_str().is_empty() {
+            return Err(format!("{path} names the worktree itself"));
+        }
+        preflight_target(&root, inside, &path)?;
         let leaf_symlink = absolute
             .symlink_metadata()
             .map(|meta| meta.file_type().is_symlink())
             .unwrap_or(false);
+        let change = match value {
+            Some(crate::worktrees::git::CheckpointValue::File { bytes, executable }) => {
+                RestoreChange::File { bytes, executable }
+            }
+            Some(crate::worktrees::git::CheckpointValue::Symlink { target }) => {
+                RestoreChange::Symlink { target }
+            }
+            None => RestoreChange::Remove,
+        };
         ops.push(RestoreOp {
             path,
             absolute,
-            bytes,
+            change,
             leaf_symlink,
         });
     }
@@ -401,9 +514,18 @@ pub(crate) fn prepare_restore(
                     .map_err(|error| format!("could not read the link at {}: {error}", op.path))?;
                 Backup::Symlink(target)
             }
-            Ok(_) => Backup::File(fs::read(&op.absolute).map_err(|error| {
-                format!("could not read {} before restoring it: {error}", op.path)
-            })?),
+            Ok(meta) if meta.is_file() => Backup::File {
+                bytes: fs::read(&op.absolute).map_err(|error| {
+                    format!("could not read {} before restoring it: {error}", op.path)
+                })?,
+                executable: is_executable(&meta),
+            },
+            Ok(_) => {
+                return Err(format!(
+                    "{} is not a file or a symlink, so it cannot be restored",
+                    op.path
+                ));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Backup::Absent,
             Err(error) => {
                 return Err(format!(
@@ -417,7 +539,7 @@ pub(crate) fn prepare_restore(
 
     let restore_id = format!("restore_{}", uuid::Uuid::now_v7());
     let record_path = store.restores_dir().join(format!("{restore_id}.json"));
-    write_record(store, &record_path, thread_id, &root, &ops, &backups)?;
+    write_record(store, &record_path, thread_id, &root, &repo, &ops, &backups)?;
     Ok(PreparedRestore {
         restore_id,
         ops,
@@ -430,53 +552,96 @@ pub(crate) fn prepare_restore(
 pub(crate) fn apply_restore(prepared: &PreparedRestore) -> Result<FileRestore, String> {
     let mut result = FileRestore::default();
     for (index, op) in prepared.ops.iter().enumerate() {
-        let applied = match &op.bytes {
-            Some(bytes) => {
-                let prepared_parent = op
-                    .absolute
-                    .parent()
-                    .map(fs::create_dir_all)
-                    .transpose()
-                    .map_err(|error| error.to_string());
-                match prepared_parent {
-                    Ok(_) => {
-                        if op.leaf_symlink || op.absolute.is_dir() {
-                            // Never write through a link into its target.
-                            let _ = fs::remove_file(&op.absolute);
-                        }
-                        fs::write(&op.absolute, bytes).map_err(|error| error.to_string())
-                    }
-                    Err(error) => Err(error),
+        if let Err(error) = apply_op(op) {
+            let rollback_error = rollback(&prepared.backups[..=index]).err();
+            return match rollback_error {
+                // The record is this restore's only way back; keep it until
+                // the rollback itself is on disk, so the next startup can
+                // finish the job.
+                Some(rollback_error) => Err(format!(
+                    "could not restore {}: {error}; putting back the files changed before it also failed: {rollback_error}, so the restore record is kept for the next startup",
+                    op.path
+                )),
+                None => {
+                    remove_record(&prepared.record_path);
+                    Err(format!("could not restore {}: {error}", op.path))
                 }
-            }
-            None => match op.absolute.symlink_metadata() {
-                Ok(_) => fs::remove_file(&op.absolute).map_err(|error| error.to_string()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error.to_string()),
-            },
-        };
-        if let Err(error) = applied {
-            rollback(&prepared.backups[..=index]);
-            let _ = fs::remove_file(&prepared.record_path);
-            return Err(format!("could not restore {}: {error}", op.path));
+            };
         }
-        match op.bytes {
-            Some(_) => result.files += 1,
-            None => result.deleted += 1,
+        match op.change {
+            RestoreChange::Remove => result.deleted += 1,
+            RestoreChange::File { .. } | RestoreChange::Symlink { .. } => result.files += 1,
         }
     }
     Ok(result)
 }
 
+/// Applies one path, writing through nothing.
+fn apply_op(op: &RestoreOp) -> Result<(), String> {
+    let parent = op
+        .absolute
+        .parent()
+        .ok_or_else(|| format!("{} has no parent folder", op.absolute.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    match &op.change {
+        RestoreChange::File { bytes, executable } => {
+            if op.leaf_symlink || op.absolute.is_dir() {
+                // A link is removed itself, never followed: a failed unlink
+                // must stop the restore instead of writing through the link
+                // into whatever it points at.
+                fs::remove_file(&op.absolute).map_err(|error| {
+                    format!(
+                        "could not remove the link at {} before writing it: {error}",
+                        op.path
+                    )
+                })?;
+            }
+            write_durable(&op.absolute, bytes)?;
+            set_executable(&op.absolute, *executable)?;
+        }
+        RestoreChange::Symlink { target } => {
+            if op.absolute.symlink_metadata().is_ok() {
+                fs::remove_file(&op.absolute).map_err(|error| {
+                    format!(
+                        "could not remove {} before replacing it with a link: {error}",
+                        op.path
+                    )
+                })?;
+            }
+            make_symlink(target, &op.absolute)?;
+        }
+        RestoreChange::Remove => match op.absolute.symlink_metadata() {
+            Ok(meta) if meta.is_dir() => {
+                return Err(format!(
+                    "{} is now a folder, so it cannot be restored",
+                    op.path
+                ));
+            }
+            Ok(_) => fs::remove_file(&op.absolute)
+                .map_err(|error| format!("could not remove {}: {error}", op.path))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("could not inspect {}: {error}", op.path));
+            }
+        },
+    }
+    sync_dir(parent)
+}
+
 /// Removes the restore journal after the cut committed.
 pub(crate) fn finish_restore(prepared: &PreparedRestore) {
-    let _ = fs::remove_file(&prepared.record_path);
+    remove_record(&prepared.record_path);
 }
 
 /// Rolls the files back and removes the restore journal.
-pub(crate) fn abort_restore(prepared: &PreparedRestore) {
-    rollback(&prepared.backups);
-    let _ = fs::remove_file(&prepared.record_path);
+///
+/// The journal is kept when a file cannot be put back, so the next startup
+/// tries the rollback again instead of accepting a half-restored worktree.
+pub(crate) fn abort_restore(prepared: &PreparedRestore) -> Result<(), String> {
+    rollback(&prepared.backups)?;
+    remove_record(&prepared.record_path);
+    Ok(())
 }
 
 /// Every restore journal still on disk, oldest first.
@@ -495,31 +660,39 @@ pub(crate) fn pending_restore_ids(store: &SnapshotStore) -> Vec<String> {
     ids
 }
 
-/// The thread a pending restore journal belongs to.
-pub(crate) fn restore_thread(store: &SnapshotStore, restore_id: &str) -> Option<ThreadId> {
+/// Reads a pending restore journal before anything is touched.
+///
+/// A journal that cannot be read is an error, never an empty one: recovery
+/// must not guess that an unreadable restore was uncommitted.
+pub(crate) fn read_pending_restore(
+    store: &SnapshotStore,
+    restore_id: &str,
+) -> Result<PendingRestore, String> {
     let path = store.restores_dir().join(format!("{restore_id}.json"));
-    let bytes = fs::read(path).ok()?;
-    let record: RestoreRecord = serde_json::from_slice(&bytes).ok()?;
-    Some(record.thread_id)
+    let bytes =
+        fs::read(&path).map_err(|error| format!("could not read the restore journal: {error}"))?;
+    let record: RestoreRecord = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("the restore journal is not readable: {error}"))?;
+    Ok(PendingRestore { record })
 }
 
 /// Finishes or rolls back one interrupted restore at startup.
 ///
 /// A committed cut keeps the files it wrote; an uncommitted one is put back.
-/// Either way the journal is removed, so recovery runs once.
+/// The journal is removed only once the rollback is on disk, so a failed one
+/// is retried by the next startup.
 pub(crate) fn recover_restore(
     store: &SnapshotStore,
-    restore_id: &str,
+    pending: &PendingRestore,
     committed: bool,
 ) -> Result<(), String> {
-    let path = store.restores_dir().join(format!("{restore_id}.json"));
-    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-    let record: RestoreRecord =
-        serde_json::from_slice(&bytes).map_err(|error| format!("restore journal: {error}"))?;
     if !committed {
-        rollback_record(store, &record)?;
+        rollback_record(store, &pending.record)?;
     }
-    fs::remove_file(&path).map_err(|error| error.to_string())
+    let path = store
+        .restores_dir()
+        .join(format!("{}.json", pending.record.restore_id));
+    remove_file_durable(&path)
 }
 
 /// Writes the restore journal durably before any file changes.
@@ -528,6 +701,7 @@ fn write_record(
     path: &Path,
     thread_id: &ThreadId,
     workspace: &Path,
+    root: &Path,
     ops: &[RestoreOp],
     backups: &[(PathBuf, Backup)],
 ) -> Result<(), String> {
@@ -535,11 +709,19 @@ fn write_record(
     for (index, (_, backup)) in backups.iter().enumerate() {
         let backup = match backup {
             Backup::Absent => BackupRecord::Absent,
-            Backup::File(bytes) => BackupRecord::File {
-                blob: store.store_blob(bytes).map_err(|error| error.to_string())?,
+            Backup::File { bytes, executable } => BackupRecord::File {
+                blob: store
+                    .store_blob(bytes)
+                    .map_err(|error| format!("could not keep {} for rollback: {error}", ops[index].path))?,
+                executable: *executable,
             },
             Backup::Symlink(target) => BackupRecord::Symlink {
-                target: target.display().to_string(),
+                target: target.to_str().map(str::to_owned).ok_or_else(|| {
+                    format!(
+                        "the link at {} has a target that is not valid UTF-8, so it cannot be recorded for rollback",
+                        ops[index].path
+                    )
+                })?,
             },
         };
         entries.push(RestoreRecordEntry {
@@ -555,51 +737,59 @@ fn write_record(
             .to_owned(),
         thread_id: thread_id.clone(),
         workspace: workspace.display().to_string(),
+        root: root.display().to_string(),
         entries,
     };
     let json =
         serde_json::to_vec_pretty(&record).map_err(|error| format!("restore journal: {error}"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
+    let Some(parent) = path.parent() else {
+        return Err(format!("{} has no parent folder", path.display()));
+    };
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let temporary = path.with_extension("json.tmp");
-    let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
-    file.write_all(&json).map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
-    drop(file);
+    write_durable(&temporary, &json)?;
     fs::rename(&temporary, path).map_err(|error| error.to_string())?;
-    Ok(())
+    sync_dir(parent)
 }
 
 /// Puts the recorded bytes back for one journal.
 fn rollback_record(store: &SnapshotStore, record: &RestoreRecord) -> Result<(), String> {
+    let base = record.base();
     for entry in &record.entries {
-        let Ok(relative) = normalize_relative(&entry.path) else {
-            continue;
-        };
-        let absolute = Path::new(&record.workspace).join(relative);
+        let relative = normalize_relative(&entry.path)
+            .map_err(|error| format!("{} cannot be put back: {error}", entry.path))?;
+        let absolute = base.join(relative);
         match &entry.backup {
-            BackupRecord::Absent => {
-                if absolute.symlink_metadata().is_ok() {
-                    let _ = fs::remove_file(&absolute);
+            BackupRecord::Absent => match absolute.symlink_metadata() {
+                Ok(_) => remove_file_durable(&absolute)
+                    .map_err(|error| format!("could not put {} back: {error}", entry.path))?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("could not inspect {}: {error}", entry.path));
                 }
-            }
-            BackupRecord::File { blob } => {
-                let Some(bytes) = store.read_blob(blob) else {
-                    continue;
-                };
-                if let Some(parent) = absolute.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = fs::remove_file(&absolute);
-                let _ = fs::write(&absolute, bytes);
+            },
+            BackupRecord::File { blob, executable } => {
+                let bytes = store.read_blob(blob).ok_or_else(|| {
+                    format!(
+                        "the bytes kept to put {} back are missing from the restore journal",
+                        entry.path
+                    )
+                })?;
+                write_parented(&absolute, &bytes)
+                    .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
+                set_executable(&absolute, *executable)
+                    .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
             }
             BackupRecord::Symlink { target } => {
-                if let Some(parent) = absolute.parent() {
-                    let _ = fs::create_dir_all(parent);
+                if absolute.symlink_metadata().is_ok() {
+                    remove_file_durable(&absolute)
+                        .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
                 }
-                let _ = fs::remove_file(&absolute);
-                make_symlink(Path::new(target), &absolute);
+                make_symlink(Path::new(target), &absolute)
+                    .map_err(|error| format!("could not put {} back: {error}", entry.path))?;
+                if let Some(parent) = absolute.parent() {
+                    sync_dir(parent)?;
+                }
             }
         }
     }
@@ -654,35 +844,181 @@ fn preflight_target(root: &Path, relative: &Path, label: &str) -> Result<(), Str
 }
 
 #[cfg(unix)]
-fn make_symlink(target: &Path, path: &Path) {
-    let _ = std::os::unix::fs::symlink(target, path);
+fn make_symlink(target: &Path, path: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, path)
+        .map_err(|error| format!("could not create the link at {}: {error}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn make_symlink(_target: &Path, _path: &Path) {}
+fn make_symlink(_target: &Path, _path: &Path) -> Result<(), String> {
+    Err("this platform cannot restore symbolic links".into())
+}
 
-/// Puts current bytes back after a failed restore, best effort.
-fn rollback(backups: &[(PathBuf, Backup)]) {
-    for (path, backup) in backups {
-        match backup {
-            Backup::File(bytes) => {
-                if let Some(parent) = path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = fs::remove_file(path);
-                let _ = fs::write(path, bytes);
-            }
-            Backup::Absent => {
-                let _ = fs::remove_file(path);
-            }
-            Backup::Symlink(target) => {
-                if let Some(parent) = path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = fs::remove_file(path);
-                make_symlink(target, path);
+/// A path relative to a root as the journal carries it.
+fn path_string(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "a restored path is not valid UTF-8, so it cannot be recorded".to_owned())
+}
+
+/// Whether the file at `path` is executable right now.
+#[cfg(unix)]
+fn current_is_executable(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| is_executable(&meta))
+        .unwrap_or(false)
+}
+
+/// Whether the file at `path` is executable right now.
+#[cfg(not(unix))]
+fn current_is_executable(_path: &Path) -> bool {
+    false
+}
+
+/// Whether the file is executable.
+#[cfg(unix)]
+fn is_executable(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+/// Whether the file is executable.
+#[cfg(not(unix))]
+fn is_executable(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+/// Sets a restored file's executable bit to the checkpoint's.
+#[cfg(unix)]
+fn set_executable(path: &Path, executable: bool) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if executable { 0o755 } else { 0o644 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("could not restore the mode of {}: {error}", path.display()))
+}
+
+/// A platform without Unix permission bits keeps them as the filesystem gave
+/// them.
+#[cfg(not(unix))]
+fn set_executable(_path: &Path, _executable: bool) -> Result<(), String> {
+    Ok(())
+}
+
+/// Writes bytes and makes them durable before returning.
+fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    sync_file(&mut file, path)
+}
+
+/// Writes bytes through a missing parent folder.
+fn write_parented(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    write_durable(path, bytes)
+}
+
+/// Flushes a file's contents to disk.
+fn sync_file(file: &mut fs::File, path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if FAIL_SYNC.with(|flag| flag.replace(false)) {
+        return Err(format!("could not flush {} (injected)", path.display()));
+    }
+    file.sync_all()
+        .map_err(|error| format!("could not flush {}: {error}", path.display()))
+}
+
+/// Makes a folder's own entries durable: a file created in it, a rename, an
+/// unlink.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> Result<(), String> {
+    let file = fs::File::open(dir)
+        .map_err(|error| format!("could not open {} to flush it: {error}", dir.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("could not flush {}: {error}", dir.display()))
+}
+
+/// Makes a folder's own entries durable where the platform supports it.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Removes a file or link and makes the removal durable.
+fn remove_file_durable(path: &Path) -> Result<(), String> {
+    fs::remove_file(path)
+        .map_err(|error| format!("could not remove {}: {error}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// Removes a restore journal after the restore committed or rolled back.
+fn remove_record(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            if let Some(parent) = path.parent() {
+                let _ = sync_dir(parent);
             }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            %error,
+            path = %path.display(),
+            "could not remove a finished restore journal"
+        ),
+    }
+}
+
+/// Puts every recorded byte back after a failed restore.
+///
+/// Every path is attempted, and the first failure is returned: the caller keeps
+/// the journal until the whole rollback is on disk.
+fn rollback(backups: &[(PathBuf, Backup)]) -> Result<(), String> {
+    let mut first_error = None;
+    for (path, backup) in backups {
+        let restored = match backup {
+            Backup::File { bytes, executable } => {
+                write_parented(path, bytes).and_then(|()| set_executable(path, *executable))
+            }
+            Backup::Absent => match path.symlink_metadata() {
+                Ok(_) => remove_file_durable(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
+            },
+            Backup::Symlink(target) => {
+                let removed = match path.symlink_metadata() {
+                    Ok(_) => remove_file_durable(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
+                };
+                removed.and_then(|()| {
+                    make_symlink(target, path)?;
+                    if let Some(parent) = path.parent() {
+                        sync_dir(parent)?;
+                    }
+                    Ok(())
+                })
+            }
+        };
+        if let Err(error) = restored
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -831,65 +1167,313 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_later_turn_restores_a_file_to_its_first_removed_observation() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("a.txt"), "before").unwrap();
-        let store = SnapshotStore::new(dir.path()).unwrap();
-        let thread = ThreadId::new("th_1");
-        let turn_2 = TurnId::new("turn_2");
-        let turn_3 = TurnId::new("turn_3");
-        store
-            .capture(&workspace, &thread, &turn_2, &["a.txt".into()])
-            .unwrap();
-        std::fs::write(workspace.join("a.txt"), "skipped middle").unwrap();
-        store
-            .capture(&workspace, &thread, &turn_3, &["a.txt".into()])
-            .unwrap();
-        std::fs::write(workspace.join("a.txt"), "after").unwrap();
+    // ---- real-git fixtures -------------------------------------------------
 
-        let prepared =
-            prepare_restore(&store, &workspace, &thread, &[turn_2, turn_3]).expect("prepare");
-        let outcome = apply_restore(&prepared).expect("restore");
-        finish_restore(&prepared);
-        assert_eq!(outcome.files, 1);
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn git_output(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned()
+    }
+
+    fn write(root: &Path, path: &str, text: &str) {
+        let absolute = root.join(path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(absolute, text).unwrap();
+    }
+
+    fn read(root: &Path, path: &str) -> String {
+        fs::read_to_string(root.join(path)).unwrap()
+    }
+
+    /// A temporary repository plus a snapshot store outside it.
+    struct Fixture {
+        dir: tempfile::TempDir,
+        repo: PathBuf,
+        store: SnapshotStore,
+        thread: ThreadId,
+    }
+
+    impl Fixture {
+        fn new(files: &[(&str, &str)]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path().join("repo");
+            fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            git(&repo, &["config", "user.email", "t@example.invalid"]);
+            git(&repo, &["config", "user.name", "h4rn test"]);
+            for (path, text) in files {
+                write(&repo, path, text);
+            }
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-q", "-m", "fixture"]);
+            let store = SnapshotStore::new(&dir.path().join("data")).unwrap();
+            Self {
+                dir,
+                repo,
+                store,
+                thread: ThreadId::new("th_1"),
+            }
+        }
+
+        /// Records the whole-worktree checkpoint a turn captured.
+        fn checkpoint(&self, turn: &str) -> String {
+            let tree =
+                crate::worktrees::git::checkpoint_commit(&self.repo).expect("checkpoint tree");
+            self.store
+                .record_checkpoint(&self.repo, &self.thread, &TurnId::new(turn), &tree)
+                .expect("record checkpoint");
+            tree
+        }
+
+        fn prepare(&self, turns: &[&str]) -> Result<PreparedRestore, String> {
+            let turns: Vec<TurnId> = turns.iter().map(|turn| TurnId::new(*turn)).collect();
+            prepare_restore(&self.store, &self.repo, &self.thread, &turns)
+        }
+
+        fn prepare_in(&self, workspace: &Path, turns: &[&str]) -> Result<PreparedRestore, String> {
+            let turns: Vec<TurnId> = turns.iter().map(|turn| TurnId::new(*turn)).collect();
+            prepare_restore(&self.store, workspace, &self.thread, &turns)
+        }
+
+        fn blob_path(&self, address: &str) -> PathBuf {
+            self.dir
+                .path()
+                .join("data")
+                .join("blobs")
+                .join(&address[..2])
+                .join(address)
+        }
+    }
+
+    fn run_restore(prepared: &PreparedRestore) -> FileRestore {
+        let outcome = apply_restore(prepared).expect("apply");
+        finish_restore(prepared);
+        outcome
+    }
+
+    #[test]
+    fn the_first_removed_turns_checkpoint_decides_a_file_that_changed_back() {
+        let fixture = Fixture::new(&[("a.txt", "one"), ("b.txt", "b0")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "two");
+        write(&fixture.repo, "b.txt", "b2");
+        fixture.checkpoint("turn_2");
+        // The file is back to what it held before the selected message.
+        write(&fixture.repo, "a.txt", "one");
+
+        let prepared = fixture.prepare(&["turn_1", "turn_2"]).expect("prepare");
+        let outcome = run_restore(&prepared);
         assert_eq!(
-            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
-            "before"
+            read(&fixture.repo, "a.txt"),
+            "one",
+            "the later checkpoint never overrides the one the selected message names"
+        );
+        assert_eq!(
+            read(&fixture.repo, "b.txt"),
+            "b0",
+            "a later removed turn's change is undone too"
+        );
+        assert_eq!(outcome.files, 1, "only the file that differs is written");
+    }
+
+    #[test]
+    fn captured_bytes_beat_a_checkpoint_that_lacks_the_file() {
+        let fixture = Fixture::new(&[(".gitignore", "secret.log\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "secret.log", "before");
+        fixture.checkpoint("turn_1");
+        // The turn's tool named the ignored file before changing it.
+        fixture
+            .store
+            .capture(
+                &fixture.repo,
+                &fixture.thread,
+                &TurnId::new("turn_1"),
+                &["secret.log".into()],
+            )
+            .unwrap();
+        write(&fixture.repo, "secret.log", "after");
+        // The turn then tracked it, so the checkpoint has no entry for it.
+        git(&fixture.repo, &["add", "-f", "secret.log"]);
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "secret.log"),
+            "before",
+            "captured pre-turn bytes beat the checkpoint's absence instead of deleting the file"
         );
     }
 
     #[test]
-    fn a_file_created_after_the_checkpoint_is_deleted_and_a_skipped_file_refuses() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let store = SnapshotStore::new(dir.path()).unwrap();
-        let thread = ThreadId::new("th_1");
-        let turn = TurnId::new("turn_1");
-        // Seen before it existed: the checkpoint has no file.
-        store
-            .capture(&workspace, &thread, &turn, &["new.txt".into()])
-            .unwrap();
-        std::fs::write(workspace.join("new.txt"), "created").unwrap();
-        let prepared = prepare_restore(&store, &workspace, &thread, std::slice::from_ref(&turn))
-            .expect("prepare");
-        let outcome = apply_restore(&prepared).expect("restore");
-        finish_restore(&prepared);
-        assert_eq!(outcome.deleted, 1);
-        assert!(!workspace.join("new.txt").exists());
+    fn a_checkpoint_blob_that_cannot_be_read_aborts_instead_of_deleting() {
+        let fixture = Fixture::new(&[("keep.txt", "one"), ("a.txt", "before")]);
+        let tree = fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "after");
+        // The turn deleted keep.txt, and the checkpoint's blob is gone: the
+        // path is in the plan, but its bytes cannot be handed back.
+        fs::remove_file(fixture.repo.join("keep.txt")).unwrap();
+        let blob = git_output(&fixture.repo, &["rev-parse", &format!("{tree}:keep.txt")]);
+        let objects = {
+            let common = git_output(&fixture.repo, &["rev-parse", "--git-common-dir"]);
+            let common = PathBuf::from(common);
+            let common = if common.is_absolute() {
+                common
+            } else {
+                fixture.repo.join(common)
+            };
+            common.join("objects")
+        };
+        fs::remove_file(objects.join(&blob[..2]).join(&blob[2..])).expect("remove the blob");
 
-        // A file too large to capture refuses the restore before writing.
-        std::fs::write(workspace.join("big.bin"), "x").unwrap();
-        let manifest_dir = dir.path().join("snapshots").join("th_1").join("turn_big");
-        std::fs::create_dir_all(&manifest_dir).unwrap();
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(
+            error.contains("could not read keep.txt from the checkpoint"),
+            "{error}"
+        );
+        assert_eq!(
+            read(&fixture.repo, "a.txt"),
+            "after",
+            "a missing checkpoint blob aborts before another file is restored"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_keeps_a_rename_a_symlink_and_an_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new(&[("old.txt", "old\n"), ("run.sh", "#!/bin/sh\n")]);
+        write(&fixture.repo, "target.txt", "target\n");
+        fs::set_permissions(
+            fixture.repo.join("run.sh"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("target.txt", fixture.repo.join("link")).unwrap();
+        git(&fixture.repo, &["add", "-A"]);
+        git(&fixture.repo, &["commit", "-q", "-m", "modes"]);
+        fixture.checkpoint("turn_1");
+
+        // The turn renames a file, drops the executable bit and retargets a link.
+        fs::rename(fixture.repo.join("old.txt"), fixture.repo.join("new.txt")).unwrap();
+        fs::set_permissions(
+            fixture.repo.join("run.sh"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        fs::remove_file(fixture.repo.join("link")).unwrap();
+        std::os::unix::fs::symlink("elsewhere", fixture.repo.join("link")).unwrap();
+
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "old.txt"),
+            "old\n",
+            "the rename is undone"
+        );
+        assert!(
+            !fixture.repo.join("new.txt").exists(),
+            "the rename's new path is removed"
+        );
+        assert_eq!(
+            fs::read_link(fixture.repo.join("link")).unwrap(),
+            PathBuf::from("target.txt"),
+            "the symlink's target is back"
+        );
+        assert_ne!(
+            fs::metadata(fixture.repo.join("run.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0,
+            "the executable bit is back"
+        );
+    }
+
+    #[test]
+    fn a_tracked_only_checkpoint_is_not_complete() {
+        let fixture = Fixture::new(&[("a.txt", "one")]);
+        let manifest_dir = fixture.dir.path().join("data/snapshots/th_1/turn_1");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        // A manifest written before checkpoints covered the whole worktree:
+        // a tree with no completeness flag.
         let manifest = serde_json::json!({
             "thread_id": "th_1",
-            "turn_id": "turn_big",
-            "workspace": workspace.display().to_string(),
+            "turn_id": "turn_1",
+            "workspace": fixture.repo.display().to_string(),
             "captured_at": chrono::Utc::now(),
+            "checkpoint": "1234567890abcdef1234567890abcdef12345678",
+            "files": {}
+        });
+        fs::write(
+            manifest_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            fixture
+                .store
+                .checkpoint(&fixture.thread, &TurnId::new("turn_1"))
+                .is_none(),
+            "a tracked-only checkpoint is not complete"
+        );
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains("no complete file checkpoint"), "{error}");
+    }
+
+    #[test]
+    fn a_file_created_after_the_checkpoint_is_deleted() {
+        let fixture = Fixture::new(&[("README.md", "hi\n")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "new.txt", "created by the turn");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
+        assert_eq!(outcome.deleted, 1);
+        assert!(!fixture.repo.join("new.txt").exists());
+    }
+
+    #[test]
+    fn a_file_too_large_to_capture_refuses_when_the_checkpoint_lacks_it() {
+        let fixture = Fixture::new(&[(".gitignore", "big.bin\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "big.bin", "x");
+        let tree = fixture.checkpoint("turn_1");
+        // The tool named the ignored file, but the capture was over its cap.
+        let manifest_dir = fixture.dir.path().join("data/snapshots/th_1/turn_1");
+        let manifest = serde_json::json!({
+            "thread_id": "th_1",
+            "turn_id": "turn_1",
+            "workspace": fixture.repo.display().to_string(),
+            "captured_at": chrono::Utc::now(),
+            "checkpoint": tree,
+            "checkpoint_complete": true,
             "files": {
                 "big.bin": {
                     "path": "big.bin",
@@ -901,180 +1485,258 @@ mod tests {
                 }
             }
         });
-        std::fs::write(
+        fs::write(
             manifest_dir.join("manifest.json"),
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        let refused = prepare_restore(&store, &workspace, &thread, &[TurnId::new("turn_big")]);
-        assert!(refused.unwrap_err().contains("too large"));
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("big.bin")).unwrap(),
-            "x"
-        );
+        write(&fixture.repo, "big.bin", "changed");
+
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains("too large"), "{error}");
+        assert_eq!(read(&fixture.repo, "big.bin"), "changed");
     }
 
     #[test]
-    fn a_missing_blob_refuses_before_any_file_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("keep.txt"), "current").unwrap();
-        let store = SnapshotStore::new(dir.path()).unwrap();
-        let thread = ThreadId::new("th_1");
-        let manifest_dir = dir.path().join("snapshots").join("th_1").join("turn_1");
-        std::fs::create_dir_all(&manifest_dir).unwrap();
+    fn a_missing_captured_blob_refuses_before_any_file_changes() {
+        let fixture = Fixture::new(&[(".gitignore", "keep.txt\n"), ("README.md", "hi\n")]);
+        write(&fixture.repo, "keep.txt", "current");
+        let tree = fixture.checkpoint("turn_1");
+        let manifest_dir = fixture.dir.path().join("data/snapshots/th_1/turn_1");
+        let missing = "0".repeat(64);
         let manifest = serde_json::json!({
             "thread_id": "th_1",
             "turn_id": "turn_1",
-            "workspace": workspace.display().to_string(),
+            "workspace": fixture.repo.display().to_string(),
             "captured_at": chrono::Utc::now(),
+            "checkpoint": tree,
+            "checkpoint_complete": true,
             "files": {
                 "keep.txt": {
                     "path": "keep.txt",
                     "existed": true,
-                    "blob": "0".repeat(64),
-                    "etag": "0".repeat(64),
-                    "size_bytes": 4,
+                    "blob": missing,
+                    "etag": missing,
+                    "size_bytes": 7,
                     "skipped": false
                 }
             }
         });
-        std::fs::write(
+        fs::write(
             manifest_dir.join("manifest.json"),
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        let refused = prepare_restore(&store, &workspace, &thread, &[TurnId::new("turn_1")]);
-        assert!(refused.unwrap_err().contains("missing"));
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("keep.txt")).unwrap(),
-            "current"
-        );
+
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains("missing"), "{error}");
+        assert_eq!(read(&fixture.repo, "keep.txt"), "current");
     }
 
     #[cfg(unix)]
     #[test]
     fn a_new_symlink_is_removed_itself_and_its_target_is_never_touched() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("notes.txt"), "keep me").unwrap();
-        let store = SnapshotStore::new(dir.path()).unwrap();
-        let thread = ThreadId::new("th_1");
-        let turn = TurnId::new("turn_1");
-        store
-            .capture(&workspace, &thread, &turn, &["scratch.txt".into()])
-            .unwrap();
-        std::os::unix::fs::symlink("notes.txt", workspace.join("scratch.txt")).unwrap();
+        let fixture = Fixture::new(&[("notes.txt", "keep me\n")]);
+        fixture.checkpoint("turn_1");
+        std::os::unix::fs::symlink("notes.txt", fixture.repo.join("scratch.txt")).unwrap();
 
-        let prepared = prepare_restore(&store, &workspace, &thread, std::slice::from_ref(&turn))
-            .expect("prepare");
-        let outcome = apply_restore(&prepared).expect("restore");
-        finish_restore(&prepared);
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let outcome = run_restore(&prepared);
         assert_eq!(outcome.deleted, 1);
         assert!(
-            workspace.join("scratch.txt").symlink_metadata().is_err(),
+            fixture.repo.join("scratch.txt").symlink_metadata().is_err(),
             "the link itself was removed"
         );
         assert_eq!(
-            std::fs::read_to_string(workspace.join("notes.txt")).unwrap(),
-            "keep me",
+            read(&fixture.repo, "notes.txt"),
+            "keep me\n",
             "the link target was never followed"
         );
     }
 
     #[test]
     fn a_file_that_became_a_parent_folder_refuses_before_other_files_change() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("a.txt"), "old a").unwrap();
-        std::fs::write(workspace.join("z"), "old z").unwrap();
-        let store = SnapshotStore::new(dir.path()).unwrap();
-        let thread = ThreadId::new("th_1");
-        let turn = TurnId::new("turn_1");
-        store
-            .capture(
-                &workspace,
-                &thread,
-                &turn,
-                &["a.txt".into(), "z/child.txt".into()],
-            )
-            .unwrap();
-        std::fs::write(workspace.join("a.txt"), "new a").unwrap();
+        let fixture = Fixture::new(&[("a.txt", "old a"), ("z/child.txt", "child")]);
+        fixture.checkpoint("turn_1");
+        // The turn replaces the folder with a file and changes a.txt.
+        fs::remove_dir_all(fixture.repo.join("z")).unwrap();
+        write(&fixture.repo, "z", "now a file");
+        write(&fixture.repo, "a.txt", "new a");
 
-        let refused = prepare_restore(&store, &workspace, &thread, std::slice::from_ref(&turn));
+        let error = fixture.prepare(&["turn_1"]).unwrap_err();
+        assert!(error.contains("is now a file"), "{error}");
+        assert_eq!(read(&fixture.repo, "a.txt"), "new a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_symlink_unlink_stops_the_restore_and_never_writes_through_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new(&[("link.txt", "was a file\n")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "target.txt", "keep me\n");
+        fs::remove_file(fixture.repo.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("target.txt", fixture.repo.join("link.txt")).unwrap();
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+
+        // The link's folder refuses the unlink; writing through the link would
+        // still reach its target.
+        fs::set_permissions(&fixture.repo, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = apply_restore(&prepared);
+        fs::set_permissions(&fixture.repo, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err(), "a failed unlink stops the restore");
+        assert_eq!(
+            read(&fixture.repo, "target.txt"),
+            "keep me\n",
+            "the restore never wrote through the link"
+        );
+        assert_eq!(
+            fs::read_link(fixture.repo.join("link.txt")).unwrap(),
+            PathBuf::from("target.txt")
+        );
+    }
+
+    #[test]
+    fn a_subdirectory_workspace_resolves_paths_from_the_repository_root() {
+        let fixture = Fixture::new(&[("sub/a.txt", "one"), ("top.txt", "top")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "sub/a.txt", "two");
+        let workspace = fixture.repo.join("sub");
+
+        let prepared = fixture
+            .prepare_in(&workspace, &["turn_1"])
+            .expect("prepare");
+        run_restore(&prepared);
+        assert_eq!(
+            read(&fixture.repo, "sub/a.txt"),
+            "one",
+            "the root-relative path is not joined to the subdirectory twice"
+        );
         assert!(
-            refused
-                .err()
-                .is_some_and(|message| message.contains("is now a file")),
-            "the parent type is checked before a.txt is written"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
-            "new a"
+            !fixture.repo.join("sub/sub").exists(),
+            "nothing is written under a doubled folder"
         );
     }
 
     #[test]
-    fn an_interrupted_restore_is_rolled_back_at_the_next_startup() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("a.txt"), "before").unwrap();
-        let store = SnapshotStore::new(dir.path()).unwrap();
-        let thread = ThreadId::new("th_1");
-        let turn = TurnId::new("turn_1");
-        store
-            .capture(&workspace, &thread, &turn, &["a.txt".into()])
-            .unwrap();
-        std::fs::write(workspace.join("a.txt"), "after").unwrap();
+    fn a_change_outside_a_subdirectory_workspace_refuses_the_restore() {
+        let fixture = Fixture::new(&[("sub/a.txt", "one"), ("top.txt", "top")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "top.txt", "changed");
+        write(&fixture.repo, "sub/a.txt", "two");
+        let workspace = fixture.repo.join("sub");
 
-        let prepared = prepare_restore(&store, &workspace, &thread, std::slice::from_ref(&turn))
-            .expect("prepare");
+        let error = fixture.prepare_in(&workspace, &["turn_1"]).unwrap_err();
+        assert!(error.contains("outside the thread's worktree"), "{error}");
+        assert_eq!(read(&fixture.repo, "top.txt"), "changed");
+        assert_eq!(read(&fixture.repo, "sub/a.txt"), "two");
+    }
+
+    #[test]
+    fn a_rollback_that_cannot_finish_keeps_its_journal() {
+        let fixture = Fixture::new(&[("a.txt", "before")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "after");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
         let restore_id = prepared.restore_id().to_owned();
+        // Break the bytes the rollback would put back.
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&prepared.record_path).unwrap()).unwrap();
+        for entry in record["entries"].as_array().unwrap() {
+            if let Some(blob) = entry["backup"]["blob"].as_str() {
+                fs::remove_file(fixture.blob_path(blob)).unwrap();
+            }
+        }
         apply_restore(&prepared).expect("apply");
+
+        let pending = read_pending_restore(&fixture.store, &restore_id).expect("read");
+        let error = recover_restore(&fixture.store, &pending, false).unwrap_err();
+        assert!(error.contains("missing"), "{error}");
         assert_eq!(
-            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
-            "before"
+            pending_restore_ids(&fixture.store),
+            vec![restore_id],
+            "the journal is kept until its rollback is on disk"
         );
-        // The daemon stops here, before the cut committed.
-        drop(prepared);
-        assert_eq!(pending_restore_ids(&store), vec![restore_id.clone()]);
-        recover_restore(&store, &restore_id, false).expect("rollback");
+    }
+
+    #[test]
+    fn a_restore_does_not_commit_a_file_that_was_not_flushed() {
+        let fixture = Fixture::new(&[("a.txt", "before")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "after");
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+
+        FAIL_SYNC.with(|flag| flag.set(true));
+        let result = apply_restore(&prepared);
+        FAIL_SYNC.with(|flag| flag.set(false));
+
+        assert!(
+            result.is_err(),
+            "an unflushed write does not count as applied"
+        );
         assert_eq!(
-            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            read(&fixture.repo, "a.txt"),
             "after",
-            "an uncommitted restore is put back"
+            "the failed write is rolled back"
         );
-        assert!(pending_restore_ids(&store).is_empty());
     }
 
     #[test]
-    fn a_committed_restore_keeps_its_files_when_the_journal_is_finished_late() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("a.txt"), "before").unwrap();
-        let store = SnapshotStore::new(dir.path()).unwrap();
-        let thread = ThreadId::new("th_1");
-        let turn = TurnId::new("turn_1");
-        store
-            .capture(&workspace, &thread, &turn, &["a.txt".into()])
-            .unwrap();
-        std::fs::write(workspace.join("a.txt"), "after").unwrap();
+    fn an_unreadable_journal_is_an_error_not_an_uncommitted_restore() {
+        let fixture = Fixture::new(&[("a.txt", "before")]);
+        let restores = fixture.store.restores_dir();
+        fs::create_dir_all(&restores).unwrap();
+        fs::write(restores.join("restore_broken.json"), b"not json").unwrap();
 
-        let prepared = prepare_restore(&store, &workspace, &thread, std::slice::from_ref(&turn))
-            .expect("prepare");
-        let restore_id = prepared.restore_id().to_owned();
+        let error = read_pending_restore(&fixture.store, "restore_broken").unwrap_err();
+        assert!(error.contains("not readable"), "{error}");
+    }
+
+    #[test]
+    fn a_crash_at_each_step_of_a_restore_is_recovered() {
+        let fixture = Fixture::new(&[("a.txt", "before a"), ("b.txt", "before b")]);
+        fixture.checkpoint("turn_1");
+        write(&fixture.repo, "a.txt", "after a");
+        write(&fixture.repo, "b.txt", "after b");
+
+        // Crash before any write: recovery leaves the worktree as it was.
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let id = prepared.restore_id().to_owned();
+        let pending = read_pending_restore(&fixture.store, &id).expect("read");
+        recover_restore(&fixture.store, &pending, false).expect("recover");
+        assert_eq!(read(&fixture.repo, "a.txt"), "after a");
+        assert_eq!(read(&fixture.repo, "b.txt"), "after b");
+        assert!(pending_restore_ids(&fixture.store).is_empty());
+
+        // Crash after the first path: every applied path is put back.
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let id = prepared.restore_id().to_owned();
+        apply_op(&prepared.ops[0]).expect("apply the first path");
+        assert_eq!(read(&fixture.repo, "a.txt"), "before a");
+        let pending = read_pending_restore(&fixture.store, &id).expect("read");
+        recover_restore(&fixture.store, &pending, false).expect("recover");
+        assert_eq!(read(&fixture.repo, "a.txt"), "after a");
+        assert_eq!(read(&fixture.repo, "b.txt"), "after b");
+
+        // Crash after every write but before the commit: all are put back.
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let id = prepared.restore_id().to_owned();
         apply_restore(&prepared).expect("apply");
-        drop(prepared);
-        recover_restore(&store, &restore_id, true).expect("finish");
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
-            "before"
-        );
-        assert!(pending_restore_ids(&store).is_empty());
+        let pending = read_pending_restore(&fixture.store, &id).expect("read");
+        recover_restore(&fixture.store, &pending, false).expect("recover");
+        assert_eq!(read(&fixture.repo, "a.txt"), "after a");
+        assert_eq!(read(&fixture.repo, "b.txt"), "after b");
+
+        // Crash after the cut committed: the files it wrote are kept.
+        let prepared = fixture.prepare(&["turn_1"]).expect("prepare");
+        let id = prepared.restore_id().to_owned();
+        apply_restore(&prepared).expect("apply");
+        let pending = read_pending_restore(&fixture.store, &id).expect("read");
+        recover_restore(&fixture.store, &pending, true).expect("recover");
+        assert_eq!(read(&fixture.repo, "a.txt"), "before a");
+        assert_eq!(read(&fixture.repo, "b.txt"), "before b");
+        assert!(pending_restore_ids(&fixture.store).is_empty());
     }
 }

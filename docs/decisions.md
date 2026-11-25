@@ -2242,28 +2242,39 @@ the plan of the selected prompt, because the thread-wide capability cannot name
 what an older prompt, or a first prompt, will really use. File restore is a
 **Labs** feature, off by default while it is still being hardened: the daemon
 refuses it, the summary reports it unavailable and the dialog hides it until
-Settings → Labs turns it on. Its whole-tree checkpoint is only captured while
-the switch is on, so a turn sent while it was off has none and can rewind only
-its conversation. It exists only for
-a thread in its own linked worktree with a complete pre-turn checkpoint (a git
-tree of the whole tracked worktree), is refused when another live thread or
-agent session shares the directory (finished, fully idle subagents of the same
-thread excepted), and requires the same worktree registration the thread was
-created with. The restore writes a durable journal
-with the replaced bytes, applies the files, commits the cut and the record
-changes together, and only then publishes the new in-memory state. A failed
-commit rolls the files back; a crash between apply and commit is rolled back at
-the next startup, while a committed cut keeps its files. The workspace is
-reserved through the commit so nothing starts inside it mid-restore. Symlinks
-are restored as directory entries and never followed.
+Settings → Labs turns it on. Its whole-worktree checkpoint is only captured
+while the switch is on, so a turn sent while it was off has none and can rewind
+only its conversation. It exists only for
+a thread in its own linked worktree with a complete pre-turn checkpoint: a git
+tree of every tracked file and every untracked file git does not ignore, with
+git's modes, symlinks and renames. A tree recorded before that (tracked files
+only) is not complete and refuses the restore. It is refused when another live
+thread or agent session shares the directory (finished, fully idle subagents of
+the same thread excepted), and requires the same worktree registration the
+thread was created with. The selected message's own checkpoint decides the
+whole restore; later removed turns never override it, and captured bytes for a
+path the tree lacks beat the tree's absence. Git paths resolve from the
+repository root, and a change outside the thread's worktree refuses the restore.
+The restore writes a durable journal with the replaced bytes and their modes,
+flushes backups,
+files and folders, applies the files, commits the cut and the record changes
+together, and only then publishes the new in-memory state. A failed commit
+rolls the files back, and the journal stays until that rollback is on disk; a
+crash between apply and commit is rolled back at the next startup, while a
+committed cut keeps its files. Startup recovery re-checks the worktree identity
+before touching anything and treats an unreadable journal as an error, not an
+uncommitted restore. The workspace is reserved through the commit so nothing
+starts inside it mid-restore. A symlink is restored as a directory entry and
+never followed, a failed unlink stops the restore, and a failed `git` read
+refuses it rather than becoming a deletion.
 
 **Consequences.** The transcript and provider history can be at slightly
 different points between the rewind and the next prompt, but no session that
 still holds the removed turns is ever written to. The word "rewind" in the UI
 means the conversation; file restore is a separate, explicitly warned Labs
 choice offered only where a complete checkpoint exists, so it can be held back
-while its remaining correctness gaps are closed without taking the conversation
-rewind with it. A provider that loses its native boundary degrades to a handoff
+while its remaining gaps (a bytes-only restore with no ownership or extended
+attributes) are closed without taking the conversation rewind with it. A provider that loses its native boundary degrades to a handoff
 rather than resuming the wrong history, and the person is told when it does.
 
 ## ADR-051: Phone alerts carry a fixed thread transition, never conversation content

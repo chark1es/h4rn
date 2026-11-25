@@ -890,6 +890,19 @@ async fn a_failed_file_restore_leaves_the_history_unchanged() {
         entry["skipped"] = serde_json::json!(true);
         entry["blob"] = serde_json::Value::Null;
     }
+    // A file the checkpoint cannot cover and the capture could not keep: it
+    // refuses the restore even though the tracked files could be put back.
+    files.insert(
+        "uncaptured.bin".into(),
+        serde_json::json!({
+            "path": "uncaptured.bin",
+            "existed": true,
+            "blob": serde_json::Value::Null,
+            "etag": serde_json::Value::Null,
+            "size_bytes": 99999999,
+            "skipped": true
+        }),
+    );
     std::fs::write(&manifest, serde_json::to_vec(&value).expect("json")).expect("manifest");
 
     let refused = fixture
@@ -926,7 +939,11 @@ async fn a_completed_subagent_does_not_block_the_same_worktree_restore() {
     let mut events = fixture.manager.subscribe();
     let parent = fixture
         .manager
-        .create_thread(thread_request(&fixture.host, &worktree, "parent"))
+        .create_thread(thread_request(
+            &fixture.host,
+            &worktree,
+            "parent [[write:from-parent.txt]]from the parent",
+        ))
         .await
         .expect("create parent");
     let mut first = events.resubscribe();
@@ -962,7 +979,14 @@ async fn a_completed_subagent_does_not_block_the_same_worktree_restore() {
         )
         .await
         .expect("the finished child does not block");
-    assert!(prompt.files_restored);
+    assert!(
+        prompt.files_restored,
+        "the restore really put the parent's worktree back"
+    );
+    assert!(
+        !worktree.join("from-parent.txt").exists(),
+        "the parent's own file is gone"
+    );
     let _ = child;
 }
 
@@ -2058,7 +2082,12 @@ async fn revert_files_too_needs_a_complete_checkpoint() {
         .join("manifest.json");
     let mut value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest).expect("manifest")).expect("json");
-    value.as_object_mut().expect("object").remove("checkpoint");
+    // The tree from before checkpoints covered the whole worktree: keeping it
+    // without the completeness flag must not pass for a complete checkpoint.
+    value
+        .as_object_mut()
+        .expect("object")
+        .remove("checkpoint_complete");
     std::fs::write(&manifest, serde_json::to_vec(&value).expect("json")).expect("manifest");
 
     let refused = fixture
@@ -2137,6 +2166,99 @@ async fn a_shell_modified_file_is_restored_from_the_complete_checkpoint() {
         std::fs::read_to_string(worktree.join("README.md")).expect("readme"),
         "fixture\n",
         "a file no tool call named is restored from the full checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn untracked_files_a_shell_command_changed_are_restored_and_removed() {
+    let (_base, _repo, worktree) = git_worktree();
+    // An untracked file the person had before the message.
+    std::fs::write(worktree.join("keep.txt"), "before\n").expect("keep.txt");
+    let (fake, gate) = FakeHarness::new()
+        .with_native_rewind()
+        .with_completion_gate();
+    let fixture = make_fixture(fake).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(&fixture.host, &worktree, "A"))
+        .await
+        .expect("create");
+    // The first token proves the checkpoint is already on disk.
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let Ok(wire) = events.recv().await
+                && matches!(wire.event, Event::MessageDelta { .. })
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the prompt reached the fake");
+    // A shell command changes one untracked file and creates another.
+    std::fs::write(worktree.join("keep.txt"), "after the shell\n").expect("shell edit");
+    std::fs::write(worktree.join("new.txt"), "created by the shell\n").expect("shell create");
+    gate.release();
+    wait_turn(&mut events).await;
+
+    let item = prompt_item(&fixture.manager, &created.thread_id, "A").await;
+    fixture
+        .manager
+        .rewind_thread(&created.thread_id, &item, true)
+        .await
+        .expect("restore the untracked files too");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("keep.txt")).expect("keep.txt"),
+        "before\n",
+        "an untracked file the turn changed is put back"
+    );
+    assert!(
+        !worktree.join("new.txt").exists(),
+        "an untracked file the turn created is removed"
+    );
+}
+
+#[tokio::test]
+async fn files_restored_reports_what_the_restore_did() {
+    let (_base, _repo, worktree) = git_worktree();
+    let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(&fixture.host, &worktree, "A"))
+        .await
+        .expect("create");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+    let item = prompt_item(&fixture.manager, &created.thread_id, "A").await;
+
+    // The turn changed nothing, so the checkpoint already matches the
+    // worktree: the restore succeeded but wrote nothing.
+    let prompt = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &item, true)
+        .await
+        .expect("the restore itself is accepted");
+    assert!(
+        !prompt.files_restored,
+        "nothing was written, so the report must not claim files were restored"
+    );
+    let snapshot = fixture
+        .manager
+        .get_thread(&created.thread_id, 0)
+        .await
+        .expect("thread");
+    assert!(
+        snapshot.events.iter().any(|wire| matches!(
+            &wire.event,
+            Event::ThreadRewound {
+                files_restored: false,
+                ..
+            }
+        )),
+        "the journaled cut reports the same outcome"
     );
 }
 

@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -46,10 +47,19 @@ struct Manifest {
     turn_id: String,
     workspace: String,
     captured_at: DateTime<Utc>,
-    /// The git commit whose tree is the complete pre-turn worktree state, when
-    /// one was captured. A rewind needs this to cover files no tool call named.
+    /// The git tree whose contents are the complete pre-turn worktree state,
+    /// when one was captured. A rewind needs this to cover files no tool call
+    /// named.
     #[serde(default)]
     checkpoint: Option<String>,
+    /// Whether `checkpoint` covers the whole worktree, untracked files
+    /// included.
+    ///
+    /// A manifest written before this field existed recorded a tracked-only
+    /// tree, which is not a complete checkpoint: a rewind must refuse it rather
+    /// than restore a partial set. Missing therefore means incomplete.
+    #[serde(default)]
+    checkpoint_complete: bool,
     files: BTreeMap<String, SnapshotEntry>,
 }
 
@@ -92,6 +102,7 @@ impl SnapshotStore {
                 workspace: workspace.display().to_string(),
                 captured_at: Utc::now(),
                 checkpoint: None,
+                checkpoint_complete: false,
                 files: BTreeMap::new(),
             });
         let mut added = 0;
@@ -272,9 +283,13 @@ impl SnapshotStore {
                 workspace: workspace.display().to_string(),
                 captured_at: Utc::now(),
                 checkpoint: None,
+                checkpoint_complete: false,
                 files: BTreeMap::new(),
             });
         manifest.checkpoint = Some(commit.to_owned());
+        // The capture stages the whole worktree in git, untracked files
+        // included, so a recorded checkpoint is complete by construction.
+        manifest.checkpoint_complete = true;
         if let Some(parent) = manifest_path.parent() {
             fs::create_dir_all(parent).map_err(|error| FsError::Io(error.to_string()))?;
         }
@@ -285,9 +300,16 @@ impl SnapshotStore {
     }
 
     /// The complete pre-turn git tree recorded for a turn, when there is one.
+    ///
+    /// A manifest whose checkpoint is missing, or was recorded before
+    /// checkpoints had to cover the whole worktree, answers `None`: a rewind
+    /// must refuse it rather than restore a tracked-only subset.
     pub fn checkpoint(&self, thread_id: &ThreadId, turn_id: &TurnId) -> Option<String> {
         let path = self.manifest_path(thread_id, turn_id).ok()?;
-        self.load_manifest(&path)?.checkpoint
+        let manifest = self.load_manifest(&path)?;
+        (manifest.checkpoint_complete)
+            .then_some(manifest.checkpoint)
+            .flatten()
     }
 
     /// Where restore journals live, beside the blobs.
@@ -300,10 +322,22 @@ impl SnapshotStore {
         if path.exists() {
             return Ok(());
         }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| FsError::Io(error.to_string()))?;
-        }
-        fs::write(&path, bytes).map_err(|error| FsError::Io(error.to_string()))
+        let Some(parent) = path.parent() else {
+            return Err(FsError::Io(format!(
+                "{} has no parent folder",
+                path.display()
+            )));
+        };
+        fs::create_dir_all(parent).map_err(|error| FsError::Io(error.to_string()))?;
+        // A restore journal names these bytes as its way back, so they must be
+        // on disk before the journal can be written.
+        let mut file = fs::File::create(&path).map_err(|error| FsError::Io(error.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        drop(file);
+        sync_dir(parent).map_err(|error| FsError::Io(error.to_string()))
     }
 
     fn blob_path(&self, address: &str) -> PathBuf {
@@ -325,6 +359,19 @@ impl SnapshotStore {
         let bytes = fs::read(path).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
+}
+
+/// Makes a folder's own entries durable (a file created in it, a rename into
+/// it).
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+/// Makes a folder's own entries durable where the platform supports it.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Makes an identifier safe as one path component without losing uniqueness.
