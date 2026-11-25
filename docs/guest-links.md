@@ -184,9 +184,15 @@ leaves no pending count behind. The card is published only once its row says
 be answered; a failed last step publishes nothing and leaves the row for the
 sweep, which finishes it or discards it with its files when the link is gone,
 and a snapshot hides a journaled card whose row is not answerable yet. When the
-sweep finishes such a row it re-announces the card the journal already holds
-instead of adding a second one, so a live owner learns about it once and the
-guest's page shows one card. A Send
+sweep finishes such a row it puts the request back in the thread (so it counts
+as waiting and is not auto-settled away) and announces the card again under a
+fresh sequence: a live owner's client drops a frame at or below the last
+sequence it applied, so the original copy would never reach it. The guest's
+page keeps the newest copy of a request's card and shows it once. A thread's
+append, its guest row write and its broadcast happen as one ordered step under
+the daemon's append lock, so an event from another thread can never overtake
+one of them in a client's stream, and a replay can never hand out a card before
+its row is answerable. A Send
 or reservation interrupted by a shutdown
 is answered from the thread itself: the message carries the request's id in its
 item id, so recovery asks the journal before it decides anything about the link.
@@ -233,11 +239,15 @@ retries removing files a refused disk left behind. The answer is durable: if wri
 fails, the row records that it is still owed, and the sweep, a restart and Stop
 sharing all re-emit it before the row can go. The row's marker is written only
 after the event is durable, so a crash never leaves a row that claims an answer
-nobody received; startup compares every finished request with the journal and
-raises an answer that is missing. Each answer is journaled once: writers take
+nobody received; startup compares every finished request with the journal,
+before it ends any link, and raises an answer that is missing — including one an
+older build's marker claimed but never appended, whose link expired while the
+daemon was down. Each answer is journaled once: writers take
 turns, and the writer asks the thread's journal before it appends, so a Dismiss
 and a sweep that both hold the finished row cannot each emit it and a restart
-never appends one the journal already holds. Ending the link only drops a
+never appends one the journal already holds. That question is answered by the
+request id, so an answer costs one lookup rather than a read of the thread's
+whole event log. Ending the link only drops a
 finished row once both its files are gone and its answer is on the wire; anything
 else stays a cleanup record for the next sweep. A submission or a Send runs to
 completion on the daemon while it keeps running, even if the guest's browser

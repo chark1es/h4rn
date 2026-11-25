@@ -781,10 +781,15 @@ All notable changes to h4rn are recorded here. The format follows
   the journal and raises an answer that is missing. A second delivery of a guest
   prompt that may already have reached the agent now gets its own transcript id,
   so both messages show instead of the second disappearing behind the first.
-  Recovering a card whose row update failed re-announces the card the journal
-  already holds instead of journaling a second one, and the guest row write no
-  longer runs inside the daemon-wide append lock, where one guest could stall
-  every thread on the machine.
+  Recovering a card whose row update failed gives the thread its pending request
+  back (so the link is not treated as idle and auto-settled) and announces the
+  card again under a new sequence, which is what a live owner needs to hear it;
+  the guest's page still shows one card. Every thread's append, its guest row
+  write and its broadcast remain one ordered step, so a client never loses an
+  event because another thread's event slipped in between. Startup raises a
+  finished request's answer before an expired link's rows are cleaned up, and an
+  answer is found by its request id rather than by reading the thread's whole
+  event log.
 - **A fork whose journal write fails never appears.** The fork's handle became
   reachable before its summary was durable, so the periodic refresh could
   publish a thread whose copy then failed to record — a row a client could open

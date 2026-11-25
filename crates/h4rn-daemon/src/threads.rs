@@ -6340,53 +6340,31 @@ impl ThreadManager {
         thread_id: &ThreadId,
         request_id: &str,
     ) -> Result<bool, ManagerError> {
-        let events = self
-            .inner
+        self.inner
             .journal
-            .read_wire_since(thread_id, 0)
+            .guest_resolution_exists(thread_id, request_id)
             .await
-            .map_err(|error| ManagerError::Internal(error.to_string()))?;
-        Ok(events.into_iter().any(|entry| {
-            matches!(
-                entry.event,
-                Event::GuestRequestResolved { request_id: id, .. } if id == request_id
-            )
-        }))
+            .map_err(|error| ManagerError::Internal(error.to_string()))
     }
 
-    /// Announces a guest card the journal already holds, without appending it
-    /// again.
+    /// Announces a guest card the journal already holds as news.
     ///
     /// A publication that reached the journal but failed before its row became
-    /// answerable left a card no live client ever received. Recovery makes the
-    /// row answerable and calls this so clients learn about the card; the
-    /// journal keeps one `GuestRequested`, so a guest that polls later still
-    /// sees one card.
+    /// answerable left a card no live client ever received, and rolled the
+    /// record's pending state back. Recovery makes the row answerable and calls
+    /// this so clients learn about the card: the durable `MessageReceived` and
+    /// `GuestRequestAdded` are applied to the record again (both are
+    /// idempotent), and the card is appended under a fresh sequence and
+    /// broadcast. Appending again is what makes it news: a live client drops
+    /// any frame at or below the last sequence it applied, and the original
+    /// card predates the failure. The guest snapshot keeps the newest card per
+    /// request id, so the guest's page still shows one card.
     pub async fn republish_guest_request(
         &self,
-        thread_id: &ThreadId,
-        request_id: &str,
-    ) -> Result<(), ManagerError> {
-        let events = self
-            .inner
-            .journal
-            .read_wire_since(thread_id, 0)
-            .await
-            .map_err(|error| ManagerError::Internal(error.to_string()))?;
-        let Some(entry) = events.into_iter().find(|entry| {
-            matches!(
-                &entry.event,
-                Event::GuestRequested { request, .. } if request.request_id == request_id
-            )
-        }) else {
-            return Ok(());
-        };
-        let handle = self.inner.handle(thread_id).await?;
-        let _record = handle.lock().await;
-        let _guard = self.inner.emit_lock.lock().await;
-        self.inner
-            .broadcast(thread_id, std::slice::from_ref(&entry.event), &[entry.seq]);
-        Ok(())
+        request: h4rn_protocol::GuestRequest,
+    ) -> Result<u64, ManagerError> {
+        let thread_id = request.thread_id.clone();
+        self.emit_guest_request(&thread_id, request).await
     }
 
     /// [`Self::send_message_with`] with a grant's ceiling and identity.
@@ -9855,14 +9833,16 @@ impl Inner {
     /// before any broadcast, so a failed commit publishes nothing; the caller
     /// restores what the failed commit left behind.
     ///
-    /// `commit` runs *outside* the daemon-wide emit lock. It is the caller's
-    /// other store (the guest row lives on the same single-connection pool as
-    /// every thread's journal), and holding the lock across another database
-    /// would make one thread's guest row wait for every other thread's append.
-    /// The thread's record lock, which the caller holds, keeps a second writer
-    /// out; the append ordering `commit` must see is already durable before it
-    /// runs, and the broadcast still happens under the lock so it stays after
-    /// both halves.
+    /// The append, `commit` and the broadcast are one step under the
+    /// daemon-wide emit lock, for every thread. Sequence numbers come from one
+    /// journal-wide counter and a client drops any frame at or below the last
+    /// one it applied, so a broadcast that slipped past another thread's
+    /// append would be discarded live even though the event is durable.
+    /// Releasing the lock between the halves would also let a subscribe replay
+    /// read the journal in the gap: it could hand a guest card to a snapshot
+    /// while the row still says the request cannot be answered. `commit` is one
+    /// short statement on the same pool the append just used, so the lock is
+    /// held for that statement and no longer.
     ///
     /// `pending_item`, when set, names a message a provider has not accepted
     /// yet: its row and its "undelivered" marker are one commit, so a failure
@@ -9895,33 +9875,30 @@ impl Inner {
         // A test can hold the write here, after the record changed and before
         // it is durable, to close a socket in that exact window.
         self.pause_append(&domain).await;
-        let seqs = {
-            let _guard = self.emit_lock.lock().await;
-            if let Some(message) = self
-                .append_failure
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-            {
-                return Err(ManagerError::Internal(message));
-            }
-            let appended = match (pending_item, steer_item) {
-                (Some(item_id), _) => {
-                    self.journal
-                        .append_sent(&record.meta, &domain, &wire, item_id)
-                        .await
-                }
-                (None, Some(item_id)) => {
-                    self.journal
-                        .append_steer(&record.meta, &domain, &wire, item_id)
-                        .await
-                }
-                (None, None) => self.journal.append(&record.meta, &domain, &wire).await,
-            };
-            appended.map_err(|error| ManagerError::Internal(error.to_string()))?
-        };
-        commit().await?;
         let _guard = self.emit_lock.lock().await;
+        if let Some(message) = self
+            .append_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            return Err(ManagerError::Internal(message));
+        }
+        let appended = match (pending_item, steer_item) {
+            (Some(item_id), _) => {
+                self.journal
+                    .append_sent(&record.meta, &domain, &wire, item_id)
+                    .await
+            }
+            (None, Some(item_id)) => {
+                self.journal
+                    .append_steer(&record.meta, &domain, &wire, item_id)
+                    .await
+            }
+            (None, None) => self.journal.append(&record.meta, &domain, &wire).await,
+        };
+        let seqs = appended.map_err(|error| ManagerError::Internal(error.to_string()))?;
+        commit().await?;
         self.broadcast(&record.meta.thread_id, &wire, &seqs);
         record.last_signature = Some(SummarySignature::of(&summary));
         let seq = seqs.last().copied().unwrap_or(0);

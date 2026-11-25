@@ -1595,15 +1595,25 @@ recognised by the check instead of appending a second answer. A crash in the
 other window, before the append, leaves the marker unset; startup compares every
 finished row with the journal and raises an answer that is missing. A `publishing`
 row whose card reached the journal only needs its row made answerable and the
-card re-announced; recovery never appends a second `GuestRequested`. The
+card re-announced. The re-announcement re-applies the durable
+`MessageReceived` and `GuestRequestAdded` (both idempotent, so the thread's
+pending request comes back) and appends the card under a fresh sequence, because
+a live client drops any frame at or below the last sequence it applied and the
+original copy predates the failure; the guest's snapshot keeps the newest card
+per request id, so the page shows one. Startup reconciles every finished row
+before it ends any link, and cleanup asks the journal instead of trusting a
+row's marker, so an answer an older build claimed but never appended is raised
+even when its link expired while the daemon was down. The
 periodic sweep leaves a `sending` or `reserving` row alone while a task may still
 be reading it; only the startup pass, where no reader can exist, recovers it, and
 a `publishing` row is left alone while its submission still holds the submission
 lock and finished by the periodic sweep once no writer is left. The guest row
-lives on the journal's single-connection pool, so the commit that writes it runs
-outside the daemon-wide append lock: the thread's record lock keeps a second
-writer out, the card's append is already durable before the row changes, and the
-broadcast still follows both halves. A Send's
+lives on the journal's single-connection pool, and its commit runs inside the
+daemon-wide append lock together with the card's append and broadcast: sequence
+numbers come from one journal-wide counter, so a broadcast that slipped past
+another thread's append would be dropped live, and a replay that read the gap
+could hand out a card before its row was answerable. The row write is one short
+statement on the connection the append just used. A Send's
 acceptance is the thread's journal, not a flag beside it: the message is named
 by the item id `item_guest_<request_id>`, and that id travels with the send
 through the queue — a prompt that arrives while a turn runs waits in the queue

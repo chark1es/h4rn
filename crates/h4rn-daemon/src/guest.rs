@@ -897,6 +897,17 @@ impl GuestService {
     /// row still marked `sending` or `reserving` was interrupted by the last
     /// shutdown and must be resolved instead of leaving an unanswerable card.
     async fn sweep_expired_with(&self, recover_in_flight: bool) -> Result<usize, GuestError> {
+        // Startup has no writer left to finish an answer, so compare every
+        // finished row with the thread's journal before any link is ended and
+        // its rows are cleaned up. A resolution the marker claims but the
+        // journal never received (an older build could leave one) is raised
+        // here, even when the link expired while the daemon was down; one the
+        // journal already holds only gets its marker back. Running this after
+        // the link loops used to delete the row first, and its stale marker
+        // then suppressed the answer the owner never got.
+        if recover_in_flight {
+            self.reconcile_finished_resolutions().await;
+        }
         let rows = sqlx::query(
             "SELECT link_id, thread_id, binding_hash, created_at, expires_at
              FROM guest_links WHERE expires_at <= ?",
@@ -927,14 +938,9 @@ impl GuestService {
                 removed += 1;
             }
         }
-        // Startup has no writer left to finish an answer, so compare every
-        // finished row with the thread's journal before the sweep decides what
-        // to keep. A resolution the marker claims but the journal never
-        // received (an older build could leave one) is raised here; one the
-        // journal already holds only gets its marker back.
-        if recover_in_flight {
-            self.reconcile_finished_resolutions().await;
-        }
+        // Every link that should not live is gone; now finish or discard the
+        // rows it left behind. A finished row's answer was already raised
+        // above, before the link could take its row with it.
         self.sweep_finished_requests(recover_in_flight).await?;
         Ok(removed)
     }
@@ -1126,6 +1132,9 @@ impl GuestService {
         }
         // The claim wrote a dismissal for a waiting row; the cleanup record
         // this pass carries must say the same so the event it emits matches.
+        // The marker is deliberately dropped: a row written by an older build
+        // (or by a crash image) can carry one for an answer the journal never
+        // received, and cleanup must ask the journal rather than trust it.
         let mut claimed_request = request.clone();
         claimed_request.status = "deleting".into();
         claimed_request.resolution = Some(
@@ -1134,7 +1143,7 @@ impl GuestService {
                 .clone()
                 .unwrap_or_else(|| "dismissed".into()),
         );
-        claimed_request.resolution_emitted = request.resolution_emitted;
+        claimed_request.resolution_emitted = false;
         self.finish_cleanup(&claimed_request).await;
         Ok(())
     }
@@ -1377,9 +1386,11 @@ impl GuestService {
             {
                 Ok(true) => {
                     // The card is already journaled; the failed final update is
-                    // the only half missing. Making the row `pending` earns the
-                    // broadcast the failed publication never sent, without a
-                    // duplicate card in the journal or the guest's page.
+                    // the only half missing. Making the row `pending` and
+                    // announcing the card again under a fresh sequence earns
+                    // the broadcast the failed publication never sent: the
+                    // guest's page keeps the newest copy of the card, so it
+                    // shows one, and the record gets its pending request back.
                     if let Err(error) = self.mark_pending(&request.request_id).await {
                         tracing::warn!(
                             request = %request.request_id,
@@ -1390,7 +1401,7 @@ impl GuestService {
                     }
                     if let Err(error) = self
                         .manager
-                        .republish_guest_request(&request.thread_id, &request.request_id)
+                        .republish_guest_request(request.to_proto())
                         .await
                     {
                         // The row is answerable and a fresh snapshot sees the
@@ -2201,28 +2212,39 @@ impl GuestService {
                 "This link was stopped or replaced by the owner.".into(),
             ));
         }
+        let mut visible: Vec<h4rn_protocol::SeqEvent> = events
+            .into_iter()
+            .filter_map(|entry| {
+                let seq = entry.seq;
+                let visible = match &entry.event {
+                    Event::GuestRequested { request, .. } => {
+                        answerable.contains(&request.request_id)
+                    }
+                    Event::GuestRequestResolved { request_id, .. } => {
+                        link_requests.contains(request_id)
+                    }
+                    _ => true,
+                };
+                visible
+                    .then(|| guest_event(entry.event))
+                    .flatten()
+                    .map(|event| h4rn_protocol::SeqEvent { seq, event })
+            })
+            .collect();
+        // A recovered card is journaled and broadcast again so a live owner can
+        // hear it. The page shows the newest copy of each request's card once:
+        // the older one is the copy whose publication never reached anybody.
+        visible.reverse();
+        let mut latest = std::collections::HashSet::new();
+        visible.retain(|entry| match &entry.event {
+            Event::GuestRequested { request, .. } => latest.insert(request.request_id.clone()),
+            _ => true,
+        });
+        visible.reverse();
         Ok(GuestSnapshot {
             state: GuestLinkState::Active,
             thread: Some(guest_view(&snapshot.summary)),
-            events: events
-                .into_iter()
-                .filter_map(|entry| {
-                    let seq = entry.seq;
-                    let visible = match &entry.event {
-                        Event::GuestRequested { request, .. } => {
-                            answerable.contains(&request.request_id)
-                        }
-                        Event::GuestRequestResolved { request_id, .. } => {
-                            link_requests.contains(request_id)
-                        }
-                        _ => true,
-                    };
-                    visible
-                        .then(|| guest_event(entry.event))
-                        .flatten()
-                        .map(|event| h4rn_protocol::SeqEvent { seq, event })
-                })
-                .collect(),
+            events: visible,
             next_seq,
             notice: None,
         })

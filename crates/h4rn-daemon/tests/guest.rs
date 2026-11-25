@@ -179,6 +179,8 @@ struct Client {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     next_id: u64,
     events: std::collections::VecDeque<Event>,
+    /// Every event sequence this socket delivered, in arrival order.
+    seqs: Vec<u64>,
 }
 
 impl Client {
@@ -195,6 +197,7 @@ impl Client {
             ws,
             next_id: 1,
             events: std::collections::VecDeque::new(),
+            seqs: Vec::new(),
         };
         let hello = ClientRequest::Hello {
             protocol_version: h4rn_protocol::PROTOCOL_VERSION,
@@ -239,7 +242,10 @@ impl Client {
                     Ok(body) => return body,
                     Err(error) => panic!("request failed: {error:?}"),
                 },
-                ServerFrame::Event { event, .. } => self.events.push_back(event),
+                ServerFrame::Event { seq, event } => {
+                    self.seqs.push(seq);
+                    self.events.push_back(event);
+                }
                 _ => {}
             }
         }
@@ -259,7 +265,8 @@ impl Client {
                 continue;
             };
             let frame: ServerFrame = serde_json::from_str(&text).expect("server frame");
-            if let ServerFrame::Event { event, .. } = frame {
+            if let ServerFrame::Event { seq, event } = frame {
+                self.seqs.push(seq);
                 return event;
             }
         }
@@ -4492,6 +4499,79 @@ async fn startup_raises_an_answer_an_older_marker_claimed_but_never_appended() {
     daemon.stop().await;
 }
 
+/// Startup raises a finished row's answer before an expired link is cleaned up.
+///
+/// An older build could leave a finished row whose marker says its answer was
+/// emitted while the journal never received it. If that link expired while the
+/// daemon was down, cleanup used to delete the row first and the stale marker
+/// then suppressed the answer: the owner's thread never learned what happened.
+/// Startup now compares every finished row with the journal before ending any
+/// link, and cleanup asks the journal rather than trusting the marker.
+#[tokio::test]
+async fn startup_raises_an_answer_before_an_expired_link_discards_the_row() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "expired crash image").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("answer before cleanup"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+    daemon
+        .guest
+        .send_request(&thread_id, &request_id)
+        .await
+        .expect("send");
+    assert_eq!(resolution_events(&daemon, &thread_id, &request_id).await, 1);
+
+    // The older build's crash image: the row claims the answer is out while the
+    // journal has never held it, and the link expired while the daemon was off.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query(
+        "DELETE FROM daemon_wire_events
+         WHERE thread_id = ? AND event_json LIKE '%guest_request_resolved%'
+           AND event_json LIKE ?",
+    )
+    .bind(thread_id.as_str())
+    .bind(format!("%{request_id}%"))
+    .execute(&pool)
+    .await
+    .expect("drop the answer the old marker was about");
+    sqlx::query("UPDATE guest_requests SET resolution_emitted = 1 WHERE request_id = ?")
+        .bind(&request_id)
+        .execute(&pool)
+        .await
+        .expect("write the stale marker");
+    sqlx::query("UPDATE guest_links SET expires_at = '2000-01-01T00:00:00Z' WHERE thread_id = ?")
+        .bind(thread_id.as_str())
+        .execute(&pool)
+        .await
+        .expect("expire the link");
+    pool.close().await;
+    assert_eq!(resolution_events(&daemon, &thread_id, &request_id).await, 0);
+    assert!(resolution_marker(&daemon, &request_id).await);
+
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        resolution_events(&daemon, &thread_id, &request_id).await,
+        1,
+        "the expired link's cleanup deleted the row before its answer was raised"
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await,
+        None,
+        "the expired link's finished row was not discarded"
+    );
+    daemon.stop().await;
+}
+
 /// A card is journaled only once its row can be sent or dismissed.
 ///
 /// The row transition to `pending` is the card's second half. Pausing between
@@ -4636,14 +4716,20 @@ async fn a_card_whose_row_update_fails_is_never_published_and_the_sweep_recovers
         request_status(&daemon, &request_id).await.as_deref(),
         Some("pending")
     );
-    // The card was journaled by the failed publication; recovery finishes its
-    // row without appending another one. The guest's page would otherwise show
-    // the card twice, and the owner's clients would never see it at all.
+    // The sweep finishes the second half and re-announces the card under a
+    // fresh sequence, because the original copy's publication never reached a
+    // live client. The owner's thread gets its pending request back, so the
+    // lifecycle does not treat the thread as idle.
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        1,
+        "recovery did not restore the pending guest request"
+    );
     let pool = journal_pool(&daemon).await;
     let cards: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM daemon_wire_events
          WHERE thread_id = ? AND event_json LIKE '%guest_requested%'
-           AND event_json LIKE ?",
+            AND event_json LIKE ?",
     )
     .bind(thread_id.as_str())
     .bind(format!("%{request_id}%"))
@@ -4651,7 +4737,10 @@ async fn a_card_whose_row_update_fails_is_never_published_and_the_sweep_recovers
     .await
     .expect("count cards");
     pool.close().await;
-    assert_eq!(cards, 1, "recovery journaled the guest card twice");
+    assert_eq!(
+        cards, 2,
+        "recovery did not journal the card again as news for a live owner"
+    );
     let recovered = owner_events_for(&mut owner, Duration::from_millis(300)).await;
     assert_eq!(
         recovered
@@ -4664,6 +4753,13 @@ async fn a_card_whose_row_update_fails_is_never_published_and_the_sweep_recovers
         1,
         "the recovered card was never announced to a live owner: {recovered:?}"
     );
+    for pair in owner.seqs.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "the recovered card arrived out of sequence: {:?}",
+            owner.seqs
+        );
+    }
     let snapshot = browser.state(0).await;
     assert_eq!(
         snapshot
@@ -4690,24 +4786,28 @@ async fn a_card_whose_row_update_fails_is_never_published_and_the_sweep_recovers
     daemon.stop().await;
 }
 
-/// A guest row write never holds the daemon-wide append lock.
+/// A subscriber never sees one thread's event overtake another's.
 ///
-/// The guest row lives on the same single-connection pool as every thread's
-/// journal. While a submission is paused inside its commit (after the row
-/// became `pending`, before the card is published), another thread's message
-/// must still be able to append; otherwise one guest would stall every thread
-/// on the machine for the length of a database write.
+/// Sequence numbers come from one journal-wide counter, and a client drops any
+/// frame at or below the last one it applied. While a guest submission is
+/// paused in the half that owns its row, another thread must not append and
+/// broadcast ahead of the guest's card: the card would then arrive after a
+/// later sequence and be dropped live for good.
 #[tokio::test]
-async fn a_guest_row_write_never_holds_up_another_thread() {
+async fn a_subscriber_never_sees_one_threads_event_overtake_anothers() {
     let daemon = boot().await;
     let base = format!("http://{}", daemon.addr);
-    let mut owner = Client::connect(&daemon).await;
-    let guest_thread = create_thread(&mut owner, daemon.dir.path(), "guest row").await;
-    let other_thread = create_thread(&mut owner, daemon.dir.path(), "other row").await;
-    let link = enable_and_share(&mut owner, &daemon.guest, &guest_thread, &base).await;
+    let mut subscriber = Client::connect(&daemon).await;
+    let guest_thread = create_thread(&mut subscriber, daemon.dir.path(), "ordered card").await;
+    let other_thread = create_thread(&mut subscriber, daemon.dir.path(), "ordered send").await;
+    let link = enable_and_share(&mut subscriber, &daemon.guest, &guest_thread, &base).await;
     let browser = bound_browser(&base, &link).await;
+    // A second socket sends the unrelated message. It connects before the
+    // guest pauses, because a subscribe's replay also takes the append lock.
+    let mut sender = Client::connect(&daemon).await;
 
-    // Pause the submission inside the commit that owns the guest row write.
+    // Pause the submission inside the commit that owns the guest row write,
+    // after the card is durable and before anything is broadcast.
     let gate = daemon
         .guest
         .pause_next_submit(h4rn_daemon::guest::SubmitPhase::AfterCommit);
@@ -4715,36 +4815,54 @@ async fn a_guest_row_write_never_holds_up_another_thread() {
         let browser = browser.clone();
         tokio::spawn(async move {
             browser
-                .post("/messages", &guest_text_message("slow row"))
+                .post("/messages", &guest_text_message("in order"))
                 .await
         })
     };
     gate.arrived().await;
 
-    // Another thread's send must not wait for that row's database.
-    let sent = tokio::time::timeout(
-        Duration::from_secs(2),
-        owner.request(ClientRequest::SendMessage {
-            thread_id: other_thread.clone(),
-            text: "unrelated message".into(),
-            attachments: Vec::new(),
-            steer: false,
-            turn_id: None,
-        }),
-    )
-    .await;
-    assert!(
-        sent.is_ok(),
-        "a guest row write stalled an unrelated thread's append"
-    );
+    // Start an unrelated thread's send in that window. It must wait for the
+    // guest's append and broadcast to be one step, so it cannot slip its own
+    // sequence in front of the card.
+    let send = tokio::spawn(async move {
+        sender
+            .request(ClientRequest::SendMessage {
+                thread_id: other_thread,
+                text: "unrelated message".into(),
+                attachments: Vec::new(),
+                steer: false,
+                turn_id: None,
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    gate.release();
+
+    let (status, body) = posting.await.expect("post task");
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
     assert!(matches!(
-        sent.expect("the send finished"),
+        send.await.expect("send task"),
         ResponseBody::MessageAccepted { .. }
     ));
 
-    gate.release();
-    let (status, body) = posting.await.expect("post task");
-    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let events = owner_events_for(&mut subscriber, Duration::from_millis(500)).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::GuestRequested { request, .. } if request.request_id == request_id
+        )),
+        "the guest card never reached the subscriber: {events:?}"
+    );
+    for pair in subscriber.seqs.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "a subscriber received seq {} after {}: {:?}",
+            pair[1],
+            pair[0],
+            subscriber.seqs
+        );
+    }
     daemon.stop().await;
 }
 
