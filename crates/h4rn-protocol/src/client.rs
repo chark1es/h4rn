@@ -139,6 +139,18 @@ pub enum ClientRequest {
         #[serde(default)]
         worktree: Option<WorktreeRequest>,
     },
+    /// Fork a thread at a settled turn.
+    ///
+    /// The new thread keeps the source's project, workspace, harness, model and
+    /// settings, and starts with the transcript through `turn_id`. The source
+    /// is never changed. A turn that is still running or queued is refused with
+    /// [`crate::ProtoErrorCode::Conflict`].
+    ForkThread {
+        /// Thread to copy.
+        thread_id: ThreadId,
+        /// Last turn the fork keeps, inclusive.
+        turn_id: crate::ids::TurnId,
+    },
     /// Append a user message to an existing thread.
     SendMessage {
         /// Thread to append to.
@@ -1764,6 +1776,7 @@ impl ClientRequest {
             | Self::ListScheduleRuns { .. }
             | Self::GitStatus { .. } => View,
             Self::CreateThread { .. }
+            | Self::ForkThread { .. }
             | Self::SendMessage { .. }
             | Self::QueueMessage { .. }
             | Self::Interrupt { .. }
@@ -2017,6 +2030,14 @@ mod tests {
         let thread = || ThreadId::new("th_1");
         let cases: Vec<(ClientRequest, crate::connect::PairScope)> = vec![
             (ClientRequest::ListHosts, View),
+            // A fork writes a new thread, so a viewer may not ask for one.
+            (
+                ClientRequest::ForkThread {
+                    thread_id: thread(),
+                    turn_id: crate::ids::TurnId::new("turn_1"),
+                },
+                Approve,
+            ),
             (
                 ClientRequest::ListFailoverOptions {
                     thread_id: thread(),

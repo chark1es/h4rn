@@ -1,4 +1,4 @@
-//! Alert selection and delivery for Android push (ADR-049).
+//! Alert selection and delivery for Android push (ADR-050).
 //!
 //! Connect may see the same transition many times (a reconnect, a retry, a
 //! daemon restart), so the delivered baseline is stored per `(user, thread)`

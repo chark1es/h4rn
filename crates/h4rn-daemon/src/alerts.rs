@@ -1,4 +1,4 @@
-//! Daemon-side publishing of agent alerts (ADR-049).
+//! Daemon-side publishing of agent alerts (ADR-050).
 //!
 //! The switch is off until the person turns it on in Settings → Notifications.
 //! While it is on, and only while the relay socket is attached, this service
@@ -478,6 +478,7 @@ mod tests {
             queue_revision: 0,
             active_turn_id: None,
             steer: true,
+            forked_from: None,
         }
     }
 

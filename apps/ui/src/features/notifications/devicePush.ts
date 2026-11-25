@@ -1,6 +1,6 @@
 /**
  * Android device alerts: registration with Connect and the foreground route
- * (ADR-049).
+ * (ADR-050).
  *
  * The daemon publishes transitions; Connect decides and sends them; this module
  * only makes the phone reachable. The chosen state is this device's own, so it

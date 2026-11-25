@@ -33,7 +33,7 @@ const MAX_SECRET_VALUE: usize = 64 * 1024;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 struct SecretStore(PluginHandle<tauri::Wry>);
 
-/// Android FCM bridge (ADR-049). The plugin is Android-only; iOS alerts are a
+/// Android FCM bridge (ADR-050). The plugin is Android-only; iOS alerts are a
 /// later task, so the commands report the feature unavailable there.
 #[cfg(target_os = "android")]
 struct PushBridge(PluginHandle<tauri::Wry>);

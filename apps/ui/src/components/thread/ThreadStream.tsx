@@ -197,8 +197,12 @@ export function ThreadReceipt({ summary, turns }: { summary: ThreadSummary; turn
   // messages, or only the cue rows that stand in for them) still came from
   // somewhere: the summary remembers the source even when no turn carries the
   // flag.
-  const imported =
-    written.length > 0 ? written.every((turn) => turn.imported) : summary.imported_from != null;
+  const copiedOnly = written.length > 0 && written.every((turn) => turn.imported);
+  // Copied history is not a finished turn of this thread. An imported
+  // conversation says where it came from; a fork says nothing here until it has
+  // run a turn of its own, and then its own receipt is the honest one.
+  if (copiedOnly && summary.forked_from) return null;
+  const imported = written.length > 0 ? copiedOnly : summary.imported_from != null;
   // The thread may have switched harness since the import. The receipt names
   // where the conversation came from, never the provider it runs on now.
   const source =
@@ -363,6 +367,7 @@ export function ThreadStream({
               {row.kind === "turn" ? (
                 <TurnBlock
                   turn={row.turn}
+                  turns={turns}
                   threadId={threadId}
                   summary={summary}
                   onReply={onReply}

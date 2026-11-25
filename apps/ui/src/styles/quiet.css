@@ -1617,6 +1617,69 @@ fieldset.q-seg-fs {
   color: var(--fg-3);
   margin-bottom: 8px;
 }
+.q-fork-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
+.q-fork-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-3);
+  text-align: left;
+}
+.q-fork-link span {
+  color: var(--fg-2);
+}
+.q-fork-link:hover {
+  color: var(--fg-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.q-turn-menu {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--fg-3);
+  opacity: 0;
+  transition:
+    opacity var(--dur-1),
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.q-turn:hover .q-turn-menu,
+.q-you-msg:hover .q-turn-menu,
+.q-turn-menu[data-state="open"],
+.q-turn-menu:focus-visible {
+  opacity: 1;
+}
+.q-turn-menu:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+@media (hover: none) {
+  .q-turn-menu {
+    opacity: 1;
+  }
+}
+/* A thumb needs the whole 44 px, but the glyph stays small: the negative
+   margins keep the row's own rhythm and only the hit area grows. */
+@media (max-width: 720px) {
+  .q-turn-menu {
+    width: 44px;
+    height: 44px;
+    margin: -11px -11px -11px auto;
+  }
+}
 .q-ag-head b {
   color: var(--fg-2);
   font-weight: 500;
@@ -4319,6 +4382,10 @@ fieldset.q-seg-fs {
     line-height: 26px;
     font-weight: 600;
     letter-spacing: -0.015em;
+  }
+  .q-fork-line {
+    margin-top: 3px;
+    font-size: 13px;
   }
   .q-ph-th-meta {
     display: flex;

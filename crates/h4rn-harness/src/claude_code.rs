@@ -175,6 +175,14 @@ impl Harness for ClaudeCodeHarness {
         self.install.clone().or_else(detect_claude)
     }
 
+    fn native_fork_scope(&self) -> Option<crate::NativeFork> {
+        // Claude Code copies the session it resumes in full. A turn that is no
+        // longer the session's tip cannot be forked natively: the copy would
+        // carry the later turns, so the daemon re-checks the tip at the fork's
+        // first start.
+        Some(crate::NativeFork::LatestOnly)
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -949,6 +957,11 @@ fn session_args(spec: &SessionSpec, mcp_config: Option<&Path>) -> Vec<String> {
     if let Some(resume_id) = spec.resume_id.as_deref().filter(|id| !id.is_empty()) {
         args.push("--resume".into());
         args.push(resume_id.to_string());
+        if spec.native_fork {
+            // Claude Code copies the saved conversation into a new session
+            // instead of continuing the one the source still owns.
+            args.push("--fork-session".into());
+        }
     }
     if let Some(config) = mcp_config {
         args.push("--mcp-config".into());
@@ -1289,6 +1302,8 @@ mod tests {
             reasoning_effort: Some("xhigh".into()),
             fast: false,
             resume_id: Some("sess-1".into()),
+            native_fork: false,
+            native_fork_turn: None,
             mcp_endpoint: None,
             env_overrides: BTreeMap::new(),
             attachments: Vec::new(),
@@ -1310,6 +1325,40 @@ mod tests {
         assert_eq!(pair("--effort"), Some("xhigh"));
         assert_eq!(pair("--permission-mode"), Some("plan"));
         assert_eq!(pair("--resume"), Some("sess-1"));
+        assert!(
+            !args.iter().any(|arg| arg == "--fork-session"),
+            "an ordinary resume continues the session in place"
+        );
+    }
+
+    #[test]
+    fn a_native_fork_asks_claude_to_copy_the_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut spec = spec(workspace.path());
+        spec.native_fork = true;
+        let args = session_args(&spec, None);
+        assert_eq!(
+            args.iter().position(|arg| arg == "--resume"),
+            Some(
+                args.iter()
+                    .position(|arg| arg == "--fork-session")
+                    .expect("the fork flag")
+                    - 2
+            ),
+            "--fork-session belongs directly after --resume <id>: {args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "--fork-session"));
+    }
+
+    #[test]
+    fn a_fork_flag_without_a_session_adds_nothing() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut spec = spec(workspace.path());
+        spec.resume_id = None;
+        spec.native_fork = true;
+        let args = session_args(&spec, None);
+        assert!(!args.iter().any(|arg| arg == "--fork-session"));
+        assert!(!args.iter().any(|arg| arg == "--resume"));
     }
 
     #[test]

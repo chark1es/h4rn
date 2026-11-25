@@ -1,4 +1,4 @@
--- Android push alerts (ADR-049).
+-- Android push alerts (ADR-050).
 --
 -- One row per Android install the signed-in user registered. The FCM token is
 -- a routing credential for Google, not an h4rn secret; it is nevertheless only

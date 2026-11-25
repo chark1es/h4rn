@@ -40,7 +40,7 @@
         </activity>
 
         <!-- FCM data messages are rendered by the app so the foreground
-             thread can stay quiet (ADR-049). -->
+             thread can stay quiet (ADR-050). -->
         <service
           android:name=".H4rnMessagingService"
           android:exported="false">

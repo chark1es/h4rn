@@ -1,5 +1,5 @@
 /**
- * The machine's phone-alert publishing switch (ADR-049).
+ * The machine's phone-alert publishing switch (ADR-050).
  *
  * The daemon owns this setting because the daemon publishes. Off is the
  * default; the UI mirrors the daemon's answer rather than deciding locally.

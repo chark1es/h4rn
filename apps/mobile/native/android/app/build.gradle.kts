@@ -10,7 +10,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 // Firebase Messaging compiles into every build, but the Google Services plugin
 // (and therefore a real Firebase project) is applied only when the operator
 // supplies `H4RN_ANDROID_GOOGLE_SERVICES_FILE`. Without it the app still
-// builds and Settings reports that alerts are unavailable (ADR-049).
+// builds and Settings reports that alerts are unavailable (ADR-050).
 buildscript {
     repositories {
         google()

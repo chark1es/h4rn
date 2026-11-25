@@ -442,7 +442,7 @@ export class ConnectClient {
     await this.authorized("DELETE", `/v1/devices/${id}`);
   }
 
-  /** Registers or rotates this install's FCM token (ADR-049). */
+  /** Registers or rotates this install's FCM token (ADR-050). */
   async registerPushDevice(input: {
     deviceId: string;
     token: string;

@@ -1862,7 +1862,11 @@ address and a hosted agent has no path in this phase.
 `QueuedMessageId`, so the queue survives a daemon restart in its order, and emits a summary instead
 of a transcript row: queued messages are not yet part of the conversation. **Steer** delivers the
 text into the turn that is already running, adds the user row to that turn, and never also queues
-it. With no turn running, a steer is an ordinary send.
+it. With no turn running, a steer is an ordinary send. A steered row is marked as part of its turn
+by a journal marker written in the same append as the row, so a replay can tell it from an older
+journal's queued prompt filed under the running turn: that row belongs to the next turn that
+starts, while a steer belongs to its own. Without the mark a fork of a steered turn would drop the
+steer, and the turn after it would read as ambiguous and could no longer be forked.
 
 **Only Codex steers.** Codex app-server has `turn/steer` with an `expectedTurnId`, so the server
 itself refuses a request aimed at a turn that has ended. Claude Code is not offered it: its
@@ -2084,7 +2088,104 @@ everything it staged, including the old provider's recorded limit and its
 countdown, and a Send the journal refuses takes its staged turn back so no
 dispatch, queued ghost or countdown outlives it.
 
-## ADR-049: Phone alerts carry a fixed thread transition, never conversation content
+## ADR-049: A fork copies a thread at a turn, natively when the harness can
+
+**Status:** Accepted
+
+A fork is a new thread, not a view over the source. It copies the source's
+project, workspace, harness, agent instance and settings, and its transcript is
+everything the source showed through the chosen turn, inclusive, journaled as
+the events that showed it with each record's own time and in the journal's own
+sequence: messages with their attachments, tool calls, delegated rows, plans,
+error and usage-limit rows, and a reply that only ever streamed. Only a turn the
+journal has evidence ended can be forked: copied history, or a turn it saw start
+and saw end (interrupted counts). An older journal recorded a host loss as the
+domain event and an error row without the wire completion that now ends the turn
+it lost; that stored loss is evidence too, so the turn beside it reads as
+interrupted and the turns after it stay forkable. A restart finds that turn in
+the wire rows as well and writes the completion the projection still needs, so a
+thread that was running when an older daemon stopped leaves Working. A prompt whose turn never
+started — queued at the crash, or lost with it — is not a turn: it is left out
+of a later turn's copy and cannot itself be forked, so a fork at a later turn
+never inherits it. The source's active turn is refused, and a turn that started
+without settling refuses the fork the same way. A queued message is not a turn:
+it has no journaled row (ADR-047), so a fork copies neither a message still
+waiting in the queue nor one a delivery claim is starting. A fork point the
+source never ran — a queue row's id — is refused as unknown. An
+imported turn has no completion of its own: it was already finished when it was
+written, so a copy of it stays completed rather than being mistaken for an
+interruption. The source is only read.
+
+The first message continues the conversation one of two ways. A native fork is
+a copy of the provider's own conversation, so it must be bounded to the chosen
+turn. Adapters say how far their own fork reaches (`native_fork_scope`): Codex
+app-server's `thread/fork` names the provider turn to copy through
+(`lastTurnId`), which the daemon recorded when that turn ran, so any finished
+turn is exact even after the source carries on; Claude Code's
+`--resume <id> --fork-session` copies the whole session, so it is only used while
+the chosen turn is still the source session's tip, re-checked under the
+source's record lock when the fork starts. That check opens a per-source gate
+before the lock is released: the source's next dispatch waits until the fork
+reports `SessionStarted`, its startup fails, or the copy's own deadline passes,
+so a message sent in that window cannot be read into the copy. The fork's prompt
+is written before its copy is waited on, and the deadline runs from that write:
+Claude Code reports its init frame only after the first user frame, so a fork
+that waited for the report first would never receive one. A provider still
+reading the source when the deadline passes has its process shut down and fenced,
+the source is released there — after the copy is stopped, before the handoff
+session starts — and the fork switches to the handoff. The source's Send is
+answered at once — its turn and prompt are already
+durable — and only its dispatch waits, in the background delivery, never while
+holding the per-thread switch lock, so the UI's deadline never reports a failure
+for a prompt that will run and a Send after the queue moved on is still answered
+at once. Each startup claims the thread's one session slot (its generation)
+before anything slow is awaited, and a gate hold is owned by that generation, so
+a second startup spawned for the same fork can neither copy nor release the
+source's gate. A session id is offered only by a thread that started that
+session itself; an unused fork still points at the conversation it was made from
+and hands off instead. Otherwise — a harness without native forks, a source that
+moved on, a copy past its deadline, or a failed start — the fork starts a fresh
+session and sends a bounded handoff of its copied history. This reuses the
+import's one-attempt machinery (ADR-045): the native intent is cleared when a
+session reports `SessionStarted`, or when it cannot be bounded, dies before that
+report, or misses its deadline, and the same turn is retried with the handoff.
+The handoff reads only the journaled turns before the dispatch it replaces, so a
+message queued during a pending startup is not part of the history and is not
+sent twice when it runs.
+
+The copy gate holds a source's next work, whichever way that work starts. A Send
+waits in its background delivery, and a queued message that a settlement promotes
+waits the same way before its claim reaches the adapter: the promotion is durable
+and published at once, only the write waits. Neither ever waits under the
+per-thread switch lock, so a closed gate cannot block the next Send behind a queue
+advance.
+
+An older journal filed a queued prompt under the running turn. The replay gives
+it to the next turn that starts and has no prompt of its own; a turn that already
+has one never inherits it. A held prompt that never became a turn is shown in no
+copy, and the fork at that point or later is refused with a clear message rather
+than copying a transcript that silently drops a row the source showed; that
+refusal advises forking from an earlier turn or starting a new thread, because no
+later fork point can include the lost row. The same rule runs in the client
+projection, where such a prompt's row is given no turn to fork.
+
+A fork's attachment blobs are adopted all or nothing: every blob is resolved for
+the new thread before it is journaled, and a failure rolls back every retain the
+attempt made — and the per-thread files it materialised — and fails the fork. A
+journal append that fails after adoption rolls back the same way. A transcript
+that pointed at the source's files, or at half its attachments, is not a fork.
+Only the new thread's summary is published on the live feed, in the same append
+lock scope as the copy, so no event with a later sequence can be delivered before
+it and make a client drop it as stale; the copied transcript is durable history
+read through the ordinary paged replay, so a long fork cannot fill the feed and
+stall other threads. Lineage is a `forked_from { thread_id, turn_id }` in the
+thread row,
+projected on the summary; the origin title is read from the thread list so a
+rename needs no rewrite. No cascade exists in either direction, so deleting or
+archiving the source cannot take the fork with it. A fork in a worktree keeps the
+source's workspace path; per-fork worktrees are a later feature.
+
+## ADR-050: Phone alerts carry a fixed thread transition, never conversation content
 
 **Status:** Accepted
 

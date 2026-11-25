@@ -3269,6 +3269,16 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         self.0.append_sent(meta, domain, wire, item_id).await
     }
 
+    async fn append_steer(
+        &self,
+        meta: &h4rn_daemon::journal::ThreadMeta,
+        domain: &[h4rn_core::ThreadEvent],
+        wire: &[Event],
+        item_id: &str,
+    ) -> Result<Vec<u64>, h4rn_daemon::journal::JournalError> {
+        self.0.append_steer(meta, domain, wire, item_id).await
+    }
+
     async fn append_wire(
         &self,
         thread_id: &ThreadId,
@@ -3315,6 +3325,22 @@ impl h4rn_daemon::journal::Journal for PoolLessJournal {
         self.0.read_domain(thread_id).await
     }
 
+    async fn read_journaled_turns(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<h4rn_daemon::journal::JournaledTurn>, h4rn_daemon::journal::JournalError> {
+        self.0.read_journaled_turns(thread_id).await
+    }
+    async fn note_native_turn(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: &h4rn_protocol::TurnId,
+        native_turn_id: &str,
+    ) -> Result<(), h4rn_daemon::journal::JournalError> {
+        self.0
+            .note_native_turn(thread_id, turn_id, native_turn_id)
+            .await
+    }
     async fn clear_handoff_pending(
         &self,
         thread_id: &ThreadId,

@@ -1,4 +1,4 @@
-//! FCM HTTP v1 sender tests against a mock server (ADR-049).
+//! FCM HTTP v1 sender tests against a mock server (ADR-050).
 //!
 //! The service-account key is generated at runtime and never committed. The
 //! token endpoint and FCM endpoint are the configurable URLs, so every test
