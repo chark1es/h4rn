@@ -665,6 +665,12 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A base or commit change keeps the tab its review was started for.** When a
+  Branch or Commits list is still loading, changing the base or the commit now
+  reopens the tab that list was started for instead of the file from before it,
+  and leaving and returning mid-read still reads that list once. Pressing
+  **Refresh** while a list is still out does the same, so the review never
+  jumps back to the file it was on before the load began.
 - **A harness switch hands the conversation over once.** The first turn on the
   new harness carries the journaled history exactly once, including after a dead
   native resume retries the same prompt; a message still waiting in the queue is
