@@ -26,8 +26,8 @@ const PACKAGE_NAME = "dev.h4rn.app";
 export type DeviceAlertsState = {
   /** This is the Android shell, so the row belongs on Settings. */
   supported: boolean;
-  /** The build has a Firebase project. */
-  available: boolean;
+  /** The build has a Firebase project; `null` when the shell did not answer. */
+  available: boolean | null;
   permission: DevicePushPermission;
   /** This device's switch; only meaningful while signed in. */
   enabled: boolean;
@@ -46,7 +46,8 @@ let lastRegistered = false;
 export function deviceStatusLine(device: DeviceAlertsState | null, signedIn: boolean): string {
   if (!signedIn) return "Sign in to Connect first.";
   if (device === null) return "Checking…";
-  if (!device.available) return "Unavailable in this build.";
+  if (device.available === false) return "Unavailable in this build.";
+  if (device.available === null) return "Could not check this phone's notifications. Try again.";
   if (device.permission === "denied") return "Blocked in system settings.";
   if (device.permission === "default")
     return "Android will ask for permission when you turn this on.";
@@ -71,6 +72,21 @@ export function deviceAvailabilityNote(device: DeviceAlertsState | null): string
     return "Could not check whether this Connect server can send alerts.";
   }
   return null;
+}
+
+/**
+ * Whether the device switch can be flipped right now.
+ *
+ * An unknown answer (`available === null`) is not a build without Firebase, so
+ * the switch stays usable and the person can try again.
+ */
+export function deviceToggleUsable(
+  device: DeviceAlertsState | null,
+  signedIn: boolean,
+  busy: boolean,
+): boolean {
+  if (!signedIn || device === null || busy) return false;
+  return device.available !== false && device.permission !== "denied";
 }
 
 export function devicePushEnabled(): boolean {
@@ -113,7 +129,12 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
       error: null,
     };
   }
-  const status = await nativePushStatus();
+  const result = await nativePushStatus();
+  const status = result.kind === "checked" ? result.status : null;
+  // A failed command says nothing about whether this build has Firebase.
+  const available =
+    result.kind === "checked" ? result.status.available : result.kind === "failed" ? null : false;
+  let error = result.kind === "failed" ? result.error : null;
   let configured: boolean | null = null;
   let registered = lastRegistered;
   const client = currentConnectClient();
@@ -125,28 +146,21 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
       // phones say nothing about whether this one can receive an alert.
       registered = relay.registered === true;
       lastRegistered = registered;
-    } catch (error) {
-      return {
-        supported,
-        available: status?.available ?? false,
-        permission: status?.permission ?? "unknown",
-        enabled: devicePushEnabled(),
-        registered,
-        configured: null,
-        token: status?.token ?? null,
-        error: describe(error),
-      };
+    } catch (caught) {
+      // Unknown, not "no sender": the next read can succeed.
+      configured = null;
+      error = describe(caught);
     }
   }
   return {
     supported,
-    available: status?.available ?? false,
+    available,
     permission: status?.permission ?? "unknown",
     enabled: devicePushEnabled(),
     registered,
     configured,
     token: status?.token ?? null,
-    error: null,
+    error,
   };
 }
 
@@ -154,8 +168,9 @@ export async function readDeviceAlerts(): Promise<DeviceAlertsState> {
 export async function registerDeviceAlerts(): Promise<void> {
   const client = currentConnectClient();
   if (!client) throw new Error("Sign in to Connect first.");
-  const status = await nativePushStatus();
-  if (!status?.available) {
+  const result = await nativePushStatus();
+  if (result.kind === "failed") throw new Error(result.error);
+  if (result.kind !== "checked" || !result.status.available) {
     throw new Error("This build has no Firebase configuration, so alerts cannot be delivered.");
   }
   const token = await nativePushToken();
@@ -163,16 +178,29 @@ export async function registerDeviceAlerts(): Promise<void> {
     deviceId: client.device.id,
     token,
     packageName: PACKAGE_NAME,
-    appVersion: status.appVersion,
+    appVersion: result.status.appVersion,
   });
   lastRegistered = true;
 }
 
 /** Turns the switch on, asking for permission and registering. */
 export async function enableDeviceAlerts(): Promise<DeviceAlertsState> {
-  await nativeRequestPushPermission();
-  const status = await nativePushStatus();
-  if (status?.permission !== "granted") {
+  try {
+    await nativeRequestPushPermission();
+  } catch (caught) {
+    // A refused dialog, or a shell that could not ask, still leaves the switch
+    // where it was; tell the person why instead of freezing it.
+    rememberEnabled(false);
+    const state = await readDeviceAlerts();
+    return { ...state, enabled: false, error: describe(caught) };
+  }
+  const result = await nativePushStatus();
+  if (result.kind === "failed") {
+    rememberEnabled(false);
+    const state = await readDeviceAlerts();
+    return { ...state, enabled: false, error: result.error };
+  }
+  if (result.kind !== "checked" || result.status.permission !== "granted") {
     return readDeviceAlerts();
   }
   rememberEnabled(true);
@@ -242,8 +270,8 @@ export function startDevicePush(): void {
     lastPhase = phase;
     if (phase !== "signed_in" || !devicePushEnabled()) return;
     void (async () => {
-      const status = await nativePushStatus();
-      if (status?.permission !== "granted") return;
+      const result = await nativePushStatus();
+      if (result.kind !== "checked" || result.status.permission !== "granted") return;
       await registerDeviceAlerts();
     })().catch(() => undefined);
   };

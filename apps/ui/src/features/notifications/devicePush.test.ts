@@ -9,6 +9,8 @@ import {
   type DeviceAlertsState,
   deviceAvailabilityNote,
   deviceStatusLine,
+  deviceToggleUsable,
+  enableDeviceAlerts,
   readDeviceAlerts,
 } from "./devicePush";
 
@@ -26,22 +28,28 @@ function state(patch: Partial<DeviceAlertsState> = {}): DeviceAlertsState {
   };
 }
 
-function stubAndroidShell(): void {
+function stubAndroidShell(): ReturnType<typeof vi.fn> {
   vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue(
     "Mozilla/5.0 (Linux; Android 14; Pixel 8)",
   );
-  vi.stubGlobal("__TAURI_INTERNALS__", {
-    invoke: vi.fn(async (command: string) => {
-      if (command !== "push_status") return null;
-      return {
-        available: true,
-        permission: "granted",
-        token: "token",
-        channel: true,
-        appVersion: "1.2.3",
-      };
-    }),
+  const invoke = vi.fn(async (command: string) => {
+    if (command !== "push_status") return null;
+    return {
+      available: true,
+      permission: "granted",
+      token: "token",
+      channel: true,
+      appVersion: "1.2.3",
+    };
   });
+  vi.stubGlobal("__TAURI_INTERNALS__", { invoke });
+  return invoke;
+}
+
+/** The shell bridge the test just installed. */
+function shellInvoke(): ReturnType<typeof vi.fn> {
+  return (window as unknown as { __TAURI_INTERNALS__: { invoke: ReturnType<typeof vi.fn> } })
+    .__TAURI_INTERNALS__.invoke;
 }
 
 afterEach(() => {
@@ -94,6 +102,17 @@ describe("device alert settings states", () => {
     expect(note).toContain("Could not check");
     expect(note).not.toContain("no push sender configured");
   });
+
+  it("keeps the switch usable when the shell could not answer", () => {
+    // A failed status call is not a build without Firebase, so it must not
+    // disable the switch and leave the person stuck on "Unavailable".
+    expect(deviceToggleUsable(state({ available: null }), true, false)).toBe(true);
+    expect(deviceToggleUsable(state({ available: false }), true, false)).toBe(false);
+    expect(deviceToggleUsable(state({ permission: "denied" }), true, false)).toBe(false);
+    expect(deviceToggleUsable(state(), false, false)).toBe(false);
+    expect(deviceToggleUsable(state(), true, true)).toBe(false);
+    expect(deviceToggleUsable(null, true, false)).toBe(false);
+  });
 });
 
 describe("reading this phone's real alert state", () => {
@@ -127,5 +146,70 @@ describe("reading this phone's real alert state", () => {
     expect(device.configured).toBeNull();
     expect(device.error).toContain("unreachable");
     expect(deviceAvailabilityNote(device)).toContain("Could not check");
+  });
+
+  it("reports a shell status failure as unknown and asks to try again", async () => {
+    stubAndroidShell();
+    shellInvoke().mockImplementation(async (command: string) => {
+      if (command === "push_status") throw new Error("bridge busy");
+      return null;
+    });
+
+    const device = await readDeviceAlerts();
+
+    expect(device.available).toBeNull();
+    expect(device.error).toContain("bridge busy");
+    expect(deviceStatusLine(device, true)).toContain("Try again");
+    expect(deviceStatusLine(device, true)).not.toContain("Unavailable in this build");
+  });
+});
+
+describe("turning device notifications on", () => {
+  it("shows a refused permission request and leaves the switch usable", async () => {
+    stubAndroidShell();
+    const invoke = shellInvoke();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "push_request_permission") throw new Error("permission dialog failed");
+      if (command !== "push_status") return null;
+      return {
+        available: true,
+        permission: "denied",
+        token: null,
+        channel: true,
+        appVersion: "1.2.3",
+      };
+    });
+
+    const refused = await enableDeviceAlerts();
+
+    expect(refused.enabled).toBe(false);
+    expect(refused.error).toContain("permission dialog failed");
+    expect(deviceStatusLine(refused, true)).toBe("Blocked in system settings.");
+
+    // The next attempt is not stuck behind the failure.
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "push_token") return "fcm-token";
+      if (command !== "push_status") return null;
+      return {
+        available: true,
+        permission: "granted",
+        token: "fcm-token",
+        channel: true,
+        appVersion: "1.2.3",
+      };
+    });
+    const registerPushDevice = vi.fn(async () => undefined);
+    setConnectClient({
+      device: { id: "device-1" },
+      registerPushDevice,
+      pushStatus: vi.fn(async () => ({ configured: true, devices: 1, registered: true })),
+    } as unknown as ConnectClient);
+
+    const enabled = await enableDeviceAlerts();
+
+    expect(registerPushDevice).toHaveBeenCalledOnce();
+    expect(enabled.enabled).toBe(true);
+    expect(enabled.error).toBeNull();
+    expect(deviceStatusLine(enabled, true)).toBe("Registered with this phone.");
   });
 });

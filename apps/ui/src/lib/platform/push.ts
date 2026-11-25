@@ -24,6 +24,18 @@ export type NativePushStatus = {
   appVersion: string;
 };
 
+/**
+ * What the shell said about this phone.
+ *
+ * A failed command is its own answer: it says nothing about whether the build
+ * has Firebase, so the UI reports "unknown" and lets the person try again
+ * instead of claiming the build cannot carry alerts.
+ */
+export type NativePushStatusResult =
+  | { kind: "checked"; status: NativePushStatus }
+  | { kind: "failed"; error: string }
+  | { kind: "unsupported" };
+
 function internals(): TauriInternals | null {
   const candidate = (window as unknown as { __TAURI_INTERNALS__?: TauriInternals })
     .__TAURI_INTERNALS__;
@@ -43,20 +55,23 @@ function describe(error: unknown): string {
   return String(error);
 }
 
-export async function nativePushStatus(): Promise<NativePushStatus | null> {
+export async function nativePushStatus(): Promise<NativePushStatusResult> {
   const api = internals();
-  if (!api || !deviceAlertsShell()) return null;
+  if (!api || !deviceAlertsShell()) return { kind: "unsupported" };
   try {
     const status = await api.invoke<NativePushStatus>("push_status");
     return {
-      available: status.available === true,
-      permission: status.permission ?? "unknown",
-      token: status.token ?? null,
-      channel: status.channel === true,
-      appVersion: status.appVersion ?? "",
+      kind: "checked",
+      status: {
+        available: status.available === true,
+        permission: status.permission ?? "unknown",
+        token: status.token ?? null,
+        channel: status.channel === true,
+        appVersion: status.appVersion ?? "",
+      },
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return { kind: "failed", error: describe(error) };
   }
 }
 

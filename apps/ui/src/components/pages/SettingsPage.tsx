@@ -22,6 +22,7 @@ import {
   type DeviceAlertsState,
   deviceAvailabilityNote,
   deviceStatusLine,
+  deviceToggleUsable,
   disableDeviceAlerts,
   enableDeviceAlerts,
   readDeviceAlerts,
@@ -544,6 +545,10 @@ function NotificationsForm() {
     setDeviceBusy(true);
     try {
       setDevice(next ? await enableDeviceAlerts() : await disableDeviceAlerts());
+    } catch (cause) {
+      // Never leave the row frozen: a failed turn-on reports why and stays off.
+      const state = await readDeviceAlerts();
+      setDevice({ ...state, enabled: false, error: describeError(cause) });
     } finally {
       setDeviceBusy(false);
     }
@@ -651,13 +656,7 @@ function NotificationsForm() {
                 <Toggle
                   checked={device?.enabled === true && device?.permission === "granted"}
                   label="Device notifications"
-                  disabled={
-                    !signedIn ||
-                    device === null ||
-                    deviceBusy ||
-                    !device.available ||
-                    device.permission === "denied"
-                  }
+                  disabled={!deviceToggleUsable(device, signedIn, deviceBusy)}
                   onChange={(next) => void changeDeviceAlerts(next)}
                 />
               </div>
@@ -668,7 +667,7 @@ function NotificationsForm() {
                 page.
               </p>
             ) : null}
-            {device && !device.available ? (
+            {device?.available === false ? (
               <p className="s q-muted">
                 This build has no Firebase configuration, so it cannot receive alerts.
               </p>
