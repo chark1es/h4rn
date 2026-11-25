@@ -103,7 +103,7 @@ pub enum ClientRequest {
     /// the harness's own history. The prompt and its attachments come back in
     /// the answer for the composer. `restore_files` also puts the workspace
     /// back to the checkpoint taken before that message; it is only offered
-    /// for a thread in its own worktree (ADR-047).
+    /// for a thread in its own worktree (ADR-048).
     RewindThread {
         /// Thread to rewind.
         thread_id: ThreadId,
@@ -112,6 +112,29 @@ pub enum ClientRequest {
         /// Also restore the workspace to the pre-message snapshot.
         #[serde(default)]
         restore_files: bool,
+    },
+    /// What rewinding one prompt would really do.
+    ///
+    /// Answered with [`crate::ResponseBody::RewindPlan`]. The thread summary
+    /// only says what the harness can do; this names the method for the
+    /// selected prompt, and whether file restore is both available and turned
+    /// on for this machine.
+    RewindPlan {
+        /// Thread the prompt belongs to.
+        thread_id: ThreadId,
+        /// The sent user message a rewind would remove from.
+        before_item_id: String,
+    },
+    /// This machine's Labs switches for rewinding.
+    ///
+    /// Answered with [`crate::ResponseBody::RewindSettings`].
+    GetRewindSettings,
+    /// Turn file restore on or off for this machine.
+    ///
+    /// Answered with the saved [`crate::ResponseBody::RewindSettings`].
+    SetRewindSettingsEnabled {
+        /// New value.
+        enabled: bool,
     },
     /// Interrupt the running turn.
     Interrupt {
@@ -1628,6 +1651,8 @@ impl ClientRequest {
             | Self::ListAcpAgents
             | Self::ListWorktrees
             | Self::GetWorktreeSettings
+            | Self::RewindPlan { .. }
+            | Self::GetRewindSettings
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
             | Self::ForgeListPrs { .. }
@@ -1764,6 +1789,7 @@ impl ClientRequest {
             | Self::UpdateHarness { .. }
             | Self::ClearWorktrees { .. }
             | Self::SetWorktreeSettings { .. }
+            | Self::SetRewindSettingsEnabled { .. }
             | Self::AddTextGenerator { .. }
             | Self::UpdateTextGenerator { .. }
             | Self::RemoveTextGenerator { .. }

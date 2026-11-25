@@ -10,6 +10,7 @@ import type {
   LimitStatus,
   ProtoError,
   ResumeSchedule,
+  RewindPlan,
   RewoundPrompt,
   RuntimeMode,
   ThreadId,
@@ -825,6 +826,19 @@ export function startConnection(): void {
 
   app.onEvent((envelope) => {
     enqueueEvent(envelope);
+    // A planned native rewind can still be refused when the next session
+    // starts. The daemon journals that moment; say it once, live, and let a
+    // replay fold the event without repeating the news.
+    if (!envelope.replayed && envelope.event.type === "rewind_fell_back") {
+      const harness = getState().threads[envelope.event.thread_id]?.harness;
+      pushToast({
+        variant: "info",
+        title: "The rewind fell back to a fresh session",
+        description: harness
+          ? `${harnessName(harness)} refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.`
+          : "The harness refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.",
+      });
+    }
     for (const listener of appEventListeners) listener(envelope);
   });
 
@@ -1425,6 +1439,28 @@ let localCounter = 0;
 let composerRestoreToken = 0;
 
 /**
+ * What rewinding one prompt would really do.
+ *
+ * The thread row only says what the harness *can* do. A prompt recorded before
+ * its provider boundary was kept, and a conversation with no provider session,
+ * can only use a handoff, so the dialog asks the daemon for the selected
+ * prompt's plan instead of promising the thread-wide method.
+ *
+ * Throws when the plan cannot be read; the dialog shows the reason.
+ */
+export async function planRewind(threadId: ThreadId, beforeItemId: string): Promise<RewindPlan> {
+  const response = await getClient().request({
+    type: "rewind_plan",
+    thread_id: threadId,
+    before_item_id: beforeItemId,
+  });
+  if (response.type !== "rewind_plan") {
+    throw new Error("The daemon answered a rewind plan with the wrong shape.");
+  }
+  return response.plan;
+}
+
+/**
  * Edits an earlier prompt: the daemon removes it and everything after it.
  *
  * On success the prompt and its attachments wait in `ui.composerRestore`, and
@@ -1463,6 +1499,16 @@ export async function rewindThread(
         },
         focusComposerNonce: current.ui.focusComposerNonce + 1,
       },
+    });
+    // Say what the harness really did, not what the thread row advertises: the
+    // answer names the method the daemon recorded for this cut.
+    const harness = current.threads[threadId]?.harness;
+    pushToast({
+      title: "Thread rewound",
+      description:
+        prompt.method === "native" && harness
+          ? `${harnessName(harness)} dropped the removed turns from its own history.`
+          : "A fresh session will continue from the kept conversation.",
     });
     return prompt;
   } catch (error) {

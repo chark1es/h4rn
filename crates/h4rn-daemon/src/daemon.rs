@@ -300,6 +300,15 @@ impl DaemonBuilder {
             Arc::clone(&worktree_settings),
         )));
 
+        // File restore is a Labs feature, off by default. The store owns the
+        // machine-wide choice; the manager enforces it and advertises it in
+        // every thread summary.
+        let rewind_settings = Arc::new(
+            crate::rewind::RewindSettingsStore::open(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open rewind settings: {error}"))?,
+        );
+        manager.set_file_rewind_enabled(rewind_settings.files_enabled());
+
         // Scheduled tasks share the journal so the timer, secrets and run
         // history survive a restart. The runner starts once the worktree
         // tracker exists, so a task that protects a checkout is wired before
@@ -653,6 +662,7 @@ impl DaemonBuilder {
             subagents,
             worktrees,
             worktree_settings,
+            rewind_settings,
             hosts,
             terminals,
             blobs,
@@ -687,6 +697,7 @@ pub struct Daemon {
     subagents: Arc<SubagentManager>,
     worktrees: Arc<crate::worktrees::WorktreeTracker>,
     worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
+    rewind_settings: Arc<crate::rewind::RewindSettingsStore>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     blobs: Arc<BlobStore>,
@@ -943,6 +954,7 @@ impl Daemon {
             subagents: Arc::clone(&self.subagents),
             worktrees: Arc::clone(&self.worktrees),
             worktree_settings: Arc::clone(&self.worktree_settings),
+            rewind_settings: Arc::clone(&self.rewind_settings),
             hosts,
             terminals: Arc::clone(&self.terminals),
             blobs: Arc::clone(&self.blobs),

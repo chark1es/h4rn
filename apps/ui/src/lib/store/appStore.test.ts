@@ -20,6 +20,8 @@ import {
   getState,
   loadThread,
   loadThreads,
+  planRewind,
+  rewindThread,
   setThreadTab,
   store,
 } from "./appStore";
@@ -351,5 +353,52 @@ describe("manual placements", () => {
     unsubscribe();
 
     expect(seen).toEqual([]);
+  });
+});
+
+describe("planRewind", () => {
+  beforeEach(() => {
+    fake.response.current = null;
+    fake.request.mockClear();
+  });
+
+  it("asks the daemon what the selected prompt's rewind would do", async () => {
+    fake.response.current = {
+      type: "rewind_plan",
+      plan: { method: "handoff", files_enabled: false, files_available: false },
+    };
+    const plan = await planRewind("th_plan", "item_user_1");
+    expect(fake.request).toHaveBeenCalledWith({
+      type: "rewind_plan",
+      thread_id: "th_plan",
+      before_item_id: "item_user_1",
+    });
+    expect(plan.method).toBe("handoff");
+    expect(plan.files_enabled).toBe(false);
+  });
+});
+
+describe("rewindThread", () => {
+  beforeEach(() => {
+    fake.response.current = null;
+    fake.request.mockClear();
+    seedHosts([]);
+  });
+
+  it("reports the method the daemon really used", async () => {
+    fake.response.current = {
+      type: "rewound",
+      prompt: {
+        thread_id: "th_rewind",
+        before_item_id: "item_user_1",
+        prompt: "try again",
+        attachments: [],
+        files_restored: false,
+        method: "handoff",
+      },
+    };
+    const prompt = await rewindThread("th_rewind", "item_user_1", false);
+    expect(prompt?.method).toBe("handoff");
+    expect(getState().toasts.at(-1)?.description).toContain("fresh session");
   });
 });

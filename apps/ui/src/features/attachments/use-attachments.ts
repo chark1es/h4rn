@@ -213,8 +213,10 @@ export function useAttachmentDrafts(
           });
         }
         if (additions.length === 0) return current;
-        const room = Math.max(0, MAX_ATTACHMENTS - current.length);
-        return [...current, ...additions.slice(0, room)];
+        // A rewind must never silently drop part of the prompt's attachments.
+        // Put every one back, even past the send limit: the person resolves
+        // the limit before sending, and the composer says how many to remove.
+        return [...current, ...additions];
       });
     },
     [setTasks],
@@ -276,7 +278,11 @@ export function useAttachmentDrafts(
       ? "Wait for the attachments to finish uploading."
       : failed
         ? "Retry or remove the failed attachment."
-        : null;
+        : drafts.length > MAX_ATTACHMENTS
+          ? `A message can carry ${MAX_ATTACHMENTS} attachments. Remove ${
+              drafts.length - MAX_ATTACHMENTS
+            } before sending.`
+          : null;
 
   return {
     tasks: drafts,

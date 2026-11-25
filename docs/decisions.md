@@ -1804,7 +1804,7 @@ transport specifies and what keeps one scope check and one rate-limit hit attach
 is loopback-only, and the Connect relay does not yet carry HTTP, so the copied URL is the local
 address and a hosted agent has no path in this phase.
 
-## ADR-047: A rewind is one durable conversation edit, with an optional file checkpoint
+## ADR-048: A rewind is one durable conversation edit, with an optional file checkpoint
 
 **Context.** People want to change an earlier prompt instead of adding another
 one, and they expect the provider to forget the turns that followed. They also
@@ -1821,12 +1821,18 @@ requesting device. The provider boundary names what the provider really
 recorded: Claude Code's assistant-message uuid before the removed prompt,
 Codex's accepted provider turn for the first removed delivered prompt. A
 harness without a native truncation, or a boundary the provider refuses, gets a
-fresh session with a bounded handoff of the kept history. The file choice
-exists only for a thread in its own linked worktree with a complete pre-turn
-checkpoint (a git tree of the whole tracked worktree), is refused when another
-live thread or agent session shares the directory (finished, fully idle
-subagents of the same thread excepted), and requires the same worktree
-registration the thread was created with. The restore writes a durable journal
+fresh session with a bounded handoff of the kept history; if the provider
+refuses a planned boundary, that fallback is journaled and reported rather than
+silently applied. The dialog asks for the plan of the selected prompt, because
+the thread-wide capability cannot name what an older prompt, or a first prompt,
+will really use. File restore is a **Labs** feature, off by default while it is
+still being hardened: the daemon refuses it, the summary reports it unavailable
+and the dialog hides it until Settings → Labs turns it on. It exists only for a
+thread in its own linked worktree with a complete pre-turn checkpoint (a git
+tree of the whole tracked worktree), is refused when another live thread or
+agent session shares the directory (finished, fully idle subagents of the same
+thread excepted), and requires the same worktree registration the thread was
+created with. The restore writes a durable journal
 with the replaced bytes, applies the files, commits the cut and the record
 changes together, and only then publishes the new in-memory state. A failed
 commit rolls the files back; a crash between apply and commit is rolled back at
@@ -1837,6 +1843,8 @@ are restored as directory entries and never followed.
 **Consequences.** The transcript and provider history can be at slightly
 different points between the rewind and the next prompt, but no session that
 still holds the removed turns is ever written to. The word "rewind" in the UI
-means the conversation; file restore is a separate, explicitly warned choice
-offered only where a complete checkpoint exists. A provider that loses its
-native boundary degrades to a handoff rather than resuming the wrong history.
+means the conversation; file restore is a separate, explicitly warned Labs
+choice offered only where a complete checkpoint exists, so it can be held back
+while its remaining correctness gaps are closed without taking the conversation
+rewind with it. A provider that loses its native boundary degrades to a handoff
+rather than resuming the wrong history, and the person is told when it does.

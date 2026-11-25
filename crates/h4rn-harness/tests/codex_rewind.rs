@@ -4,12 +4,18 @@
 //! is asked to perform so the test can prove the boundary names the first
 //! removed provider turn.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::path::PathBuf;
 
-use h4rn_harness::{CodexHarness, Harness, HarnessError, HarnessInstall, SessionSpec};
+use h4rn_harness::{CodexHarness, Harness};
+#[cfg(unix)]
+use h4rn_harness::{HarnessError, HarnessInstall, SessionSpec};
+#[cfg(unix)]
 use h4rn_protocol::{HarnessKind, RuntimeMode, SessionRewind};
 
+#[cfg(unix)]
 fn install_script(log: &std::path::Path) -> PathBuf {
     let path = log.with_file_name("fake-codex");
     let body = format!(
@@ -47,6 +53,7 @@ for line in sys.stdin:
     path
 }
 
+#[cfg(unix)]
 fn spec(
     workspace: PathBuf,
     resume_id: Option<String>,
@@ -68,6 +75,7 @@ fn spec(
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_pending_codex_rewind_reverts_the_provider_thread_before_the_first_prompt() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -100,6 +108,7 @@ async fn a_pending_codex_rewind_reverts_the_provider_thread_before_the_first_pro
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn codex_refuses_a_boundary_its_conversation_does_not_know() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -139,6 +148,7 @@ async fn codex_refuses_a_boundary_its_conversation_does_not_know() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn codex_refuses_a_boundary_only_claude_code_can_name() {
     let directory = tempfile::tempdir().expect("tempdir");

@@ -3,16 +3,23 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ThreadSummary } from "@/gen";
+import type { RewindMethod, ThreadSummary } from "@/gen";
 import { RewindDialog } from "./RewindDialog";
 
 const mock = vi.hoisted(() => ({
   rewindThread: vi.fn(async () => ({}) as never),
+  planRewind: vi.fn(),
   refusal: null as string | null,
   filesAvailable: true,
+  plan: {
+    method: "handoff" as RewindMethod,
+    filesEnabled: true,
+    error: null as string | null,
+  },
 }));
 
 vi.mock("@/lib/store/appStore", () => ({
+  planRewind: mock.planRewind,
   rewindThread: mock.rewindThread,
   rewindRefusal: () => mock.refusal,
   filesRewindAvailable: () => mock.filesAvailable,
@@ -63,9 +70,18 @@ afterEach(() => {
   vi.clearAllMocks();
   mock.refusal = null;
   mock.filesAvailable = true;
+  mock.plan = { method: "handoff", filesEnabled: true, error: null };
 });
 
 function open(overrides: Partial<ThreadSummary> = {}) {
+  mock.planRewind.mockImplementation(async () => {
+    if (mock.plan.error) throw new Error(mock.plan.error);
+    return {
+      method: mock.plan.method,
+      files_enabled: mock.plan.filesEnabled,
+      files_available: mock.filesAvailable,
+    };
+  });
   return render(
     <RewindDialog
       thread={{ ...thread, ...overrides }}
@@ -78,9 +94,9 @@ function open(overrides: Partial<ThreadSummary> = {}) {
 }
 
 describe("RewindDialog", () => {
-  it("offers both choices and warns before reverting files", () => {
+  it("offers both choices and warns before reverting files", async () => {
     open();
-    expect(screen.getByText("Revert and keep changes")).toBeTruthy();
+    expect(await screen.findByText("Revert and keep changes")).toBeTruthy();
     expect(screen.getByText("Revert files too")).toBeTruthy();
     expect(screen.queryByText(/also undoes edits you made yourself/)).toBeNull();
     fireEvent.click(screen.getByLabelText(/Revert files too/));
@@ -90,6 +106,11 @@ describe("RewindDialog", () => {
 
   it("sends the file choice to the daemon and closes on success", async () => {
     const onOpenChange = vi.fn();
+    mock.planRewind.mockImplementation(async () => ({
+      method: "handoff",
+      files_enabled: true,
+      files_available: true,
+    }));
     render(
       <RewindDialog
         thread={thread}
@@ -99,6 +120,7 @@ describe("RewindDialog", () => {
         onOpenChange={onOpenChange}
       />,
     );
+    await screen.findByText("Revert files too");
     fireEvent.click(screen.getByLabelText(/Revert files too/));
     fireEvent.click(screen.getByRole("button", { name: "Rewind thread" }));
     await vi.waitFor(() =>
@@ -107,23 +129,60 @@ describe("RewindDialog", () => {
     await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   });
 
-  it("explains a missing complete checkpoint", () => {
+  it("hides the file choice entirely while the Labs switch is off", async () => {
+    mock.plan.filesEnabled = false;
+    open();
+    expect(await screen.findByText(/starts a new session with a handoff/)).toBeTruthy();
+    expect(screen.queryByText("Revert files too")).toBeNull();
+    expect(screen.queryByText("Revert and keep changes")).toBeNull();
+    expect(screen.queryByText(/no complete file checkpoint/)).toBeNull();
+    expect(screen.queryByText(/only its conversation is rewound/)).toBeNull();
+  });
+
+  it("names the handoff for a prompt with no recorded provider boundary", async () => {
+    mock.plan.method = "handoff";
+    open();
+    expect(await screen.findByText(/starts a new session with a handoff/)).toBeTruthy();
+    expect(screen.queryByText(/drops this message and every later turn/)).toBeNull();
+  });
+
+  it("names the native truncation when the prompt has a boundary", async () => {
+    mock.plan.method = "native";
+    open();
+    expect(
+      await screen.findByText(/drops this message and every later turn from its own history/),
+    ).toBeTruthy();
+  });
+
+  it("refuses when the plan cannot be read", async () => {
+    mock.plan.error = "The thread is not loaded yet.";
+    open();
+    expect(await screen.findByText("The thread is not loaded yet.")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Rewind thread" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("explains a missing complete checkpoint", async () => {
     mock.filesAvailable = false;
     open();
+    await screen.findByText(/starts a new session with a handoff/);
     expect(screen.queryByText("Revert files too")).toBeNull();
     expect(screen.getByText(/no complete file checkpoint/)).toBeTruthy();
   });
 
-  it("only offers the conversation when the thread is in the main folder", () => {
+  it("only offers the conversation when the thread is in the main folder", async () => {
+    mock.filesAvailable = false;
     open({ file_rewind: false });
+    await screen.findByText(/starts a new session with a handoff/);
     expect(screen.queryByText("Revert files too")).toBeNull();
     expect(screen.getByText(/only its conversation is rewound/)).toBeTruthy();
   });
 
-  it("explains a refusal and disables the action", () => {
+  it("explains a refusal and disables the action", async () => {
     mock.refusal = "Wait for the current turn to finish, or stop it first.";
     open({ agent_state: "thinking" });
-    expect(screen.getByText(/Wait for the current turn to finish/)).toBeTruthy();
+    expect(await screen.findByText(/Wait for the current turn to finish/)).toBeTruthy();
     expect(
       (screen.getByRole("button", { name: "Rewind thread" }) as HTMLButtonElement).disabled,
     ).toBe(true);

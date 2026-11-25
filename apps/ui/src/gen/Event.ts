@@ -218,6 +218,14 @@ restore_id?: string,
 /**
  * When the rewind happened.
  */
+at: string, } | { "type": "rewind_fell_back", 
+/**
+ * Thread whose pending native rewind became a handoff.
+ */
+thread_id: ThreadId, 
+/**
+ * When the fallback happened.
+ */
 at: string, } | { "type": "agent_state_changed", 
 /**
  * Thread.

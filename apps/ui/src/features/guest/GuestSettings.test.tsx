@@ -12,17 +12,25 @@ vi.mock("@/lib/store/appStore", () => ({
 }));
 
 import { resetAccessStore } from "../access/store";
+import { resetRewindSettingsForTests } from "../rewind/settings";
 import { GuestSettingsForm } from "./GuestSettings";
 import { resetGuestStoreForTests } from "./guestStore";
 
 beforeEach(() => {
   resetGuestStoreForTests();
   resetAccessStore();
+  resetRewindSettingsForTests();
   request.mockReset();
   request.mockImplementation(
-    (body: { type: string; request?: { type: string; enabled?: boolean } }) => {
+    (body: { type: string; enabled?: boolean; request?: { type: string; enabled?: boolean } }) => {
       if (body.type === "guest_settings" || body.type === "set_guest_settings") {
         return Promise.resolve({ type: "guest_settings", settings: { enabled: false } });
+      }
+      if (body.type === "get_rewind_settings" || body.type === "set_rewind_settings_enabled") {
+        return Promise.resolve({
+          type: "rewind_settings",
+          settings: { files_enabled: body.enabled === true },
+        });
       }
       if (body.type !== "mcp") throw new Error(`unexpected request ${body.type}`);
       switch (body.request?.type) {
@@ -44,6 +52,7 @@ afterEach(() => {
   cleanup();
   resetGuestStoreForTests();
   resetAccessStore();
+  resetRewindSettingsForTests();
 });
 
 describe("Settings → Labs", () => {
@@ -74,10 +83,34 @@ describe("Settings → Labs", () => {
     );
   });
 
+  it("keeps rewind file restore off by default and turns it on from the switch", async () => {
+    render(<GuestSettingsForm />);
+    const toggle = (await screen.findByRole("switch", {
+      name: "Rewind files with Edit from here",
+    })) as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("switch", { name: "Rewind files with Edit from here" })
+          .getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    expect(request).toHaveBeenCalledWith({
+      type: "set_rewind_settings_enabled",
+      enabled: true,
+    });
+  });
+
   it("shows a failed outside-agent setting load under its switch", async () => {
     request.mockImplementation((body: { type: string; request?: { type: string } }) => {
       if (body.type === "guest_settings") {
         return Promise.resolve({ type: "guest_settings", settings: { enabled: false } });
+      }
+      if (body.type === "get_rewind_settings") {
+        return Promise.resolve({ type: "rewind_settings", settings: { files_enabled: false } });
       }
       if (body.type === "mcp" && body.request?.type === "outside_agent_settings") {
         return Promise.reject(new Error("daemon unavailable"));

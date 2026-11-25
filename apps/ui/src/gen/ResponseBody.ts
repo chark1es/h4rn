@@ -75,6 +75,8 @@ import type { ProxyProfile } from "./ProxyProfile";
 import type { ProxyTestReport } from "./ProxyTestReport";
 import type { Resets } from "./Resets";
 import type { ResumeSchedule } from "./ResumeSchedule";
+import type { RewindPlan } from "./RewindPlan";
+import type { RewindSettings } from "./RewindSettings";
 import type { RewoundPrompt } from "./RewoundPrompt";
 import type { ScheduleRun } from "./ScheduleRun";
 import type { ScheduleTask } from "./ScheduleTask";
@@ -206,7 +208,15 @@ seq: number, } | { "type": "rewound",
 /**
  * The prompt to put back in the composer.
  */
-prompt: RewoundPrompt, } | { "type": "terminal_opened", 
+prompt: RewoundPrompt, } | { "type": "rewind_plan", 
+/**
+ * The planned method and whether file restore is available.
+ */
+plan: RewindPlan, } | { "type": "rewind_settings", 
+/**
+ * Current settings.
+ */
+settings: RewindSettings, } | { "type": "terminal_opened", 
 /**
  * The new terminal, including its effective size.
  */

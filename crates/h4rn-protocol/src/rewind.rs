@@ -1,6 +1,6 @@
 //! Editing an earlier prompt rewinds the conversation, and optionally its files.
 //!
-//! A rewind is one durable decision (ADR-047). The daemon truncates the thread
+//! A rewind is one durable decision (ADR-048). The daemon truncates the thread
 //! at the chosen user message, tells the harness to drop that message and
 //! everything after it from its own history, and can put the workspace back to
 //! the turn snapshot taken before the message. The wire types here are shared
@@ -8,6 +8,39 @@
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+/// This machine's Labs switches for rewinding a thread.
+///
+/// File restore is off until the person turns it on in Settings → Labs →
+/// **Rewind files with Edit from here**. While it is off the daemon refuses a
+/// rewind that asks for files, the thread summary reports file rewind as
+/// unavailable, and the dialog offers only the conversation rewind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RewindSettings {
+    /// Whether Settings → Labs → **Rewind files with Edit from here** is on for
+    /// this machine.
+    #[serde(default)]
+    pub files_enabled: bool,
+}
+
+/// What one selected prompt's rewind will really do.
+///
+/// The thread's harness only says what it *can* do. A prompt recorded before
+/// the provider boundary was kept, or a conversation that never started a
+/// provider session, can only use a handoff. A preview names the method the
+/// request would use, so the dialog never promises the wrong one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RewindPlan {
+    /// The method the next rewind of this prompt would use.
+    #[serde(default)]
+    pub method: RewindMethod,
+    /// Whether file restore is turned on for this machine (Settings → Labs).
+    #[serde(default)]
+    pub files_enabled: bool,
+    /// Whether **Revert files too** would be accepted for this prompt.
+    #[serde(default)]
+    pub files_available: bool,
+}
 
 /// How a harness drops the rewound turns from its own history.
 ///
@@ -113,6 +146,20 @@ mod tests {
             serde_json::to_string(&PendingRewind::Handoff).unwrap(),
             "{\"kind\":\"handoff\"}"
         );
+    }
+
+    #[test]
+    fn rewind_settings_and_plans_default_to_off_and_unsupported() {
+        let settings: RewindSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.files_enabled, "file restore is off by default");
+        let plan: RewindPlan = serde_json::from_str("{}").unwrap();
+        assert!(!plan.files_enabled);
+        assert!(!plan.files_available);
+        assert_eq!(plan.method, RewindMethod::Unsupported);
+        let plan: RewindPlan =
+            serde_json::from_str(r#"{"method":"native","files_enabled":true}"#).unwrap();
+        assert!(plan.files_enabled);
+        assert!(!plan.files_available, "a missing field is not a yes");
     }
 
     #[test]

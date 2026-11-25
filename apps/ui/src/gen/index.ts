@@ -227,6 +227,8 @@ export type * from "./ResumeFailover";
 export type * from "./ResumeSchedule";
 export type * from "./ResumeState";
 export type * from "./RewindMethod";
+export type * from "./RewindPlan";
+export type * from "./RewindSettings";
 export type * from "./RewoundPrompt";
 export type * from "./RuntimeMode";
 export type * from "./ScheduleDestination";

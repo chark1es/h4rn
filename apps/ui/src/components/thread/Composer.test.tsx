@@ -10,6 +10,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageRole, ThreadSummary } from "@/gen";
 import type { StreamTurn, ThreadLog, TurnItem } from "@/lib/store/projection";
@@ -1443,6 +1444,26 @@ describe("Composer rewind restore", () => {
     runAnimationFrames();
     expect(textarea().value).toBe("my unsent draft\n\nthe edited prompt");
     expect(mock.consumeComposerRestore).toHaveBeenCalledWith(9);
+  });
+
+  it("adopts the restored prompt once under StrictMode", () => {
+    mock.state.ui.composerRestore = {
+      threadId: THREAD,
+      token: 12,
+      prompt: "the edited prompt",
+      attachments: [],
+    };
+    render(
+      <StrictMode>
+        <WorkspaceFilesContext.Provider value={fileLister}>
+          <Composer summary={summary} />
+        </WorkspaceFilesContext.Provider>
+      </StrictMode>,
+    );
+    runAnimationFrames();
+    expect(textarea().value).toBe("the edited prompt");
+    expect(mock.restoreAttachments).toHaveBeenCalledTimes(1);
+    mock.state.ui.composerRestore = null;
   });
 
   it("keeps the draft alone when the restore belongs to another thread", () => {

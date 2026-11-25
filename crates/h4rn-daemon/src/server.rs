@@ -70,6 +70,8 @@ pub struct AppState {
     pub worktrees: Arc<crate::worktrees::WorktreeTracker>,
     /// This machine's defaults for new thread worktrees.
     pub worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
+    /// This machine's Labs switches for rewinding a thread.
+    pub rewind_settings: Arc<crate::rewind::RewindSettingsStore>,
     /// Host inventory.
     pub hosts: Arc<HostInventory>,
     /// Daemon-owned PTY terminals.
@@ -1687,6 +1689,36 @@ impl Connection {
                     result
                         .map(|prompt| ResponseBody::Rewound { prompt })
                         .map_err(crate::threads::ManagerError::into_proto)
+                }
+                ClientRequest::RewindPlan {
+                    thread_id,
+                    before_item_id,
+                } => self
+                    .state
+                    .manager
+                    .rewind_plan(&thread_id, &before_item_id)
+                    .await
+                    .map(|plan| ResponseBody::RewindPlan { plan })
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::GetRewindSettings => Ok(ResponseBody::RewindSettings {
+                    settings: self.state.rewind_settings.get(),
+                }),
+                ClientRequest::SetRewindSettingsEnabled { enabled } => {
+                    match self.state.rewind_settings.set_files_enabled(enabled) {
+                        Ok(settings) => {
+                            // The thread manager enforces the switch at the
+                            // moment of the request and advertises it in every
+                            // summary.
+                            self.state
+                                .manager
+                                .set_file_rewind_enabled(settings.files_enabled);
+                            Ok(ResponseBody::RewindSettings { settings })
+                        }
+                        Err(error) => Err(ProtoError::plain(
+                            ProtoErrorCode::Internal,
+                            format!("could not save the rewind switch: {error}"),
+                        )),
+                    }
                 }
                 ClientRequest::Interrupt { thread_id } => self
                     .state

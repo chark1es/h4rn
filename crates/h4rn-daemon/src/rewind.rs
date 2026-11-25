@@ -5,7 +5,7 @@
 //! the journal to find which prompt turns are still live, and putting the
 //! workspace back to the snapshot taken before the edited message.
 //!
-//! A rewind is one durable decision (ADR-047): the files and the history end at
+//! A rewind is one durable decision (ADR-048): the files and the history end at
 //! the same boundary or not at all. The restore writes a durable journal first,
 //! applies the files, commits the `ThreadRewound` event with that journal's id,
 //! and only then publishes the new in-memory state. A crash between the apply
@@ -15,12 +15,123 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
-use h4rn_protocol::{Attachment, Event, Item, MessageRole, ThreadId, TurnId};
+use h4rn_protocol::{Attachment, Event, Item, MessageRole, RewindSettings, ThreadId, TurnId};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::{SnapshotStore, normalize_relative};
 use crate::journal::WireEvent;
+
+/// The machine-wide Labs switch for "Rewind files with Edit from here".
+///
+/// The setting lives in `<data_dir>/rewind-settings.json`. It is off by
+/// default: the conversation rewind is ready, the file restore is still being
+/// hardened, so turning it on is a deliberate choice in Settings → Labs.
+pub struct RewindSettingsStore {
+    path: PathBuf,
+    value: Arc<RwLock<RewindSettings>>,
+}
+
+impl RewindSettingsStore {
+    /// Opens `<data_dir>/rewind-settings.json`.
+    ///
+    /// An unreadable or malformed file falls back to the defaults with a
+    /// warning: a bad preference must not stop the daemon from starting.
+    pub fn open(data_dir: &Path) -> Result<Self, String> {
+        let path = data_dir.join("rewind-settings.json");
+        let value = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<RewindSettings>(&bytes).unwrap_or_else(|error| {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "ignoring unreadable rewind settings; using defaults"
+                );
+                RewindSettings::default()
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => RewindSettings::default(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "could not read rewind settings; using defaults"
+                );
+                RewindSettings::default()
+            }
+        };
+        Ok(Self {
+            path,
+            value: Arc::new(RwLock::new(value)),
+        })
+    }
+
+    /// An in-memory store for tests and embedders without a data directory.
+    pub fn in_memory() -> Self {
+        Self {
+            path: PathBuf::new(),
+            value: Arc::new(RwLock::new(RewindSettings::default())),
+        }
+    }
+
+    /// The current settings.
+    pub fn get(&self) -> RewindSettings {
+        *self
+            .value
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether file restore is turned on for this machine.
+    pub fn files_enabled(&self) -> bool {
+        self.get().files_enabled
+    }
+
+    /// Saves the file-restore switch, returning what was saved.
+    pub fn set_files_enabled(&self, enabled: bool) -> Result<RewindSettings, String> {
+        let settings = RewindSettings {
+            files_enabled: enabled,
+        };
+        if !self.path.as_os_str().is_empty() {
+            let bytes = serde_json::to_vec_pretty(&settings)
+                .map_err(|error| format!("could not encode rewind settings: {error}"))?;
+            write_atomic(&self.path, &bytes)?;
+        }
+        *self
+            .value
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
+        Ok(settings)
+    }
+}
+
+/// Writes a small settings file through a rename, so a crash never leaves a
+/// half-written preference behind.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent folder", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    let suffix = std::process::id();
+    let staged = path.with_file_name(format!(
+        ".{}.{suffix}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("rewind-settings")
+    ));
+    {
+        let mut file = std::fs::File::create(&staged)
+            .map_err(|error| format!("could not write {}: {error}", staged.display()))?;
+        file.write_all(bytes)
+            .map_err(|error| format!("could not write {}: {error}", staged.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("could not flush {}: {error}", staged.display()))?;
+    }
+    std::fs::rename(&staged, path).map_err(|error| {
+        let _ = std::fs::remove_file(&staged);
+        format!("could not save {}: {error}", path.display())
+    })
+}
 
 /// One user prompt that is still part of a thread.
 #[derive(Clone, Debug, PartialEq, Eq)]

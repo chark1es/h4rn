@@ -430,6 +430,12 @@ struct Inner {
     /// A thread or agent session that would start inside one waits until the
     /// rewind has committed, so nothing can change the tree mid-restore.
     restore_reservations: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    /// The machine-wide Labs switch for "Rewind files with Edit from here".
+    ///
+    /// Off by default. The conversation rewind never consults it; only the
+    /// file restore does. Each record holds the same handle, so a summary
+    /// reflects a saved change without touching every open thread.
+    file_rewind: Arc<AtomicBool>,
     /// A test-only failure the next journal append reports.
     append_failure: std::sync::Mutex<Option<String>>,
     threads: Mutex<HashMap<String, ThreadHandle>>,
@@ -715,6 +721,8 @@ struct QueuedTurn {
 }
 
 struct ThreadRecord {
+    /// The machine-wide Labs switch for file restore, shared with the manager.
+    file_rewind: Arc<AtomicBool>,
     meta: ThreadMeta,
     state: ThreadState,
     active: Option<ActiveTurn>,
@@ -827,7 +835,7 @@ struct ThreadRecord {
     /// Git branch of the workspace, cached for the thread header.
     branch: Option<String>,
     /// Whether the workspace is a linked git worktree rather than the project's
-    /// main checkout. Only then can a rewind restore files (ADR-047).
+    /// main checkout. Only then can a rewind restore files (ADR-048).
     linked_worktree: bool,
     /// Whether the active turn was rebuilt from the journal at startup.
     ///
@@ -1840,6 +1848,50 @@ impl ThreadFact {
     }
 }
 
+/// The provider boundary a rewind of the prompt at `index` would record.
+///
+/// `None` when only a bounded handoff can honestly be used: an imported
+/// conversation whose provider ids h4rn never chose, a thread that has no
+/// provider session yet, a prompt recorded before its provider boundary was
+/// kept, or a harness that cannot truncate at all.
+fn native_rewind(
+    record: &ThreadRecord,
+    prompts: &[crate::rewind::LivePrompt],
+    index: usize,
+    advertised: h4rn_protocol::RewindMethod,
+) -> Option<h4rn_protocol::PendingRewind> {
+    let boundary = |turn: &TurnId| {
+        record
+            .meta
+            .provider_turns
+            .get(turn.as_str())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let target = prompts.get(index)?;
+    match (advertised, record.meta.harness) {
+        // An imported conversation's provider message ids were not chosen by
+        // h4rn, so a native boundary cannot name them reliably.
+        _ if record.meta.imported.is_some() => None,
+        (h4rn_protocol::RewindMethod::Native, _) if record.meta.resume_id.is_none() => None,
+        (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::ClaudeCode) => {
+            boundary(&target.turn_id).last_message_id.map(|message| {
+                h4rn_protocol::PendingRewind::Native {
+                    session: h4rn_protocol::SessionRewind::ResumeAtMessage { message },
+                }
+            })
+        }
+        (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::Codex) => prompts
+            .iter()
+            .skip(index)
+            .find_map(|prompt| boundary(&prompt.turn_id).turn_id)
+            .map(|turn| h4rn_protocol::PendingRewind::Native {
+                session: h4rn_protocol::SessionRewind::BeforeTurn { turn },
+            }),
+        _ => None,
+    }
+}
+
 /// Every thread below `root`, however deep.
 fn descendants_of(root: &ThreadId, facts: &[ThreadFact]) -> HashSet<ThreadId> {
     let mut descendants = HashSet::new();
@@ -2014,7 +2066,10 @@ impl ThreadRecord {
                     advertised
                 }
             },
-            file_rewind: self.linked_worktree,
+            // File restore is a Labs feature, off by default: the summary must
+            // never offer it while the switch is off.
+            file_rewind: self.linked_worktree
+                && self.file_rewind.load(std::sync::atomic::Ordering::SeqCst),
         }
     }
 
@@ -2831,6 +2886,7 @@ impl ThreadManager {
                 emit_lock: Arc::new(Mutex::new(())),
                 rewind_lock: Arc::new(Mutex::new(())),
                 restore_reservations: std::sync::Mutex::new(Vec::new()),
+                file_rewind: Arc::new(AtomicBool::new(false)),
                 append_failure: std::sync::Mutex::new(None),
                 threads: Mutex::new(HashMap::new()),
                 ticker: std::sync::Mutex::new(None),
@@ -3536,6 +3592,7 @@ impl ThreadManager {
         let title_workspace = meta.workspace_path.clone();
 
         let mut record = ThreadRecord {
+            file_rewind: Arc::clone(&self.inner.file_rewind),
             linked_worktree: crate::worktrees::git::is_linked_worktree(std::path::Path::new(
                 &meta.workspace_path,
             )),
@@ -3750,6 +3807,7 @@ impl ThreadManager {
             });
         }
         let record = ThreadRecord {
+            file_rewind: Arc::clone(&self.inner.file_rewind),
             linked_worktree: crate::worktrees::git::is_linked_worktree(std::path::Path::new(
                 &meta.workspace_path,
             )),
@@ -3853,7 +3911,7 @@ impl ThreadManager {
     /// The prompt and its attachments come back for the composer. With
     /// `restore_files` the workspace also goes back to the snapshot taken
     /// before the edited message; that needs the thread's own worktree and no
-    /// other thread or agent session sharing it (ADR-047).
+    /// other thread or agent session sharing it (ADR-048).
     ///
     /// The file restore happens before the journal write: a restore that fails
     /// leaves the conversation exactly as it was. The provider boundary is
@@ -3940,6 +3998,16 @@ impl ThreadManager {
         let mut prepared = None;
         let mut reservation = None;
         if restore_files {
+            // File restore is behind Settings → Labs and off by default: the
+            // conversation rewind is ready, the file restore is still being
+            // hardened. The daemon enforces the switch, not only the dialog.
+            if !self.file_rewind_enabled() {
+                return Err(ManagerError::ConflictWithHint(
+                    "restoring files is a Labs feature and is turned off on this machine".into(),
+                    "Turn on Settings → Labs → Rewind files with Edit from here, or rewind only the conversation"
+                        .into(),
+                ));
+            }
             if !record.linked_worktree {
                 return Err(ManagerError::Conflict(
                     "this thread runs in the project's main folder, so only its conversation can be rewound"
@@ -4055,35 +4123,7 @@ impl ThreadManager {
         // recorded, never a local prompt index. A boundary that cannot be named
         // falls back to the handoff rather than sending a resume the CLI
         // refuses.
-        let boundary = |turn: &TurnId| {
-            record
-                .meta
-                .provider_turns
-                .get(turn.as_str())
-                .cloned()
-                .unwrap_or_default()
-        };
-        let native = match (advertised, record.meta.harness) {
-            // An imported conversation's provider message ids were not chosen
-            // by h4rn, so a native boundary cannot name them reliably.
-            _ if record.meta.imported.is_some() => None,
-            (h4rn_protocol::RewindMethod::Native, _) if record.meta.resume_id.is_none() => None,
-            (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::ClaudeCode) => {
-                boundary(&target.turn_id).last_message_id.map(|message| {
-                    h4rn_protocol::PendingRewind::Native {
-                        session: h4rn_protocol::SessionRewind::ResumeAtMessage { message },
-                    }
-                })
-            }
-            (h4rn_protocol::RewindMethod::Native, h4rn_protocol::HarnessKind::Codex) => prompts
-                .iter()
-                .skip(index)
-                .find_map(|prompt| boundary(&prompt.turn_id).turn_id)
-                .map(|turn| h4rn_protocol::PendingRewind::Native {
-                    session: h4rn_protocol::SessionRewind::BeforeTurn { turn },
-                }),
-            _ => None,
-        };
+        let native = native_rewind(&record, &prompts, index, advertised);
         let (pending, method) = match native {
             Some(pending) => (pending, h4rn_protocol::RewindMethod::Native),
             None => (
@@ -4103,6 +4143,10 @@ impl ThreadManager {
         let old_resume = record.meta.resume_id.clone();
         let old_fingerprint = record.meta.agent_fingerprint.clone();
         let old_provider = record.meta.provider_turns.clone();
+        // The lifecycle transition (`Rewound`) is staged with the cut: if the
+        // append fails, the summary must describe the conversation that is
+        // still in the journal, not an edit that never happened.
+        let old_state = record.state.clone();
         if matches!(pending, h4rn_protocol::PendingRewind::Handoff) {
             record.meta.resume_id = None;
             record.meta.agent_fingerprint = None;
@@ -4128,6 +4172,7 @@ impl ThreadManager {
             record.meta.resume_id = old_resume;
             record.meta.agent_fingerprint = old_fingerprint;
             record.meta.provider_turns = old_provider;
+            record.state = old_state;
             if let Some(prepared) = &prepared {
                 crate::rewind::abort_restore(prepared);
             }
@@ -4151,6 +4196,85 @@ impl ThreadManager {
             attachments: target.attachments,
             files_restored: restore_files,
             method,
+        })
+    }
+
+    /// What rewinding one prompt would really do.
+    ///
+    /// The thread row only advertises what the harness can do. A prompt
+    /// recorded before its provider boundary was kept, a conversation with no
+    /// provider session, and an imported conversation can only use a handoff,
+    /// so the dialog asks for the plan of the message the person selected.
+    /// File restore additionally needs the Labs switch, a linked worktree with
+    /// its recorded identity, and a complete checkpoint for every removed turn.
+    pub async fn rewind_plan(
+        &self,
+        thread_id: &ThreadId,
+        before_item_id: &str,
+    ) -> Result<h4rn_protocol::RewindPlan, ManagerError> {
+        let _rewind = self.inner.rewind_lock.lock().await;
+        let handle = self.inner.handle(thread_id).await?;
+        let record = handle.lock().await;
+        if record.closed {
+            return Err(ManagerError::NotFound(format!(
+                "thread {thread_id} is closed"
+            )));
+        }
+        let advertised = self
+            .inner
+            .harnesses
+            .get(record.meta.harness)
+            .map(|adapter| adapter.rewind_method())
+            .unwrap_or(h4rn_protocol::RewindMethod::Unsupported);
+        if advertised == h4rn_protocol::RewindMethod::Unsupported {
+            return Ok(h4rn_protocol::RewindPlan {
+                method: h4rn_protocol::RewindMethod::Unsupported,
+                files_enabled: self.file_rewind_enabled(),
+                files_available: false,
+            });
+        }
+        let events = self
+            .inner
+            .journal
+            .read_wire_since(thread_id, 0)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        let prompts = crate::rewind::live_prompts(&events);
+        let Some(index) = prompts
+            .iter()
+            .position(|prompt| prompt.item_id == before_item_id)
+        else {
+            return Err(ManagerError::InvalidRequest(
+                "that message is not in the thread's current history".into(),
+            ));
+        };
+        let method = match native_rewind(&record, &prompts, index, advertised) {
+            Some(_) => h4rn_protocol::RewindMethod::Native,
+            None => h4rn_protocol::RewindMethod::Handoff,
+        };
+        let removed = crate::rewind::removed_turns(&prompts, index);
+        let mut files_available = self.file_rewind_enabled() && record.linked_worktree;
+        if files_available {
+            let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
+            files_available = record.meta.worktree_identity.is_some()
+                && crate::worktrees::git::linked_identity(&workspace).is_some_and(|current| {
+                    record.meta.worktree_identity.as_ref() == Some(&current)
+                });
+            if files_available {
+                match self.inner.snapshots.get() {
+                    Some(store) => {
+                        files_available = removed
+                            .iter()
+                            .all(|turn| store.checkpoint(thread_id, turn).is_some());
+                    }
+                    None => files_available = false,
+                }
+            }
+        }
+        Ok(h4rn_protocol::RewindPlan {
+            method,
+            files_enabled: self.file_rewind_enabled(),
+            files_available,
         })
     }
 
@@ -5244,6 +5368,24 @@ impl ThreadManager {
         let _ = self.inner.snapshots.set(store);
     }
 
+    /// Applies the machine-wide Labs switch for file restore.
+    ///
+    /// The daemon calls this at startup and whenever Settings → Labs saves a
+    /// new value. While it is off, [`Self::rewind_thread`] refuses
+    /// `restore_files` and the summary reports file rewind as unavailable.
+    pub fn set_file_rewind_enabled(&self, enabled: bool) {
+        self.inner
+            .file_rewind
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether **Revert files too** is turned on for this machine.
+    pub fn file_rewind_enabled(&self) -> bool {
+        self.inner
+            .file_rewind
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Finishes file restores a crash interrupted between the apply and the
     /// journal commit.
     ///
@@ -6329,10 +6471,18 @@ impl Inner {
             }
         };
         let fallback = self.now();
-        let mut messages: Vec<crate::journal::ImportedMessage> = Vec::new();
-        // Where each sent user message sits in `messages`, so a rewind can cut
-        // the gathered history at exactly the edited prompt.
-        let mut prompts: Vec<(String, usize)> = Vec::new();
+        // A message is grouped by the turn that delivered it, and turns are
+        // ordered by when they were first seen. A message queued while another
+        // turn runs is journaled under its own turn id before the running
+        // turn's reply arrives; cutting by arrival order would then drop the
+        // kept reply and keep the removed prompt's context. The turn id folds
+        // the queued prompt back to its real position (ADR-048).
+        let mut entries: Vec<(usize, crate::journal::ImportedMessage)> = Vec::new();
+        let mut ranks: HashMap<TurnId, usize> = HashMap::new();
+        let mut next_rank = 0usize;
+        // Which turn each sent user message belongs to, so a rewind can cut the
+        // gathered history at exactly the edited prompt.
+        let mut prompts: Vec<(String, TurnId)> = Vec::new();
         for wire in events {
             match wire.event {
                 Event::ItemCompleted {
@@ -6347,34 +6497,48 @@ impl Inner {
                     at,
                     ..
                 } => {
+                    let rank = *ranks.entry(turn_id.clone()).or_insert_with(|| {
+                        let rank = next_rank;
+                        next_rank += 1;
+                        rank
+                    });
                     if role == MessageRole::User {
-                        prompts.push((item_id, messages.len()));
+                        prompts.push((item_id, turn_id.clone()));
                     }
                     if exclude == Some(&turn_id) {
                         continue;
                     }
-                    messages.push(crate::journal::ImportedMessage {
-                        role,
-                        text,
-                        at: at.unwrap_or(fallback),
-                    });
+                    entries.push((
+                        rank,
+                        crate::journal::ImportedMessage {
+                            role,
+                            text,
+                            at: at.unwrap_or(fallback),
+                        },
+                    ));
                 }
                 Event::ThreadRewound { before_item_id, .. } => {
                     // The edited message and everything after it left the
-                    // thread, so a later handoff must not bring them back.
-                    if let Some(index) = prompts
+                    // thread, so a later handoff must not bring them back. A
+                    // kept turn whose reply arrived after the edited prompt was
+                    // journaled stays: the cut is by delivered turn, not by
+                    // message arrival.
+                    let cut = prompts
                         .iter()
-                        .position(|(item_id, _)| item_id == &before_item_id)
-                    {
-                        let cut = prompts[index].1;
-                        prompts.truncate(index);
-                        messages.truncate(cut);
+                        .find(|(item_id, _)| item_id == &before_item_id)
+                        .and_then(|(_, turn)| ranks.get(turn).copied());
+                    if let Some(cut) = cut {
+                        prompts.retain(|(_, turn)| ranks.get(turn).is_some_and(|rank| *rank < cut));
+                        entries.retain(|(rank, _)| *rank < cut);
                     }
                 }
                 _ => {}
             }
         }
-        messages
+        // A stable sort keeps arrival order inside one turn, so a queued
+        // prompt never jumps ahead of the reply it queued behind.
+        entries.sort_by_key(|(rank, _)| *rank);
+        entries.into_iter().map(|(_, message)| message).collect()
     }
 
     async fn restore(self: &Arc<Self>) -> Result<(), ManagerError> {
@@ -6396,6 +6560,7 @@ impl Inner {
                 std::path::Path::new(&meta.workspace_path),
             );
             let mut record = ThreadRecord {
+                file_rewind: Arc::clone(&self.file_rewind),
                 linked_worktree,
                 meta,
                 state,
@@ -7798,13 +7963,15 @@ impl Inner {
         drop(guard);
         match sent {
             Ok(()) => {
-                // The harness took the prompt: everything it reported during the
-                // write belongs to this turn and is released in order.
-                dispatch.accept_write(attempt);
-                dispatch.note_write_settled();
                 // Record which provider message or turn this prompt really
                 // became, so a rewind names the provider's boundary instead of
-                // counting local prompts.
+                // counting local prompts. This happens before the write is
+                // accepted, because accepting it releases the output the pump
+                // was holding: a fast completion can settle the turn at once,
+                // and a settlement followed by a restart must still name this
+                // boundary. The boundary gets its own durable write for the
+                // same reason; the next append would otherwise be the only
+                // copy, and there may be no next append.
                 let provider = session.lock().await.provider_turn();
                 if provider.turn_id.is_some() || provider.last_message_id.is_some() {
                     let mut record = handle.lock().await;
@@ -7815,7 +7982,18 @@ impl Inner {
                             last_message_id: provider.last_message_id,
                         },
                     );
+                    if let Err(error) = self.journal.upsert_thread(&record.meta).await {
+                        tracing::warn!(
+                            %error,
+                            thread = %record.meta.thread_id,
+                            "could not record the provider boundary of a prompt"
+                        );
+                    }
                 }
+                // The harness took the prompt: everything it reported during the
+                // write belongs to this turn and is released in order.
+                dispatch.accept_write(attempt);
+                dispatch.note_write_settled();
             }
             Err(error) => {
                 // Only the adapter's typed limit may arm a resume: an arbitrary
@@ -9164,6 +9342,7 @@ impl Inner {
         handle: &ThreadHandle,
         turn: &Arc<TurnDispatch>,
     ) -> HandoffRetry {
+        let mut fell_back = false;
         let meta = {
             let mut record = handle.lock().await;
             // Only the turn this pump's startup carried can be retried; a turn
@@ -9209,6 +9388,7 @@ impl Inner {
                 // as a bounded handoff, and later turns keep using the handoff
                 // until a session starts from it.
                 record.meta.pending_rewind = Some(h4rn_protocol::PendingRewind::Handoff);
+                fell_back = true;
             }
             if let Some(imported) = record.meta.imported.as_mut() {
                 imported.native_resume = false;
@@ -9218,6 +9398,21 @@ impl Inner {
         };
         if let Err(error) = self.journal.upsert_thread(&meta).await {
             tracing::warn!(%error, "could not clear a failed imported resume id");
+        }
+        if fell_back {
+            // The dialog planned a native rewind; the provider refused the
+            // boundary. Say so wherever the person is, and keep the news in the
+            // journal so a client that reloads still folds it.
+            let wire = vec![Event::RewindFellBack {
+                thread_id: meta.thread_id.clone(),
+                at: self.now(),
+            }];
+            match self.journal.append_wire(&meta.thread_id, &wire).await {
+                Ok(seqs) => self.broadcast(&meta.thread_id, &wire, &seqs),
+                Err(error) => {
+                    tracing::warn!(%error, "could not record a rewind fallback");
+                }
+            }
         }
         let history = self
             .imported_history(&meta.thread_id, Some(&turn.turn_id))
@@ -24396,6 +24591,71 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let _ = next_turn_status(&mut events).await;
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_accepted_provider_boundary_is_written_before_the_turn_can_settle() {
+        let journal = FlakyJournal::in_memory().await;
+        let manager = open_test_manager_with_journal(
+            FakeHarness::new().with_native_rewind(),
+            HostId::new("host_test"),
+            journal.clone(),
+        )
+        .await;
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(HostId::new("host_test"), workspace.path(), "A"))
+            .await
+            .expect("create");
+        next_turn_completion(&mut events).await;
+
+        // Hold B's delivery before its prompt is written, then refuse every
+        // journal append from that point on. The streaming output and the
+        // settlement can no longer write the boundary as a side effect: it must
+        // have a write of its own.
+        let pause = Arc::new(DeliveryPause::default());
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        manager
+            .send_message(&created.thread_id, "B".into(), Vec::new())
+            .await
+            .expect("send B");
+        tokio::time::timeout(Duration::from_secs(5), pause.checked.notified())
+            .await
+            .expect("B never reached its delivery");
+        journal.fail_next_appends(usize::MAX);
+        *manager
+            .inner
+            .deliver_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        pause.resume.notify_one();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let metas = journal.list_threads().await.expect("metas");
+            let meta = metas
+                .into_iter()
+                .find(|meta| meta.thread_id == created.thread_id)
+                .expect("the thread's meta");
+            if meta
+                .provider_turns
+                .values()
+                .any(|turn| turn.turn_id.is_some() || turn.last_message_id.is_some())
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the accepted boundary reached no write of its own"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         manager.shutdown().await;
     }
 }

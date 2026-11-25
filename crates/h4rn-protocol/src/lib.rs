@@ -112,7 +112,9 @@ pub use mcp::{
 };
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;
-pub use rewind::{PendingRewind, RewindMethod, RewoundPrompt, SessionRewind};
+pub use rewind::{
+    PendingRewind, RewindMethod, RewindPlan, RewindSettings, RewoundPrompt, SessionRewind,
+};
 pub use schedules::{
     IntervalUnit, MAX_WEBHOOK_BODY_BYTES, MAX_WEBHOOK_PLACEHOLDERS, ScheduleDestination,
     ScheduleDraft, ScheduleEvent, ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask,

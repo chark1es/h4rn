@@ -98,6 +98,10 @@ async fn open_manager(
     .await
     .expect("manager");
     manager.set_snapshot_store(Arc::new(SnapshotStore::new(data).expect("snapshots")));
+    // File restore is a Labs feature, off unless a person turns it on. These
+    // fixtures describe the turned-on feature; the switch-off tests turn it
+    // back off explicitly.
+    manager.set_file_rewind_enabled(true);
     Arc::new(manager)
 }
 
@@ -1253,12 +1257,17 @@ async fn a_refused_claude_boundary_falls_back_to_a_handoff_and_later_sends_work(
         .await
         .expect("send C");
     let mut text = String::new();
+    let mut fell_back = false;
     tokio::time::timeout(TIMEOUT, async {
         loop {
             match events.recv().await {
                 Ok(wire) => match wire.event {
                     Event::MessageDelta { text: delta, .. } => text.push_str(&delta),
                     Event::TurnCompleted { .. } => break,
+                    Event::RewindFellBack { thread_id, .. } => {
+                        assert_eq!(thread_id, created.thread_id);
+                        fell_back = true;
+                    }
                     _ => {}
                 },
                 Err(error) => panic!("the retry published no turn: {error}"),
@@ -1270,6 +1279,10 @@ async fn a_refused_claude_boundary_falls_back_to_a_handoff_and_later_sends_work(
     assert!(
         text.contains("an earlier message was edited"),
         "the refused boundary became a bounded handoff: {text:?}"
+    );
+    assert!(
+        fell_back,
+        "a refused native boundary is published so the person is told"
     );
     assert!(
         specs.get().iter().any(|spec| spec.is_none()),
@@ -1321,6 +1334,12 @@ async fn a_failed_append_leaves_files_and_history_unchanged() {
     let (b_item, _) = next_user_item(&mut events).await;
     wait_turn(&mut events).await;
 
+    let before = fixture
+        .manager
+        .get_thread(&created.thread_id, 0)
+        .await
+        .expect("thread before the rewind")
+        .summary;
     fixture
         .manager
         .fail_next_append("the journal is unavailable");
@@ -1367,6 +1386,10 @@ async fn a_failed_append_leaves_files_and_history_unchanged() {
             .count(),
         2,
         "both prompts are still in the thread"
+    );
+    assert_eq!(
+        snapshot.summary, before,
+        "a cut that could not be recorded leaves the summary unchanged"
     );
     assert_eq!(
         fixture
@@ -1686,5 +1709,281 @@ async fn a_shell_modified_file_is_restored_from_the_complete_checkpoint() {
         std::fs::read_to_string(worktree.join("README.md")).expect("readme"),
         "fixture\n",
         "a file no tool call named is restored from the full checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn file_restore_is_off_until_the_labs_switch_is_turned_on() {
+    let (_base, _repo, worktree) = git_worktree();
+    let fixture = make_fixture(FakeHarness::new().with_native_rewind()).await;
+    fixture.manager.set_file_rewind_enabled(false);
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(
+            &fixture.host,
+            &worktree,
+            "A [[write:a.txt]]from A",
+        ))
+        .await
+        .expect("create");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(
+            &created.thread_id,
+            "B [[write:b.txt]]from B".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send B");
+    let (b_item, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("b.txt")).expect("B's file"),
+        "from B"
+    );
+
+    let snapshot = fixture
+        .manager
+        .get_thread(&created.thread_id, 0)
+        .await
+        .expect("thread");
+    assert!(
+        !snapshot.summary.file_rewind,
+        "the summary must not offer file restore while the Labs switch is off"
+    );
+
+    let plan = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &b_item)
+        .await
+        .expect("plan");
+    assert!(!plan.files_enabled);
+    assert!(!plan.files_available);
+
+    let refused = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &b_item, true)
+        .await
+        .expect_err("file restore is refused while the switch is off");
+    assert!(
+        refused.to_string().contains("Labs"),
+        "the refusal names the switch: {refused}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("b.txt")).expect("B's file"),
+        "from B",
+        "a refused file restore changes nothing"
+    );
+
+    // The conversation rewind is not behind the switch.
+    let prompt = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &b_item, false)
+        .await
+        .expect("the conversation still rewinds");
+    assert!(!prompt.files_restored);
+
+    // With the switch on, the same prompt would accept the file choice when a
+    // checkpoint exists.
+    fixture.manager.set_file_rewind_enabled(true);
+    let a_item = prompt_item(
+        &fixture.manager,
+        &created.thread_id,
+        "A [[write:a.txt]]from A",
+    )
+    .await;
+    let plan = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &a_item)
+        .await
+        .expect("plan");
+    assert!(plan.files_enabled);
+    assert!(plan.files_available);
+}
+
+#[tokio::test]
+async fn a_rewind_plan_names_the_method_the_selected_prompt_really_uses() {
+    let fixture = make_fixture_kind(
+        FakeHarness::new().with_native_rewind(),
+        HarnessKind::ClaudeCode,
+    )
+    .await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request_kind(
+            &fixture.host,
+            Path::new("/tmp/rewind-plan-claude"),
+            "A",
+            HarnessKind::ClaudeCode,
+        ))
+        .await
+        .expect("create");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+    let a_item = prompt_item(&fixture.manager, &created.thread_id, "A").await;
+    fixture
+        .manager
+        .send_message(&created.thread_id, "B".into(), Vec::new())
+        .await
+        .expect("send B");
+    let (b_item, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+
+    // Claude Code names the assistant reply before the removed prompt. The
+    // first prompt has no reply before it, so only a handoff is honest there.
+    let first = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &a_item)
+        .await
+        .expect("plan A");
+    assert_eq!(first.method, RewindMethod::Handoff);
+    let second = fixture
+        .manager
+        .rewind_plan(&created.thread_id, &b_item)
+        .await
+        .expect("plan B");
+    assert_eq!(second.method, RewindMethod::Native);
+}
+
+#[tokio::test]
+async fn an_accepted_provider_boundary_is_durable_before_the_turn_settles() {
+    let (_base, _repo, worktree) = git_worktree();
+    let (fake, completion) = FakeHarness::new()
+        .with_native_rewind()
+        .with_later_completion_gate();
+    let (fake, sends) = fake.with_send_count();
+    let fixture = make_fixture(fake).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(&fixture.host, &worktree, "A"))
+        .await
+        .expect("create");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(&created.thread_id, "B".into(), Vec::new())
+        .await
+        .expect("send B");
+    let (b_item, b_turn) = next_user_item(&mut events).await;
+    // B's completion is still held, so the turn has not settled. When it does
+    // settle, its own append is refused: the boundary must still be on disk, in
+    // a write of its own, for a restart to name it.
+    sends.wait_for(2).await;
+    fixture
+        .manager
+        .fail_next_append("the journal is unavailable");
+    completion.release();
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let metas = fixture.journal.list_threads().await.expect("metas");
+        let meta = metas
+            .into_iter()
+            .find(|meta| meta.thread_id == created.thread_id)
+            .expect("the thread's meta");
+        if meta.provider_turns.contains_key(b_turn.as_str()) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the boundary was not persisted before the turn could settle"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    drop(fixture.manager);
+    let reopened = open_manager(
+        Arc::clone(&fixture.journal),
+        FakeHarness::new().with_native_rewind(),
+        HarnessKind::Codex,
+        fixture.data.path(),
+    )
+    .await;
+    let plan = reopened
+        .rewind_plan(&created.thread_id, &b_item)
+        .await
+        .expect("plan after the restart");
+    assert_eq!(
+        plan.method,
+        RewindMethod::Native,
+        "a restarted daemon still names B's provider boundary"
+    );
+    let prompt = reopened
+        .rewind_thread(&created.thread_id, &b_item, false)
+        .await
+        .expect("rewind B after the restart");
+    assert_eq!(prompt.method, RewindMethod::Native);
+}
+
+#[tokio::test]
+async fn a_handoff_keeps_the_reply_a_queued_prompt_arrived_before() {
+    let (_base, _repo, worktree) = git_worktree();
+    let (fake, gate) = FakeHarness::new().with_send_gate_after(0);
+    let fixture = make_fixture(fake).await;
+    let mut events = fixture.manager.subscribe();
+    let created = fixture
+        .manager
+        .create_thread(thread_request(&fixture.host, &worktree, "A"))
+        .await
+        .expect("create");
+    let _ = next_user_item(&mut events).await;
+    // B is journaled while A's prompt is still being written, so B's message
+    // reaches the journal before A's reply.
+    fixture
+        .manager
+        .send_message(&created.thread_id, "B".into(), Vec::new())
+        .await
+        .expect("queue B");
+    let (b_item, _) = next_user_item(&mut events).await;
+    gate.release();
+    wait_turn(&mut events).await;
+    wait_turn(&mut events).await;
+
+    // The fake harness only hands off, so the next prompt carries the kept
+    // conversation in one bounded block.
+    let prompt = fixture
+        .manager
+        .rewind_thread(&created.thread_id, &b_item, false)
+        .await
+        .expect("rewind B");
+    assert_eq!(prompt.method, RewindMethod::Handoff);
+
+    drain(&mut events);
+    fixture
+        .manager
+        .send_message(&created.thread_id, "C".into(), Vec::new())
+        .await
+        .expect("send C");
+    let mut text = String::new();
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            match events.recv().await {
+                Ok(wire) => match wire.event {
+                    Event::MessageDelta { text: delta, .. } => text.push_str(&delta),
+                    Event::TurnCompleted { .. } => break,
+                    _ => {}
+                },
+                Err(error) => panic!("the handoff turn published no output: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("the handoff turn settled");
+
+    assert!(
+        text.contains("A") && text.contains("echo: A"),
+        "the kept prompt and its reply both reach the fresh session: {text:?}"
+    );
+    assert!(
+        !text.contains("\nB\n") && !text.contains(": B"),
+        "the removed prompt is not in the handoff: {text:?}"
     );
 }

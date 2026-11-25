@@ -204,6 +204,16 @@ pub enum ResponseBody {
         /// The prompt to put back in the composer.
         prompt: crate::RewoundPrompt,
     },
+    /// What rewinding one prompt would really do.
+    RewindPlan {
+        /// The planned method and whether file restore is available.
+        plan: crate::RewindPlan,
+    },
+    /// This machine's Labs switches for rewinding.
+    RewindSettings {
+        /// Current settings.
+        settings: crate::RewindSettings,
+    },
     /// A terminal was opened.
     TerminalOpened {
         /// The new terminal, including its effective size.
@@ -1104,6 +1114,19 @@ pub enum Event {
         #[ts(optional)]
         restore_id: Option<String>,
         /// When the rewind happened.
+        at: DateTime<Utc>,
+    },
+    /// A rewind's native provider boundary was refused, so the next session
+    /// continues from a bounded handoff instead.
+    ///
+    /// The dialog plans the method from what the provider recorded; the
+    /// provider can still refuse the named boundary when the next session
+    /// starts. This event is journaled at that moment so the person is told,
+    /// and every connected client can say the same thing.
+    RewindFellBack {
+        /// Thread whose pending native rewind became a handoff.
+        thread_id: ThreadId,
+        /// When the fallback happened.
         at: DateTime<Utc>,
     },
     /// The agent state changed; drives the orb or static glyph.

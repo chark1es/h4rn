@@ -1591,4 +1591,81 @@ done
         assert_eq!(requests[0]["request"]["model"], "default");
         session.shutdown().await.expect("shutdown");
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_kept_boundary_is_the_reply_before_the_removed_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let path = workspace.path().join("claude");
+        // Each prompt it reads gets one assistant reply with its own uuid. The
+        // adapter must keep the reply A produced as B's boundary, not whatever
+        // reply arrived later.
+        let script = r#"#!/bin/sh
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      n=$((n + 1))
+      printf '{"type":"assistant","uuid":"reply-%s","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}]}}\n' "$n"
+      printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+      ;;
+  esac
+done
+"#;
+        crate::test_scripts::write_script(&path, script);
+        let harness = ClaudeCodeHarness::with_install(HarnessInstall {
+            path,
+            version: "2.1.329".into(),
+        });
+        let mut session = harness
+            .start_session(spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send_tagged(
+                UserInput {
+                    text: "A".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-a"),
+            )
+            .await
+            .expect("send A");
+        wait_for_completion(&mut events).await;
+        session
+            .send_tagged(
+                UserInput {
+                    text: "B".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-b"),
+            )
+            .await
+            .expect("send B");
+        // B's own reply has been parsed by the time its turn completes.
+        wait_for_completion(&mut events).await;
+        assert_eq!(
+            session.provider_turn().last_message_id.as_deref(),
+            Some("reply-1"),
+            "B's boundary is A's reply, never the one B produced"
+        );
+        session.shutdown().await.expect("shutdown");
+    }
+
+    /// Consumes one turn from a test session's event stream.
+    #[cfg(unix)]
+    async fn wait_for_completion(events: &mut futures::stream::BoxStream<'static, HarnessEvent>) {
+        use futures::StreamExt as _;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = events.next().await {
+                if matches!(event, HarnessEvent::TurnCompleted { .. }) {
+                    return;
+                }
+            }
+            panic!("the session ended before a turn completed");
+        })
+        .await
+        .expect("the turn completed");
+    }
 }

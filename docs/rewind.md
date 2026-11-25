@@ -10,6 +10,13 @@ actions the agent took elsewhere — a push, a deploy, a message to another
 system. Only the thread, the harness history and (optionally) the worktree go
 back.
 
+Restoring files is a **Labs** feature and off by default. The conversation
+rewind is ready; the file restore is still being hardened, so it is a
+deliberate choice in Settings → Labs → **Rewind files with Edit from here**.
+While it is off, the dialog offers only the conversation rewind, the thread row
+reports file rewind as unavailable, and the daemon refuses a request that asks
+for files.
+
 ## What happens to the history
 
 - The message you chose is removed, together with every later turn.
@@ -17,19 +24,27 @@ back.
   rewind is part of the conversation: editing it removes it and everything
   after it, and never resurrects the prompt the earlier rewind removed.
 - The kept conversation stays readable and is what the next turn continues
-  from.
+  from. A handoff keeps a turn's prompt and its reply together even when a
+  message queued behind that turn reached the journal first.
 - The daemon journals one **rewound** event. A client that reloads later folds
   the same cut, so every device sees the same thread. The prompt itself is
   returned only to the device that asked, in the answer, so a replay never
   reopens a composer someone had already closed.
 - If a daemon restarts before the next prompt, the recorded provider boundary
   survives: the next session still starts from the edited history instead of
-  silently resuming the old one.
+  silently resuming the old one. The boundary is written as soon as the
+  provider accepts the prompt, before the turn can settle, so a busy turn and a
+  restart cannot lose it.
+- If a rewind's cut cannot be recorded, nothing changes: the files are put
+  back and the thread row still describes the conversation that is in the
+  journal.
 
 ### Harness history
 
-The thread row advertises how its harness drops the removed turns, and the
-dialog says which one will run.
+The thread row says what the harness *can* do. The dialog asks the daemon what
+the selected message will really use, because an older prompt recorded before
+its provider boundary was kept — and a conversation that never started a
+provider session — can only use a handoff.
 
 | Harness | Method | What it does |
 |---|---|---|
@@ -47,21 +62,24 @@ The provider boundary is applied at the **next** session start. The old
 session is shut down at rewind time so it can never be sent another prompt.
 If the adapter cannot keep its native promise — the provider no longer has the
 named turn, the CLI refuses the message id, or no recorded boundary exists —
-the daemon falls back to the handoff, clears the refused boundary and reports
-`handoff` for what will really run.
+the daemon falls back to the handoff, clears the refused boundary, journals a
+**fell back** event and tells the person, so a plan that named a native rewind
+never turns into a silent handoff.
 
 ## Files
 
-There are two choices:
+With **Rewind files with Edit from here** turned on in Settings → Labs, there
+are two choices:
 
 - **Revert and keep changes** leaves the workspace exactly as it is.
 - **Revert files too** puts the thread's worktree back to the turn snapshot
   taken before the chosen message.
 
-The file choice is only offered for a thread running in **its own linked git
-worktree**, and only when every removed turn has a complete pre-turn
-checkpoint. A thread in the project's main checkout rewinds its conversation
-only, because restoring a shared checkout would change files other work sees.
+The file choice is only offered while the Labs switch is on, for a thread
+running in **its own linked git worktree**, and only when every removed turn has
+a complete pre-turn checkpoint. A thread in the project's main checkout rewinds
+its conversation only, because restoring a shared checkout would change files
+other work sees.
 
 A complete checkpoint is the git tree of the whole tracked worktree captured
 just before the turn's prompt reaches the agent. It covers files a shell command
@@ -95,6 +113,13 @@ same git dir and common dir. A moved worktree whose old path now holds another
 checkout is refused. The workspace is reserved from the first file write
 through the commit, so a thread or agent session that would start there waits
 or is refused.
+
+The switch stays off by default because the file restore still has known gaps.
+A later checkpoint can override the one the message names; a rename, a symlink
+and a file mode are not carried; a failed capture can be read as a deletion; and
+a restore writes bytes only, so ownership and extended attributes are left as
+they are. The conversation rewind never depends on any of that, which is why it
+is available without the Lab.
 
 ## Safety
 

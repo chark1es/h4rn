@@ -238,6 +238,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   }, [summary.host, summary.thread_id]);
 
   const composerRestore = useApp((state) => state.ui.composerRestore);
+  // A restored prompt is adopted exactly once. React StrictMode runs effects
+  // twice in development; without this guard the second run would read the
+  // draft the first one just wrote and append the prompt again.
+  const consumedRestore = useRef<number | null>(null);
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, !newThreadOpen);
 
@@ -263,6 +267,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   useEffect(() => {
     if (!composerRestore || composerRestore.threadId !== summary.thread_id) return;
     const token = composerRestore.token;
+    if (consumedRestore.current === token) return;
+    consumedRestore.current = token;
     const current = readThreadDraft(summary.host, summary.thread_id);
     const merged = current.trim()
       ? `${current.trimEnd()}\n\n${composerRestore.prompt}`

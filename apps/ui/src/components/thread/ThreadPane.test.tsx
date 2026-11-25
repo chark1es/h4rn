@@ -86,6 +86,12 @@ vi.mock("@/lib/store/appStore", () => ({
   openThread: mock.openThread,
   sendMessage: mock.sendMessage,
   rewindRefusal: () => null,
+  filesRewindAvailable: () => false,
+  planRewind: vi.fn(async () => ({
+    method: "handoff",
+    files_enabled: false,
+    files_available: false,
+  })),
   rewindThread: vi.fn(),
   consumeComposerRestore: vi.fn(),
   getClient: () => {
