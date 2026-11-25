@@ -1571,6 +1571,8 @@ const HELD_PROMOTED_EVENTS: usize = 1024;
 /// the retry is what lets a healthy journal finish the turn instead of leaving
 /// its completion waiting on a discarded error.
 const ACCEPTED_WRITE_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+/// The longest pause between acceptance-write retries.
+const ACCEPTED_WRITE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether a harness event is a lifecycle report the hold must never drop.
 ///
@@ -12864,11 +12866,15 @@ impl Inner {
         attempt: u64,
     ) {
         let prompt_item = dispatch.prompt_item_id();
+        let mut delay = ACCEPTED_WRITE_RETRY;
         loop {
             if dispatch.state() != DispatchState::Claimed || dispatch.write_attempt() != attempt {
                 // A Stop or another path settled the turn while the journal
-                // was refusing its acceptance: there is nothing left to
-                // release, and its durable mark must not be set for it.
+                // was refusing its acceptance: its durable mark must not be
+                // set for it. A pump whose stream already ended may be parked
+                // on this write, though, and nothing else will wake it, so the
+                // wait is still released: the Stop is then what settles it.
+                dispatch.note_write_settled();
                 return;
             }
             let accepted = self.mark_item_accepted(handle, prompt_item.clone()).await;
@@ -12886,8 +12892,11 @@ impl Inner {
                 return;
             }
             // The journal is busy or failing. The turn's output stays held and
-            // its completion waits; retry without holding the record lock.
-            tokio::time::sleep(ACCEPTED_WRITE_RETRY).await;
+            // its completion waits; retry without holding the record lock,
+            // backing off so a journal that stays broken is not hammered (a
+            // Stop still ends the turn).
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(ACCEPTED_WRITE_RETRY_MAX);
         }
     }
 
@@ -43715,6 +43724,118 @@ mod tests {
         assert_eq!(
             applied, "the reply",
             "the reply read inside the durability window never reached the transcript"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A Stop ends a turn whose stream ended while its acceptance kept failing.
+    ///
+    /// The pump waits at the stream end for the acceptance write. When a Stop
+    /// ends the turn while the journal still refuses that write, the retry
+    /// gives up, and it must still release that wait: otherwise the turn stays
+    /// running for good and everything queued behind it stalls.
+    #[tokio::test]
+    async fn a_stop_ends_a_turn_whose_acceptance_never_lands() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let journal = FlakyJournal::in_memory().await;
+        let completed = || {
+            vec![HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            }]
+        };
+        let harness = FakeHarness::with_session_scripts(vec![completed(), completed(), Vec::new()]);
+        let (harness, injector) = harness.with_event_injector();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, write) = harness.with_send_gate_after(2);
+        let (harness, stream_end) = harness.with_stream_end_gate();
+        let manager = Arc::new(
+            ThreadManager::open(
+                Arc::clone(&journal) as Arc<dyn Journal>,
+                Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
+                host.clone(),
+                ThreadManagerOptions {
+                    tick_interval: Duration::from_secs(3600),
+                    ..ThreadManagerOptions::default()
+                },
+                None,
+            )
+            .await
+            .expect("manager"),
+        );
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let promoted = promote_a_queued_message(&manager, &mut events, &created.thread_id).await;
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the promoted write never reached the fake");
+
+        // The provider takes the prompt; the journal never records it.
+        journal.fail_next_accepts(usize::MAX);
+        write.release();
+
+        let pause = Arc::new(HeldReleasePause::default());
+        *manager
+            .inner
+            .held_release_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        injector.emit(HarnessEvent::TextDelta {
+            text: "the reply".into(),
+        });
+        injector.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        });
+        tokio::time::timeout(Duration::from_secs(5), pause.read.notified())
+            .await
+            .expect("the pump never read the completion behind the held text");
+        stream_end.release();
+        pause.resume.notify_one();
+
+        // The pump is now parked at the stream end, waiting for a write the
+        // journal keeps refusing: nothing settles on its own.
+        let early = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted { turn_id, .. } = wire.event
+                    && turn_id == promoted
+                {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(!early, "the turn settled while its acceptance kept failing");
+
+        manager.interrupt(&created.thread_id).await.expect("stop");
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnCompleted {
+                    turn_id, status, ..
+                } = wire.event
+                    && turn_id == promoted
+                {
+                    return status;
+                }
+            }
+        })
+        .await
+        .expect("a Stop left the turn running while its acceptance never landed");
+        // The provider already reported the turn, so the Stop may land on a
+        // completed turn or interrupt it; either way the turn ends.
+        assert!(
+            matches!(status, TurnStatus::Completed | TurnStatus::Interrupted),
+            "{status:?}"
         );
         manager.shutdown().await;
     }

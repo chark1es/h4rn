@@ -795,6 +795,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A harness switch keeps the whole reply around its handoff.** Text the adapter
+  reports while the switch is recording that the new harness took the prompt is
+  merged like live output, so a long reply is no longer cut off at the hold's bound;
+  a stream that ends inside that window applies its reply before the turn is
+  settled; and a journal that refuses the acceptance or the handoff clear is
+  retried with a backoff instead of being reported as durable (a Stop still ends the turn), so a request never stays marked
+  undelivered beside the turn it ran.
+
 - **A fork whose journal write fails never appears.** The fork's handle became
   reachable before its summary was durable, so the periodic refresh could
   publish a thread whose copy then failed to record — a row a client could open
@@ -2389,16 +2397,6 @@ All notable changes to h4rn are recorded here. The format follows
   false` workspace crate that the Antigravity test builds on demand and locates from Cargo's JSON
   output, so `cargo run -p h4rn-daemon` is unambiguous again and `cargo build`/`install` ship only
   `h4rnd`.
-
-### Fixed
-
-- **A harness switch keeps the whole reply around its handoff.** Text the adapter
-  reports while the switch is recording that the new harness took the prompt is
-  merged like live output, so a long reply is no longer cut off at the hold's bound;
-  a stream that ends inside that window applies its reply before the turn is
-  settled; and a journal that refuses the acceptance or the handoff clear is
-  retried instead of being reported as durable, so a request never stays marked
-  undelivered beside the turn it ran.
 
 ## 1.0.1 — 2026-11-19
 
