@@ -2484,6 +2484,100 @@ async fn worktree_settings_refuse_a_separate_git_dir_main_checkout() {
     daemon.stop().await;
 }
 
+/// A `--separate-git-dir` repository whose metadata dir sits under an unrelated
+/// parent leaves nothing that proves the main checkout when the project is a
+/// linked worktree. Saving a location that could hold it is refused, and the
+/// refusal never names the metadata directory.
+#[tokio::test]
+async fn worktree_settings_refuse_an_unprovable_main_checkout() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let root = tempfile::tempdir().expect("root");
+    std::fs::create_dir(root.path().join("meta")).expect("meta");
+    let main = root.path().join("code").join("api");
+    std::fs::create_dir_all(&main).expect("api");
+    let gitdir = root.path().join("meta").join("admin-meta");
+    git_in(
+        root.path(),
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            gitdir.to_str().unwrap(),
+            main.to_str().unwrap(),
+        ],
+    );
+    git_in(&main, &["config", "user.name", "h4rn test"]);
+    git_in(&main, &["config", "user.email", "test@example.invalid"]);
+    git_in(&main, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(main.join("a.txt"), "one\n").expect("write");
+    git_in(&main, &["add", "a.txt"]);
+    git_in(&main, &["commit", "-m", "Initial commit"]);
+    let linked = root.path().join("code").join("linked");
+    git_in(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: linked.to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the linked worktree as the project");
+
+    for location in [main.clone(), main.join("nested")] {
+        let error = client
+            .request(ClientRequest::SetWorktreeSettings {
+                settings: h4rn_protocol::WorktreeSettings {
+                    location: Some(location.to_string_lossy().into_owned()),
+                    ..h4rn_protocol::WorktreeSettings::default()
+                },
+            })
+            .await
+            .expect_err("the main checkout cannot be proved");
+        assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+        assert!(
+            error.message.contains("main checkout could not be found"),
+            "{error:?}"
+        );
+        assert!(
+            !error.message.contains("admin-meta") && !error.message.contains("api.git"),
+            "the refusal never names the metadata directory: {error:?}"
+        );
+    }
+    match client
+        .request(ClientRequest::GetWorktreeSettings)
+        .await
+        .expect("read worktree settings")
+    {
+        ResponseBody::WorktreeSettings { settings } => {
+            assert_eq!(
+                settings.location, None,
+                "the refused location was not saved"
+            );
+        }
+        other => panic!("unexpected settings response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
 /// A create that was interrupted before its thread existed is finished before
 /// the next daemon starts serving.
 #[tokio::test]

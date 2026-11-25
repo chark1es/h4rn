@@ -725,23 +725,20 @@ pub(crate) struct Layout {
     pub snapshot: RegistrationSnapshot,
 }
 
-/// The main worktree of the repository containing `workspace`.
-///
-/// [`repo_of`] answers from the common dir's name, so a `--separate-git-dir`
-/// repository and a submodule (whose common dir is not named `.git`) have no
-/// answer there even though they do have a main worktree. This asks the
-/// repository itself instead: `core.worktree`, the checkout whose `.git` file
-/// points at the common dir, or a nearby directory holding one. `None` when
-/// none of those resolves.
-pub(crate) fn main_checkout(workspace: &Path) -> Option<PathBuf> {
-    layout(workspace).ok().map(|layout| layout.main)
-}
-
 /// One complete, cross-checked view of the repository containing `workspace`.
 ///
 /// Containment decisions use this rather than taking separate snapshots:
 /// `complete` is false when an admin entry could not be read, so a missing
 /// sibling can never be mistaken for an absent one.
+///
+/// The main checkout is never guessed. It is `core.worktree`, the workspace
+/// itself when its `.git` file points at the common dir, a nearby directory
+/// whose `.git` does, or a registration whose own `.git` proves it. A
+/// registration alone proves nothing: `git worktree list` reports the metadata
+/// directory as the main entry of a `--separate-git-dir` repository, and a
+/// linked worktree is registered too. When none of those resolves, this is an
+/// error rather than the first non-bare registration, because a checkout
+/// placed against the wrong folder could land inside the real main checkout.
 pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
     let common = common_dir(workspace, OBSERVATION_GIT_TIMEOUT)?;
     let snapshot = registrations_in(
@@ -751,10 +748,7 @@ pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
         &CommonDirs::default(),
     )?;
     if !snapshot.complete {
-        return Err(format!(
-            "git could not read every worktree registration of {}",
-            common.display()
-        ));
+        return Err("git could not read every worktree registration of this repository".to_owned());
     }
     let main = if let Some(repo) = repo_of(workspace) {
         repo
@@ -766,18 +760,17 @@ pub(crate) fn layout(workspace: &Path) -> Result<Layout, String> {
         workspace.to_path_buf()
     } else if let Some(found) = find_checkout_pointing_at(&common) {
         found
+    } else if let Some(registered) = snapshot
+        .iter()
+        .filter(|registration| !registration.bare && registration.path != common)
+        .find(|registration| gitdir_points_at(&registration.path, &common))
+        .map(|registration| registration.path.clone())
+    {
+        // A registration counts only when its own `.git` still points at this
+        // common dir, which a linked worktree's never does.
+        registered
     } else {
-        snapshot
-            .registrations
-            .iter()
-            .find(|registration| !registration.bare && registration.path != common)
-            .map(|registration| registration.path.clone())
-            .ok_or_else(|| {
-                format!(
-                    "the main worktree of {} could not be resolved",
-                    common.display()
-                )
-            })?
+        return Err("the project's main checkout could not be found".to_owned());
     };
     Ok(Layout {
         common,

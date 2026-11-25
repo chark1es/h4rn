@@ -656,10 +656,15 @@ All notable changes to h4rn are recorded here. The format follows
   checkout even when the repository keeps its git directory elsewhere — a
   `--separate-git-dir` repository, a submodule — instead of naming `api.git` or
   an admin directory, and also refuse a location inside any sibling linked
-  worktree, not only the main one. The check uses one complete worktree
-  snapshot, so an admin entry git cannot read refuses the location rather than
-  allowing a nested checkout. A bare repository's refusal says the destination
-  is its git directory and to choose a folder outside it.
+  worktree, not only the main one. When the main checkout cannot be proved, h4rn
+  refuses the location instead of taking the first worktree registration, which
+  may be a linked worktree, so it never creates a checkout inside the real main
+  checkout by guessing. The same reading of the repository decides both the
+  project folder's name and the destination that is checked and created, so a
+  location that passes is exactly the one used. The check uses one complete
+  worktree snapshot, so an admin entry git cannot read refuses the location
+  rather than allowing a nested checkout. A bare repository's refusal says the
+  destination is its git directory and to choose a folder outside it.
 - **A failed worktree create no longer leaves its checkout behind when the
   daemon stops.** Create admission closes at shutdown, running creates finish by
   adopting their checkout or rolling back, and the daemon waits for those
@@ -669,7 +674,14 @@ All notable changes to h4rn are recorded here. The format follows
   Recovery removes only a checkout whose admin dir, branch and owner marker all
   match, retries a locked worktree after it is unlocked, and never runs a
   repository-wide prune: a moved worktree h4rn did not make keeps its
-  registration. A thread's checkout is never touched.
+  registration. Once the checkout is removed, that step is recorded, and the
+  next start finishes from the record itself: it deletes the branch h4rn made
+  only when the branch is not registered, not checked out and still at the
+  commit the create began from, then retires the record. A branch deletion git
+  refuses is retried on a later start instead of being lost, a start reports
+  only checkouts it actually removed, and a thread working in a parent folder is
+  not mistaken for one using the checkout. A thread's checkout is never
+  touched.
 - **One daemon owns one data folder.** Startup takes an operating-system lock
   before restoring threads or sweeping recovery and holds it until shutdown, so
   a second daemon on the same folder exits without adopting or clearing the

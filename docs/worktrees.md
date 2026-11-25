@@ -49,10 +49,16 @@ The same holds when the thread starts in a linked worktree, in a worktree of a
 repository. The project folder is named after the real main worktree (or the
 bare repository's git directory), wherever that is: h4rn resolves the checkout
 from `core.worktree`, from the directory whose `.git` file points at the common
-git directory, or from the repository's own worktree registrations. Metadata
-directories such as `api.git` or an admin directory are never mistaken for a
-working tree. The destination is refused inside the workspace, the main
-checkout, or any other linked worktree of the same repository, because a
+git directory, or from a nearby directory or registration whose own `.git` file
+proves it is that checkout. Metadata directories such as `api.git` or an admin
+directory are never mistaken for a working tree, and a linked worktree is never
+accepted as the main one. When none of those can prove where the main checkout
+is, h4rn refuses the location instead of guessing; the refusal says the main
+checkout could not be found and never names the metadata directory. One reading
+of the repository decides both the project folder's name and the destination
+that is checked and created, so a location that passes the check is exactly the
+one a checkout goes into. The destination is refused inside the workspace, the
+main checkout, or any other linked worktree of the same repository, because a
 checkout there would make that working tree dirty. The check uses one complete
 worktree snapshot; if git cannot read an admin entry, the location is refused
 instead of guessing that the missing worktree is absent. All of these are
@@ -113,15 +119,31 @@ the checkout hook therefore leaves both the token and the record.
 If the daemon shuts down, it closes create admission, waits for every running
 create to adopt its checkout or start its rollback, and then waits for those
 rollbacks. If the daemon is killed first, the next startup finishes each record
-only with positive proof: the checkout's `.git` must name the recorded admin
-dir, that admin dir's `gitdir` must point back at the checkout, its `HEAD` must
-be the recorded branch, and the owner token must match. A record that cannot be
+only with positive proof. While the checkout is still there, the proof is the
+checkout's `.git` naming the recorded admin dir, that admin dir's `gitdir`
+pointing back at the checkout, its `HEAD` being the recorded branch, and the
+owner token matching. Once the checkout has been removed and that step was
+recorded, the record itself is the proof, because it says this create removed
+its own checkout; the startup then deletes the branch h4rn made only if that
+branch is not registered, is not checked out anywhere, and still points at the
+commit the create started from, and retires the record. A record that cannot be
 proved is kept and left alone. A record whose path a thread now uses is retired
-without touching the checkout. Recovery never runs a repository-wide
-`git worktree prune`: a moved worktree you made yourself keeps its registration.
-Cleanup is retried until the checkout, its registration and the branch h4rn made
-are actually gone; a locked worktree keeps its record until it is unlocked. A
-busy folder is deferred rather than stalling startup.
+without touching the checkout; a thread working in a parent folder does not
+count as using the checkout, so an unused one is still cleaned up. Recovery
+never runs a repository-wide `git worktree prune`: a moved worktree you made
+yourself keeps its registration. Cleanup is retried until the checkout, its
+registration and the branch h4rn made are actually gone; a locked worktree, or
+a branch deletion git refuses, keeps its record until a later start succeeds. A
+busy folder is deferred rather than stalling startup, and only a start that
+really removed a checkout or branch reports it as swept.
+
+The identity of a checkout is checked again immediately before h4rn asks git to
+remove it, and the destination folder's claim is held for the checks, the
+removal and the branch step. One window remains: a separate git process could
+remove the checkout and put another one at the same path in the moments between
+that last check and `git worktree remove`. h4rn cannot hold that process off.
+It never acts on a path it has not checked in this way, and it never prunes
+registrations it did not make.
 
 ## Tracking and clearing
 
