@@ -54,8 +54,10 @@ proves it is that checkout. A folder that git reports as the main worktree only
 because its git directory is named `.git` counts only when it really holds the
 checkout: the workspace's own git directory is that git directory, or a file
 the repository tracks is there. The workspace merely sitting inside the folder
-is not enough, because a linked worktree can sit inside the parent of a metadata
-directory named `.git`. As a last check no folder on the destination's way up
+is not enough on its own, because a linked worktree can sit inside the parent of
+a metadata directory named `.git`; a linked worktree nested inside its real main
+checkout (`repo/.worktrees/one`) still passes, because that checkout holds a
+tracked file. As a last check no folder on the destination's way up
 may belong to the same repository. Metadata directories such as `api.git` or an
 admin directory are never mistaken for a working tree, and a linked worktree is
 never accepted as the main one. When none of those can prove where the main
@@ -177,9 +179,12 @@ The claim token has a limit of its own. It says which create last used the
 folder, but it cannot tell a checkout a person later made on the same branch at
 the same path apart from the interrupted create's checkout: both leave the same
 branch at the same path while the claim still names that create. Recovery uses
-the token only when the registration carries no owner marker, and it still
-requires the branch and path to match the record, but that combination is
-indistinguishable. The confusion lasts only while the folder's claim still names
+the token when the registration carries no owner marker (and then also requires
+the branch and path to match the record), or when there is no registration at
+all and the destination is gone or empty; in every case a branch is deleted only
+when it is unregistered, not checked out, and still at the commit the create
+started from. That combination is still indistinguishable from a person's own
+checkout on the same branch. The confusion lasts only while the folder's claim still names
 that create; the next create for the folder rewrites it.
 
 ## Tracking and clearing

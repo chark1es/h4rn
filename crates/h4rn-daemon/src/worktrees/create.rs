@@ -3749,6 +3749,50 @@ mod tests {
         );
     }
 
+    /// A linked worktree nested inside its own main checkout (`repo/.wt/one`,
+    /// the common `.worktrees/` layout) still resolves the real main checkout:
+    /// being inside it is not proof enough on its own, but the main checkout
+    /// holds a tracked path, so creating a thread checkout from there works.
+    #[test]
+    fn a_linked_worktree_nested_in_its_own_main_checkout_can_create() {
+        let root = tempfile::tempdir().expect("root");
+        let main = root.path().join("repo");
+        std::fs::create_dir(&main).expect("repo");
+        init_repo(&main);
+        std::fs::write(main.join(".git").join("info").join("exclude"), ".wt/\n").expect("exclude");
+        let workspace = main.join(".wt").join("one");
+        run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "one",
+                workspace.to_str().unwrap(),
+            ],
+        );
+
+        let location = tempfile::tempdir().expect("location");
+        let data = tempfile::tempdir().expect("data");
+        let created = create_blocking(
+            &workspace,
+            &WorktreeRequest::Named("nested-ok/x".into()),
+            "nested",
+            &settings(Some(location.path())),
+            data.path(),
+            None,
+        )
+        .expect("a worktree nested in its own main checkout can create");
+        // The project folder is named after the real main checkout, which is
+        // only known once the main checkout is resolved.
+        assert!(
+            git::norm(&created.path).starts_with(git::norm(&location.path().join("repo"))),
+            "the checkout lands under the main checkout's project folder: {}",
+            created.path.display()
+        );
+    }
+
     /// A repository whose `HEAD` tree is empty cannot prove its main checkout
     /// from a linked worktree: no tracked path shows which folder holds the
     /// working tree, and a metadata parent has the same `.git` shape. The
@@ -4580,8 +4624,8 @@ mod tests {
         .expect("create");
         let admin = created.registration.clone().expect("a registration");
         let record = created.record.as_mut().expect("a recovery record");
-        // Drop the admin the create learned, so only the removal write can put
-        // it back before git acts.
+        // Drop the admin from the record file, so only the removal write can
+        // put it back before git acts.
         record.data.admin = None;
         let record_path = record.path.clone();
         write_pending_record(&record_path, &record.data).expect("record without an admin");
