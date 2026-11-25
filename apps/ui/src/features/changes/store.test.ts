@@ -83,7 +83,13 @@ describe("loadTurnChanges", () => {
     const seen: ClientRequest[] = [];
     const response: ResponseBody = {
       type: "fs_turn_changes",
-      changes: { thread_id: "thr_1", turn_id: "turn_1", files: [file], note: null },
+      changes: {
+        thread_id: "thr_1",
+        turn_id: "turn_1",
+        files: [file],
+        complete: false,
+        note: null,
+      },
     };
     const changes = await loadTurnChanges(
       async (request) => {

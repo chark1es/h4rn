@@ -40,6 +40,8 @@ const mock = vi.hoisted(() => {
     unread: false,
     resume_at: null,
     limit: null,
+    rewind: "handoff",
+    file_rewind: false,
     queued_count: 2,
     queue_revision: 3,
     steer: true,

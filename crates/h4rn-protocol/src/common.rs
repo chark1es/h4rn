@@ -6,6 +6,7 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use crate::ids::{DeviceId, HostId, SubagentId, ThreadId, TurnId};
+use crate::rewind::RewindMethod;
 use crate::subagents::SubagentState;
 
 /// The coding harness driving a thread (ADR-005).
@@ -511,6 +512,18 @@ pub struct ThreadSummary {
     /// When auto-resume will try this thread again, when scheduled (ADR-024).
     #[serde(default)]
     pub resume_at: Option<DateTime<Utc>>,
+    /// How this thread's harness drops rewound turns from its own history.
+    ///
+    /// A client offers **Edit from here** when this is not
+    /// [`RewindMethod::Unsupported`], and says which method will run.
+    #[serde(default)]
+    pub rewind: RewindMethod,
+    /// Whether the workspace is the thread's own linked git worktree.
+    ///
+    /// Only then can a rewind put files back to the pre-message checkpoint;
+    /// a thread in the project's main checkout rewinds its conversation only.
+    #[serde(default)]
+    pub file_rewind: bool,
     /// The limit currently blocking the thread, when one was observed.
     #[serde(default)]
     pub limit: Option<crate::usage::LimitBrief>,
@@ -948,6 +961,8 @@ mod tests {
             unread: false,
             resume_at,
             limit,
+            rewind: Default::default(),
+            file_rewind: false,
             queued_count: 0,
             queue_revision: 0,
             active_turn_id: None,

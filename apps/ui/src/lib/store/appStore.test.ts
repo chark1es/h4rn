@@ -14,6 +14,7 @@ vi.mock("@/lib/client/config", () => ({
 
 import { onManualPlacement } from "@/features/notifications/placement";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
+import type { EventEnvelope } from "@/lib/client/types";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
 import {
   applyEvent,
@@ -25,6 +26,9 @@ import {
   loadThreadQueue,
   loadThreads,
   moveQueuedMessage,
+  noticeRewindFallback,
+  planRewind,
+  rewindThread,
   sendMessage,
   sendQueuedNow,
   setThreadTab,
@@ -81,6 +85,8 @@ function threadSummary(input: { threadId: string; host: string }): ThreadSummary
     pending_guest_requests: 0,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
     queued_count: 0,
     queue_revision: 0,
@@ -413,6 +419,77 @@ describe("manual placements", () => {
     unsubscribe();
 
     expect(seen).toEqual([]);
+  });
+});
+
+describe("planRewind", () => {
+  beforeEach(() => {
+    fake.response.current = null;
+    fake.request.mockClear();
+  });
+
+  it("asks the daemon what the selected prompt's rewind would do", async () => {
+    fake.response.current = {
+      type: "rewind_plan",
+      plan: { method: "handoff", files_enabled: false, files_available: false },
+    };
+    const plan = await planRewind("th_plan", "item_user_1");
+    expect(fake.request).toHaveBeenCalledWith({
+      type: "rewind_plan",
+      thread_id: "th_plan",
+      before_item_id: "item_user_1",
+    });
+    expect(plan.method).toBe("handoff");
+    expect(plan.files_enabled).toBe(false);
+  });
+});
+
+describe("rewindThread", () => {
+  beforeEach(() => {
+    fake.response.current = null;
+    fake.request.mockClear();
+    seedHosts([]);
+  });
+
+  it("reports the method the daemon really used", async () => {
+    fake.response.current = {
+      type: "rewound",
+      prompt: {
+        thread_id: "th_rewind",
+        before_item_id: "item_user_1",
+        prompt: "try again",
+        attachments: [],
+        files_restored: false,
+        method: "handoff",
+      },
+    };
+    const prompt = await rewindThread("th_rewind", "item_user_1", false);
+    expect(prompt?.method).toBe("handoff");
+    expect(getState().toasts.at(-1)?.description).toContain("fresh session");
+  });
+});
+
+describe("rewind fallback notice", () => {
+  const envelope = (replayed: boolean): EventEnvelope => ({
+    seq: 1,
+    replayed,
+    event: {
+      type: "rewind_fell_back",
+      thread_id: "th_fallback",
+      at: "2026-01-01T00:00:00Z",
+    },
+  });
+
+  it("says a live fallback once and stays quiet when it is replayed", () => {
+    noticeRewindFallback(envelope(false));
+    const live = getState().toasts.at(-1);
+    expect(live?.title).toBe("The rewind fell back to a fresh session");
+    expect(live?.description).toBe(
+      "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
+    );
+
+    noticeRewindFallback(envelope(true));
+    expect(getState().toasts.at(-1)?.id).toBe(live?.id);
   });
 });
 

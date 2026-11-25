@@ -55,6 +55,8 @@ function summary(threadId: ThreadId = THREAD, patch: Partial<ThreadSummary> = {}
     unread: false,
     limit: null,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     usage: {
       input_tokens: 0,
       output_tokens: 0,

@@ -249,6 +249,18 @@ impl ThreadState {
             ThreadEvent::AgentStateChanged { state, .. } => {
                 self.agent_state = *state;
             }
+            ThreadEvent::Rewound { removed_turns, at } => {
+                self.turn_count = self.turn_count.saturating_sub(*removed_turns);
+                self.phase = Phase::Completed {
+                    status: TurnStatus::Completed,
+                };
+                self.agent_state = AgentState::Done;
+                self.pending_approval = false;
+                self.pending_question = false;
+                self.pending_failure = false;
+                self.usage_limit = None;
+                self.last_activity = *at;
+            }
             ThreadEvent::ApprovalRequested { at } => {
                 self.phase = Phase::AwaitingApproval;
                 self.agent_state = AgentState::AwaitingApproval;
@@ -674,6 +686,16 @@ pub enum ThreadEvent {
         /// Event time.
         at: DateTime<Utc>,
     },
+    /// An earlier prompt was edited: this many turns left the conversation.
+    ///
+    /// The thread is finished again rather than left Working. It keeps the tab
+    /// the person placed it in; a rewind never moves a thread by itself.
+    Rewound {
+        /// Turns removed, including the edited one.
+        removed_turns: u32,
+        /// Event time.
+        at: DateTime<Utc>,
+    },
     /// An approval hand was raised.
     ApprovalRequested {
         /// Event time.
@@ -824,6 +846,7 @@ impl ThreadEvent {
             | Self::TurnStarted { at }
             | Self::HarnessSwitched { at, .. }
             | Self::AgentStateChanged { at, .. }
+            | Self::Rewound { at, .. }
             | Self::ApprovalRequested { at }
             | Self::ApprovalResolved { at }
             | Self::QuestionAsked { at }
@@ -890,6 +913,28 @@ mod tests {
 
     fn tab(state: &ThreadState, now: DateTime<Utc>) -> ThreadTab {
         tab_for(state, now, &settings())
+    }
+
+    #[test]
+    fn a_rewind_finishes_the_thread_without_leaving_it_unread() {
+        let state = state_after(&[
+            ThreadEvent::TurnStarted { at: at(1) },
+            ThreadEvent::TurnCompleted {
+                status: h4rn_protocol::TurnStatus::Completed,
+                at: at(2),
+            },
+            ThreadEvent::Rewound {
+                removed_turns: 1,
+                at: at(3),
+            },
+        ]);
+        assert_eq!(state.turn_count, 0);
+        assert_eq!(state.agent_state, AgentState::Done);
+        assert!(!state.acknowledged, "Done still asks the person to resend");
+        assert!(!state.pending_failure);
+        // The ordinary post-turn grace may still hold the row in Working for a
+        // moment; once it passes, the thread is Done and asks to be resent.
+        assert_eq!(tab(&state, at(10)), ThreadTab::Done);
     }
 
     #[test]

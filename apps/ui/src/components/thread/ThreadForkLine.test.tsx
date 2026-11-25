@@ -45,6 +45,8 @@ function summary(): ThreadSummary {
     ttft_ms: null,
     context_window: null,
     context_fill_percent: null,
+    rewind: "handoff",
+    file_rewind: false,
   };
 }
 

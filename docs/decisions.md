@@ -2185,3 +2185,64 @@ rename needs no rewrite. No cascade exists in either direction, so deleting or
 archiving the source cannot take the fork with it. A fork in a worktree keeps the
 source's workspace path; per-fork worktrees are a later feature.
 
+## ADR-050: A rewind is one durable conversation edit, with an optional file checkpoint
+
+**Context.** People want to change an earlier prompt instead of adding another
+one, and they expect the provider to forget the turns that followed. They also
+sometimes want the files back, but a worktree can be shared with a subagent or
+another thread. A partial rewind — transcript edited but files half-restored,
+or files restored but history unchanged — is worse than refusing.
+
+**Decision.** **Edit from here** removes the chosen message and every later
+turn. Prompts and cuts are folded in journal order, so a prompt sent after an
+earlier cut is live and editable; a queued message joins the transcript under
+the turn that really ran it. One journaled `ThreadRewound` event is the durable cut; the
+UI folds it on replay, and the prompt returns only in the answer to the
+requesting device. Only a turn's first user item, its cue, can be edited: a
+steer is journaled inside the running turn, so cutting at it would also remove
+the cue before it, and the daemon refuses such a target. The provider boundary
+names the last kept chain entry the provider really recorded: Claude Code's
+message uuid for the assistant reply before the edited prompt, or for the kept
+prompt itself when that turn wrote no reply; Codex's accepted provider turn for
+the edited prompt.
+A later prompt's boundary is never borrowed, and a boundary counts only in the
+provider session that recorded it, whose id is stored beside it; a boundary
+from an abandoned session plans a handoff. A harness without a native
+truncation, or a boundary the provider refuses, gets a fresh session with a
+bounded handoff of the kept history; a refused boundary is journaled and
+reported on every fallback path rather than silently applied, including a switch
+to another harness, which turns the pending native boundary into the handoff the
+kept history already needs. A rewind is refused while a message's delivery is
+uncertain, so a row that may already be in the provider conversation is resent
+or discarded first; a steer whose adapter write has not returned is not such a
+row, and surfaces only if the write's outcome is really unknown. A promoted prompt
+whose write failed after the adapter was called becomes that row as soon as its
+turn settles, the same way a restart would recover it, so the dialog and the
+daemon refuse an edit it would hide rather than name. The dialog asks for
+the plan of the selected prompt, because the thread-wide capability cannot name
+what an older prompt, or a first prompt, will really use. File restore is a
+**Labs** feature, off by default while it is still being hardened: the daemon
+refuses it, the summary reports it unavailable and the dialog hides it until
+Settings → Labs turns it on. Its whole-tree checkpoint is only captured while
+the switch is on, so a turn sent while it was off has none and can rewind only
+its conversation. It exists only for
+a thread in its own linked worktree with a complete pre-turn checkpoint (a git
+tree of the whole tracked worktree), is refused when another live thread or
+agent session shares the directory (finished, fully idle subagents of the same
+thread excepted), and requires the same worktree registration the thread was
+created with. The restore writes a durable journal
+with the replaced bytes, applies the files, commits the cut and the record
+changes together, and only then publishes the new in-memory state. A failed
+commit rolls the files back; a crash between apply and commit is rolled back at
+the next startup, while a committed cut keeps its files. The workspace is
+reserved through the commit so nothing starts inside it mid-restore. Symlinks
+are restored as directory entries and never followed.
+
+**Consequences.** The transcript and provider history can be at slightly
+different points between the rewind and the next prompt, but no session that
+still holds the removed turns is ever written to. The word "rewind" in the UI
+means the conversation; file restore is a separate, explicitly warned Labs
+choice offered only where a complete checkpoint exists, so it can be held back
+while its remaining correctness gaps are closed without taking the conversation
+rewind with it. A provider that loses its native boundary degrades to a handoff
+rather than resuming the wrong history, and the person is told when it does.
