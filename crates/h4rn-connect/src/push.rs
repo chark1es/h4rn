@@ -209,7 +209,7 @@ impl FcmClient {
                 *self.token.lock().await = None;
                 continue;
             }
-            if status.as_u16() == 404 || is_unregistered(status.as_u16(), &text) {
+            if is_unregistered(status.as_u16(), &text) {
                 return Err(SendError::Unregistered);
             }
             if (status.as_u16() == 429 || status.is_server_error()) && attempt < 2 {
@@ -276,9 +276,28 @@ async fn retry_sleep(attempt: u32) {
     tokio::time::sleep(Duration::from_millis(millis.min(1_000))).await;
 }
 
+/// Whether FCM's answer names this token as gone.
+///
+/// Only the body decides. A 404 alone is just as likely to mean a wrong
+/// endpoint or project id, and deleting every token on that would silence a
+/// whole account because of an operator typo.
 fn is_unregistered(status: u16, body: &str) -> bool {
-    status == 404
-        || (status == 400 && (body.contains("UNREGISTERED") || body.contains("NOT_FOUND")))
+    if status != 400 && status != 404 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let names = |candidate: Option<&str>| matches!(candidate, Some("UNREGISTERED" | "NOT_FOUND"));
+    let error = &value["error"];
+    if names(error["status"].as_str()) {
+        return true;
+    }
+    error["details"].as_array().is_some_and(|details| {
+        details
+            .iter()
+            .any(|detail| names(detail["errorCode"].as_str()))
+    })
 }
 
 fn load_account(raw: &str) -> Result<ServiceAccount, String> {
@@ -367,13 +386,23 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_and_not_found_bodies_are_recognised() {
-        assert!(is_unregistered(404, ""));
+    fn only_a_body_that_names_the_token_as_gone_is_unregistered() {
+        // A wrong endpoint or project id also answers 404; that is not a token
+        // the phone abandoned.
+        assert!(!is_unregistered(404, ""));
+        assert!(!is_unregistered(404, "<html>not found</html>"));
+        assert!(is_unregistered(
+            404,
+            r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#
+        ));
         assert!(is_unregistered(
             400,
             r#"{"error":{"status":"UNREGISTERED"}}"#
         ));
-        assert!(is_unregistered(400, r#"{"error":{"status":"NOT_FOUND"}}"#));
+        assert!(is_unregistered(
+            404,
+            r#"{"error":{"details":[{"errorCode":"UNREGISTERED"}]}}"#
+        ));
         assert!(!is_unregistered(429, "quota"));
         assert!(!is_unregistered(500, "boom"));
     }
