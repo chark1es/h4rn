@@ -55,7 +55,8 @@ completion or approval that repeats the same state does. Connect also drops a
 completion that is more than two minutes old. Transitions that arrive together
 are grouped: two or more agents waiting for a person become one **N agents need
 attention** alert, and two or more finishing become one **N agents finished**
-alert.
+alert. The count is of threads, not raw transitions, so one agent that raises
+the same hand twice inside the group window is still one agent.
 
 ## Operator setup: Connect
 
@@ -80,8 +81,11 @@ that state in `/v1/push/status`; it never pretends to send.
 The sender signs an RS256 JWT-bearer assertion with the service account key,
 caches the OAuth2 access token until shortly before it expires, and posts a
 data message to `https://fcm.googleapis.com/v1/projects/<project>/messages:send`.
-A token that FCM reports as `UNREGISTERED` or `NOT_FOUND` is deleted; 429 and
-5xx responses are retried with backoff.
+A token that FCM reports as `UNREGISTERED` or `NOT_FOUND` in its error body is
+deleted; 429 and 5xx responses are retried with backoff. A bare 404 is not
+enough evidence: a wrong `H4RN_CONNECT_FCM_URL` or project id also answers 404,
+and deleting every token on that would silence the whole account because of an
+operator typo. Those answers leave the token in place and only log the failure.
 
 A device row belongs to the account that registered it. Registration accepts
 only the caller's own Connect device id, rotation replaces the old token,
