@@ -278,6 +278,7 @@ function changes(): FsTurnChanges {
   return {
     thread_id: thread,
     turn_id: activeTurn,
+    complete: false,
     files: [
       {
         path: "a.ts",
@@ -366,6 +367,8 @@ function threadRow(id: ThreadId, path: string, title: string) {
     needs_attention: false,
     unread: false,
     resume_at: null,
+    rewind: "handoff",
+    file_rewind: false,
     limit: null,
   };
 }

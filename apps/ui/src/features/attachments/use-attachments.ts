@@ -19,6 +19,11 @@ type DraftTask = {
   uploader: AttachmentUploader;
   previewUrl: string | null;
   invalid: UploadFailure | null;
+  /**
+   * An attachment a rewind returned: already committed on the daemon, so it
+   * has no upload to run and is sent by id exactly like an uploaded one.
+   */
+  restored?: Attachment;
 };
 
 export type AttachmentDraft = DraftTask & {
@@ -40,6 +45,8 @@ export type AttachmentDrafts = {
   remove: (key: string) => void;
   retry: (key: string) => void;
   clear: () => void;
+  /** Puts already-committed attachments back in the tray, without re-uploading. */
+  restore: (attachments: Attachment[]) => void;
 };
 
 /** Drafts survive thread switches and reconnects; uploads keep running. */
@@ -179,6 +186,42 @@ export function useAttachmentDrafts(
     [threadId, refresh],
   );
 
+  const restore = useCallback(
+    (attachments: Attachment[]) => {
+      if (attachments.length === 0) return;
+      setTasks((current) => {
+        const known = new Set(
+          current.flatMap((task) => {
+            if (task.restored) return [task.restored.id];
+            const blob = task.uploader.getSnapshot().blob;
+            return blob ? [blob.id] : [];
+          }),
+        );
+        const additions: DraftTask[] = [];
+        for (const attachment of attachments) {
+          if (known.has(attachment.id)) continue;
+          known.add(attachment.id);
+          taskCounter += 1;
+          const file = new File([], attachment.name, { type: attachment.mime });
+          additions.push({
+            key: `restored-${taskCounter}`,
+            file,
+            uploader: new AttachmentUploader(getClient(), file),
+            previewUrl: null,
+            invalid: null,
+            restored: attachment,
+          });
+        }
+        if (additions.length === 0) return current;
+        // A rewind must never silently drop part of the prompt's attachments.
+        // Put every one back, even past the send limit: the person resolves
+        // the limit before sending, and the composer says how many to remove.
+        return [...current, ...additions];
+      });
+    },
+    [setTasks],
+  );
+
   const clear = useCallback(() => {
     setTasks((current) => {
       for (const task of current) {
@@ -190,6 +233,27 @@ export function useAttachmentDrafts(
 
   const drafts: AttachmentDraft[] = tasks.map((task) => {
     const snapshot = task.uploader.getSnapshot();
+    if (task.restored) {
+      return {
+        ...task,
+        snapshot: {
+          ...snapshot,
+          phase: "done",
+          totalBytes: task.restored.size,
+          sentBytes: task.restored.size,
+          blob: {
+            id: task.restored.id,
+            name: task.restored.name,
+            mime: task.restored.mime,
+            size: task.restored.size,
+            created_at: new Date().toISOString(),
+            has_thumbnail: false,
+          },
+          failure: null,
+        },
+        failure: null,
+      };
+    }
     return {
       ...task,
       snapshot,
@@ -214,7 +278,11 @@ export function useAttachmentDrafts(
       ? "Wait for the attachments to finish uploading."
       : failed
         ? "Retry or remove the failed attachment."
-        : null;
+        : drafts.length > MAX_ATTACHMENTS
+          ? `A message can carry ${MAX_ATTACHMENTS} attachments. Remove ${
+              drafts.length - MAX_ATTACHMENTS
+            } before sending.`
+          : null;
 
   return {
     tasks: drafts,
@@ -230,6 +298,7 @@ export function useAttachmentDrafts(
     remove,
     retry,
     clear,
+    restore,
   };
 }
 

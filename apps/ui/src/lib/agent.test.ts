@@ -39,6 +39,8 @@ function summary(overrides: Partial<ThreadSummary>): ThreadSummary {
     unread: false,
     resume_at: null,
     limit: null,
+    rewind: "handoff",
+    file_rewind: false,
     queued_count: 0,
     queue_revision: 0,
     steer: true,

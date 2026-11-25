@@ -54,7 +54,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::stream::{BoxStream, StreamExt};
-use h4rn_protocol::{AgentState, ApprovalDecision, HarnessKind, RuntimeMode, TurnStatus};
+use h4rn_protocol::{
+    AgentState, ApprovalDecision, HarnessKind, RewindMethod, RuntimeMode, SessionRewind, TurnStatus,
+};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -183,10 +185,20 @@ impl Harness for ClaudeCodeHarness {
         Some(crate::NativeFork::LatestOnly)
     }
 
+    fn rewind_method(&self) -> RewindMethod {
+        RewindMethod::Native
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        if matches!(spec.rewind, Some(SessionRewind::BeforeTurn { .. })) {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind(),
+                feature: "that rewind boundary; Claude Code resumes at a message id".into(),
+            });
+        }
         let install = self
             .detect()
             .ok_or(HarnessError::NotDetected { kind: self.kind() })?;
@@ -311,6 +323,8 @@ impl Harness for ClaudeCodeHarness {
             first_send: true,
             closed: false,
             control_seq: 0,
+            prompt_id: None,
+            prompt_boundary: None,
             fixed_permission_mode: spec.env_overrides.contains_key(ENV_PERMISSION_MODE),
         }))
     }
@@ -335,6 +349,18 @@ pub struct ClaudeCodeSession {
     first_send: bool,
     closed: bool,
     control_seq: u64,
+    /// The prompt id the next `send` tags its user frame with.
+    ///
+    /// Claude Code records it as the message uuid, which is what a later
+    /// truncating resume names.
+    prompt_id: Option<String>,
+    /// The last kept chain entry before the prompt being written.
+    ///
+    /// Claude Code's truncating resume keeps the named entry and everything
+    /// before it, so the boundary is the last chain entry that stays: the
+    /// assistant reply that preceded the removed prompt, or that prompt itself
+    /// when its turn wrote no reply.
+    prompt_boundary: Option<String>,
     /// The mode is pinned by an explicit environment override, so the thread
     /// control cannot change it.
     fixed_permission_mode: bool,
@@ -354,6 +380,20 @@ struct SharedState {
     /// The stdout task resolves one on the parsed frame; a request that is
     /// never answered times out in [`ClaudeCodeSession::send_control_request`].
     pending_controls: HashMap<String, tokio::sync::oneshot::Sender<ControlReply>>,
+    /// The uuid of the most recent assistant message the CLI emitted.
+    ///
+    /// Claude Code names every message; the last one before a prompt is one
+    /// kind of boundary a truncating resume keeps.
+    last_assistant_uuid: Option<String>,
+    /// The last entry in the provider's conversation chain that h4rn can name.
+    ///
+    /// A truncating resume keeps the named entry and everything before it, so
+    /// this is the boundary the next prompt advances from. It is the tagged
+    /// uuid of the prompt just sent until an assistant message replaces it: a
+    /// kept turn that wrote no reply (stopped, or failed first) is still the
+    /// last chain entry, and an assistant-only boundary would silently drop it
+    /// from the provider while the thread still shows it.
+    last_chain_uuid: Option<String>,
     /// Whether the stdout reader has ended, so no reply can ever arrive.
     ///
     /// Set and read under the same lock as `pending_controls`: a request that
@@ -372,6 +412,8 @@ impl SharedState {
             last_turn: None,
             touched_paths: Vec::new(),
             pending_controls: HashMap::new(),
+            last_assistant_uuid: None,
+            last_chain_uuid: None,
             control_closed: false,
         }
     }
@@ -522,13 +564,13 @@ impl ClaudeCodeSession {
     }
 }
 
-#[async_trait]
-impl HarnessSession for ClaudeCodeSession {
-    fn kind(&self) -> HarnessKind {
-        self.kind
-    }
-
-    async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
+impl ClaudeCodeSession {
+    /// Writes one prompt, tagging the user frame with the turn's prompt id.
+    async fn send_with_prompt(
+        &mut self,
+        input: UserInput,
+        prompt_id: Option<&str>,
+    ) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
             return Err(HarnessError::NotSent {
                 harness: self.kind,
@@ -542,11 +584,49 @@ impl HarnessSession for ClaudeCodeSession {
             attachments.extend(self.first_attachments.iter().cloned());
         }
 
-        let frame = build_user_frame(&input.text, &attachments)?;
+        let frame = build_user_frame(&input.text, &attachments, prompt_id)?;
+        // The last kept chain entry is the boundary a truncating resume cuts
+        // at. It is the previous turn's assistant reply, or the previous prompt
+        // itself when that turn wrote none: cutting at an assistant-only
+        // boundary would drop that kept prompt from the provider.
+        {
+            let mut state = lock(&self.shared);
+            self.prompt_boundary = state.last_chain_uuid.clone();
+            if let Some(prompt_id) = prompt_id.filter(|id| !id.trim().is_empty()) {
+                state.last_chain_uuid = Some(prompt_id.to_string());
+            }
+        }
         self.write_frame(frame).await?;
         self.interrupt_requested.store(false, Ordering::SeqCst);
         self.mark_state(AgentState::Thinking);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl HarnessSession for ClaudeCodeSession {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        let prompt_id = self.prompt_id.take();
+        self.send_with_prompt(input, prompt_id.as_deref()).await
+    }
+
+    async fn send_tagged(
+        &mut self,
+        input: UserInput,
+        prompt_id: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        self.send_with_prompt(input, prompt_id).await
+    }
+
+    fn provider_turn(&self) -> crate::ProviderTurn {
+        crate::ProviderTurn {
+            last_message_id: self.prompt_boundary.clone(),
+            ..crate::ProviderTurn::default()
+        }
     }
 
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
@@ -750,6 +830,16 @@ fn spawn_stdout_reader(
                 state.state = parser.agent_state();
                 state.touched_paths = parser.touched_paths().to_vec();
                 state.last_turn = parser.last_turn().cloned();
+                let assistant = parser.last_assistant_uuid().map(str::to_string);
+                if assistant != state.last_assistant_uuid {
+                    state.last_assistant_uuid = assistant.clone();
+                    // A new assistant message is the newest chain entry. When
+                    // the parser has none, the prompt just sent stays the
+                    // boundary instead of falling back to an older reply.
+                    if assistant.is_some() {
+                        state.last_chain_uuid = assistant;
+                    }
+                }
             }
 
             let completed = events
@@ -880,6 +970,7 @@ fn spawn_supervisor(
 pub fn build_user_frame(
     text: &str,
     attachments: &[AttachmentRef],
+    prompt_id: Option<&str>,
 ) -> Result<Vec<u8>, HarnessError> {
     let mut blocks = Vec::new();
     let mut path_lines = Vec::new();
@@ -918,10 +1009,15 @@ pub fn build_user_frame(
     }
     blocks.extend(native_blocks);
 
-    let frame = json!({
+    let mut frame = json!({
         "type": "user",
         "message": { "role": "user", "content": blocks }
     });
+    // Claude Code records this as the user message's uuid. A later
+    // `--resume-session-at` names it to drop that turn and everything after.
+    if let Some(prompt_id) = prompt_id.filter(|id| !id.trim().is_empty()) {
+        frame["uuid"] = json!(prompt_id);
+    }
     encode_frame(&frame)
 }
 
@@ -962,6 +1058,15 @@ fn session_args(spec: &SessionSpec, mcp_config: Option<&Path>) -> Vec<String> {
             // instead of continuing the one the source still owns.
             args.push("--fork-session".into());
         }
+    }
+    // The CLI's truncating resume names the last kept chain entry, which may be
+    // a prompt whose turn wrote no assistant message. It is only valid with
+    // `--resume`, in print mode (which every h4rn session runs in).
+    if let Some(SessionRewind::ResumeAtMessage { message }) = spec.rewind.as_ref()
+        && spec.resume_id.as_deref().is_some_and(|id| !id.is_empty())
+    {
+        args.push("--resume-session-at".into());
+        args.push(message.clone());
     }
     if let Some(config) = mcp_config {
         args.push("--mcp-config".into());
@@ -1213,7 +1318,7 @@ mod tests {
 
     #[test]
     fn user_frames_use_stream_json_content_blocks() {
-        let frame = build_user_frame("hello", &[]).expect("frame");
+        let frame = build_user_frame("hello", &[], None).expect("frame");
         let value: serde_json::Value = serde_json::from_slice(&frame).expect("json");
         assert_eq!(value["type"], "user");
         assert_eq!(value["message"]["role"], "user");
@@ -1231,7 +1336,7 @@ mod tests {
             path,
             media_type: "image/png".into(),
         };
-        let frame = build_user_frame("look", &[attachment]).expect("frame");
+        let frame = build_user_frame("look", &[attachment], None).expect("frame");
         let value: serde_json::Value = serde_json::from_slice(&frame).expect("json");
         let blocks = value["message"]["content"].as_array().expect("blocks");
         assert_eq!(blocks[0]["type"], "text");
@@ -1252,7 +1357,7 @@ mod tests {
             path: PathBuf::from("/tmp/report.csv"),
             media_type: "text/csv".into(),
         };
-        let frame = build_user_frame("summarise", &[attachment]).expect("frame");
+        let frame = build_user_frame("summarise", &[attachment], None).expect("frame");
         let value: serde_json::Value = serde_json::from_slice(&frame).expect("json");
         let blocks = value["message"]["content"].as_array().expect("blocks");
         assert_eq!(blocks.len(), 1);
@@ -1308,7 +1413,69 @@ mod tests {
             env_overrides: BTreeMap::new(),
             attachments: Vec::new(),
             agent_id: None,
+            rewind: None,
         }
+    }
+
+    #[test]
+    fn a_truncating_resume_names_the_first_removed_message() {
+        let mut spec = spec(Path::new("/tmp"));
+        spec.rewind = Some(SessionRewind::ResumeAtMessage {
+            message: "11111111-1111-4111-8111-111111111111".into(),
+        });
+        let args = session_args(&spec, None);
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--resume" && pair[1] == "sess-1" }),
+            "the session is resumed: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| {
+                pair[0] == "--resume-session-at"
+                    && pair[1] == "11111111-1111-4111-8111-111111111111"
+            }),
+            "the truncating boundary is passed: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_user_frame_carries_the_prompt_id_as_its_uuid() {
+        let frame = build_user_frame(
+            "edit this",
+            &[],
+            Some("11111111-1111-4111-8111-111111111111"),
+        )
+        .expect("frame");
+        let value: serde_json::Value =
+            serde_json::from_slice(&frame[..frame.len() - 1]).expect("json");
+        assert_eq!(value["uuid"], "11111111-1111-4111-8111-111111111111");
+        assert_eq!(value["message"]["content"][0]["text"], "edit this");
+    }
+
+    #[test]
+    fn claude_advertises_a_native_rewind_and_refuses_a_codex_boundary() {
+        let harness = ClaudeCodeHarness::new();
+        assert_eq!(harness.rewind_method(), RewindMethod::Native);
+        let error =
+            match tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(harness.start_session({
+                    let mut spec = spec(Path::new("/tmp"));
+                    spec.rewind = Some(SessionRewind::BeforeTurn {
+                        turn: "turn-b".into(),
+                    });
+                    spec
+                })) {
+                Ok(_) => panic!("a turn boundary is not a message boundary"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            crate::HarnessError::Unsupported {
+                harness: HarnessKind::ClaudeCode,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1492,6 +1659,8 @@ done
             first_send: false,
             closed: false,
             control_seq: 0,
+            prompt_id: None,
+            prompt_boundary: None,
             fixed_permission_mode: false,
         }
     }
@@ -1574,5 +1743,157 @@ done
         assert_eq!(requests[0]["request"]["subtype"], "set_model");
         assert_eq!(requests[0]["request"]["model"], "default");
         session.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_kept_boundary_is_the_reply_before_the_removed_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let path = workspace.path().join("claude");
+        // Each prompt it reads gets one assistant reply with its own uuid. The
+        // adapter must keep the reply A produced as B's boundary, not whatever
+        // reply arrived later.
+        let script = r#"#!/bin/sh
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      n=$((n + 1))
+      printf '{"type":"assistant","uuid":"reply-%s","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}]}}\n' "$n"
+      printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+      ;;
+  esac
+done
+"#;
+        crate::test_scripts::write_script(&path, script);
+        let harness = ClaudeCodeHarness::with_install(HarnessInstall {
+            path,
+            version: "2.1.329".into(),
+        });
+        let mut session = harness
+            .start_session(spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send_tagged(
+                UserInput {
+                    text: "A".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-a"),
+            )
+            .await
+            .expect("send A");
+        wait_for_completion(&mut events).await;
+        session
+            .send_tagged(
+                UserInput {
+                    text: "B".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-b"),
+            )
+            .await
+            .expect("send B");
+        // B's own reply has been parsed by the time its turn completes.
+        wait_for_completion(&mut events).await;
+        assert_eq!(
+            session.provider_turn().last_message_id.as_deref(),
+            Some("reply-1"),
+            "B's boundary is A's reply, never the one B produced"
+        );
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_kept_turn_that_wrote_no_reply_is_the_next_boundary() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let path = workspace.path().join("claude");
+        // A's prompt gets an assistant reply; B's prompt fails before writing
+        // any assistant frame; C's prompt gets nothing yet. C's boundary must
+        // be B's tagged prompt itself, not A's reply: cutting at A's reply
+        // would drop B from the provider while the thread still shows it.
+        let script = r#"#!/bin/sh
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      n=$((n + 1))
+      if [ "$n" -eq 1 ]; then
+        printf '{"type":"assistant","uuid":"reply-1","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}]}}\n'
+        printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+      elif [ "$n" -eq 2 ]; then
+        printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"stopped before any reply","duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":0}}\n'
+      fi
+      ;;
+  esac
+done
+"#;
+        crate::test_scripts::write_script(&path, script);
+        let harness = ClaudeCodeHarness::with_install(HarnessInstall {
+            path,
+            version: "2.1.329".into(),
+        });
+        let mut session = harness
+            .start_session(spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send_tagged(
+                UserInput {
+                    text: "A".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-a"),
+            )
+            .await
+            .expect("send A");
+        wait_for_completion(&mut events).await;
+        session
+            .send_tagged(
+                UserInput {
+                    text: "B".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-b"),
+            )
+            .await
+            .expect("send B");
+        wait_for_completion(&mut events).await;
+        session
+            .send_tagged(
+                UserInput {
+                    text: "C".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-c"),
+            )
+            .await
+            .expect("send C");
+        assert_eq!(
+            session.provider_turn().last_message_id.as_deref(),
+            Some("turn-b"),
+            "C's boundary must keep B, whose turn wrote no reply"
+        );
+        session.shutdown().await.expect("shutdown");
+    }
+
+    /// Consumes one turn from a test session's event stream.
+    #[cfg(unix)]
+    async fn wait_for_completion(events: &mut futures::stream::BoxStream<'static, HarnessEvent>) {
+        use futures::StreamExt as _;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = events.next().await {
+                if matches!(event, HarnessEvent::TurnCompleted { .. }) {
+                    return;
+                }
+            }
+            panic!("the session ended before a turn completed");
+        })
+        .await
+        .expect("the turn completed");
     }
 }

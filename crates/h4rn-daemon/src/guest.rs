@@ -2879,6 +2879,19 @@ fn guest_event(event: Event) -> Option<Event> {
             turn_id,
             entries,
         }),
+        Event::ThreadRewound {
+            thread_id,
+            before_item_id,
+            files_restored,
+            restore_id,
+            at,
+        } => Some(Event::ThreadRewound {
+            thread_id,
+            before_item_id,
+            files_restored,
+            restore_id,
+            at,
+        }),
         Event::AgentStateChanged { thread_id, state } => {
             Some(Event::AgentStateChanged { thread_id, state })
         }
@@ -3307,6 +3320,8 @@ mod tests {
             unread: false,
             resume_at: None,
             limit: None,
+            rewind: Default::default(),
+            file_rewind: false,
             queued_count: 0,
             queue_revision: 0,
             active_turn_id: None,

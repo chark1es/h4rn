@@ -15,7 +15,10 @@ use async_trait::async_trait;
 use futures::channel::mpsc::{self, UnboundedSender, unbounded};
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
-use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, TurnStatus, Usage};
+use h4rn_protocol::{
+    ApprovalDecision, HarnessKind, RewindMethod, SessionRewind, ToolCall, ToolCallStatus,
+    TurnStatus, Usage,
+};
 
 use crate::{
     Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, LimitSignal, SessionSpec,
@@ -457,6 +460,12 @@ pub struct FakeHarness {
     generic_death_gate: Option<Gate>,
     /// A test's handle on the live session's event stream.
     event_injector: Option<EventInjector>,
+    /// How this fake harness says it rewinds provider history.
+    rewind_method: RewindMethod,
+    /// Every rewind boundary a session was started with, when a test asked.
+    rewind_specs: Option<Arc<Mutex<Vec<Option<SessionRewind>>>>>,
+    /// The prompt id every tagged send carried, when a test asked.
+    tagged_prompts: Option<TaggedPrompts>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -920,6 +929,9 @@ impl Default for FakeHarness {
             immediate_stream_end: false,
             generic_death_gate: None,
             event_injector: None,
+            rewind_method: RewindMethod::Handoff,
+            rewind_specs: None,
+            tagged_prompts: None,
         }
     }
 }
@@ -1520,10 +1532,59 @@ impl FakeHarness {
     /// A test uses this to report a transport death between turns the way a
     /// real adapter does, while the session (and so its event sender) stays
     /// alive: the stream never ends, so the daemon's row cannot wait for it.
+    /// Advertises a native provider rewind.
+    pub fn with_native_rewind(mut self) -> Self {
+        self.rewind_method = RewindMethod::Native;
+        self
+    }
+
+    /// Records the rewind boundary every session start was given.
+    pub fn with_rewind_specs(mut self) -> (Self, RewindSpecs) {
+        let specs = RewindSpecs::default();
+        self.rewind_specs = Some(Arc::clone(&specs.0));
+        (self, specs)
+    }
+
+    /// Records the prompt id every tagged send carried.
+    pub fn with_tagged_prompts(mut self) -> (Self, TaggedPrompts) {
+        let prompts = TaggedPrompts::default();
+        self.tagged_prompts = Some(prompts.clone());
+        (self, prompts)
+    }
+
+    /// Hands the test a handle on a live session's event stream.
     pub fn with_event_injector(mut self) -> (Self, EventInjector) {
         let injector = EventInjector::default();
         self.event_injector = Some(injector.clone());
         (self, injector)
+    }
+}
+
+/// The rewind boundaries a fake session was started with, in start order.
+#[derive(Clone, Debug, Default)]
+pub struct RewindSpecs(Arc<Mutex<Vec<Option<SessionRewind>>>>);
+
+impl RewindSpecs {
+    /// Every boundary, oldest start first.
+    pub fn get(&self) -> Vec<Option<SessionRewind>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// The prompt ids tagged sends carried, in send order.
+#[derive(Clone, Debug, Default)]
+pub struct TaggedPrompts(Arc<Mutex<Vec<Option<String>>>>);
+
+impl TaggedPrompts {
+    /// Every prompt id, oldest send first.
+    pub fn get(&self) -> Vec<Option<String>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -1544,6 +1605,10 @@ impl Harness for FakeHarness {
         self.native_fork_scope
     }
 
+    fn rewind_method(&self) -> RewindMethod {
+        self.rewind_method
+    }
+
     fn has_instance(&self, instance: &str) -> bool {
         self.instances
             .iter()
@@ -1559,6 +1624,12 @@ impl Harness for FakeHarness {
         }
         if let Some(count) = &self.session_count {
             count.note();
+        }
+        if let Some(specs) = &self.rewind_specs {
+            specs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(spec.rewind.clone());
         }
         if let Some(models) = &self.session_models {
             models
@@ -1770,6 +1841,7 @@ impl Harness for FakeHarness {
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
+            session_id,
             sender: if dies_on_start.is_some() {
                 None
             } else {
@@ -1818,7 +1890,7 @@ impl Harness for FakeHarness {
             diagnostic_before_death: self.diagnostic_before_death.clone(),
             immediate_stream_end: self.immediate_stream_end,
             generic_death_gate: self.generic_death_gate.clone(),
-            session_id,
+            tagged_prompts: self.tagged_prompts.clone(),
             native_sessions: self.native_sessions.clone(),
             deferred_fork,
             deferred_fork_failure,
@@ -1831,6 +1903,9 @@ impl Harness for FakeHarness {
 pub struct FakeSession {
     kind: HarnessKind,
     workspace: PathBuf,
+    /// The id this session reported, so the daemon can tag provider boundaries
+    /// with the session that recorded them.
+    session_id: String,
     /// The stream's producer. `None` (or dropped) ends the stream after the
     /// events already queued.
     sender: Option<EventSink>,
@@ -1914,8 +1989,8 @@ pub struct FakeSession {
     immediate_stream_end: bool,
     /// Holds a dead send's failure until this gate opens.
     generic_death_gate: Option<Gate>,
-    /// This session's id, as the provider sees it.
-    session_id: String,
+    /// Where tagged prompt ids are recorded, when a test asked for them.
+    tagged_prompts: Option<TaggedPrompts>,
     /// The provider conversations this fake kept, when a test asked for them.
     native_sessions: Option<NativeSessions>,
     /// A native fork's copy and session id, reported when the first prompt
@@ -1937,6 +2012,10 @@ pub struct FakeSession {
 impl HarnessSession for FakeSession {
     fn kind(&self) -> HarnessKind {
         self.kind
+    }
+
+    fn session_id(&self) -> Option<String> {
+        Some(self.session_id.clone())
     }
 
     fn controls(&self) -> Option<crate::SessionControls> {
@@ -2369,6 +2448,35 @@ impl HarnessSession for FakeSession {
         Ok(())
     }
 
+    async fn send_tagged(
+        &mut self,
+        input: UserInput,
+        prompt_id: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        if let Some(prompts) = &self.tagged_prompts {
+            prompts
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(prompt_id.map(str::to_owned));
+        }
+        self.send(input).await
+    }
+
+    fn provider_turn(&self) -> crate::ProviderTurn {
+        match self.kind {
+            HarnessKind::Codex => crate::ProviderTurn {
+                turn_id: Some(format!("provider-turn-{}", self.sends)),
+                last_message_id: None,
+            },
+            _ => crate::ProviderTurn {
+                turn_id: None,
+                last_message_id: (self.sends > 1)
+                    .then(|| format!("provider-message-{}", self.sends - 1)),
+            },
+        }
+    }
+
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
         if let Some(count) = &self.interrupt_count {
             count.0.fetch_add(1, Ordering::SeqCst);
@@ -2592,6 +2700,7 @@ pub fn test_spec() -> SessionSpec {
         env_overrides: BTreeMap::new(),
         attachments: Vec::new(),
         agent_id: None,
+        rewind: None,
     }
 }
 

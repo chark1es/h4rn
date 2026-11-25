@@ -319,6 +319,10 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
 
     let failed = next_turn(&mut events).await;
     assert_eq!(failed.turn_id, dying.turn_id, "the dying turn is A");
+    assert_eq!(
+        queued.turn_id, dying.turn_id,
+        "the follow-up waits behind A and has no turn yet"
+    );
     assert_eq!(failed.status, TurnStatus::Failed);
     assert_eq!(
         failed.errors.len(),

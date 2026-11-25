@@ -18,16 +18,18 @@ import {
   PREVIEW_EVENT,
   requestComposerFocus,
   retryThread,
+  rewindRefusal,
   setPanelTab,
   toggleTerminal,
   useApp,
 } from "@/lib/store/appStore";
-import type { ApprovalItem } from "@/lib/store/projection";
+import type { ApprovalItem, MessageItem } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
 import { GuestRequestCard } from "./GuestRequestCard";
 import { PhoneApprovalSheet, PhoneApprovalSummary } from "./PhoneApproval";
+import { RewindDialog } from "./RewindDialog";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadStream, ThreadStreamSkeleton } from "./ThreadStream";
 
@@ -91,6 +93,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   const hosts = useApp((state) => state.hosts);
   const host = useApp((state) => state.hosts[summary?.host ?? ""]);
   const log = useApp((state) => state.logs[threadId]);
+  const queued = useApp((state) => state.queues[threadId]?.queued);
   const threadError = useApp((state) => state.threadErrors[threadId]);
   const connection = useApp((state) => state.connection.status);
   const lastSyncAt = useApp((state) => state.lastSyncAt);
@@ -100,6 +103,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   const [terminalMounted, setTerminalMounted] = useState(terminalOpen);
   const [phonePanel, setPhonePanel] = useState<"changes" | "subagents" | "preview" | null>(null);
   const [approvalSheetOpen, setApprovalSheetOpen] = useState(false);
+  const [rewindTarget, setRewindTarget] = useState<{ itemId: string } | null>(null);
   // The shortcut and the palette open the terminal through the store, not
   // the header button, so mount on any open.
   useEffect(() => {
@@ -109,6 +113,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   useEffect(() => {
     ensureThread(threadId);
     setApprovalSheetOpen(false);
+    setRewindTarget(null);
   }, [threadId]);
 
   // The delegated row in the stream opens the right panel's Subagents tab on
@@ -227,6 +232,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     });
   const firstApproval = pendingApprovals[0];
   const hostName = host?.name ?? summary.host;
+  const rewindBlocked = rewindRefusal(summary, log, queued);
 
   const main = (
     <main
@@ -377,6 +383,8 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           // queued follow-up would be sent twice. Put the cursor back in the
           // composer instead.
           onReply={requestComposerFocus}
+          onEditFromHere={(item: MessageItem) => setRewindTarget({ itemId: item.itemId })}
+          editDisabledReason={rewindBlocked}
           staleAt={offline ? lastSyncAt : null}
         />
       )}
@@ -422,6 +430,17 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           onClose={toggleTerminal}
         />
       ) : null}
+
+      <RewindDialog
+        thread={summary}
+        log={log}
+        queued={queued}
+        itemId={rewindTarget?.itemId ?? null}
+        open={rewindTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRewindTarget(null);
+        }}
+      />
 
       {isPhone && approvalSheetOpen && firstApproval ? (
         <PhoneApprovalSheet
