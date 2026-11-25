@@ -80,6 +80,14 @@ export type PlanItem = {
   entries: PlanStep[];
 };
 
+/** A quiet line where one provider stopped and the next began. */
+export type HarnessSwitchItem = {
+  kind: "harness_switch";
+  itemId: string;
+  from: HarnessKind;
+  to: HarnessKind;
+};
+
 export type TurnItem =
   | MessageItem
   | ToolItem
@@ -87,7 +95,8 @@ export type TurnItem =
   | LimitItem
   | ErrorItem
   | DelegatedItem
-  | PlanItem;
+  | PlanItem
+  | HarnessSwitchItem;
 
 export type StreamTurn = {
   id: TurnId;
@@ -116,6 +125,20 @@ export type StreamTurn = {
    * behind — and no fork is offered from it.
    */
   forkTurnId?: TurnId;
+  /**
+   * Harness that ran this turn, when the daemon reported one.
+   *
+   * A thread can switch harness between turns, so a turn keeps its own
+   * provider instead of borrowing the summary's current one.
+   */
+  harness?: HarnessKind;
+  /**
+   * True for a synthetic row that only carries a quiet divider.
+   *
+   * It has no agent header, live line or turn actions: a harness switch landed
+   * between turns, so it belongs between their rows, not inside either.
+   */
+  divider?: boolean;
 };
 
 export type PendingMessage = {
@@ -164,6 +187,27 @@ function cloneLog(log: ThreadLog): ThreadLog {
     pending: [...log.pending],
     guestRequests: [...log.guestRequests],
   };
+}
+
+/**
+ * Whether a turn is one an agent really ran.
+ *
+ * A harness-switch divider and a user-message cue are synthetic rows: neither
+ * has an agent turn behind it, so neither can own a turn scope, a change set or
+ * a receipt.
+ */
+export function isRealTurn(turn: StreamTurn): boolean {
+  return !turn.divider && !turn.id.startsWith("cue:user:");
+}
+
+/** The newest turn an agent really ran, or `null` before one did. */
+export function latestRealTurn(turns: readonly StreamTurn[] | undefined): StreamTurn | null {
+  if (!turns) return null;
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn && isRealTurn(turn)) return turn;
+  }
+  return null;
 }
 
 function latestRunningTurn(log: ThreadLog): StreamTurn | null {
@@ -267,28 +311,61 @@ export function foldEvent(
 
   switch (event.type) {
     case "turn_started": {
-      let turn = findTurn(log, event.turn_id);
-      if (!turn) {
-        turn = {
+      let existing = findTurn(log, event.turn_id);
+      if (!existing) {
+        existing = {
           id: event.turn_id,
           startedAt: event.started_at,
           status: "running",
           items: [],
           usage: null,
           changes: null,
+          ...(event.harness ? { harness: event.harness } : {}),
         };
-        log.turns.push(turn);
+        log.turns.push(existing);
       }
-      turn.status = "running";
-      if (!turn.startedAt) turn.startedAt = event.started_at;
+      existing.status = "running";
+      if (!existing.startedAt) existing.startedAt = event.started_at;
+      if (event.harness) existing.harness = event.harness;
       // A copied turn's cue already says it came from a finished conversation.
       // Mark the daemon row too, so a prompt-only copy (whose own row stays
       // empty) never shows a "Finished" receipt it did not earn.
       if (
         log.turns.some((candidate) => candidate.forkTurnId === event.turn_id && candidate.imported)
       ) {
-        turn.imported = true;
+        existing.imported = true;
       }
+      return log;
+    }
+
+    case "harness_switched": {
+      // Every turn journaled before a switch ran on the harness it names, even
+      // when its own `TurnStarted` predates the field. Backfilling from the
+      // divider is what keeps an older turn labelled with the provider that
+      // really ran it instead of the thread's current one.
+      for (const turn of log.turns) {
+        if (!turn.divider && !turn.harness) turn.harness = event.from;
+      }
+      const id = `switch:${event.from}:${event.to}:${at}`;
+      const item: HarnessSwitchItem = {
+        kind: "harness_switch",
+        itemId: id,
+        from: event.from,
+        to: event.to,
+      };
+      // A switch always happens between turns. A new row keeps it in
+      // chronological place and keeps both neighbouring turns intact; the
+      // same event folded twice is not shown twice.
+      if (log.turns.some((turn) => turn.id === id)) return log;
+      log.turns.push({
+        id,
+        startedAt: at,
+        status: "completed",
+        items: [item],
+        usage: null,
+        changes: null,
+        divider: true,
+      });
       return log;
     }
 

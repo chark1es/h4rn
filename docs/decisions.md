@@ -1573,16 +1573,47 @@ exist and the Labs switch to still be on; a racing Stop sharing, new link,
 settle or switch-off therefore leaves no request and no files. The row becomes
 visible to the owner, and its `GuestRequested` event is raised, only after the
 files are written; both steps happen while the submission lock is held, so
-ending a link can never race a card into existence. Send and Dismiss claim a
+ending a link can never race a card into existence. The card is published only
+once its row says `pending`: that transition is the append's second half, made
+under the same locks, so any card the owner can see can be sent or dismissed. A
+failed transition publishes nothing and leaves the row `publishing`, and a
+snapshot hides a journaled card whose row cannot yet be answered; the sweep
+finishes such a row (or discards it with its files when the link is gone)
+instead of leaving a card nobody can answer. Send and Dismiss claim a
 request with one conditional update, so two actions can never run the same
 message twice.
 
 Every removal of a request raises `GuestRequestResolved` before its row is
 deleted, and the resolved event names its request. A crash between the claim and
 the event therefore leaves a row the startup sweep can resolve, and a repeated
-event from that sweep cannot clear another guest's hand. The periodic sweep
+event from that sweep cannot clear another guest's hand. The answer is journaled
+once: the writer claims the row's `resolution_emitted` marker with a conditional
+update before appending, so a Dismiss and a sweep that both hold the finished
+row cannot both emit it and the loser does nothing. The periodic sweep
 leaves a `sending` or `reserving` row alone while a task may still be reading
-it; only the startup pass, where no reader can exist, recovers it. A connection
+it; only the startup pass, where no reader can exist, recovers it, and a
+`publishing` row is left alone while its submission still holds the submission
+lock and finished by the periodic sweep once no writer is left. A Send's
+acceptance is the thread's journal, not a flag beside it: the message is named
+by the item id `item_guest_<request_id>`, and that id travels with the send
+through the queue — a prompt that arrives while a turn runs waits in the queue
+recorded under the same id, is promoted under it, and a restart restores it
+under it — so the journal says whether the thread owns the message in every
+state a crash can leave. Nothing becomes deliverable before the append that
+takes the message commits, so a prompt whose append failed is not left queued
+and the owner's retry delivers it exactly once.
+The references the Send takes for its thread's attachments are recorded under a
+hold named for the request in the same transaction that takes them, so recovery
+releases exactly those (the reference and the per-thread copy) when the message
+never arrived, or confirms them when it did, without touching a reference an
+earlier message of the same thread already held. When a Send is interrupted,
+recovery asks the journal first and decides about the link and the row only
+afterwards: a message the thread owns — as a transcript item, as a queue row,
+or as the delivery claim of a promotion that may already have reached the agent
+— is `sent`, never dismissed because its link expired while the daemon was
+down. While the link still lives the row stays as
+the provenance record the guest's later poll needs; an ended or expired link
+drops it once its answer is raised. A connection
 runs its handlers to completion, so closing the peer never cancels a step that
 already changed the record. Work that can take a while — a submission, Send and
 Dismiss — runs on its own task and cannot be stranded by a dropped socket
@@ -1614,8 +1645,26 @@ and opens on the revoked notice. The page request carries the browser's own
 binding cookie, so a bound browser reloads to its own state while a fresh one
 sees "unbound", and a page GET still never claims the link. Each exchange
 travels to the daemon over its existing authenticated relay socket and is
-answered by that daemon only: a waiter is bound to the selected daemon's device
-id, and a reply from any other device is ignored.
+answered by that daemon only: an exchange and its answer are pinned to one
+connection id — not merely the daemon's device id — so a reply from another
+device, or from a socket the daemon has since replaced, is ignored, and a chunk
+that waited for queue capacity is checked against the pinned connection once
+more as it is enqueued. A current daemon marks its
+socket as one that sends a hello, and capability is recorded per socket: a
+reconnect starts unknown, and a hello from a replaced socket is ignored. A
+daemon that promised a hello and has not sent one is never sent a body; the
+browser gets a retryable error and the exchange is cancelled. Only a socket from
+a build that predates hellos, or a hello that omits admission, keeps the legacy
+path. A hello wakes every exchange waiting for it, and an announced daemon gets
+no body before its admission; when it stays silent, the cancel lets it release
+the slot it was holding instead of pinning it until an idle timeout. A session
+belongs to the two sockets that opened it: a socket a reconnect replaced still
+closes exactly its own sessions and tells each partner, while the device's
+presence stays with the replacement. Presence writes are serialised per device
+and check the connection generation as they are written, so an old socket's
+close can never report online after the replacement did. A refusal by the daemon
+releases its upload slot before the refusal is queued, so a full outbound queue
+cannot pin the slot.
 Bodies are split into bounded frames, so a 10 MB upload never grows a shared
 WebSocket frame; Connect refuses an exchange over the guest limit before it
 reaches the socket, and rebuilds every response header, including the binding
@@ -1813,11 +1862,11 @@ address and a hosted agent has no path in this phase.
 `QueuedMessageId`, so the queue survives a daemon restart in its order, and emits a summary instead
 of a transcript row: queued messages are not yet part of the conversation. **Steer** delivers the
 text into the turn that is already running, adds the user row to that turn, and never also queues
-it. With no turn running, a steer is an ordinary send. A steered row's item id starts with
-`item_steer_`, additively, so a replay can tell it from an older journal's queued prompt filed under
-the running turn: that row belongs to the next turn that starts, while a steer belongs to its own.
-Without the mark a fork of a steered turn would drop the steer, and the turn after it would read as
-ambiguous and could no longer be forked.
+it. With no turn running, a steer is an ordinary send. A steered row is marked as part of its turn
+by a journal marker written in the same append as the row, so a replay can tell it from an older
+journal's queued prompt filed under the running turn: that row belongs to the next turn that
+starts, while a steer belongs to its own. Without the mark a fork of a steered turn would drop the
+steer, and the turn after it would read as ambiguous and could no longer be forked.
 
 **Only Codex steers.** Codex app-server has `turn/steer` with an `expectedTurnId`, so the server
 itself refuses a request aimed at a turn that has ended. Claude Code is not offered it: its
@@ -1971,8 +2020,75 @@ Shift in multiline mode) uses the opposite action. `Cmd/Ctrl+Shift+Enter` steers
 message while a turn is really running, and `Alt/Option+Up` at the start of the composer edits the
 newest one; both are rebindable.
 
+## ADR-048: A harness switch happens between turns, over a bounded handoff
 
-## ADR-048: A fork copies a thread at a turn, natively when the harness can
+**Status:** Accepted
+
+A thread can move to another provider only when nothing is in flight: no running
+turn, no queued or parked prompt, no armed rate-limit resume and no waiting
+approval. That single rule is what keeps the switch honest. The old session can
+be shut down without a prompt still belonging to it, a queued message can never
+be delivered to the provider the person just left, and an approval can only be
+answered by the session that asked for it. A switch therefore belongs between
+turns, next to the turn boundary the composer already respects, not inside the
+stream as a mid-turn migration.
+
+The switch is staged: the record names the new harness and model, clears the old
+harness-native resume id and its agent fingerprint, and sets a `handoff_pending`
+flag. That row and the `HarnessSwitched` domain and wire events are one journal
+append, so the switch is either durable in full or not at all. Only after the
+append commits is the old session detached under the thread's record lock and
+shut down while the switch gate is held, so a Send cannot select a new session
+beside it. A journal that refuses the write restores the staged fields and ends
+nothing. Clearing the resume id is part of the same write, so a crash or restart
+cannot resurrect a conversation the new provider never had. `handoff_pending`
+survives a restart and is cleared only once the new session accepts the prompt
+that carried the history; a failed start or write must not lose the history a
+later message still needs. A session that already died between turns belongs to
+the old provider too, so it is drained and shut down with the live one instead of
+letting its late exit report arm a resume on the switched thread.
+
+The first turn on the new harness reuses the import fallback instead of growing a
+second implementation: the same `handoff::build`, the same `H4RN_HANDOFF_BYTES`
+budget, the same "original request plus newest messages" selection, and the same
+rule that the person's request is appended verbatim. The history is read from the
+journaled wire items, which is the one copy h4rn keeps, so a switch after a
+restart behaves like one made a moment earlier. A thread that was imported and
+then switched keeps the same path: the imported origin is no longer special once
+the thread has live turns.
+
+Settings follow the thread where the target harness can honour them. A plan mode
+on a harness without one falls back to approval required; an effort or fast tier
+the target does not expose returns to its default. A configured ACP agent names
+its own catalogue at session start, so the switch resolves that catalogue before
+it commits (probing the agent when this daemon has no answer yet) and drops a
+value the agent never advertised instead of reporting a switch whose first Send
+would fail. The response names every value
+that was dropped, and the transcript's divider names the two harnesses. An agent
+that names a catalogue h4rn can map nothing from is refused with its own mode
+names: "it offers no mode a thread can run in" is a different fact from "it
+never named one", and only the second is trusted with the declared controls.
+Each `TurnStarted` event carries the harness that ran the turn, so a transcript
+that spans a switch does not relabel old turns with the new provider, and the
+metering ledger attributes each turn to the harness and model that really served
+it.
+
+A switch is honest only if the journal and the record agree on what the old
+provider already accepted, so acceptance is written before the turn's completion
+is published. A provider can report a whole turn while its prompt is still being
+written; the daemon holds that completion until the acceptance — and the handoff
+clear that belongs to it — is durable, and only then settles the turn. Without
+that order a switch in that window could hand over the reply while the request
+that produced it was still recorded as undelivered. The fallback from a dead
+native resume follows the same rule from the other side: it changes only the
+fallback's own fields (the resume id, the handoff flag and the import's spent
+native resume) and only while the row still belongs to the switch it read, so a
+late write cannot restore the harness the person left. A refused switch restores
+everything it staged, including the old provider's recorded limit and its
+countdown, and a Send the journal refuses takes its staged turn back so no
+dispatch, queued ghost or countdown outlives it.
+
+## ADR-049: A fork copies a thread at a turn, natively when the harness can
 
 **Status:** Accepted
 
@@ -2068,3 +2184,4 @@ projected on the summary; the origin title is read from the thread list so a
 rename needs no rewrite. No cascade exists in either direction, so deleting or
 archiving the source cannot take the fork with it. A fork in a worktree keeps the
 source's workspace path; per-fork worktrees are a later feature.
+

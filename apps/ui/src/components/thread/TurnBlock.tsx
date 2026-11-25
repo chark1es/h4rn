@@ -30,6 +30,7 @@ import { absoluteTime, countdown } from "@/lib/format";
 import { forkThread } from "@/lib/store/appStore";
 import type {
   DelegatedItem,
+  HarnessSwitchItem,
   MessageItem,
   PlanItem,
   StreamTurn,
@@ -188,6 +189,18 @@ function PlanItemView({ item }: { item: PlanItem }) {
   );
 }
 
+function HarnessSwitchLine({ item }: { item: HarnessSwitchItem }) {
+  return (
+    <div className="q-switch-line">
+      <span className="q-switch-rule" aria-hidden />
+      <span>
+        Switched from {harnessLabel(item.from)} to {harnessLabel(item.to)}
+      </span>
+      <span className="q-switch-rule" aria-hidden />
+    </div>
+  );
+}
+
 function Item({ item, threadId }: { item: TurnItem; threadId: string }) {
   void threadId;
   switch (item.kind) {
@@ -205,6 +218,8 @@ function Item({ item, threadId }: { item: TurnItem; threadId: string }) {
       return <PlanItemView item={item} />;
     case "error":
       return <ErrorItemView message={item.message} hint={item.hint} retryable={item.retryable} />;
+    case "harness_switch":
+      return <HarnessSwitchLine item={item} />;
   }
 }
 
@@ -239,6 +254,17 @@ export function TurnBlock({
   const stopped = stoppedNotice(turn.status);
   const failed = turn.status === "failed" || turn.status === "interrupted";
   const forkTurnId = forkableTurn(turn, turns);
+  const turnHarness = turn.harness ?? summary.harness;
+
+  if (turn.divider) {
+    return (
+      <div className="q-turn q-turn-divider">
+        {turn.items.map((item) => (
+          <Item key={`${turn.id}:${item.itemId}`} item={item} threadId={threadId} />
+        ))}
+      </div>
+    );
+  }
 
   if (isUserTurn) {
     return (
@@ -307,12 +333,12 @@ export function TurnBlock({
     <div className="q-turn">
       <div className="q-ag-head">
         <EntityAvatar
-          seed={harnessSeed(summary.host, summary.harness)}
+          seed={harnessSeed(summary.host, turnHarness)}
           kind="harness"
-          label={harnessLabel(summary.harness)}
+          label={harnessLabel(turnHarness)}
           size={14}
         />
-        <b>{harnessLabel(summary.harness)}</b>
+        <b>{harnessLabel(turnHarness)}</b>
         <span>on {summary.host}</span>
         <span>·</span>
         <span className="q-num">{absoluteTime(turn.startedAt)}</span>

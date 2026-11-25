@@ -2387,8 +2387,39 @@ fieldset.q-seg-fs {
 .q-model:hover {
   background: var(--hover);
 }
-.q-rot180 {
-  transform: rotate(180deg);
+/* The header's harness name is a quiet control that opens the switch panel. */
+.q-harness-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 6px;
+  margin-left: -6px;
+  border-radius: 5px;
+  color: var(--fg-2);
+  font-size: 12px;
+  font-weight: 500;
+}
+.q-harness-switch:hover {
+  background: var(--hover);
+  color: var(--fg-1);
+}
+/* A harness switch is a seam in the transcript, not a turn. */
+.q-switch-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
+.q-switch-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.q-turn-divider {
+  margin: 0;
 }
 /* Thread controls: a quiet panel of one-choice rows. */
 .q-tctrl {
@@ -6868,4 +6899,77 @@ fieldset.q-seg-fs {
   .q-issues-head .q-issues-search {
     min-width: 0;
   }
+}
+
+/* A harness switch opened from the palette, and the phone sheet it becomes.
+   Both are bounded by the viewport so neither can grow past the screen. */
+.q-switch-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  border: 0;
+  padding: 0;
+  background: var(--scrim);
+  animation: q-fade var(--dur-2) var(--ease-out);
+}
+.q-switch-dialog {
+  position: fixed;
+  z-index: 22;
+  left: 50%;
+  top: 14vh;
+  transform: translateX(-50%);
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(72dvh, calc(100dvh - 120px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-raised);
+  border-radius: 12px;
+  box-shadow:
+    var(--sh-dlg),
+    inset 0 0 0 1px var(--line);
+  padding: 14px;
+}
+.q-switch-dialog:focus {
+  outline: none;
+}
+.q-switch-sheet {
+  max-height: min(72dvh, calc(100dvh - 64px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
+}
+.q-switch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.q-switch-sheet .q-switch-head,
+.q-switch-sheet .q-tctrl {
+  padding: 0 20px;
+}
+.q-switch-head .q-tctrl-head {
+  margin: 0;
+}
+/* Full-size touch targets in the phone sheet: 44 px rows and fields. */
+.q-switch-sheet .q-tctrl-row {
+  min-height: 44px;
+  padding: 0 8px;
+  font-size: 14px;
+}
+.q-switch-sheet .q-tctrl-model input {
+  height: 44px;
+  font-size: 14px;
+}
+.q-switch-sheet .q-tctrl-actions .q-btn {
+  min-height: 44px;
+}
+.q-tctrl-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 12px;
+}
+.q-rot180 {
+  transform: rotate(180deg);
 }

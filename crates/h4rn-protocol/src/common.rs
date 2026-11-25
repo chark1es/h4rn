@@ -396,6 +396,14 @@ pub struct ThreadSummary {
     pub host: HostId,
     /// Harness driving the thread.
     pub harness: HarnessKind,
+    /// Harness the conversation was imported from, when it was imported.
+    ///
+    /// The thread can later switch harness, so this is the one durable answer
+    /// to "where did this conversation come from?"; the thread's current
+    /// `harness` no longer names it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub imported_from: Option<HarnessKind>,
     /// Configured ACP agent instance, when `harness` is [`HarnessKind::Acp`].
     ///
     /// Older daemons did not have this field; threads written before it
@@ -601,6 +609,32 @@ pub fn queue_page(queued: &[QueuedMessage], offset: usize) -> Vec<QueuedMessage>
         page.push(message.clone());
     }
     page
+}
+
+/// One thread setting a harness switch had to drop.
+///
+/// The new harness does not offer the setting the old one was using, so the
+/// daemon records the value it dropped and the client can say which ones it
+/// was. The value is display-ready: a mode is its protocol slug and an effort
+/// is the harness's own word.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DroppedSetting {
+    /// Which setting was dropped.
+    pub setting: DroppedSettingKind,
+    /// The value the thread had before the switch.
+    pub value: String,
+}
+
+/// A thread setting a switch can drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DroppedSettingKind {
+    /// The permission mode the old harness could run in.
+    RuntimeMode,
+    /// The reasoning effort the old harness accepted.
+    ReasoningEffort,
+    /// The old harness's fast tier.
+    Fast,
 }
 
 /// One completed stream item.
@@ -886,6 +920,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            imported_from: None,
             agent_id: None,
             title: "usage limit".into(),
             workspace_path: "/tmp/work".into(),

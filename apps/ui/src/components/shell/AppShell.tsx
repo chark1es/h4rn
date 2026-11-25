@@ -23,6 +23,7 @@ import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import { PhoneNav } from "@/components/shell/PhoneNav";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { Toasts } from "@/components/shell/Toasts";
+import { HarnessSwitchCommand } from "@/components/thread/HarnessSwitch";
 import { ThreadPane } from "@/components/thread/ThreadPane";
 import {
   DropdownMenu,
@@ -781,6 +782,7 @@ export function AppShell() {
         <AddProjectDialog />
         <GuestShareDialog />
         <CommandPalette />
+        <HarnessSwitchCommand />
         <LinkPullRequestDialog
           open={linkPrOpen}
           thread={thread ?? null}
@@ -834,6 +836,7 @@ export function AppShell() {
       <AddProjectDialog />
       <GuestShareDialog />
       <CommandPalette />
+      <HarnessSwitchCommand />
       <LinkPullRequestDialog
         open={linkPrOpen}
         thread={thread ?? null}

@@ -234,7 +234,24 @@ thread_id: ThreadId,
 /**
  * Whether to use the fast tier.
  */
-fast: boolean, } | { "type": "set_thread_tab", 
+fast: boolean, } | { "type": "switch_thread_harness", 
+/**
+ * Thread to switch.
+ */
+thread_id: ThreadId, 
+/**
+ * Harness to run the next turns on.
+ */
+harness: HarnessKind, 
+/**
+ * Configured ACP agent instance when `harness` is
+ * [`HarnessKind::Acp`]; ignored by built-in harnesses.
+ */
+agent_id: string | null, 
+/**
+ * Model slug to start the new harness with.
+ */
+model: string, } | { "type": "set_thread_tab", 
 /**
  * Thread to move.
  */

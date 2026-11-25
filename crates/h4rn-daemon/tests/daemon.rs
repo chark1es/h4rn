@@ -1331,22 +1331,25 @@ async fn approvals_are_answered_through_the_stream() {
     let (_, event) = client
         .wait_event(|event| matches!(event, Event::ApprovalRequested { .. }))
         .await;
-    match event {
+    let approval_id = match event {
         Event::ApprovalRequested {
             approval_id,
             prompt,
             ..
         } => {
-            assert_eq!(approval_id, "appr_1");
+            // The harness's own id is private; the client answers the cue the
+            // daemon minted for it.
+            assert!(approval_id.starts_with("ap_"), "{approval_id}");
             assert!(prompt.contains("git status"));
+            approval_id
         }
         _ => unreachable!(),
-    }
+    };
 
     client
         .request(ClientRequest::RespondApproval {
             thread_id,
-            approval_id: "appr_1".into(),
+            approval_id,
             decision: ApprovalDecision::Approve,
             option_id: None,
         })

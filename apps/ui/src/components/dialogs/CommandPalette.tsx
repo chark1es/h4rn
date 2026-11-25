@@ -1,5 +1,6 @@
 import {
   ArchiveIcon,
+  ArrowLeftRightIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   CircleDotIcon,
@@ -227,6 +228,15 @@ export function CommandPalette() {
               <WorkflowIcon aria-hidden />
               Open subagents
               <CommandShortcut command="panel.subagents" />
+            </CommandItem>
+            <CommandItem
+              value="switch harness provider model"
+              onSelect={() =>
+                close(() => window.dispatchEvent(new CustomEvent("h4rn:switch-harness")))
+              }
+            >
+              <ArrowLeftRightIcon aria-hidden />
+              Switch harness…
             </CommandItem>
             <CommandItem value="link pull request pr url" onSelect={() => openLinkPullRequest()}>
               <GitPullRequestIcon aria-hidden />

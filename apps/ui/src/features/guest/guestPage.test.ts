@@ -257,13 +257,47 @@ describe("the guest page", () => {
     );
   });
 
-  it("draws the attach control's focus ring on the visible label", () => {
+  it("draws the attach control's focus ring on the visible label with the focus token", () => {
     // The file input is invisible (opacity 0, full label overlay), so the
-    // browser's default ring on it would never be seen.
-    expect(pageHtml).toContain(".attach:has(:focus-visible)");
-    expect(pageHtml).toContain("outline: 2px solid var(--accent)");
+    // browser's default ring on it would never be seen. The ring belongs on the
+    // label the person sees, and DESIGN.md reserves the focus token for it.
+    const dom = new JSDOM(pageHtml.replace("__STATE__", "active"));
+    const { document } = dom.window;
+    const label = document.querySelector("label.attach");
+    expect(label).not.toBeNull();
+    expect(label?.querySelector("input[type=file]")).not.toBeNull();
+
+    const rules: Array<Record<string, unknown>> = [];
+    const collect = (list: ArrayLike<Record<string, unknown>>) => {
+      for (const rule of Array.from(list)) {
+        rules.push(rule);
+        if (rule.cssRules) collect(rule.cssRules as ArrayLike<Record<string, unknown>>);
+      }
+    };
+    collect(document.styleSheets[0]?.cssRules ?? []);
+
+    const ring = rules.find((rule) => rule.selectorText === ".attach:has(:focus-visible)") as
+      | { style?: { outline?: string } }
+      | undefined;
+    expect(ring, "the visible label has no focus ring rule").toBeTruthy();
+    expect(ring?.style?.outline).toContain("var(--focus)");
+    expect(ring?.style?.outline).not.toContain("var(--accent)");
+
+    // Both themes define the token, so the ring has a value in dark mode too.
+    const tokens = rules
+      .filter((rule) => rule.selectorText === ":root")
+      .map(
+        (rule) =>
+          (rule.style as { getPropertyValue?: (name: string) => string }).getPropertyValue?.(
+            "--focus",
+          ) ?? "",
+      )
+      .filter(Boolean);
+    expect(tokens.length).toBe(2);
+    expect(new Set(tokens).size).toBe(2);
     // A mouse click must not draw the ring: only keyboard focus does.
     expect(pageHtml).not.toContain(".attach:focus-within");
+    dom.window.close();
   });
 
   const servedStates = [

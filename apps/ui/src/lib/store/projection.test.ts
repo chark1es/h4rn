@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { ToolCall, Usage } from "@/gen";
 
-import { createThreadLog, foldEvent, totalTokens } from "./projection";
+import {
+  createThreadLog,
+  foldEvent,
+  isRealTurn,
+  latestRealTurn,
+  type StreamTurn,
+  totalTokens,
+} from "./projection";
 
 const USAGE: Usage = {
   input_tokens: 100,
@@ -99,6 +106,92 @@ describe("foldEvent", () => {
       status: "running",
       items: [{ kind: "message", itemId: "item_1", text: "Hello", streaming: true }],
     });
+  });
+
+  it("puts a harness switch between the turns as a quiet divider row", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: "2026-01-01T00:00:00.000Z",
+      harness: "claude_code",
+    });
+    log = foldEvent(log, {
+      type: "harness_switched",
+      thread_id: "t1",
+      from: "claude_code",
+      to: "codex",
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_2",
+      started_at: "2026-01-01T00:01:00.000Z",
+      harness: "codex",
+    });
+    expect(log.turns[0]?.id).toBe("turn_1");
+    const divider = log.turns.find((turn) => turn.divider);
+    expect(divider?.items).toMatchObject([
+      { kind: "harness_switch", from: "claude_code", to: "codex" },
+    ]);
+    expect(log.turns.find((turn) => turn.id === "turn_1")?.harness).toBe("claude_code");
+    expect(log.turns.find((turn) => turn.id === "turn_2")?.harness).toBe("codex");
+  });
+
+  it("keeps an older turn's real harness when its own event predates the field", () => {
+    // The daemon's normal order: a turn journaled before the upgrade carries
+    // no harness on its `turn_started`; the switch that follows names where the
+    // thread came from.
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: "2026-01-01T00:00:00.000Z",
+    });
+    log = foldEvent(log, {
+      type: "turn_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      status: "completed",
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_input_tokens: 0,
+        cost_micros: 0,
+        duration_ms: 0,
+        generation_ms: 0,
+        tps: 0,
+      },
+    });
+    log = foldEvent(log, {
+      type: "harness_switched",
+      thread_id: "t1",
+      from: "claude_code",
+      to: "codex",
+    });
+    log = foldEvent(log, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_2",
+      started_at: "2026-01-01T00:02:00.000Z",
+      harness: "codex",
+    });
+    expect(log.turns.find((turn) => turn.id === "turn_1")?.harness).toBe("claude_code");
+    expect(log.turns.find((turn) => turn.id === "turn_2")?.harness).toBe("codex");
+  });
+
+  it("does not mark the switch divider as an imported turn", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "harness_switched",
+      thread_id: "t1",
+      from: "claude_code",
+      to: "codex",
+    });
+    const divider = log.turns.find((turn) => turn.divider);
+    expect(divider?.imported).toBeUndefined();
   });
 
   it("keeps one plan item per turn, updated in place", () => {
@@ -868,6 +961,29 @@ describe("foldEvent", () => {
     expect(
       log.turns[4]?.items.map((item) => (item.kind === "message" ? item.text : item.kind)),
     ).toEqual(["echo: B prompt"]);
+  });
+});
+
+describe("latestRealTurn", () => {
+  it("skips a switch divider and a user cue after the last agent turn", () => {
+    const turn = (id: string, extra: Partial<StreamTurn> = {}): StreamTurn => ({
+      id,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      status: "completed",
+      items: [],
+      usage: null,
+      changes: null,
+      ...extra,
+    });
+    const turns = [
+      turn("turn_a"),
+      turn("switch:claude_code:codex", { divider: true }),
+      turn("cue:user:item_1"),
+    ];
+
+    expect(latestRealTurn(turns)?.id).toBe("turn_a");
+    expect(isRealTurn(turns[1] as StreamTurn)).toBe(false);
+    expect(isRealTurn(turns[2] as StreamTurn)).toBe(false);
   });
 });
 

@@ -2304,6 +2304,8 @@ fn idle_thread_meta(
         claimed: Vec::new(),
         imported: None,
         forked_from: None,
+        handoff_pending: false,
+        switch_generation: 0,
     }
 }
 

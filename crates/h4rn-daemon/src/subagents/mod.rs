@@ -139,9 +139,8 @@ impl From<ManagerError> for SubagentError {
     fn from(error: ManagerError) -> Self {
         match error {
             ManagerError::NotFound(message) => Self::NotFound(message),
-            ManagerError::Conflict(message) | ManagerError::ConflictHint { message, .. } => {
-                Self::Conflict(message)
-            }
+            ManagerError::Conflict(message) => Self::Conflict(message),
+            ManagerError::Refused { message, .. } => Self::Conflict(message),
             ManagerError::InvalidRequest(message) => Self::Invalid(message),
             ManagerError::Unsupported(message) => Self::Unsupported(message),
             ManagerError::NotImplemented(message) => Self::Unsupported(message),

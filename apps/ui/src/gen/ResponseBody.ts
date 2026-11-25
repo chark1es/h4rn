@@ -8,6 +8,7 @@ import type { BlobInfo } from "./BlobInfo";
 import type { DeviceId } from "./DeviceId";
 import type { DirectDevice } from "./DirectDevice";
 import type { DirectoryListing } from "./DirectoryListing";
+import type { DroppedSetting } from "./DroppedSetting";
 import type { FailoverOptions } from "./FailoverOptions";
 import type { FileEntry } from "./FileEntry";
 import type { ForgeAccount } from "./ForgeAccount";
@@ -199,7 +200,15 @@ thread_id: ThreadId,
 /**
  * Current projection of the new thread.
  */
-summary: ThreadSummary, } | { "type": "message_accepted", 
+summary: ThreadSummary, } | { "type": "thread_switched", 
+/**
+ * The thread after the switch.
+ */
+summary: ThreadSummary, 
+/**
+ * Settings the new harness could not keep.
+ */
+dropped: Array<DroppedSetting>, } | { "type": "message_accepted", 
 /**
  * Thread that accepted the message.
  */
