@@ -62,8 +62,10 @@ every registered worktree below the folder: with the metadata directory at
 is that worktree's own file, not a file `meta` holds. A linked worktree nested
 inside its real main checkout (`repo/.worktrees/one`) still passes, because that
 checkout holds the tracked files itself, and so does a main checkout moved
-inside one of its own linked worktrees. As a last check no folder on the destination's way up
-may belong to the same repository. Metadata directories such as `api.git` or an
+inside one of its own linked worktrees. A tracked symlink counts only when its
+target is inside the folder, so a checkout whose every tracked path links
+outside it can't prove itself this way. As a last check no folder on the
+destination's way up may belong to the same repository. Metadata directories such as `api.git` or an
 admin directory are never mistaken for a working tree, and a linked worktree is
 never accepted as the main one. When none of those can prove where the main
 checkout is, h4rn refuses the location instead of guessing; the refusal says the
