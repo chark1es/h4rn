@@ -684,8 +684,9 @@ All notable changes to h4rn are recorded here. The format follows
   folder deleted while its registration and mark remain is finished from the
   registration's admin dir, and the removal is marked before git runs, so a kill
   between the removal and the progress write still deletes the branch h4rn
-  made. Recovery removes only a checkout whose admin dir, branch and owner
-  marker all match, retries a locked worktree after it is unlocked, and never
+  made. Recovery removes only a checkout it can prove this create made (a
+  registration that names its path and branch, plus the owner marker or, before
+  the marker was written, the matching claim token), retries a locked worktree after it is unlocked, and never
   runs a repository-wide prune: a moved worktree h4rn did not make keeps its
   registration. Once the checkout is removed, that step is recorded, and the
   next start finishes from the record itself: it deletes the branch h4rn made
