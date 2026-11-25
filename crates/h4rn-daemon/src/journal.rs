@@ -177,6 +177,13 @@ pub struct StoredQueuedMessage {
     /// family that was revoked while it waited never runs.
     #[serde(default)]
     pub grant: Option<h4rn_protocol::WorkGrant>,
+    /// The transcript item id this message must be journaled under, if any.
+    ///
+    /// A guest Send names its request's id. The row keeps it, so a prompt that
+    /// waits in the queue and is promoted later is journaled under the same id
+    /// and recovery can still answer the guest from the journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 /// One message taken from the queue to steer into a running turn.

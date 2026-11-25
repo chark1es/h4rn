@@ -77,11 +77,25 @@ async fn boot_with_tick(
         tick_interval,
         "127.0.0.1:0".parse().expect("bind"),
         None,
+        Arc::new(FakeHarness::new()),
     )
     .await
 }
 
 /// Boots a daemon on the listener addresses a test names.
+/// Boots a daemon whose thread manager runs these harnesses.
+async fn boot_with_harness(harness: Arc<dyn h4rn_harness::Harness>) -> TestDaemon {
+    boot_full(
+        LifecycleSettings::default(),
+        None,
+        Duration::from_millis(20),
+        "127.0.0.1:0".parse().expect("bind"),
+        None,
+        harness,
+    )
+    .await
+}
+
 async fn boot_on(
     bind: std::net::SocketAddr,
     extra_bind: Option<std::net::SocketAddr>,
@@ -92,6 +106,7 @@ async fn boot_on(
         Duration::from_millis(20),
         bind,
         extra_bind,
+        Arc::new(FakeHarness::new()),
     )
     .await
 }
@@ -102,6 +117,7 @@ async fn boot_full(
     tick_interval: Duration,
     bind: std::net::SocketAddr,
     extra_bind: Option<std::net::SocketAddr>,
+    harness: Arc<dyn h4rn_harness::Harness>,
 ) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
@@ -124,7 +140,7 @@ async fn boot_full(
         .with_harness_registry(Arc::new(OfflineRegistry))
         .with_lifecycle(options)
         .with_catalog(Arc::new(
-            h4rn_daemon::harnesses::StaticHarnessCatalog::with(Arc::new(FakeHarness::new())),
+            h4rn_daemon::harnesses::StaticHarnessCatalog::with(harness),
         ));
     if let Some(journal) = journal {
         builder = builder.with_journal(journal);
@@ -2117,6 +2133,54 @@ async fn summary_pending_guest_requests(client: &mut Client, thread_id: &ThreadI
     }
 }
 
+/// Every event the owner's thread has recorded, read from the start.
+async fn owner_events(client: &mut Client, thread_id: &ThreadId) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut since = 0;
+    loop {
+        match client
+            .request(ClientRequest::GetThread {
+                thread_id: thread_id.clone(),
+                since_seq: since,
+            })
+            .await
+        {
+            ResponseBody::Thread {
+                events: page,
+                next_seq,
+                more,
+                ..
+            } => {
+                events.extend(page.into_iter().map(|entry| entry.event));
+                if !more {
+                    return events;
+                }
+                since = next_seq;
+            }
+            other => panic!("unexpected thread response: {other:?}"),
+        }
+    }
+}
+
+/// The events the owner's live socket carries during `window`.
+///
+/// Used to prove something was *not* published: `next_event` would wait
+/// forever for an event that must never arrive.
+async fn owner_events_for(client: &mut Client, window: Duration) -> Vec<Event> {
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return events;
+        }
+        match tokio::time::timeout(left, client.next_event()).await {
+            Ok(event) => events.push(event),
+            Err(_) => return events,
+        }
+    }
+}
+
 fn guest_text_message(text: &str) -> GuestMessageInput {
     GuestMessageInput {
         text: text.into(),
@@ -2308,6 +2372,62 @@ async fn the_pending_budget_is_held_before_any_file_is_written() {
 }
 
 #[tokio::test]
+async fn a_send_journals_its_message_before_the_card_is_answered() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "accept marker").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("send me"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The claim only owns the row. The message is accepted when the thread's
+    // journal holds it, and until then the thread has nothing.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::BeforeAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+    assert!(
+        !daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the thread held the message before the append"
+    );
+
+    gate.release();
+    sending.await.expect("send task").expect("the send failed");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sent")
+    );
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the thread never received the message its card calls sent"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
     let daemon = boot().await;
     let base = format!("http://{}", daemon.addr);
@@ -2346,7 +2466,11 @@ async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
     pool.close().await;
     assert_eq!(rows, 1, "a periodic sweep deleted a row Send is reading");
 
-    // Startup has no reader, so it resolves the card and removes the row.
+    // Startup has no reader, so it resolves the card. The row stays while the
+    // link lives: the guest snapshot only mentions a resolution whose request
+    // id is still a row for that link, so deleting it here would leave the
+    // guest's card up forever.
+    let resume = browser.state(0).await.next_seq;
     daemon
         .guest
         .recover_after_restart()
@@ -2363,7 +2487,470 @@ async fn a_sweep_skips_a_send_in_flight_and_startup_recovers_it() {
         .await
         .expect("count row");
     pool.close().await;
-    assert_eq!(rows, 0);
+    assert_eq!(rows, 1, "startup deleted the row the guest needs to poll");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "the guest never learned its recovered card resolved: {:?}",
+        later.events
+    );
+
+    // Ending the link drops the provenance row like any finished request.
+    owner
+        .request(ClientRequest::StopGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    let pool = journal_pool(&daemon).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests WHERE request_id = ?")
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count row");
+    pool.close().await;
+    assert_eq!(rows, 0, "an ended link kept a finished request row");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_a_send_whose_message_is_journaled_as_sent() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "accepted recover").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("went through"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The append happened, but the daemon stopped before the row could say
+    // `sent`. Recovery must ask the journal, not a flag written beside it.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::AfterAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending"),
+        "the simulated crash did not leave a claimed row"
+    );
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the crash point was before the append"
+    );
+
+    let resume = browser.state(0).await.next_seq;
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "the owner still shows a pending guest request"
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sent"),
+        "a journaled send was recovered as never sent"
+    );
+    // The same browser's next poll carries the answer that clears its card.
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: true, .. } if id == &request_id
+        )),
+        "the guest never learned its accepted message resolved: {:?}",
+        later.events
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_a_journaled_send_whose_link_expired_while_down() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "expired after append").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post(
+            "/messages",
+            &guest_text_message("arrived before the link died"),
+        )
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The append happened, then the daemon stopped before recording `sent`.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::AfterAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the crash point was before the append"
+    );
+
+    // The 24 hours pass while the daemon is down, so startup ends the link
+    // before it recovers the row. The owner's thread still has the message, and
+    // it must be answered as sent rather than dismissed.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query("UPDATE guest_links SET expires_at = ? WHERE thread_id = ?")
+        .bind((chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339())
+        .bind(thread_id.as_str())
+        .execute(&pool)
+        .await
+        .expect("expire link");
+    pool.close().await;
+
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "the owner still shows a pending guest request"
+    );
+    let events = owner_events(&mut owner, &thread_id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::GuestRequestResolved { request_id: id, sent: true, .. } if id == &request_id
+        )),
+        "a journaled send whose link expired was never answered as sent: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "a journaled send was dismissed because its link expired"
+    );
+    let pool = journal_pool(&daemon).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests WHERE request_id = ?")
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count row");
+    pool.close().await;
+    assert_eq!(rows, 0, "an ended link kept a finished request row");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_guest_prompt_that_may_have_been_delivered_is_recovered_as_sent() {
+    // The thread's first turn is held, so the guest Send has to queue; the
+    // second write is held too, so the promoted prompt sits at a `sending`
+    // claim: the restart a crash there leaves shows it as "May have been
+    // delivered".
+    let (harness, completion) = FakeHarness::new().with_completion_gate();
+    let (harness, sends) = harness.with_send_count();
+    let (harness, write_gate) = harness.with_send_gate_after(1);
+    let daemon = boot_with_harness(Arc::new(harness)).await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "guest in flight").await;
+    sends.wait_for(1).await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, _) = browser
+        .post("/messages", &guest_text_message("may have arrived"))
+        .await;
+    assert_eq!(status, 202);
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    // The prompt is queued. The daemon stops here, after the append and before
+    // the row could record `sent`, so the row is claimed and the prompt waits.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::AfterAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending"),
+        "the simulated crash did not leave a claimed row"
+    );
+
+    // The running turn ends and its settlement promotes the guest prompt; the
+    // adapter's write is held, so the promotion's claim is `sending`.
+    completion.release();
+    sends.wait_for(2).await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+    let queue = daemon
+        .manager
+        .thread_queue(&thread_id, 0)
+        .await
+        .expect("queue");
+    assert!(
+        queue.queued.is_empty(),
+        "the promoted guest prompt is still listed as waiting"
+    );
+    assert!(
+        daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the thread owns the promoted prompt but calls it unaccepted"
+    );
+
+    // Startup recovery asks the journal. The item exists, so the guest is told
+    // its message was sent and never that it was dismissed.
+    let resume = browser.state(0).await.next_seq;
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sent"),
+        "a guest prompt that may have been delivered was resolved as never sent"
+    );
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: true, .. } if id == &request_id
+        )),
+        "the guest never learned its prompt was sent: {:?}",
+        later.events
+    );
+    assert!(
+        !later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "a guest prompt whose item exists was resolved as dismissed"
+    );
+    write_gate.release();
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_crashed_send_releases_the_thread_attachment_it_staged() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "staged files").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "with a file".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "staged.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"staged before the append"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let guest_dir = daemon.dir.path().join("guest").join(&request_id);
+    let thread_attachments = daemon
+        .dir
+        .path()
+        .join("attachments")
+        .join(thread_id.as_str());
+    assert!(guest_dir.is_dir());
+    assert!(count_files(&thread_attachments) == 0);
+
+    // The append is paused: the file has already been copied into the thread
+    // and its reference taken, but the message is not journaled yet.
+    let gate = daemon.manager.pause_next_append();
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+    assert!(
+        !daemon
+            .manager
+            .guest_message_in_thread(&thread_id, &request_id)
+            .await
+            .expect("read the thread's journal"),
+        "the crash point was after the append"
+    );
+    assert_eq!(
+        count_files(&thread_attachments),
+        1,
+        "the crash point was before the attachment was resolved into the thread"
+    );
+    let blobs = blob_pool(&daemon).await;
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE refcount > 0")
+        .fetch_one(&blobs)
+        .await
+        .expect("count retained blobs");
+    assert_eq!(retained, 1, "the staged blob was not referenced");
+
+    // Recovery dismisses the send because the thread never got it, and the
+    // references it staged must go with the guest's own files.
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    assert!(!guest_dir.exists(), "the dismissed send kept its files");
+    assert_eq!(
+        count_files(&thread_attachments),
+        0,
+        "the thread kept a copy only the failed send referenced"
+    );
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE refcount > 0")
+        .fetch_one(&blobs)
+        .await
+        .expect("count retained blobs");
+    assert_eq!(retained, 0, "a dismissed send kept its blob reference");
+    let holds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_holds")
+        .fetch_one(&blobs)
+        .await
+        .expect("count holds");
+    assert_eq!(holds, 0, "a recovered send kept its staged hold");
+    blobs.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_a_send_that_never_reached_the_thread_as_dismissed() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "lost send").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "never arrived".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"hello"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists(), "the request wrote no directory");
+
+    // The claim happened, then the daemon stopped before the message could be
+    // appended. The thread never got it, so the guest must not be told it did.
+    let gate = daemon
+        .guest
+        .pause_next_send(h4rn_daemon::guest::SendPhase::BeforeAppend);
+    let sending = {
+        let guest = Arc::clone(&daemon.guest);
+        let thread_id = thread_id.clone();
+        let request_id = request_id.clone();
+        tokio::spawn(async move { guest.send_request(&thread_id, &request_id).await })
+    };
+    gate.arrived().await;
+    sending.abort();
+    let _ = sending.await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("sending")
+    );
+
+    let resume = browser.state(0).await.next_seq;
+    daemon
+        .guest
+        .recover_after_restart()
+        .await
+        .expect("startup sweep");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "the owner still shows a pending guest request"
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed"),
+        "a send that never reached the thread was recovered as sent"
+    );
+    assert!(
+        !directory.exists(),
+        "a dismissed send kept the files of a message the thread never got"
+    );
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "the guest never learned its lost message was dismissed: {:?}",
+        later.events
+    );
     daemon.stop().await;
 }
 
@@ -2955,6 +3542,23 @@ async fn journal_pool(daemon: &TestDaemon) -> sqlx::SqlitePool {
     ))
     .await
     .expect("open journal")
+}
+
+/// The blob store's own database, for reference and hold assertions.
+async fn blob_pool(daemon: &TestDaemon) -> sqlx::SqlitePool {
+    sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        daemon.dir.path().join("blobs").join("meta.db").display()
+    ))
+    .await
+    .expect("open blob store")
+}
+
+/// How many files one directory holds; a missing directory is empty.
+fn count_files(directory: &std::path::Path) -> usize {
+    std::fs::read_dir(directory)
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0)
 }
 
 /// The stored status of one guest request, or none when the row is gone.
@@ -3611,10 +4215,191 @@ async fn a_dismiss_that_claimed_its_row_is_never_reported_missing() {
         .await
         .expect("dismiss task")
         .expect("a claimed dismissal reported missing");
-    assert_eq!(request_status(&daemon, &request_id).await, None);
+    // The row stays while its link lives: its id is what lets the guest learn
+    // that its card resolved. Ending the link removes it.
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    // The sweep emitted the resolution while the Dismiss was paused; the
+    // Dismiss then resumed with the row it read before its claim. The answer
+    // belongs to the request, not to whichever writer ran last: one event.
+    let pool = journal_pool(&daemon).await;
+    let resolutions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM daemon_wire_events
+         WHERE thread_id = ? AND event_json LIKE '%guest_request_resolved%'
+           AND event_json LIKE ?",
+    )
+    .bind(thread_id.as_str())
+    .bind(format!("%{request_id}%"))
+    .fetch_one(&pool)
+    .await
+    .expect("count resolutions");
+    pool.close().await;
+    assert_eq!(
+        resolutions, 1,
+        "the dismissal journalled the same answer twice"
+    );
     assert_eq!(
         summary_pending_guest_requests(&mut owner, &thread_id).await,
         0
+    );
+    daemon.stop().await;
+}
+
+/// A card is journaled only once its row can be sent or dismissed.
+///
+/// The row transition to `pending` is the card's second half. Pausing between
+/// them proves the row is already answerable before anything is published, so
+/// the owner's first act on the card can never be answered "no longer exists".
+#[tokio::test]
+async fn a_card_is_published_only_after_its_row_is_answerable() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "card order").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::AfterCommit);
+    let posting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post("/messages", &guest_text_message("answer me at once"))
+                .await
+        })
+    };
+    gate.arrived().await;
+    // The card is journaled, and its row already says it can be answered.
+    let pool = journal_pool(&daemon).await;
+    let statuses: Vec<String> = sqlx::query_scalar("SELECT status FROM guest_requests")
+        .fetch_all(&pool)
+        .await
+        .expect("read request rows");
+    pool.close().await;
+    assert_eq!(
+        statuses,
+        vec!["pending".to_string()],
+        "a card was published before its row could be answered"
+    );
+    // And nothing has been published yet: the owner's live stream stays empty
+    // while the submit is paused, so no client can act on a card early.
+    let seen = owner_events_for(&mut owner, Duration::from_millis(200)).await;
+    assert!(
+        seen.iter()
+            .all(|event| !matches!(event, Event::GuestRequested { .. })),
+        "the card was published before its row could be answered: {seen:?}"
+    );
+    gate.release();
+
+    let (status, body) = posting.await.expect("post task");
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    // The owner's first act on the published card succeeds.
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    daemon.stop().await;
+}
+
+/// A card whose row update fails is never published, and the sweep raises it
+/// only once its row can be answered.
+#[tokio::test]
+async fn a_card_whose_row_update_fails_is_never_published_and_the_sweep_recovers_it() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "card commit").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    // Make the row's last half fail exactly as a refused database would: the
+    // card is journaled and the row stays `publishing`.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_pending BEFORE UPDATE ON guest_requests
+         WHEN NEW.status = 'pending'
+         BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    )
+    .execute(&pool)
+    .await
+    .expect("install the failure");
+    let (status, body) = browser
+        .post("/messages", &guest_text_message("never unanswerable"))
+        .await;
+    assert_eq!(
+        status,
+        500,
+        "a card that could not become answerable was accepted: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let rows: Vec<String> = sqlx::query_scalar("SELECT status FROM guest_requests")
+        .fetch_all(&pool)
+        .await
+        .expect("read request rows");
+    assert_eq!(
+        rows,
+        vec!["publishing".to_string()],
+        "a failed update lost the row the sweep needs"
+    );
+    sqlx::query("DROP TRIGGER fail_pending")
+        .execute(&pool)
+        .await
+        .expect("remove the failure");
+    pool.close().await;
+
+    // Nothing reached the owner or the guest: the card is not in the live
+    // stream, the guest's snapshot hides an unanswerable row, and the thread
+    // shows no pending request.
+    let published = owner_events_for(&mut owner, Duration::from_millis(300)).await;
+    assert!(
+        published
+            .iter()
+            .all(|event| !matches!(event, Event::GuestRequested { .. })),
+        "a card the owner cannot answer was published: {published:?}"
+    );
+    let snapshot = browser.state(0).await;
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .all(|entry| !matches!(entry.event, Event::GuestRequested { .. })),
+        "the guest saw a card it could not have answered: {:?}",
+        snapshot.events
+    );
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0,
+        "an unanswerable card raised a pending count"
+    );
+
+    // The sweep finishes the second half, and the card is answerable when it
+    // appears.
+    daemon.guest.sweep_expired().await.expect("sweep");
+    let request_id = request_id_from_snapshot(&browser).await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("pending")
+    );
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
     );
     daemon.stop().await;
 }
@@ -3894,14 +4679,19 @@ async fn a_dismiss_finishes_after_the_owner_disconnects_mid_claim() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     gate.release();
 
+    // The claim alone is not a finished Dismiss: its files go and its card is
+    // resolved after the claim, and a dropped socket must not stop that. Wait
+    // for the end of the dismissal, not for the status word.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if request_status(&daemon, &request_id).await.as_deref() == Some("dismissed") {
+        let status = request_status(&daemon, &request_id).await;
+        let pending = summary_pending_guest_requests(&mut owner, &thread_id).await;
+        if status.as_deref() == Some("dismissed") && pending == 0 && !directory.exists() {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "a dropped owner socket stranded the Dismiss in {request_id}"
+            "a dropped owner socket stranded the Dismiss in {request_id}: {status:?}, {pending} pending"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -3910,5 +4700,493 @@ async fn a_dismiss_finishes_after_the_owner_disconnects_mid_claim() {
         summary_pending_guest_requests(&mut owner, &thread_id).await,
         0
     );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_error_with_a_host_path_reaches_the_owner_but_not_the_guest() {
+    let host_path = "/home/owner/.h4rn/missing-workspace";
+    let daemon = boot_full(
+        LifecycleSettings::default(),
+        None,
+        Duration::from_millis(20),
+        "127.0.0.1:0".parse().expect("bind"),
+        None,
+        Arc::new(FakeHarness::new().with_start_failure(format!(
+            "the agent could not start in its fixed working directory {host_path}"
+        ))),
+    )
+    .await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "error path").await;
+
+    // The owner's own view keeps the whole diagnostic.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let owner_message = loop {
+        if let Event::Error { message, .. } = owner.next_event().await {
+            break message;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed startup never reached the owner"
+        );
+    };
+    assert!(
+        owner_message.contains(host_path),
+        "the owner lost the diagnostic: {owner_message}"
+    );
+
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let snapshot = browser.state(0).await;
+    let json = serde_json::to_string(&snapshot).expect("snapshot json");
+    assert!(
+        !json.contains(host_path),
+        "a guest received the host path: {json}"
+    );
+    let errors: Vec<_> = snapshot
+        .events
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            Event::Error { message, hint, .. } => Some((message.clone(), hint.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "the guest lost the error entirely");
+    assert_eq!(errors[0].0, "The agent hit an error.");
+    assert!(
+        errors[0]
+            .1
+            .as_deref()
+            .is_none_or(|hint| !hint.contains('/')),
+        "the guest hint carried a path: {:?}",
+        errors[0].1
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_thread_settled_after_the_placement_check_gets_no_card() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "settle window").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::BeforePublish);
+    let posting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post(
+                    "/messages",
+                    &GuestMessageInput {
+                        text: "too late".into(),
+                        attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                            name: "late.txt".into(),
+                            mime: "text/plain".into(),
+                            data: base64_encode(b"too late"),
+                        }],
+                    },
+                )
+                .await
+        })
+    };
+    gate.arrived().await;
+
+    // The placement commits before the settle hook can run: the hook needs the
+    // submission lock this submit is holding.
+    daemon
+        .manager
+        .set_thread_tab(&thread_id, ThreadTab::Settled, false)
+        .await
+        .expect("settle the thread");
+    gate.release();
+
+    let (status, body) = posting.await.expect("post task");
+    assert_eq!(
+        status,
+        410,
+        "a settled thread took a guest message: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let pool = journal_pool(&daemon).await;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guest_requests WHERE thread_id = ?")
+        .bind(thread_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("count requests");
+    pool.close().await;
+    assert_eq!(rows, 0, "a card was published on a settled thread");
+    assert_eq!(
+        summary_pending_guest_requests(&mut owner, &thread_id).await,
+        0
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(daemon.dir.path().join("guest"))
+        .expect("guest dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert!(leftovers.is_empty(), "the refused message kept files");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_refused_placement_keeps_its_cleanup_record_when_files_cannot_be_removed() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "conflict cleanup").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+
+    let gate = daemon
+        .guest
+        .pause_next_submit(h4rn_daemon::guest::SubmitPhase::BeforePublish);
+    let posting = {
+        let browser = browser.clone();
+        tokio::spawn(async move {
+            browser
+                .post(
+                    "/messages",
+                    &GuestMessageInput {
+                        text: "settle under me".into(),
+                        attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                            name: "kept.txt".into(),
+                            mime: "text/plain".into(),
+                            data: base64_encode(b"keep me"),
+                        }],
+                    },
+                )
+                .await
+        })
+    };
+    gate.arrived().await;
+    let request_id = std::fs::read_dir(daemon.dir.path().join("guest"))
+        .expect("guest dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("greq_"))
+        .expect("the reserved request directory");
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    // A refused disk: the cleanup cannot remove this path as a directory.
+    std::fs::remove_dir_all(&directory).expect("clear the request directory");
+    std::fs::write(&directory, b"not a directory").expect("block the cleanup");
+
+    // The settle wins the placement decision, so the card is refused. The
+    // row must stay reachable for the sweep rather than follow the failed
+    // file removal out of the database.
+    daemon
+        .manager
+        .set_thread_tab(&thread_id, ThreadTab::Settled, false)
+        .await
+        .expect("settle the thread");
+    gate.release();
+    let (status, body) = posting.await.expect("post task");
+    assert_eq!(
+        status,
+        410,
+        "a settled thread took a guest message: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("deleting"),
+        "a refused placement dropped the row whose files are still on disk"
+    );
+    assert!(directory.exists());
+
+    std::fs::remove_file(&directory).expect("unblock the cleanup");
+    daemon.guest.sweep_expired().await.expect("sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await,
+        None,
+        "the retried cleanup never removed the row"
+    );
+    assert!(!directory.exists());
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_snapshot_read_under_a_replaced_link_never_answers() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "revoked poll").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    // One message makes the refused snapshot's content recognisable.
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "before revocation".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+
+    let gate = daemon.guest.pause_next_snapshot();
+    let polling = {
+        let browser = browser.clone();
+        tokio::spawn(async move { browser.get("/state/0").await })
+    };
+    gate.arrived().await;
+
+    // Replace the link, don't end it: the thread still has a live link when
+    // the old poll resumes, so a check for "any live link on this thread"
+    // would wrongly answer it. Only the exact link that started the read may.
+    daemon
+        .guest
+        .create(&thread_id, &format!("{base}/guest"))
+        .await
+        .expect("replace the link");
+    gate.release();
+
+    let (status, _, body) = polling.await.expect("poll task");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::GONE,
+        "a revoked link answered a snapshot: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        !String::from_utf8_lossy(&body).contains("before revocation"),
+        "the refused snapshot still carried thread text"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_guest_polling_after_a_dismiss_and_a_sweep_still_sees_its_card_resolve() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "resolved poll").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "dismiss me".into(),
+                attachments: Vec::new(),
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let resume = browser.state(0).await.next_seq;
+
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    // The sweep runs with the link still alive: it must keep the row that
+    // carries the request id, or the resolution has no way to reach the guest.
+    daemon.guest.sweep_expired().await.expect("sweep");
+
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "a guest polling after the sweep never learned its card resolved: {:?}",
+        later.events
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_resolution_lost_from_the_journal_is_emitted_by_the_sweep() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "lost resolution").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post("/messages", &guest_text_message("answer me"))
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    let resume = browser.state(0).await.next_seq;
+
+    // The exact state a failed journal write leaves: the row records the
+    // answer, but no `GuestRequestResolved` exists on the wire.
+    let pool = journal_pool(&daemon).await;
+    sqlx::query(
+        "DELETE FROM daemon_wire_events
+         WHERE thread_id = ? AND event_json LIKE '%\"guest_request_resolved\"%'",
+    )
+    .bind(thread_id.as_str())
+    .execute(&pool)
+    .await
+    .expect("drop the resolution event");
+    sqlx::query("UPDATE guest_requests SET resolution_emitted = 0 WHERE request_id = ?")
+        .bind(&request_id)
+        .execute(&pool)
+        .await
+        .expect("clear the emitted marker");
+    pool.close().await;
+
+    daemon.guest.sweep_expired().await.expect("sweep");
+
+    let later = browser.state(resume).await;
+    assert!(
+        later.events.iter().any(|entry| matches!(
+            &entry.event,
+            Event::GuestRequestResolved { request_id: id, sent: false, .. } if id == &request_id
+        )),
+        "the sweep never re-emitted a lost resolution: {:?}",
+        later.events
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_finished_request_retries_file_removal_while_its_link_lives() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "sent cleanup").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "with a file".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"hello"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists(), "the request wrote no directory");
+
+    // A refused disk during Dismiss leaves the finished row naming its files.
+    std::fs::remove_dir_all(&directory).expect("clear the request directory");
+    std::fs::write(&directory, b"not a directory").expect("block the cleanup");
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+
+    // The periodic sweep retries while the link still lives, so the orphan is
+    // not kept until Stop sharing.
+    std::fs::remove_file(&directory).expect("unblock the cleanup");
+    std::fs::create_dir_all(&directory).expect("restore the request directory");
+    std::fs::write(directory.join("0-note.txt"), b"hello").expect("restore the file");
+    daemon.guest.sweep_expired().await.expect("sweep");
+    assert!(
+        !directory.exists(),
+        "the sweep never retried a finished request's files"
+    );
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed"),
+        "the sweep dropped the row the guest still needs to resolve"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_dismiss_whose_files_cannot_be_removed_stays_retryable_after_stop_sharing() {
+    let daemon = boot().await;
+    let base = format!("http://{}", daemon.addr);
+    let mut owner = Client::connect(&daemon).await;
+    let thread_id = create_thread(&mut owner, daemon.dir.path(), "dismiss cleanup").await;
+    let link = enable_and_share(&mut owner, &daemon.guest, &thread_id, &base).await;
+    let browser = bound_browser(&base, &link).await;
+    let (status, body) = browser
+        .post(
+            "/messages",
+            &GuestMessageInput {
+                text: "with a file".into(),
+                attachments: vec![h4rn_protocol::GuestAttachmentInput {
+                    name: "note.txt".into(),
+                    mime: "text/plain".into(),
+                    data: base64_encode(b"hello"),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(status, 202, "{}", String::from_utf8_lossy(&body));
+    let request_id = request_id_from_snapshot(&browser).await;
+    let directory = daemon.dir.path().join("guest").join(&request_id);
+    assert!(directory.exists(), "the request wrote no directory");
+
+    // A refused disk: the path exists but cannot be removed as a directory.
+    std::fs::remove_dir_all(&directory).expect("clear the request directory");
+    std::fs::write(&directory, b"not a directory").expect("block the cleanup");
+
+    owner
+        .request(ClientRequest::DismissGuestRequest {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        })
+        .await;
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("dismissed")
+    );
+
+    owner
+        .request(ClientRequest::StopGuestSharing {
+            thread_id: thread_id.clone(),
+        })
+        .await;
+    // The link is gone, but the row is a cleanup record until its files are
+    // gone: dropping it with the orphan still on disk would make the cleanup
+    // unreachable forever.
+    assert_eq!(
+        request_status(&daemon, &request_id).await.as_deref(),
+        Some("deleting"),
+        "Stop sharing dropped a row whose files are still on disk"
+    );
+    assert!(directory.exists());
+
+    std::fs::remove_file(&directory).expect("unblock the cleanup");
+    daemon.guest.sweep_expired().await.expect("sweep");
+    assert_eq!(
+        request_status(&daemon, &request_id).await,
+        None,
+        "the retried cleanup never removed the row"
+    );
+    assert!(!directory.exists());
     daemon.stop().await;
 }
