@@ -2832,10 +2832,12 @@ fn guest_event(event: Event) -> Option<Event> {
             thread_id,
             turn_id,
             started_at,
+            harness,
         } => Some(Event::TurnStarted {
             thread_id,
             turn_id,
             started_at,
+            harness,
         }),
         Event::MessageDelta {
             thread_id,
@@ -3277,6 +3279,7 @@ mod tests {
             parent_thread_id: None,
             host: h4rn_protocol::HostId::new("host"),
             harness: h4rn_protocol::HarnessKind::ClaudeCode,
+            imported_from: None,
             agent_id: None,
             title: "shared".into(),
             workspace_path: "/home/secret/work".into(),

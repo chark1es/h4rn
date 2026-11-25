@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import type { ThreadSummary, Usage } from "@/gen";
 import type { StreamTurn } from "@/lib/store/projection";
-import { ThreadReceipt } from "./ThreadStream";
+import { nextTurnIndex, ThreadReceipt } from "./ThreadStream";
+import { TurnBlock } from "./TurnBlock";
 
 const usage: Usage = {
   input_tokens: 0,
@@ -78,6 +79,37 @@ describe("ThreadReceipt", () => {
     expect(markup).not.toContain("Finished");
   });
 
+  it("keeps the import's receipt when no agent turn was written yet", () => {
+    // An imported conversation the person has not continued has no assistant
+    // turn: only their own message, which the stream shows as a cue row.
+    const cue: StreamTurn = {
+      id: "cue:user:item_1",
+      startedAt: "2026-11-18T09:00:00Z",
+      status: "completed",
+      items: [
+        {
+          kind: "message",
+          itemId: "item_1",
+          role: "user",
+          text: "an imported request",
+          attachments: [],
+          streaming: false,
+        },
+      ],
+      usage: null,
+      changes: null,
+    };
+    const markup = renderToStaticMarkup(
+      <ThreadReceipt
+        summary={{ ...summary, harness: "codex", imported_from: "claude_code" }}
+        turns={[cue]}
+      />,
+    );
+    expect(markup).toContain("Imported from Claude Code");
+    expect(markup).not.toContain("Finished");
+    expect(markup).not.toContain("tokens");
+  });
+
   it("keeps the ordinary receipt for a thread that ran here", () => {
     const markup = renderToStaticMarkup(
       <ThreadReceipt
@@ -93,6 +125,57 @@ describe("ThreadReceipt", () => {
     expect(markup).not.toContain("Imported from");
   });
 
+  it("does not read a thread that switched harness as imported", () => {
+    const divider: StreamTurn = {
+      id: "switch:claude_code:codex",
+      startedAt: "2026-11-18T09:10:00Z",
+      status: "completed",
+      items: [
+        {
+          kind: "harness_switch",
+          itemId: "switch:claude_code:codex",
+          from: "claude_code",
+          to: "codex",
+        },
+      ],
+      usage: null,
+      changes: null,
+      divider: true,
+    };
+    const markup = renderToStaticMarkup(
+      <ThreadReceipt summary={summary} turns={[turn(false), divider]} />,
+    );
+    expect(markup).not.toContain("Imported from");
+    expect(markup).toContain("Finished");
+  });
+
+  it("names the import source after the thread switched harness", () => {
+    const divider: StreamTurn = {
+      id: "switch:codex:claude_code",
+      startedAt: "2026-11-18T09:10:00Z",
+      status: "completed",
+      items: [
+        {
+          kind: "harness_switch",
+          itemId: "switch:codex:claude_code",
+          from: "codex",
+          to: "claude_code",
+        },
+      ],
+      usage: null,
+      changes: null,
+      divider: true,
+    };
+    const markup = renderToStaticMarkup(
+      <ThreadReceipt
+        summary={{ ...summary, harness: "codex", imported_from: "claude_code" }}
+        turns={[turn(true), divider]}
+      />,
+    );
+    expect(markup).toContain("Imported from Claude Code");
+    expect(markup).not.toContain("Imported from Codex");
+  });
+
   it("stays out of a thread that is not done", () => {
     expect(
       renderToStaticMarkup(
@@ -102,5 +185,57 @@ describe("ThreadReceipt", () => {
         />,
       ),
     ).toBe("");
+  });
+});
+
+describe("Harness switch divider", () => {
+  it("names both harnesses in the transcript", () => {
+    const divider: StreamTurn = {
+      id: "switch:claude_code:codex",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      status: "completed",
+      items: [
+        {
+          kind: "harness_switch",
+          itemId: "switch:claude_code:codex",
+          from: "claude_code",
+          to: "codex",
+        },
+      ],
+      usage: null,
+      changes: null,
+      divider: true,
+    };
+    const markup = renderToStaticMarkup(
+      <TurnBlock turn={divider} threadId="thread_1" summary={summary} onReply={() => undefined} />,
+    );
+    expect(markup).toContain("Switched from Claude Code to Codex");
+    expect(markup).not.toContain("q-ag-head");
+  });
+});
+
+describe("turn navigation", () => {
+  // Three real turns with a switch divider and a user cue between them.
+  const real = [0, 2, 4];
+
+  it("steps between real turns instead of stopping on a divider or a cue", () => {
+    expect(nextTurnIndex(real, 2, 1)).toBe(4);
+    expect(nextTurnIndex(real, 0, 1)).toBe(2);
+    expect(nextTurnIndex(real, 4, -1)).toBe(2);
+    expect(nextTurnIndex(real, 2, -1)).toBe(0);
+  });
+
+  it("skips a divider the tail follow landed on", () => {
+    // The newest row is the divider (index 5); Previous Turn must reach the
+    // turn before it, and Next Turn must not stay on the divider either.
+    expect(nextTurnIndex(real, 5, -1)).toBe(4);
+    expect(nextTurnIndex(real, 5, 1)).toBe(4);
+    expect(nextTurnIndex(real, 3, -1)).toBe(2);
+  });
+
+  it("stays on the end turns rather than walking onto a synthetic row", () => {
+    expect(nextTurnIndex(real, 0, -1)).toBe(0);
+    expect(nextTurnIndex(real, 4, 1)).toBe(4);
+    expect(nextTurnIndex([], 3, 1)).toBe(3);
   });
 });

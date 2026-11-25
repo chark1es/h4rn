@@ -189,6 +189,17 @@ pub enum ResponseBody {
         /// Current projection of the new thread.
         summary: ThreadSummary,
     },
+    /// A thread moved to another harness.
+    ///
+    /// `dropped` names the settings the new harness does not offer, so the
+    /// client can say what no longer applies.
+    ThreadSwitched {
+        /// The thread after the switch.
+        summary: ThreadSummary,
+        /// Settings the new harness could not keep.
+        #[serde(default)]
+        dropped: Vec<crate::DroppedSetting>,
+    },
     /// A user message was appended to a thread.
     MessageAccepted {
         /// Thread that accepted the message.
@@ -1007,6 +1018,18 @@ pub enum ProtoErrorCode {
 pub enum Event {
     /// The thread projection changed; upsert the row.
     ThreadUpserted(ThreadSummary),
+    /// The thread moved to another harness between turns.
+    ///
+    /// The transcript shows this as a quiet divider so the person can see
+    /// where one provider stopped and the next began.
+    HarnessSwitched {
+        /// Thread.
+        thread_id: ThreadId,
+        /// Harness the thread ran on until now.
+        from: crate::HarnessKind,
+        /// Harness the next turn runs on.
+        to: crate::HarnessKind,
+    },
     /// A turn started.
     TurnStarted {
         /// Thread.
@@ -1015,6 +1038,15 @@ pub enum Event {
         turn_id: TurnId,
         /// Start time.
         started_at: DateTime<Utc>,
+        /// Harness this turn ran on, when the daemon knows it.
+        ///
+        /// A thread can change harness between turns, so a turn names the
+        /// provider that produced it instead of borrowing the thread's current
+        /// one. Older journals omit it; the client then falls back to the
+        /// summary's harness.
+        #[serde(default)]
+        #[ts(optional)]
+        harness: Option<crate::HarnessKind>,
     },
     /// Streaming text from the agent.
     MessageDelta {
