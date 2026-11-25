@@ -686,12 +686,21 @@ impl SqliteJournal {
                 scope_key  TEXT NOT NULL,
                 scope_json TEXT NOT NULL,
                 issue_id   TEXT NOT NULL,
+                identifier TEXT,
+                title      TEXT,
                 linked_at  TEXT NOT NULL,
                 PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
             )",
         )
         .execute(&self.pool)
         .await?;
+        // A database written before the link stored its human identity still
+        // opens: the two columns are added empty, and the UI falls back to a
+        // generic label for those links.
+        self.ensure_column("daemon_issue_links", "identifier", "TEXT")
+            .await?;
+        self.ensure_column("daemon_issue_links", "title", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_issue_links_thread
@@ -785,21 +794,113 @@ impl SqliteJournal {
         column: &str,
         definition: &str,
     ) -> Result<(), JournalError> {
-        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
-            .fetch_all(&self.pool)
-            .await?;
-        let exists = rows.iter().any(|row| {
-            row.try_get::<String, _>("name")
-                .is_ok_and(|name| name == column)
-        });
-        if !exists {
-            sqlx::query(&format!(
-                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-            ))
-            .execute(&self.pool)
-            .await?;
+        // Two daemons may open the same journal at once. The check and the
+        // `ALTER TABLE` run inside one write transaction (`BEGIN IMMEDIATE`),
+        // so the second process can only look after the first committed and
+        // sees the column it added, instead of both seeing it missing and
+        // racing to add it.
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        match add_column(&mut conn, table, column, definition).await {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(error)
+            }
         }
-        Ok(())
+    }
+}
+
+/// Test-only pause between a column's check and its `ALTER`.
+///
+/// A test that wants two daemons to contend must keep the first one inside
+/// that window, otherwise the two finishes arrive one after the other and the
+/// race never happens. Production builds have no gate.
+#[cfg(test)]
+mod migration_gate {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    /// How often the duplicate-column fallback ran. A properly locked upgrade
+    /// never needs it, so a test can prove the lock did the work.
+    static FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn arm() {
+        ARMED.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn disarm() {
+        ARMED.store(false, Ordering::SeqCst);
+    }
+
+    pub(super) async fn pause() {
+        if ARMED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub(super) fn record_fallback() {
+        FALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn reset_fallbacks() {
+        FALLBACKS.store(0, Ordering::SeqCst);
+    }
+
+    pub(super) fn fallbacks() -> usize {
+        FALLBACKS.load(Ordering::SeqCst)
+    }
+}
+
+/// Adds one column when it is missing, on the caller's locked connection.
+async fn add_column(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), JournalError> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(&mut *conn)
+        .await?;
+    let exists = rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .is_ok_and(|name| name == column)
+    });
+    if exists {
+        return Ok(());
+    }
+    #[cfg(test)]
+    migration_gate::pause().await;
+    alter_add_column(conn, table, column, definition).await
+}
+
+/// Runs the `ALTER`, treating a column another writer already added as done.
+async fn alter_add_column(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), JournalError> {
+    match sqlx::query(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
+    .execute(&mut *conn)
+    .await
+    {
+        Ok(_) => Ok(()),
+        // A writer that never took the lock (an older build, or another
+        // tool) may have added the column after the check. That is exactly
+        // the state this migration wants, so it is already applied.
+        Err(sqlx::Error::Database(error)) if error.message().contains("duplicate column name") => {
+            #[cfg(test)]
+            migration_gate::record_fallback();
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1235,10 +1336,13 @@ impl Journal for SqliteJournal {
             .map_err(|error| JournalError::Database(sqlx::Error::Protocol(error.to_string())))?;
         sqlx::query(
             "INSERT INTO daemon_issue_links
-                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id,
+                 identifier, title, linked_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(thread_id, scope_kind, scope_key, issue_id) DO UPDATE SET
-                account_id = excluded.account_id",
+                account_id = excluded.account_id,
+                identifier = excluded.identifier,
+                title = excluded.title",
         )
         .bind(link.thread_id.as_str())
         .bind(&link.account_id)
@@ -1246,6 +1350,8 @@ impl Journal for SqliteJournal {
         .bind(key)
         .bind(scope_json)
         .bind(&link.issue_id)
+        .bind(&link.identifier)
+        .bind(&link.title)
         .bind(link.linked_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -1277,7 +1383,7 @@ impl Journal for SqliteJournal {
         thread_id: &ThreadId,
     ) -> Result<Vec<IssueLinkRecord>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, account_id, scope_json, issue_id, linked_at
+            "SELECT thread_id, account_id, scope_json, issue_id, identifier, title, linked_at
              FROM daemon_issue_links WHERE thread_id = ?
              ORDER BY linked_at ASC, rowid ASC",
         )
@@ -1812,6 +1918,8 @@ fn issue_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<IssueLinkRecord, 
             )))
         })?,
         issue_id: row.try_get("issue_id")?,
+        identifier: row.try_get("identifier")?,
+        title: row.try_get("title")?,
         linked_at: DateTime::parse_from_rfc3339(&linked_at)
             .map(|value| value.with_timezone(&Utc))
             .map_err(|error| {
@@ -1994,6 +2102,156 @@ mod tests {
         assert_eq!(threads[0].thread_id.as_str(), "th_old");
         assert_eq!(threads[0].agent_id, None);
         assert_eq!(threads[0].harness, HarnessKind::ClaudeCode);
+    }
+
+    /// The issue-link table as daemons wrote it before the identity columns,
+    /// with one row that must survive the upgrade.
+    async fn old_issue_links_schema(path: &std::path::Path) {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("open old database");
+        sqlx::query(
+            "CREATE TABLE daemon_issue_links (
+                thread_id  TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                scope_key  TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                issue_id   TEXT NOT NULL,
+                linked_at  TEXT NOT NULL,
+                PRIMARY KEY (thread_id, scope_kind, scope_key, issue_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old schema");
+        sqlx::query(
+            "INSERT INTO daemon_issue_links
+                (thread_id, account_id, scope_kind, scope_key, scope_json, issue_id, linked_at)
+             VALUES ('th_1', 'lin_1', 'linear', 'team_1',
+                     '{\"tracker\":\"linear\",\"team_id\":\"team_1\"}', 'issue_uuid_1',
+                     '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("old row");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_issue_link_written_before_the_identity_was_stored_migrates_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("old-links.db");
+        old_issue_links_schema(&path).await;
+
+        let journal = SqliteJournal::connect(&path).await.expect("open journal");
+        let links = journal
+            .issue_links_for_thread(&ThreadId::new("th_1"))
+            .await
+            .expect("list");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].issue_id, "issue_uuid_1");
+        assert_eq!(links[0].identifier, None);
+        assert_eq!(links[0].title, None);
+    }
+
+    /// The fallback counter is process-wide, so the tests that read it take
+    /// turns even though cargo runs tests in parallel.
+    fn fallback_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Arms the contention gate and disarms it on drop, so a failing
+    /// assertion cannot leave every later test pausing at its migration.
+    struct ArmedGate;
+
+    impl ArmedGate {
+        fn arm() -> Self {
+            migration_gate::arm();
+            Self
+        }
+    }
+
+    impl Drop for ArmedGate {
+        fn drop(&mut self) {
+            migration_gate::disarm();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_daemons_open_one_old_journal_without_a_race() {
+        let _counting = fallback_lock().lock().await;
+        // Hold every daemon at its column check long enough for the other one
+        // to reach the same point, so the two upgrades really contend.
+        let _gate = ArmedGate::arm();
+        for attempt in 0..3 {
+            migration_gate::reset_fallbacks();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("old-links-race.db");
+            // The core schema is applied once, so the only upgrade left is
+            // the daemon's own, which both processes run at startup.
+            drop(SqliteEventStore::connect(&path).await.expect("core schema"));
+            old_issue_links_schema(&path).await;
+
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                handles.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    SqliteJournal::connect(&path).await
+                }));
+            }
+            let mut opened = Vec::new();
+            for handle in handles {
+                let journal = handle
+                    .await
+                    .expect("the daemon task ran")
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "both daemons must open the same journal (attempt {attempt}): {error}"
+                        )
+                    });
+                opened.push(journal);
+            }
+            let links = opened[0]
+                .issue_links_for_thread(&ThreadId::new("th_1"))
+                .await
+                .expect("list");
+            assert_eq!(links.len(), 1, "the row survives the upgrade");
+            assert_eq!(links[0].issue_id, "issue_uuid_1");
+            assert_eq!(links[0].identifier, None);
+            // The lock, not the duplicate-column fallback, is what makes the
+            // second opener see the first one's column.
+            assert_eq!(
+                migration_gate::fallbacks(),
+                0,
+                "a locked upgrade never reached the duplicate-column fallback (attempt {attempt})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_column_another_writer_already_added_counts_as_applied() {
+        let _counting = fallback_lock().lock().await;
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let mut conn = journal.pool.acquire().await.expect("connection");
+        sqlx::query("CREATE TABLE probe (id TEXT)")
+            .execute(&mut *conn)
+            .await
+            .expect("probe table");
+        migration_gate::reset_fallbacks();
+        add_column(&mut conn, "probe", "note", "TEXT")
+            .await
+            .expect("add the column");
+        // A writer that did not check first (an older build) reaches its own
+        // `ALTER` after ours: the column is already there.
+        alter_add_column(&mut conn, "probe", "note", "TEXT")
+            .await
+            .expect("a duplicate column is already applied");
+        assert_eq!(migration_gate::fallbacks(), 1, "the fallback ran once");
     }
 
     #[tokio::test]

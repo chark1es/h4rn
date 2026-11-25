@@ -424,6 +424,16 @@ pub struct ThreadIssue {
     pub state: Option<LinkedIssueState>,
     /// Why the latest read failed, when it did.
     pub error: Option<String>,
+    /// Human identifier stored when the link was made (`ENG-123` for Linear).
+    /// Absent on links made before it was stored, and for trackers whose issue
+    /// id is already human (a forge issue number).
+    #[serde(default)]
+    pub identifier: Option<String>,
+    /// Issue title stored when the link was made, so a failed refresh still
+    /// names what the link points at. Absent on links made before it was
+    /// stored.
+    #[serde(default)]
+    pub title: Option<String>,
     /// When the link was created.
     pub linked_at: DateTime<Utc>,
 }
@@ -440,6 +450,23 @@ mod tests {
         let value = serde_json::to_value(&scope).unwrap();
         assert_eq!(value["tracker"], "linear");
         assert_eq!(value["team_id"], "team_1");
+    }
+
+    #[test]
+    fn a_thread_issue_link_framed_before_stored_identity_still_parses() {
+        // A daemon that predates the stored identifier and title sends neither
+        // field; the link must still parse, with both left empty.
+        let value = serde_json::json!({
+            "scope": {"tracker": "linear", "team_id": "team_1"},
+            "issue_id": "issue_uuid_1",
+            "account_id": "lin_1",
+            "state": null,
+            "error": "the tracker did not answer",
+            "linked_at": "2026-01-01T00:00:00Z",
+        });
+        let issue: ThreadIssue = serde_json::from_value(value).unwrap();
+        assert_eq!(issue.identifier, None);
+        assert_eq!(issue.title, None);
     }
 
     #[test]
