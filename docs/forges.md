@@ -459,13 +459,19 @@ labels, assignees, and close/reopen. Gitea/Forgejo replace labels through
 `PUT /repos/{owner}/{repo}/issues/{index}/labels` with label ids, not through
 the issue PATCH body. Gitea accepts a label owned by the repository or by the
 organization that owns it. The labels already on the issue are read from the
-issue's own label list, which a repository-scoped token can read; a name that
-is not applied yet is looked up in the repository catalogue and then in
-`GET /orgs/{org}/labels`. That organization catalogue needs an
-organization-scoped token, so a `403` from it names the label that could not be
-found instead of failing the whole edit. The daemon
-only sends the fields the caller
-named, so an edit never clears the others. GitHub closes with a
+issue's own label list, which a repository-scoped token can read, and a name
+that is not applied yet is looked up first in the repository catalogue, which
+the same token can read: those labels keep working. Only names the repository
+catalogue does not carry are looked up in `GET /orgs/{org}/labels`, which
+needs an organization-scoped token. When that organization catalogue answers
+`403`, the repository labels still resolve and the organization labels are
+left out of the lookup. The label replacement is refused when any requested
+name cannot be resolved: nothing is sent to the label endpoint, and the error
+names the label so the person can create it on the repository or connect an
+account with organization access. The refusal comes after the issue PATCH,
+though, so the other fields in the same update (title, body, state, assignees)
+were already sent and may already be saved. The daemon only sends the fields
+the caller named, so an edit never clears the others. GitHub closes with a
 `state_reason`, and a duplicate close also sends `duplicate_issue_id`; the UI
 collects the duplicate's number, and the daemon reads that issue so it can
 send GitHub's 64-bit issue id, which is not the number. GitLab, Gitea/Forgejo
@@ -511,11 +517,20 @@ connected".
 ### Thread links
 
 `LinkIssue` stores the tracker scope and provider issue id in the journal, so
-a link survives a restart; `ThreadIssues` reads each linked issue live and
-reports a failed read as an error rather than a stale row. The thread header's
-linked-items panel shows issues beside pull requests with open and unlink, and
-names each issue by its scope (`owner/repo#12`, or Linear's identifier and
-team), so two issues numbered `#12` in different repositories never look alike.
+a link survives a restart. A Linear link also stores the issue's human
+identifier (`ENG-123`) and its title at link time, so a failed refresh still
+names the issue instead of falling back to Linear's internal id, whether
+Linear is unreachable or reports the issue missing (a 404, a `NOT_FOUND`
+error, or an "Entity not found" message); a link made before those were stored
+is labelled "Linear issue". A rejected key, a missing permission or a rate
+limit keeps its own message even when it says something was "not found". A
+forge link stores no copy of the title: its readable `owner/repo#12` already
+names it, and the title stops showing once access to the repository is gone. `ThreadIssues` reads
+each linked issue live and reports a failed read as an error rather than a
+stale row. The thread header's linked-items panel shows issues beside pull
+requests with open and unlink, and names each issue by its scope
+(`owner/repo#12`, or Linear's identifier and team), so two issues numbered
+`#12` in different repositories never look alike.
 
 ## Checks, logs, re-run and commits
 

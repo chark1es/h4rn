@@ -149,7 +149,18 @@ impl LinearClient {
         })
     }
 
+    /// Runs a query that is not about one specific issue.
     async fn query(&self, query: &str, variables: Value) -> Result<Value> {
+        self.request(query, variables, Lookup::Other).await
+    }
+
+    /// Runs a query that looks up one specific issue, so a missing entity
+    /// is that issue being gone.
+    async fn query_issue(&self, query: &str, variables: Value) -> Result<Value> {
+        self.request(query, variables, Lookup::Issue).await
+    }
+
+    async fn request(&self, query: &str, variables: Value, lookup: Lookup) -> Result<Value> {
         let response = self
             .client
             .post(&self.endpoint)
@@ -163,6 +174,20 @@ impl LinearClient {
             .text()
             .await
             .map_err(|error| ForgeError::Network(self.sanitize(&error.to_string())))?;
+        // A `404` is Linear saying the entity does not exist. Any body it
+        // carries, JSON or not, can quote the id that was asked for, so the
+        // status is mapped before the body is parsed or forwarded.
+        if status.as_u16() == 404 {
+            return Err(match lookup {
+                Lookup::Issue => linear_not_found(),
+                // Verifying a key or listing teams never names an issue, so a
+                // 404 there is the endpoint or the request, not a lost issue.
+                Lookup::Other => ForgeError::Http {
+                    status: 404,
+                    message: "Linear answered 404 Not Found for this request".into(),
+                },
+            });
+        }
         let value: Value = serde_json::from_str(&body).map_err(|error| {
             ForgeError::Parse(format!(
                 "Linear returned a non-JSON body: {}",
@@ -176,28 +201,46 @@ impl LinearClient {
                     .or_else(|| value["errors"][0]["message"].as_str())
                     .unwrap_or("Linear rejected the request"),
             );
+            // A rejected key, a missing permission or a rate limit is the
+            // real answer even when its text mentions something "not found";
+            // only a reply that names a missing entity becomes a miss.
             return Err(match status.as_u16() {
                 401 => ForgeError::InvalidRequest(format!(
                     "the Linear API key was rejected: {message}"
                 )),
                 403 => ForgeError::LinearForbidden { message },
                 429 => ForgeError::LinearRateLimited { message },
+                _ if lookup == Lookup::Issue
+                    && value["errors"]
+                        .as_array()
+                        .is_some_and(|errors| errors.iter().any(is_not_found)) =>
+                {
+                    linear_not_found()
+                }
                 _ => ForgeError::Http {
                     status: status.as_u16(),
                     message,
                 },
             });
         }
-        if let Some(errors) = value["errors"].as_array()
-            && let Some(message) = errors.first().and_then(|error| error["message"].as_str())
-        {
-            let message = self.sanitize(message);
-            // Linear reports an invalid key as a GraphQL error with HTTP 200.
-            return Err(if message.to_ascii_lowercase().contains("authentication") {
-                ForgeError::InvalidRequest(format!("the Linear API key was rejected: {message}"))
-            } else {
-                ForgeError::InvalidRequest(message)
-            });
+        if let Some(errors) = value["errors"].as_array() {
+            // Linear also reports a missing entity as a GraphQL error with
+            // HTTP 200, either through `extensions.code` or its message. Both
+            // shapes can echo the id, so they never reach the caller's text.
+            if lookup == Lookup::Issue && errors.iter().any(is_not_found) {
+                return Err(linear_not_found());
+            }
+            if let Some(message) = errors.first().and_then(|error| error["message"].as_str()) {
+                let message = self.sanitize(message);
+                // Linear reports an invalid key as a GraphQL error with HTTP 200.
+                return Err(if message.to_ascii_lowercase().contains("authentication") {
+                    ForgeError::InvalidRequest(format!(
+                        "the Linear API key was rejected: {message}"
+                    ))
+                } else {
+                    ForgeError::InvalidRequest(message)
+                });
+            }
         }
         Ok(value["data"].clone())
     }
@@ -334,15 +377,15 @@ impl LinearClient {
         comments_after: Option<&str>,
     ) -> Result<LinearIssue> {
         let data = self
-            .query(
+            .query_issue(
                 LINEAR_DETAIL_QUERY,
                 json!({"id": issue_id, "after": comments_after}),
             )
             .await?;
         let issue = &data["issue"];
-        let summary = map_issue_summary(issue).ok_or_else(|| {
-            ForgeError::NotFound(format!("Linear issue {issue_id} was not found"))
-        })?;
+        // The id is Linear's internal UUID, which nobody recognises. The
+        // caller that knows the human identifier names the issue itself.
+        let summary = map_issue_summary(issue).ok_or_else(linear_not_found)?;
         let comments = issue["comments"]["nodes"]
             .as_array()
             .map(|nodes| nodes.iter().filter_map(map_comment).collect())
@@ -372,16 +415,15 @@ impl LinearClient {
     /// field instead of the whole discussion.
     pub async fn team_id(&self, issue_id: &str) -> Result<String> {
         let data = self
-            .query(LINEAR_ISSUE_TEAM_QUERY, json!({ "id": issue_id }))
+            .query_issue(LINEAR_ISSUE_TEAM_QUERY, json!({ "id": issue_id }))
             .await?;
-        optional_text(&data["issue"]["team"], "id")
-            .ok_or_else(|| ForgeError::NotFound(format!("Linear issue {issue_id} was not found")))
+        optional_text(&data["issue"]["team"], "id").ok_or_else(linear_not_found)
     }
 
     /// Posts a comment and returns what Linear stored.
     pub async fn create_comment(&self, issue_id: &str, body: &str) -> Result<LinearIssueComment> {
         let data = self
-            .query(
+            .query_issue(
                 LINEAR_COMMENT_MUTATION,
                 json!({"issueId": issue_id, "body": body}),
             )
@@ -390,6 +432,37 @@ impl LinearClient {
         map_comment(comment)
             .ok_or_else(|| ForgeError::Parse("Linear returned no comment after posting".into()))
     }
+}
+
+/// Whether a request looks up one specific issue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    Issue,
+    Other,
+}
+
+/// Linear's "not found" reply, whichever shape it takes.
+///
+/// The text is the daemon's own: Linear often echoes the id it was asked with,
+/// and for a linked issue that is an internal UUID nobody recognises.
+fn linear_not_found() -> ForgeError {
+    ForgeError::NotFound("Linear issue was not found".into())
+}
+
+/// Whether one GraphQL error reports a missing entity.
+///
+/// Only Linear's `NOT_FOUND` code or its "Entity not found" wording counts.
+/// Other errors can also say "not found" ("API key not found"), and those
+/// must keep their own meaning.
+fn is_not_found(error: &Value) -> bool {
+    match error["extensions"]["code"].as_str() {
+        Some("NOT_FOUND") => return true,
+        Some(_) => return false,
+        None => {}
+    }
+    error["message"]
+        .as_str()
+        .is_some_and(|message| message.to_ascii_lowercase().contains("entity not found"))
 }
 
 /// GraphQL document that validates a key and reads the workspace identity.
@@ -651,6 +724,214 @@ mod tests {
         assert_eq!(state_type("started"), LinearStateType::Started);
         assert_eq!(state_type("completed"), LinearStateType::Completed);
         assert_eq!(state_type("something"), LinearStateType::Unstarted);
+    }
+
+    #[tokio::test]
+    async fn a_missing_linear_issue_is_not_named_by_its_internal_id() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"issue": null}
+            })))
+            .mount(&server)
+            .await;
+        let client = LinearClient::with_endpoint("test-key", &server.uri()).unwrap();
+        let error = client.get_issue("issue_uuid_1", None).await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Linear issue was not found"));
+        assert!(
+            !message.contains("issue_uuid_1"),
+            "the provider UUID must never reach the person: {message}"
+        );
+    }
+
+    /// Reads an issue through one canned reply and returns the error.
+    async fn missing_issue_reply(status: u16, body: Value) -> ForgeError {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client = LinearClient::with_endpoint("test-key", &server.uri()).unwrap();
+        client.get_issue("issue_uuid_1", None).await.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn every_linear_not_found_shape_hides_the_internal_id() {
+        // Each reply shape Linear uses for a missing entity, with the id it
+        // was asked for echoed back the way the real API does.
+        let shapes = [
+            (
+                "http 404",
+                404,
+                json!({"message": "Entity issue_uuid_1 was not found"}),
+            ),
+            (
+                "graphql not-found code",
+                200,
+                json!({"errors": [{
+                    "message": "Nothing matches issue_uuid_1",
+                    "extensions": {"code": "NOT_FOUND"}
+                }]}),
+            ),
+            (
+                "graphql entity-not-found message",
+                200,
+                json!({"errors": [{"message": "Entity not found: issue_uuid_1"}]}),
+            ),
+        ];
+        for (shape, status, body) in shapes {
+            let error = missing_issue_reply(status, body).await;
+            assert!(
+                matches!(error, ForgeError::NotFound(_)),
+                "{shape} must be a not-found reply: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("Linear issue was not found"),
+                "{shape}: {message}"
+            );
+            assert!(
+                !message.contains("issue_uuid_1"),
+                "{shape} must not forward the id: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plain_text_404_is_still_a_named_miss() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_string("<html>issue_uuid_1 not here</html>"),
+            )
+            .mount(&server)
+            .await;
+        let client = LinearClient::with_endpoint("test-key", &server.uri()).unwrap();
+        let error = client.get_issue("issue_uuid_1", None).await.unwrap_err();
+        assert!(
+            matches!(error, ForgeError::NotFound(_)),
+            "a non-JSON 404 must be a miss, not a parse error: {error}"
+        );
+        assert!(!error.to_string().contains("issue_uuid_1"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_key_is_not_a_missing_issue() {
+        // Each of these says "not found" about the key, not the issue, so the
+        // person must be told to reconnect rather than that the issue is gone.
+        let shapes = [
+            (
+                "http 401",
+                401,
+                json!({"errors": [{"message": "Authentication token not found"}]}),
+            ),
+            (
+                "http 401 with an entity-not-found body",
+                401,
+                json!({"errors": [{"message": "Entity not found"}]}),
+            ),
+            (
+                "http 403 with an entity-not-found body",
+                403,
+                json!({"errors": [{"message": "Entity not found"}]}),
+            ),
+            (
+                "http 429 with an entity-not-found body",
+                429,
+                json!({"errors": [{"message": "Entity not found"}]}),
+            ),
+            (
+                "graphql unauthenticated code over entity-not-found wording",
+                200,
+                json!({"errors": [{
+                    "message": "Entity not found",
+                    "extensions": {"code": "UNAUTHENTICATED"}
+                }]}),
+            ),
+            (
+                "graphql unauthenticated code",
+                200,
+                json!({"errors": [{
+                    "message": "API key not found",
+                    "extensions": {"code": "UNAUTHENTICATED"}
+                }]}),
+            ),
+            (
+                "http 400 unauthenticated code",
+                400,
+                json!({"errors": [{
+                    "message": "API key not found",
+                    "extensions": {"code": "UNAUTHENTICATED"}
+                }]}),
+            ),
+        ];
+        for (shape, status, body) in shapes {
+            let error = missing_issue_reply(status, body).await;
+            assert!(
+                !matches!(error, ForgeError::NotFound(_)),
+                "{shape} is a key problem, not a missing issue: {error}"
+            );
+            match status {
+                401 => assert!(
+                    matches!(error, ForgeError::InvalidRequest(ref m) if m.contains("API key was rejected")),
+                    "{shape}: {error}"
+                ),
+                403 => assert!(
+                    matches!(error, ForgeError::LinearForbidden { .. }),
+                    "{shape}: {error}"
+                ),
+                429 => assert!(
+                    matches!(error, ForgeError::LinearRateLimited { .. }),
+                    "{shape}: {error}"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_404_outside_an_issue_lookup_is_not_a_missing_issue() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Verifying a key names no issue, so a 404 or a NOT_FOUND error there
+        // must not read as "Linear issue was not found".
+        for (status, body) in [
+            (404, json!({"message": "Not Found"})),
+            (
+                200,
+                json!({"errors": [{
+                    "message": "Entity not found",
+                    "extensions": {"code": "NOT_FOUND"}
+                }]}),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let client = LinearClient::with_endpoint("test-key", &server.uri()).unwrap();
+            let error = client.viewer().await.unwrap_err();
+            assert!(
+                !matches!(error, ForgeError::NotFound(_)),
+                "status {status}: account verification is not an issue miss: {error}"
+            );
+            assert!(
+                !error.to_string().contains("Linear issue was not found"),
+                "status {status}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -30,6 +30,18 @@ state: LinkedIssueState | null,
  */
 error: string | null, 
 /**
+ * Human identifier stored when the link was made (`ENG-123` for Linear).
+ * Absent on links made before it was stored, and for trackers whose issue
+ * id is already human (a forge issue number).
+ */
+identifier: string | null, 
+/**
+ * Issue title stored when the link was made, so a failed refresh still
+ * names what the link points at. Absent on links made before it was
+ * stored.
+ */
+title: string | null, 
+/**
  * When the link was created.
  */
 linked_at: string, };

@@ -9,13 +9,17 @@ import type {
   HostSummary,
   LimitStatus,
   ProtoError,
+  QueueAction,
+  QueuedMessage,
   ResumeSchedule,
   RuntimeMode,
   ThreadId,
   ThreadSummary,
   ThreadTab,
+  TurnId,
   WorktreeRequest,
 } from "@/gen";
+import { isTurnRunning } from "@/lib/agent";
 import type { H4rnClient } from "@/lib/client/client";
 import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
@@ -71,6 +75,8 @@ export type UiState = {
   newThreadPreset: { host: string; workspace: string } | null;
   /** The Add project dialog is open. */
   addProjectOpen: boolean;
+  /** The queued message currently open in the composer for editing. */
+  queuedEdit: { threadId: ThreadId; messageId: string } | null;
   focusSearchNonce: number;
   focusComposerNonce: number;
   focusFilesNonce: number;
@@ -156,6 +162,20 @@ export type PendingCreate = {
   at: number;
 };
 
+/**
+ * The queue rows this client has for one thread.
+ *
+ * The thread summary only counts the queue, because a full queue can be larger
+ * than a paired transport's frame. The rows are fetched separately and paged;
+ * `revision` says which version of the queue they are, so a late reply cannot
+ * put back a message that already started.
+ */
+export type ThreadQueue = {
+  queued: QueuedMessage[];
+  total: number;
+  revision: number;
+};
+
 export type AppState = {
   connection: ConnectionSnapshot;
   hosts: Record<HostId, HostSummary>;
@@ -167,6 +187,8 @@ export type AppState = {
    * overwrite a summary projected from a newer event.
    */
   threadSeqs: Record<ThreadId, number>;
+  /** Queue rows per thread, fetched separately from the summary. */
+  queues: Record<ThreadId, ThreadQueue>;
   logs: Record<ThreadId, ThreadLog>;
   threadErrors: Record<ThreadId, ProtoError>;
   loadingThreads: boolean;
@@ -220,6 +242,7 @@ function createInitialState(): AppState {
     hosts: {},
     threads: {},
     threadSeqs: {},
+    queues: {},
     logs: {},
     threadErrors: {},
     loadingThreads: true,
@@ -250,6 +273,7 @@ function createInitialState(): AppState {
       recordingShortcut: false,
       newThreadPreset: null,
       addProjectOpen: false,
+      queuedEdit: null,
       focusSearchNonce: 0,
       focusComposerNonce: 0,
       focusFilesNonce: 0,
@@ -793,6 +817,11 @@ export function flushEvents(): void {
   }
   setState(next);
   if (routePath(before.ui.route) !== routePath(next.ui.route)) replaceRoute(next.ui.route);
+  // The summary only counts the queue; it never carries the rows, because a
+  // full queue can be larger than a paired transport's frame.
+  for (const envelope of batch) {
+    if (envelope.event.type === "thread_upserted") syncQueueWithSummary(envelope.event);
+  }
 }
 
 function enqueueEvent(envelope: EventEnvelope): void {
@@ -826,6 +855,9 @@ export function startConnection(): void {
       daemonMachineId: info.daemonMachineId,
       connection: { ...state.connection, error: null },
     });
+    // Queue rows are keyed by the daemon's revision counter, which starts over
+    // with a new daemon: a reconnect refetches them from scratch.
+    setState({ ...getState(), queues: {} });
     void loadThreads().then(() => {
       const current = getState();
       if (info.reconnected) {
@@ -914,6 +946,13 @@ export async function loadThreads(): Promise<void> {
       threadsError: null,
       lastSyncAt: Date.now(),
     });
+    // A reload clears the cached rows (the daemon's revision counter starts
+    // over), so every thread that still has queued messages fetches them now.
+    // Waiting for an unrelated event would hide the queue for as long as a
+    // rate-limit pause lasts.
+    for (const summary of Object.values(threads)) {
+      if (summary.queued_count > 0) void loadThreadQueue(summary.thread_id);
+    }
   } catch (error) {
     const current = getState();
     setState({
@@ -968,6 +1007,9 @@ export async function loadThread(threadId: ThreadId, sinceSeq = 0): Promise<void
           logs: { ...current.logs, [threadId]: log },
           threadErrors: omitKey(current.threadErrors, threadId),
         });
+        // The summary only counts the queue; a thread opened while messages
+        // wait needs its rows even before another event arrives.
+        if (page.summary.queued_count > 0) void loadThreadQueue(threadId);
         return;
       }
     }
@@ -1408,13 +1450,28 @@ export async function respondApproval(
 
 let localCounter = 0;
 
+export type SendOptions = {
+  /** Deliver into the running turn instead of queuing for the next one. */
+  steer?: boolean;
+};
+
+/**
+ * What the daemon could say about a send.
+ *
+ * `unclear` means the frame was written and the adapter never answered: the
+ * turn may hold the text, so the composer keeps the draft instead of clearing
+ * it while the person decides.
+ */
+export type SendResult = "sent" | "unclear" | "failed";
+
 export async function sendMessage(
   threadId: ThreadId,
   text: string,
   attachments: Attachment[] = [],
-): Promise<boolean> {
+  options: SendOptions = {},
+): Promise<SendResult> {
   const body = text.trim();
-  if (!body && attachments.length === 0) return false;
+  if (!body && attachments.length === 0) return "failed";
   const state = getState();
   const log = state.logs[threadId] ?? createThreadLog();
   const localId = `local-${++localCounter}`;
@@ -1430,13 +1487,31 @@ export async function sendMessage(
     },
   });
 
+  // A steer names the turn the client saw, so a turn that ended in the
+  // meantime is refused instead of catching a newer one.
+  const observedTurn = options.steer ? getState().threads[threadId]?.active_turn_id : undefined;
   try {
-    await getClient().request({
+    const response = await getClient().request({
       type: "send_message",
       thread_id: threadId,
       text: body,
       attachments: attachments.map((attachment) => attachment.id),
+      steer: options.steer ?? false,
+      ...(observedTurn ? { turn_id: observedTurn } : {}),
     });
+    // A queued message has no transcript item yet: the durable queue row from
+    // `thread_upserted` replaces the optimistic one, so drop the local row.
+    const queuedId = response.type === "message_accepted" ? response.queued_message_id : null;
+    if (response.type === "message_accepted" && response.unrecorded) {
+      // The agent has the words but the transcript row was not saved. The send
+      // succeeded, so the row stays sent and nothing invites a resend.
+      const host = getState().threads[threadId]?.host ?? "The host";
+      pushToast({
+        variant: "info",
+        title: "Delivered, but this thread couldn't record it.",
+        description: `${host} has your message; its transcript row is missing.`,
+      });
+    }
     const current = getState();
     const currentLog = current.logs[threadId];
     if (currentLog) {
@@ -1446,16 +1521,46 @@ export async function sendMessage(
           ...current.logs,
           [threadId]: {
             ...currentLog,
-            pending: currentLog.pending.map((message) =>
-              message.id === localId ? { ...message, sending: false } : message,
-            ),
+            pending: queuedId
+              ? currentLog.pending.filter((message) => message.id !== localId)
+              : currentLog.pending.map((message) =>
+                  message.id === localId ? { ...message, sending: false } : message,
+                ),
           },
         },
       });
     }
-    return true;
+    return "sent";
   } catch (error) {
     const proto = toProtoError(error);
+    if (proto.code === "delivery_unclear") {
+      // The daemon wrote the steer before the connection failed, so the turn
+      // may already hold it. The composer keeps the draft (it is the person's
+      // only other copy until the recovered row appears), and the row stays
+      // sent here so the transcript never invites a resend automatically.
+      const current = getState();
+      const currentLog = current.logs[threadId];
+      if (currentLog) {
+        setState({
+          ...current,
+          logs: {
+            ...current.logs,
+            [threadId]: {
+              ...currentLog,
+              pending: currentLog.pending.map((message) =>
+                message.id === localId ? { ...message, sending: false } : message,
+              ),
+            },
+          },
+        });
+      }
+      pushToast({
+        variant: "info",
+        title: "Delivered, or maybe not.",
+        description: `${proto.message} Your draft is still in the composer until the queue row appears.`,
+      });
+      return "unclear";
+    }
     const current = getState();
     const currentLog = current.logs[threadId];
     if (currentLog) {
@@ -1475,8 +1580,252 @@ export async function sendMessage(
       title: `Couldn't send the reply to ${current.threads[threadId]?.host ?? "the host"}.`,
       description: `${proto.message} Your draft is still in the composer.`,
     });
+    return "failed";
+  }
+}
+
+/**
+ * Applies one queue change and reflects the daemon's answer immediately.
+ *
+ * The daemon also broadcasts a new summary; using the response keeps the row
+ * from flickering while that event travels. A reply can, however, arrive after
+ * a newer summary (or after another client's change): it names the revision it
+ * came from, and anything older than what this client already holds is ignored
+ * rather than putting back a message whose turn has started.
+ */
+async function runQueueAction(
+  threadId: ThreadId,
+  messageId: string,
+  action: QueueAction,
+  label: string,
+): Promise<boolean> {
+  try {
+    const response = await getClient().request({
+      type: "queue_message",
+      thread_id: threadId,
+      message_id: messageId,
+      action,
+    });
+    if (response.type === "queue_updated") {
+      // A no-op (a move at the end of the queue) changed nothing and carries no
+      // event; replacing newer rows with it would only lose state.
+      if (response.seq === 0) return true;
+      const state = getState();
+      const latest = state.threadSeqs[threadId] ?? 0;
+      const held = state.queues[threadId]?.revision ?? 0;
+      if (response.seq < latest || response.revision < held) return true;
+      if (response.queued.length < response.total) {
+        // More messages wait than one reply can carry: it is the first page,
+        // not the queue. Fetch every page rather than replacing the cached
+        // rows with a short list.
+        void loadThreadQueue(threadId);
+        return true;
+      }
+      applyQueue(threadId, response.queued, response.total, response.revision);
+    }
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    const unclear = proto.code === "delivery_unclear";
+    pushToast(
+      unclear
+        ? {
+            variant: "info",
+            title: "Delivered, or maybe not.",
+            description: `${proto.message} Check the turn before trying again.`,
+          }
+        : {
+            variant: "error",
+            title: `Couldn't ${label} the queued message.`,
+            description: proto.message,
+          },
+    );
     return false;
   }
+}
+
+/**
+ * Replaces the cached queue rows for one thread.
+ *
+ * A reply older than the rows already held, or older than the summary daemon's
+ * own revision, is dropped: the queue it describes has already moved on.
+ */
+function applyQueue(
+  threadId: ThreadId,
+  queued: QueuedMessage[],
+  total: number,
+  revision: number,
+): void {
+  const state = getState();
+  const held = state.queues[threadId];
+  if (held && revision < held.revision) return;
+  if (revision < (state.threads[threadId]?.queue_revision ?? 0)) return;
+  setState({
+    ...state,
+    queues: { ...state.queues, [threadId]: { queued, total, revision } },
+  });
+}
+
+/**
+ * Fetches a thread's queue, following pages until `total` is covered.
+ *
+ * A queue larger than one frame comes back in bounded pages. Pages are only
+ * joined while every one names the same revision: a message that started or was
+ * edited between two pages would otherwise be stitched into a queue that never
+ * existed, so the read restarts from the first page.
+ */
+export async function loadThreadQueue(threadId: ThreadId): Promise<void> {
+  let offset = 0;
+  let rows: QueuedMessage[] = [];
+  let revision: number | null = null;
+  let restarts = 0;
+  for (;;) {
+    let page: { queued: QueuedMessage[]; total: number; next_offset: number; revision: number };
+    try {
+      const response = await getClient().request({
+        type: "get_thread_queue",
+        thread_id: threadId,
+        offset,
+      });
+      if (response.type !== "thread_queue") return;
+      page = response;
+    } catch {
+      // The next summary with a newer revision retries this; a toast for a
+      // queue nobody is looking at would be noise.
+      return;
+    }
+    if (revision !== null && page.revision !== revision) {
+      // The queue changed between two pages. Start over with the revision it
+      // has now; a few restarts in a row means the queue is churning, and the
+      // latest summary will ask again.
+      if (restarts >= 2) return;
+      restarts += 1;
+      offset = 0;
+      rows = [];
+      revision = null;
+      continue;
+    }
+    revision = page.revision;
+    rows = rows.concat(page.queued);
+    if (page.next_offset <= offset || page.next_offset >= page.total) {
+      applyQueue(threadId, rows, page.total, page.revision);
+      return;
+    }
+    offset = page.next_offset;
+  }
+}
+
+/**
+ * Keeps the cached rows in step with a summary.
+ *
+ * The summary only counts the queue. A count that does not match what this
+ * client holds, or a revision it has not applied, means the rows are stale.
+ * A count of zero keeps an empty entry at the summary's revision rather than
+ * dropping the entry: a reply still in flight must be recognised as older than
+ * the summary and dropped, instead of putting back a message that has started.
+ *
+ * Exposed for tests; the live path calls it for each `thread_upserted`.
+ */
+export function syncQueueWithSummary(summary: ThreadSummary): void {
+  const state = getState();
+  const held = state.queues[summary.thread_id];
+  // A summary the daemon wrote before the rows this client already holds is
+  // delayed, not news: applying its count would hide (or clear) a queue that
+  // has moved on, and end an edit of a row that still exists.
+  if (held && summary.queue_revision < held.revision) return;
+  if (summary.queued_count === 0) {
+    if (held && held.total === 0 && held.revision === summary.queue_revision) return;
+    setState({
+      ...state,
+      queues: {
+        ...state.queues,
+        [summary.thread_id]: {
+          queued: [],
+          total: 0,
+          revision: summary.queue_revision,
+        },
+      },
+    });
+    return;
+  }
+  if (held && held.revision === summary.queue_revision && held.total === summary.queued_count) {
+    return;
+  }
+  void loadThreadQueue(summary.thread_id);
+}
+
+export function editQueuedMessage(
+  threadId: ThreadId,
+  messageId: string,
+  text: string,
+  attachments: Attachment[],
+): Promise<boolean> {
+  return runQueueAction(
+    threadId,
+    messageId,
+    { type: "edit", text, attachments: attachments.map((attachment) => attachment.id) },
+    "edit",
+  );
+}
+
+export function removeQueuedMessage(threadId: ThreadId, messageId: string): Promise<boolean> {
+  return runQueueAction(threadId, messageId, { type: "remove" }, "remove");
+}
+
+export function moveQueuedMessage(
+  threadId: ThreadId,
+  messageId: string,
+  direction: "up" | "down",
+): Promise<boolean> {
+  return runQueueAction(threadId, messageId, { type: "move", direction }, "move");
+}
+
+/** Sends a queued message now: steer it in, or move it to the front. */
+export function sendQueuedNow(threadId: ThreadId, messageId: string): Promise<boolean> {
+  return runQueueAction(
+    threadId,
+    messageId,
+    { type: "send_now", turn_id: observedTurn(threadId) },
+    "send",
+  );
+}
+
+/** Steers one queued message, refusing rather than queuing it again. */
+export function steerQueuedMessage(threadId: ThreadId, messageId: string): Promise<boolean> {
+  return runQueueAction(
+    threadId,
+    messageId,
+    { type: "steer", turn_id: observedTurn(threadId) },
+    "steer",
+  );
+}
+
+/**
+ * The turn this client last saw running for a thread.
+ *
+ * A queue action names it so the daemon steers only into the turn the person
+ * meant; a turn that ended in the meantime is refused or moved instead of
+ * catching whatever runs next.
+ */
+function observedTurn(threadId: ThreadId): TurnId | null {
+  return getState().threads[threadId]?.active_turn_id ?? null;
+}
+
+/**
+ * Steers the oldest queued message into the running turn.
+ *
+ * The shortcut leaves the composer's draft alone. It needs both a running turn
+ * and a harness that really takes mid-turn input: without either, "steer" would
+ * refuse or mean something else, so the key does nothing instead of guessing.
+ */
+export function steerOldestQueued(threadId: ThreadId): boolean {
+  const state = getState();
+  const summary = state.threads[threadId];
+  if (!summary?.steer || !isTurnRunning(summary)) return false;
+  const oldest = state.queues[threadId]?.queued[0];
+  if (!oldest?.steerable) return false;
+  void steerQueuedMessage(threadId, oldest.message_id);
+  return true;
 }
 
 export type CreateThreadInput = {
@@ -1579,6 +1928,9 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     ttft_ms: null,
     context_window: null,
     context_fill_percent: null,
+    queued_count: 0,
+    queue_revision: 0,
+    steer: false,
   };
 
   setState({

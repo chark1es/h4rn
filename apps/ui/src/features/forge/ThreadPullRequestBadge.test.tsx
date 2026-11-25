@@ -81,6 +81,8 @@ const issues: ThreadIssue[] = [
     account_id: "a1",
     state: { tracker: "forge", issue: issueSummary },
     error: null,
+    identifier: null,
+    title: issueSummary.title,
     linked_at: "2026-01-01T00:00:00Z",
   },
 ];
@@ -259,6 +261,8 @@ describe("linked pull request badge and panel", () => {
             account_id: "a1",
             state: { tracker: "forge", issue: otherSummary },
             error: null,
+            identifier: null,
+            title: otherSummary.title,
             linked_at: "2026-01-02T00:00:00Z",
           },
         ]}
@@ -303,6 +307,8 @@ describe("linked pull request badge and panel", () => {
         },
       },
       error: null,
+      identifier: "ENG-1",
+      title: "Rate limit the import",
       linked_at: "2026-01-01T00:00:00Z",
     };
     const { rerender } = render(
@@ -324,7 +330,8 @@ describe("linked pull request badge and panel", () => {
 
     // A failed refresh empties the live state. The row's key comes from the
     // stored team and issue ids, so the row keeps its place instead of
-    // remounting and closing what the person had open.
+    // remounting and closing what the person had open, and the identity
+    // stored at link time keeps the issue's name.
     rerender(
       <LinkedPullRequestsMenu
         pulls={[]}
@@ -334,9 +341,103 @@ describe("linked pull request badge and panel", () => {
         onUnwatch={() => undefined}
       />,
     );
-    expect(screen.getByText("Issue unavailable")).toBeTruthy();
+    expect(screen.getAllByText("ENG-1").length).toBeGreaterThan(0);
+    expect(screen.getByText("Rate limit the import")).toBeTruthy();
     expect(screen.getByText("the tracker did not answer")).toBeTruthy();
     expect(document.querySelector(".q-pr-links")).toBe(row);
+    expect(screen.queryByText(/team_uuid_1/)).toBeNull();
+    expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
+  });
+
+  it("names a missing Linear issue without its internal id", () => {
+    const linked: ThreadIssue = {
+      scope: { tracker: "linear", team_id: "team_uuid_1" },
+      issue_id: "issue_uuid_1",
+      account_id: "lin_1",
+      state: null,
+      // An older daemon named the provider's UUID in its not-found message.
+      error: "Linear issue issue_uuid_1 was not found",
+      identifier: "ENG-1",
+      title: "Rate limit the import",
+      linked_at: "2026-01-01T00:00:00Z",
+    };
+    const { rerender } = render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[linked]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    openBadge();
+    expect(screen.getByText("ENG-1 was not found")).toBeTruthy();
+    expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
+
+    // A link made before the identifier was stored still gets plain words,
+    // never the provider's internal id.
+    rerender(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[{ ...linked, identifier: null, title: null }]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    expect(screen.getByText("Linear issue was not found")).toBeTruthy();
+    expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
+  });
+
+  it("hides an uppercase UUID an older daemon echoed", () => {
+    const linked: ThreadIssue = {
+      scope: { tracker: "linear", team_id: "team_uuid_1" },
+      issue_id: "issue_uuid_1",
+      account_id: "lin_1",
+      state: null,
+      error: "Linear issue ISSUE_UUID_1 was not found",
+      identifier: "ENG-1",
+      title: "Rate limit the import",
+      linked_at: "2026-01-01T00:00:00Z",
+    };
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[linked]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    openBadge();
+    expect(screen.getByText("ENG-1 was not found")).toBeTruthy();
+    expect(screen.queryByText(/ISSUE_UUID_1/i)).toBeNull();
+  });
+
+  it("labels a Linear link made before the identifier was stored", () => {
+    const linked: ThreadIssue = {
+      scope: { tracker: "linear", team_id: "team_uuid_1" },
+      issue_id: "issue_uuid_1",
+      account_id: "lin_1",
+      state: null,
+      error: "the tracker did not answer",
+      identifier: null,
+      title: null,
+      linked_at: "2026-01-01T00:00:00Z",
+    };
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[]}
+        issues={[linked]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    // Neither the live state nor a stored identifier is available: a plain
+    // label, never the provider's internal UUID.
+    expect(screen.getAllByText("Linear issue").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/issue_uuid_1/)).toBeNull();
     expect(screen.queryByText(/team_uuid_1/)).toBeNull();
   });
 
