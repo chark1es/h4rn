@@ -1035,6 +1035,49 @@ describe("thread_rewound", () => {
     expect(items).toEqual(["item_user_0", "assistant_0"]);
   });
 
+  it("ignores a message that arrives after its turn was cut", () => {
+    const cue = foldEvent(createThreadLog(), {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_user_1",
+        role: "user",
+        text: "one",
+        attachments: [],
+      },
+    });
+    const running = foldEvent(cue, {
+      type: "turn_started",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      started_at: "2026-01-01T00:00:00.500Z",
+    });
+    const rewound = foldEvent(running, {
+      type: "thread_rewound",
+      thread_id: "t1",
+      before_item_id: "item_user_1",
+      files_restored: false,
+      at: "2026-01-01T00:00:01.000Z",
+    });
+    // A steer whose write was still in flight journals its message under the
+    // turn the cut just removed.
+    const late = foldEvent(rewound, {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_steer_1",
+        role: "user",
+        text: "still being written",
+        attachments: [],
+      },
+    });
+    expect(late.turns).toHaveLength(0);
+  });
+
   it("leaves a log that never held the message alone", () => {
     const log = foldEvent(createThreadLog(), {
       type: "thread_rewound",

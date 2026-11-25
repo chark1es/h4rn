@@ -19,7 +19,7 @@ use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
 use h4rn_protocol::{
     Event, ForgeKind, ForgeRepoRef, FsTurnChanges, HarnessKind, HostId, Item, RuntimeMode,
     ScheduleDestination, ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask,
-    ScheduleTaskId, SubagentId, ThreadId, Usage, WorktreeRequest,
+    ScheduleTaskId, SubagentId, ThreadId, TurnId, Usage, WorktreeRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -2100,6 +2100,10 @@ impl Journal for SqliteJournal {
         // source showed and no turn owns, so every turn from here on is an
         // ambiguous fork point: copying one would drop a row the source had.
         let mut lost_prompt = false;
+        // The turns a rewind removed. The cut leaves the transcript for good,
+        // and a late row that still names one of them must not put it back: the
+        // text the person edited away may be a secret.
+        let mut removed_turns: HashSet<TurnId> = HashSet::new();
         // The item each streaming assistant reply is filling, by item id. A
         // reply that never finished stays here and is rebuilt from its deltas
         // once every event has been read.
@@ -2120,6 +2124,9 @@ impl Journal for SqliteJournal {
                     started_at,
                     ..
                 } => {
+                    if removed_turns.contains(&turn_id) {
+                        continue;
+                    }
                     let previous_open = open_turn;
                     let index = turn_index(&mut turns, &turn_id);
                     turns[index].started_at = Some(started_at);
@@ -2148,6 +2155,9 @@ impl Journal for SqliteJournal {
                 Event::ItemCompleted {
                     item, turn_id, at, ..
                 } => {
+                    if removed_turns.contains(&turn_id) {
+                        continue;
+                    }
                     let index = turn_index(&mut turns, &turn_id);
                     // An explicit authoring time marks a copied record: a live
                     // turn's items carry none and fall back to the journal's.
@@ -2213,6 +2223,9 @@ impl Journal for SqliteJournal {
                     text,
                     ..
                 } => {
+                    if removed_turns.contains(&turn_id) {
+                        continue;
+                    }
                     let index = turn_index(&mut turns, &turn_id);
                     if let Some((turn, position)) = streaming.get(&item_id) {
                         if let JournaledItem::Item {
@@ -2242,12 +2255,18 @@ impl Journal for SqliteJournal {
                 Event::ToolCall {
                     turn_id, tool_call, ..
                 } => {
+                    if removed_turns.contains(&turn_id) {
+                        continue;
+                    }
                     let index = turn_index(&mut turns, &turn_id);
                     turns[index].push_item(seq, JournaledItem::ToolCall { tool_call });
                 }
                 Event::Plan {
                     turn_id, entries, ..
                 } => {
+                    if removed_turns.contains(&turn_id) {
+                        continue;
+                    }
                     let index = turn_index(&mut turns, &turn_id);
                     match turns[index]
                         .items
@@ -2313,6 +2332,9 @@ impl Journal for SqliteJournal {
                     changes,
                     ..
                 } => {
+                    if removed_turns.contains(&turn_id) {
+                        continue;
+                    }
                     let index = turn_index(&mut turns, &turn_id);
                     turns[index].status = Some(status);
                     turns[index].usage = Some(usage);
@@ -2323,6 +2345,46 @@ impl Journal for SqliteJournal {
                             .iter()
                             .rposition(|turn| turn.started_at.is_some() && turn.status.is_none());
                     }
+                }
+                Event::ThreadRewound { before_item_id, .. } => {
+                    // The same cut `rewind::live_prompts` makes: the named
+                    // prompt and everything after it left the conversation. A
+                    // fork must never copy them back, so they leave this reader
+                    // too, and any later row that still names one is ignored.
+                    let named = |item: &JournaledItem| {
+                        matches!(
+                            item,
+                            JournaledItem::Item {
+                                item: Item::Message {
+                                    item_id,
+                                    role: h4rn_protocol::MessageRole::User,
+                                    ..
+                                },
+                                ..
+                            } if item_id.as_str() == before_item_id.as_str()
+                        )
+                    };
+                    let Some(cut) = turns.iter().position(|turn| turn.items.iter().any(named))
+                    else {
+                        continue;
+                    };
+                    let cut_seq = turns[cut]
+                        .items
+                        .iter()
+                        .position(named)
+                        .and_then(|position| turns[cut].item_seqs.get(position).copied());
+                    for turn in turns.drain(cut..) {
+                        removed_turns.insert(turn.turn_id);
+                    }
+                    // A prompt an older journal held without a turn of its own
+                    // stays held when it was shown before the cut item, and
+                    // leaves with the cut when it was shown after it.
+                    held_prompts.retain(|(seq, _)| cut_seq.is_some_and(|cut_seq| *seq < cut_seq));
+                    // Streamed text still refers to turn indexes the cut dropped.
+                    streaming.retain(|_, (turn, _)| *turn < cut);
+                    open_turn = turns
+                        .iter()
+                        .rposition(|turn| turn.started_at.is_some() && turn.status.is_none());
                 }
                 _ => {}
             }

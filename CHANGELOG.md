@@ -802,7 +802,14 @@ All notable changes to h4rn are recorded here. The format follows
   with no mode catalogue is refused unless full access was asked for, and a replayed refresh token
   stays recognisable for the family's whole life. The outside surface no longer offers `stop_thread`,
   and a Full-access grant stops after 24 hours.
-
+- **Rewind and fork stay honest about messages still being delivered.** An edit
+  now waits for a steer's write to return instead of cutting the turn it was
+  about to join, a queued steer is marked in flight before its `sending` write
+  so a rewind in that window cannot surface the same text twice, and a promoted
+  prompt whose grant was revoked before delivery goes back to the queue instead
+  of vanishing. A fork made after an edit copies only the live conversation, so
+  removed text never returns, and a fork at a removed turn is refused with a
+  clear message.
 - **A fork whose journal write fails never appears.** The fork's handle became
   reachable before its summary was durable, so the periodic refresh could
   publish a thread whose copy then failed to record — a row a client could open
