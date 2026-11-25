@@ -1813,7 +1813,11 @@ address and a hosted agent has no path in this phase.
 `QueuedMessageId`, so the queue survives a daemon restart in its order, and emits a summary instead
 of a transcript row: queued messages are not yet part of the conversation. **Steer** delivers the
 text into the turn that is already running, adds the user row to that turn, and never also queues
-it. With no turn running, a steer is an ordinary send.
+it. With no turn running, a steer is an ordinary send. A steered row's item id starts with
+`item_steer_`, additively, so a replay can tell it from an older journal's queued prompt filed under
+the running turn: that row belongs to the next turn that starts, while a steer belongs to its own.
+Without the mark a fork of a steered turn would drop the steer, and the turn after it would read as
+ambiguous and could no longer be forked.
 
 **Only Codex steers.** Codex app-server has `turn/steer` with an `expectedTurnId`, so the server
 itself refuses a request aimed at a turn that has ended. Claude Code is not offered it: its
@@ -1982,7 +1986,9 @@ journal has evidence ended can be forked: copied history, or a turn it saw start
 and saw end (interrupted counts). An older journal recorded a host loss as the
 domain event and an error row without the wire completion that now ends the turn
 it lost; that stored loss is evidence too, so the turn beside it reads as
-interrupted and the turns after it stay forkable. A prompt whose turn never
+interrupted and the turns after it stay forkable. A restart finds that turn in
+the wire rows as well and writes the completion the projection still needs, so a
+thread that was running when an older daemon stopped leaves Working. A prompt whose turn never
 started — queued at the crash, or lost with it — is not a turn: it is left out
 of a later turn's copy and cannot itself be forked, so a fork at a later turn
 never inherits it. The source's active turn is refused, and a turn that started
@@ -2005,13 +2011,14 @@ the chosen turn is still the source session's tip, re-checked under the
 source's record lock when the fork starts. That check opens a per-source gate
 before the lock is released: the source's next dispatch waits until the fork
 reports `SessionStarted`, its startup fails, or the copy's own deadline passes,
-so a message sent in that window cannot be read into the copy. The deadline
-covers the whole copy, not just the child starting: a provider returns from its
-start once the process is up and reads the source afterwards, so the copy is only
-confirmed by that report. A provider still reading the source when the deadline
-passes has its process shut down, any session it produces is discarded without
-being used, the fork switches to the handoff, and only then is the source
-released. The source's Send is answered at once — its turn and prompt are already
+so a message sent in that window cannot be read into the copy. The fork's prompt
+is written before its copy is waited on, and the deadline runs from that write:
+Claude Code reports its init frame only after the first user frame, so a fork
+that waited for the report first would never receive one. A provider still
+reading the source when the deadline passes has its process shut down and fenced,
+the source is released there — after the copy is stopped, before the handoff
+session starts — and the fork switches to the handoff. The source's Send is
+answered at once — its turn and prompt are already
 durable — and only its dispatch waits, in the background delivery, never while
 holding the per-thread switch lock, so the UI's deadline never reports a failure
 for a prompt that will run and a Send after the queue moved on is still answered

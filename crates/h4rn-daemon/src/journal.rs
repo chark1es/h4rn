@@ -1448,6 +1448,26 @@ fn is_user_message(item: &Item) -> bool {
     )
 }
 
+/// The item-id prefix a steer's row carries (ADR-047).
+///
+/// A steer is part of the turn that was running when it was sent, so its row
+/// stays in that turn. Every other extra prompt in an open turn may be a
+/// prompt an older daemon filed under the turn it was queued behind, which
+/// belongs to the next turn that starts instead.
+const STEER_ITEM_PREFIX: &str = "item_steer_";
+
+/// Whether one streamed item was journaled as a steer into a running turn.
+fn is_steered_message(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::Message {
+            item_id,
+            role: h4rn_protocol::MessageRole::User,
+            ..
+        } if item_id.starts_with(STEER_ITEM_PREFIX)
+    )
+}
+
 /// The turn a thread-only row belongs to: the open turn when there is one,
 /// otherwise the newest turn the journal holds.
 fn attach_turn(turns: &mut [JournaledTurn], open: Option<usize>) -> Option<&mut JournaledTurn> {
@@ -1828,8 +1848,11 @@ impl Journal for SqliteJournal {
                     // A user item that arrives while its turn is already open,
                     // after that turn's own prompt, is a prompt an older journal
                     // stored under the turn it was queued behind. It belongs to
-                    // the next turn that starts, never to this one.
+                    // the next turn that starts, never to this one. A steer is
+                    // the exception: it was written into this running turn on
+                    // purpose (ADR-047), and its row says so.
                     if is_user_message(&item)
+                        && !is_steered_message(&item)
                         && open_turn == Some(index)
                         && turns[index].items.iter().any(is_user_prompt)
                     {

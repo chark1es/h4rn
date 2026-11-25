@@ -497,9 +497,11 @@ pub struct ThreadManager {
 ///
 /// The deadline belongs to the copy itself: a provider still reading the
 /// source after this is abandoned, so its result can never contain anything
-/// the source does later. The source waits a little longer on its gate, so the
-/// copy's own deadline always fires first and it is the fork — not the source
-/// — that decides how to continue.
+/// the source does later. It covers a start that never returns, and then the
+/// wait for the copy to be confirmed once the fork's prompt has been written.
+/// The source waits a little longer on its gate, so the copy's own deadline
+/// always fires first and it is the fork — not the source — that decides how to
+/// continue.
 const FORK_COPY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long past [`FORK_COPY_TIMEOUT`] a source keeps waiting for a copy.
@@ -1418,48 +1420,24 @@ enum StartFailure {
     Expired,
 }
 
-/// A native fork's session, with the events it reported before its start was
-/// confirmed.
+/// Whether a native fork's first output shows that its copy is done.
 ///
-/// The copy is confirmed by `SessionStarted`, which the start already read
-/// under the copy's deadline. That event (and anything that preceded it) is
-/// handed back in `stream` so the pump applies it in its own order.
-struct NativeForkStart {
-    session: Box<dyn h4rn_harness::HarnessSession>,
-    stream: futures::stream::BoxStream<'static, HarnessEvent>,
-}
-
-/// Reads a fresh session's events until it reports `SessionStarted`.
-///
-/// A provider reports that event only after it has finished reading the source,
-/// which is what confirms the copy. Events read before it are returned in their
-/// order, that report included, so the pump sees the same sequence it would
-/// have read itself. A stream that ends first is a copy that died before it
-/// confirmed anything.
-async fn read_until_session_started(
-    stream: &mut futures::stream::BoxStream<'static, HarnessEvent>,
-    kind: HarnessKind,
-) -> Result<Vec<HarnessEvent>, StartFailure> {
-    let mut early = Vec::new();
-    loop {
-        match stream.next().await {
-            None => {
-                return Err(StartFailure::Failed(
-                    h4rn_harness::HarnessError::Transport {
-                        harness: kind,
-                        message: "the native copy ended before it reported a session".into(),
-                    },
-                ));
-            }
-            Some(event) => {
-                let started = matches!(event, HarnessEvent::SessionStarted { .. });
-                early.push(event);
-                if started {
-                    return Ok(early);
-                }
-            }
-        }
-    }
+/// A provider that forks natively reads the source before it answers, so the
+/// first thing it shows for the prompt is proof the copy finished even when it
+/// never reports `SessionStarted`. Lifecycle reports that are not output (its
+/// own turn id, a transport death) prove nothing about the copy.
+fn is_fork_output(event: &HarnessEvent) -> bool {
+    matches!(
+        event,
+        HarnessEvent::TextDelta { .. }
+            | HarnessEvent::ToolCall { .. }
+            | HarnessEvent::Plan { .. }
+            | HarnessEvent::ApprovalRequested { .. }
+            | HarnessEvent::Usage { .. }
+            | HarnessEvent::LimitHit { .. }
+            | HarnessEvent::TurnCompleted { .. }
+            | HarnessEvent::Error { .. }
+    )
 }
 
 /// Which branch of the idle fallback's one poll was ready.
@@ -5013,7 +4991,11 @@ impl ThreadManager {
                         thread_id: thread_id.clone(),
                         turn_id: active_turn_id.clone(),
                         item: Item::Message {
-                            item_id: fresh_item_id("user"),
+                            // A steer is part of its turn. Its row says so in the
+                            // item id (`item_steer_…`), which is how the journal
+                            // tells it from a prompt an older daemon filed under
+                            // the turn it was queued behind.
+                            item_id: fresh_item_id("steer"),
                             role: MessageRole::User,
                             text,
                             attachments: resolved_attachments,
@@ -8019,6 +8001,33 @@ impl Inner {
             .collect()
     }
 
+    /// The newest turn the wire rows saw start and never saw end.
+    ///
+    /// A restart's repair needs the turn that was running even when the
+    /// journal's host-loss recovery already gave it an end: the recovery keeps
+    /// later turns forkable, but the projection still needs the turn's own
+    /// completion row to leave Working.
+    async fn last_unsettled_wire_turn(&self, thread_id: &ThreadId) -> Option<TurnId> {
+        let events = match self.journal.read_wire_since(thread_id, 0).await {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!(%error, "could not read a thread's wire rows for a restart");
+                return None;
+            }
+        };
+        let mut open: Option<TurnId> = None;
+        for wire in events {
+            match wire.event {
+                Event::TurnStarted { turn_id, .. } => open = Some(turn_id),
+                Event::TurnCompleted { turn_id, .. } if open.as_ref() == Some(&turn_id) => {
+                    open = None
+                }
+                _ => {}
+            }
+        }
+        open
+    }
+
     async fn restore(self: &Arc<Self>) -> Result<(), ManagerError> {
         let metas = self
             .journal
@@ -8125,11 +8134,22 @@ impl Inner {
                     .read_journaled_turns(&record.meta.thread_id)
                     .await
                 {
-                    Ok(turns) => turns
-                        .into_iter()
-                        .rev()
-                        .find(|turn| turn.started_at.is_some() && turn.status.is_none())
-                        .map(|turn| turn.turn_id),
+                    Ok(turns) => {
+                        let open = turns
+                            .into_iter()
+                            .rev()
+                            .find(|turn| turn.started_at.is_some() && turn.status.is_none())
+                            .map(|turn| turn.turn_id);
+                        match open {
+                            Some(turn_id) => Some(turn_id),
+                            // The journal's host-loss recovery already gave the
+                            // lost turn a status, so it no longer reads as open.
+                            // Its completion row is still missing, and the
+                            // projection needs it to leave Working: the wire rows
+                            // still name the turn that started and never ended.
+                            None => self.last_unsettled_wire_turn(&record.meta.thread_id).await,
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "could not find a turn a restart interrupted");
                         None
@@ -8652,37 +8672,32 @@ impl Inner {
         Some(generation)
     }
 
-    /// Starts a native fork's session under the copy's own deadline.
+    /// Starts a native fork's session, bounded by the copy's own deadline.
     ///
-    /// The deadline covers the whole copy, not just the spawn. A provider like
-    /// Claude Code returns from its start as soon as the child is up and reads
-    /// the source afterwards; the copy is only confirmed when the new session
-    /// reports `SessionStarted`. So the start runs on its own task, and the
-    /// first events are then read under the same deadline until that report.
-    /// A provider still reading the source when the deadline passes produces a
-    /// session that is shut down without ever being used, while the fork
-    /// switches to the handoff. The source's gate is released by that handoff,
-    /// so no message the source sends afterwards can be read into something the
-    /// fork shows.
+    /// Only the start is bounded here: a provider like Claude Code returns from
+    /// its start as soon as the child is up and reads the source afterwards.
+    /// It also only reports `SessionStarted` after the first user frame, so
+    /// the fork's prompt is written before its copy is waited on; that wait
+    /// (`await_fork_confirmation`) runs under the same deadline, measured from
+    /// the write. A start that never returns is abandoned here, and a session
+    /// it produces later is shut down without ever being used.
     async fn start_native_fork(
         &self,
         harness: Arc<dyn h4rn_harness::Harness>,
         spec: h4rn_harness::SessionSpec,
         snapshot: Option<h4rn_harness::InstanceSnapshot>,
-    ) -> Result<NativeForkStart, StartFailure> {
+    ) -> Result<Box<dyn h4rn_harness::HarnessSession>, StartFailure> {
         let kind = harness.kind();
         let deadline = tokio::time::Instant::now() + self.fork_copy_timeout();
         let mut task =
             tokio::spawn(async move { harness.start_session_with(spec, snapshot).await });
-        let mut session = match tokio::time::timeout_at(deadline, &mut task).await {
-            Ok(Ok(Ok(session))) => session,
-            Ok(Ok(Err(error))) => return Err(StartFailure::Failed(error)),
-            Ok(Err(error)) => {
-                return Err(StartFailure::Failed(h4rn_harness::HarnessError::Spawn {
-                    harness: kind,
-                    message: format!("the session start task failed: {error}"),
-                }));
-            }
+        match tokio::time::timeout_at(deadline, &mut task).await {
+            Ok(Ok(Ok(session))) => Ok(session),
+            Ok(Ok(Err(error))) => Err(StartFailure::Failed(error)),
+            Ok(Err(error)) => Err(StartFailure::Failed(h4rn_harness::HarnessError::Spawn {
+                harness: kind,
+                message: format!("the session start task failed: {error}"),
+            })),
             Err(_) => {
                 // The copy is fenced: a session it produces later is shut down
                 // before it is used or handed to the pump.
@@ -8691,39 +8706,130 @@ impl Inner {
                         let _ = session.shutdown().await;
                     }
                 });
-                return Err(StartFailure::Expired);
+                Err(StartFailure::Expired)
             }
-        };
-        // The child being up is not the copy being done. Read ahead to the
-        // report that confirms it, keeping anything that arrived first so the
-        // pump sees the session's events in their own order.
-        let mut stream = session.events();
-        let early =
-            match tokio::time::timeout_at(deadline, read_until_session_started(&mut stream, kind))
-                .await
-            {
-                Ok(Ok(early)) => early,
-                Ok(Err(failure)) => {
-                    let _ =
-                        tokio::time::timeout(FORK_COPY_SHUTDOWN_GRACE, session.shutdown()).await;
-                    return Err(failure);
+        }
+    }
+
+    /// Waits, after a native fork's prompt is written, for its copy to be
+    /// confirmed.
+    ///
+    /// The deadline starts at the write, not at the start: a provider that
+    /// sends its init frame only after the first user frame (Claude Code) has
+    /// nothing to report until the fork's prompt arrives. `SessionStarted`, or
+    /// the first output from a provider that never sends one, confirms the
+    /// copy and releases the source's gate (in the pump). A session whose
+    /// stream ends first is left to its pump, which owns the turn's outcome.
+    ///
+    /// `true` when the session may carry on carrying the turn; `false` when the
+    /// copy missed its deadline. The caller then fences it with
+    /// [`Self::fence_native_fork`].
+    async fn await_fork_confirmation(
+        &self,
+        handle: &ThreadHandle,
+        turn: &TurnDispatch,
+        mut confirmed: tokio::sync::watch::Receiver<bool>,
+    ) -> bool {
+        // A turn that ended while its prompt was being written has nothing
+        // left to confirm; the ordinary paths own the session now.
+        {
+            let record = handle.lock().await;
+            if record.dispatch_for(&turn.turn_id).is_none() {
+                return true;
+            }
+        }
+        let deadline = tokio::time::Instant::now() + self.fork_copy_timeout();
+        loop {
+            if *confirmed.borrow() {
+                return true;
+            }
+            match tokio::time::timeout_at(deadline, confirmed.changed()).await {
+                Ok(Ok(())) => {}
+                // The pump ended: it detached the session and owns the turn.
+                Ok(Err(_)) => return true,
+                Err(_) => break,
+            }
+        }
+        // Read the report once more under the record lock. The pump sets it
+        // while holding that lock, so a copy that confirmed before this check
+        // is never fenced.
+        let record = handle.lock().await;
+        let confirmed = *confirmed.borrow();
+        drop(record);
+        confirmed
+    }
+
+    /// Fences a native copy that outlived its deadline.
+    ///
+    /// The copy's process is stopped first, then its pump, so nothing it read
+    /// can be applied. The turn is handed back to its handoff, which is what
+    /// releases the source's gate; that release happens before the handoff
+    /// session starts, so a message the source sends in between cannot reach
+    /// anything the fork shows. A turn that cannot be retried (a Stop landed,
+    /// or it is no longer the one this startup carried) is finished here
+    /// instead of being left working with no pump.
+    async fn fence_native_fork(
+        self: &Arc<Self>,
+        handle: &ThreadHandle,
+        turn: &Arc<TurnDispatch>,
+        generation: u64,
+        session: &SharedSession,
+    ) {
+        let thread_id = handle.lock().await.meta.thread_id.clone();
+        tracing::warn!(
+            %thread_id,
+            "a native fork did not confirm its copy in time; its session is fenced"
+        );
+        let _ =
+            tokio::time::timeout(FORK_COPY_SHUTDOWN_GRACE, session.lock().await.shutdown()).await;
+        {
+            let mut record = handle.lock().await;
+            if record.session.is_live(session) && record.session.generation() == Some(generation) {
+                // Stop the pump before the turn is handed off: the fenced copy's
+                // stream must never be applied to the turn that replaces it.
+                if let Some(pump) = record.pump.take() {
+                    pump.abort();
                 }
-                Err(_) => {
-                    // The copy outlived its deadline: shut the process down before
-                    // anything else happens, so whatever it read can never be used.
-                    let _ =
-                        tokio::time::timeout(FORK_COPY_SHUTDOWN_GRACE, session.shutdown()).await;
-                    tracing::warn!(
-                        ?kind,
-                        "a native fork did not report its session in time; its copy is fenced"
-                    );
-                    return Err(StartFailure::Expired);
+            }
+        }
+        match self.retry_with_handoff(handle, turn, generation).await {
+            HandoffRetry::Started => {}
+            HandoffRetry::Declined | HandoffRetry::Stopped => {
+                // The turn is not the retry's to run again. Finish it the way the
+                // pump's own stream end would, so it never stays working.
+                let (settled, advance) = {
+                    let mut record = handle.lock().await;
+                    if !record.session.is_live(session)
+                        || record.session.generation() != Some(generation)
+                    {
+                        (false, false)
+                    } else {
+                        let stderr_tail = record
+                            .live_session()
+                            .and_then(|session| session.try_lock().ok())
+                            .map(|session| session.stderr_tail())
+                            .unwrap_or_default();
+                        let hint = if stderr_tail.trim().is_empty() {
+                            "Send the message again to resume".to_owned()
+                        } else {
+                            format!(
+                                "Send the message again to resume. Harness stderr: {stderr_tail}"
+                            )
+                        };
+                        let ended = record.stream_end_turn(generation, &hint);
+                        record.clear_session(generation);
+                        record.pump = None;
+                        let (settled, advance) = self
+                            .finish_stream_end(&mut record, ended, None, generation)
+                            .await;
+                        (settled, advance)
+                    }
+                };
+                if settled || advance {
+                    self.spawn_advance(handle.clone());
                 }
-            };
-        Ok(NativeForkStart {
-            session,
-            stream: futures::stream::iter(early).chain(stream).boxed(),
-        })
+            }
+        }
     }
 
     async fn start_session(self: &Arc<Self>, handle: ThreadHandle) {
@@ -8922,18 +9028,25 @@ impl Inner {
         }
 
         let native_attempt = spec.native_fork;
+        // Set only for a native fork: the pump reports the copy's confirmation
+        // here, and the startup waits for it after writing the prompt.
+        let mut fork_confirmation: Option<tokio::sync::watch::Sender<bool>> = None;
+        let mut fork_confirmed: Option<tokio::sync::watch::Receiver<bool>> = None;
         let started = if native_attempt {
             self.start_native_fork(harness, spec, snapshot)
                 .await
-                .map(|start| (start.session, Some(start.stream)))
+                .inspect(|_| {
+                    let (confirm, confirmed) = tokio::sync::watch::channel(false);
+                    fork_confirmation = Some(confirm);
+                    fork_confirmed = Some(confirmed);
+                })
         } else {
             harness
                 .start_session_with(spec, snapshot)
                 .await
-                .map(|session| (session, None))
                 .map_err(StartFailure::Failed)
         };
-        let (mut session, prepared_stream) = match started {
+        let mut session = match started {
             Ok(started) => started,
             Err(StartFailure::Failed(error)) => {
                 // An imported conversation prefers its harness-native resume.
@@ -8969,10 +9082,7 @@ impl Inner {
             }
         };
 
-        let stream = match prepared_stream {
-            Some(stream) => stream,
-            None => session.events(),
-        };
+        let stream = session.events();
         let health = session.transport_health();
         let controls = session.controls();
         let session: SharedSession = Arc::new(Mutex::new(session));
@@ -9051,9 +9161,17 @@ impl Inner {
             let inner = Arc::clone(self);
             let pump_handle = handle.clone();
             let pump_session = Arc::clone(&session);
+            let fork_confirmation = fork_confirmation.take();
             record.pump = Some(tokio::spawn(async move {
                 inner
-                    .run_pump(pump_handle, generation, pump_session, health, stream)
+                    .run_pump(
+                        pump_handle,
+                        generation,
+                        pump_session,
+                        health,
+                        stream,
+                        fork_confirmation,
+                    )
                     .await;
             }));
         }
@@ -9066,8 +9184,22 @@ impl Inner {
             record.dispatch_for(&turn.turn_id).is_some() && !record.pause_parks_turn(&turn.turn_id)
         };
         if still_active {
-            self.deliver(handle.clone(), turn, Arc::clone(&session))
+            self.deliver(handle.clone(), Arc::clone(&turn), Arc::clone(&session))
                 .await;
+            // A native fork's prompt goes first: a provider that copies its own
+            // conversation may only report the copy once it has read a user
+            // frame, so the copy's deadline runs from this write. A copy still
+            // unconfirmed when it passes is shut down and fenced here, and the
+            // turn is handed off.
+            if let Some(confirmed) = fork_confirmed
+                && !self
+                    .await_fork_confirmation(&handle, &turn, confirmed)
+                    .await
+            {
+                self.fence_native_fork(&handle, &turn, generation, &session)
+                    .await;
+                return;
+            }
         }
         // Whatever is waiting now (a queued turn, or none) is delivered on this
         // live session.
@@ -10306,6 +10438,7 @@ impl Inner {
         session: SharedSession,
         health: Option<h4rn_harness::TransportHealth>,
         mut stream: futures::stream::BoxStream<'static, HarnessEvent>,
+        fork_confirmation: Option<tokio::sync::watch::Sender<bool>>,
     ) {
         // A death between turns is published from its report, not from the end
         // of the stream: a live adapter holds the session, and with it the
@@ -10527,6 +10660,30 @@ impl Inner {
                 );
                 drop(record);
                 break;
+            }
+            // A native fork's copy is over when its session reports
+            // `SessionStarted`, or when a provider that never reports one starts
+            // producing output: it can only answer after it has read the
+            // source. The startup waiting on the fork's prompt is released here,
+            // and an output-only confirmation opens the source's gate as well
+            // (`SessionStarted` does that in its own arm below).
+            if let Some(confirm) = &fork_confirmation
+                && !*confirm.borrow()
+            {
+                let started = matches!(&event, HarnessEvent::SessionStarted { .. });
+                if started || is_fork_output(&event) {
+                    if !started
+                        && record
+                            .meta
+                            .forked_from
+                            .as_ref()
+                            .is_some_and(|forked| forked.native_fork)
+                    {
+                        let fork_id = record.meta.thread_id.clone();
+                        self.release_fork_copy(&fork_id, generation).await;
+                    }
+                    confirm.send_replace(true);
+                }
             }
             // A promoted turn's prompt may still be on its way to the harness.
             // Until `send` returns `Ok` the adapter has not accepted it, so
@@ -14875,7 +15032,7 @@ mod tests {
         }])
         .boxed();
         Arc::clone(&manager.inner)
-            .run_pump(handle.clone(), generation, session, None, stream)
+            .run_pump(handle.clone(), generation, session, None, stream, None)
             .await;
 
         {
@@ -14948,7 +15105,7 @@ mod tests {
         }])
         .boxed();
         Arc::clone(&manager.inner)
-            .run_pump(handle.clone(), generation, session, None, stream)
+            .run_pump(handle.clone(), generation, session, None, stream, None)
             .await;
 
         let mut errors = Vec::new();
@@ -15083,7 +15240,7 @@ mod tests {
         };
         let stream = futures::stream::empty().boxed();
         Arc::clone(&manager.inner)
-            .run_pump(handle.clone(), generation, session, None, stream)
+            .run_pump(handle.clone(), generation, session, None, stream, None)
             .await;
 
         {
@@ -15152,6 +15309,7 @@ mod tests {
                 session,
                 None,
                 futures::stream::empty().boxed(),
+                None,
             )
             .await;
 
@@ -15269,6 +15427,7 @@ mod tests {
                         session,
                         None,
                         futures::stream::empty().boxed(),
+                        None,
                     )
                     .await;
             }
@@ -16496,6 +16655,7 @@ mod tests {
                 session,
                 Some(health),
                 stream,
+                None,
             ),
         )
         .await
@@ -26355,6 +26515,141 @@ mod tests {
         manager.shutdown().await;
     }
 
+    /// A steer belongs to the turn it was written into. A fork of that turn
+    /// keeps it, in order, and every later turn stays forkable: the journal
+    /// must never read a steer as an older daemon's queued prompt.
+    #[tokio::test]
+    async fn a_fork_of_a_steered_turn_keeps_the_steer_and_later_turns_stay_forkable() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_running_turn(&mut events).await;
+
+        let steered = manager
+            .send_message_with(
+                &created.thread_id,
+                "go left".into(),
+                Vec::new(),
+                SendMode::Steer,
+                Some(created.turn_id.clone()),
+            )
+            .await
+            .expect("steer");
+        assert_eq!(steered.turn_id, created.turn_id);
+        gate.release();
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                settled_turn(&mut events, &created.turn_id)
+            )
+            .await
+            .expect("the steered turn completed"),
+            TurnStatus::Completed
+        );
+        let second = manager
+            .send_message(&created.thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("the next turn");
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                settled_turn(&mut events, &second.turn_id)
+            )
+            .await
+            .expect("the turn after the steer completed"),
+            TurnStatus::Completed
+        );
+
+        let turns = manager
+            .inner
+            .journal
+            .read_journaled_turns(&created.thread_id)
+            .await
+            .expect("turns");
+        let steered_turn = turns
+            .iter()
+            .find(|turn| turn.turn_id == created.turn_id)
+            .expect("the steered turn");
+        assert!(
+            !steered_turn.lost_prompt,
+            "a steer is not an older version's queued prompt"
+        );
+        assert!(
+            !turns.iter().any(|turn| turn.lost_prompt),
+            "the turn after a steer is not ambiguous either"
+        );
+        let rows: Vec<(String, String)> = steered_turn
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                crate::journal::JournaledItem::Item {
+                    item: Item::Message { item_id, text, .. },
+                    ..
+                } => Some((item_id.clone(), text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows.iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "echo: first", "go left"],
+            "the steer is kept in its turn, after its reply"
+        );
+        assert!(
+            rows[0].0.starts_with("item_user_"),
+            "the turn's own prompt keeps its row: {rows:?}"
+        );
+        assert!(
+            rows[2].0.starts_with("item_steer_"),
+            "the steer's row says what it is: {rows:?}"
+        );
+
+        // Both settled turns fork, and the steered turn's copy holds the steer
+        // in the same order the source showed it.
+        let forked = manager
+            .fork_thread(&created.thread_id, &created.turn_id)
+            .await
+            .expect("the steered turn forks");
+        let wire = manager
+            .inner
+            .journal
+            .read_wire_since(&forked.thread_id, 0)
+            .await
+            .expect("the fork's journal");
+        let texts: Vec<String> = wire
+            .into_iter()
+            .filter_map(|wire| match wire.event {
+                Event::ItemCompleted {
+                    item: Item::Message { text, .. },
+                    ..
+                } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "first".to_owned(),
+                "echo: first".to_owned(),
+                "go left".to_owned()
+            ],
+            "the fork keeps the steer in order"
+        );
+        manager
+            .fork_thread(&created.thread_id, &second.turn_id)
+            .await
+            .expect("a turn after a steer still forks");
+        manager.shutdown().await;
+    }
+
     /// A direct steer with no observed turn id never lands in a turn the client
     /// did not see: the message waits in the queue instead.
     #[tokio::test]
@@ -32982,6 +33277,117 @@ mod tests {
         second.shutdown().await;
     }
 
+    /// An older daemon recorded a mid-turn shutdown as `TurnStarted`, the
+    /// prompt, an error row and `HostLost`, with no completion. The journal's
+    /// host-loss recovery gives that turn a status so forks can use it, but the
+    /// turn's completion row is still missing: a restart must write it, or the
+    /// projection stays Working forever.
+    #[tokio::test]
+    async fn an_older_host_lost_running_turn_is_finished_at_restart_and_stays_forkable() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let host = HostId::new("host_test");
+        let first =
+            open_test_manager_with_journal(FakeHarness::new(), host.clone(), Arc::clone(&journal))
+                .await;
+        let mut events = first.subscribe();
+        let created = first
+            .create_thread(new_thread(host.clone(), workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the first turn completed"),
+            TurnStatus::Completed
+        );
+        let meta = first
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("handle")
+            .lock()
+            .await
+            .meta
+            .clone();
+        first.shutdown().await;
+
+        // The shape 1.0.1 wrote when the daemon stopped mid-turn.
+        let turn = TurnId::new_uuid_v7();
+        let started_at = chrono::Utc::now();
+        let lost_at = started_at + chrono::Duration::seconds(1);
+        journal
+            .append(
+                &meta,
+                &[
+                    ThreadEvent::TurnStarted { at: started_at },
+                    ThreadEvent::HostLost { at: lost_at },
+                ],
+                &[
+                    Event::TurnStarted {
+                        thread_id: created.thread_id.clone(),
+                        turn_id: turn.clone(),
+                        started_at,
+                    },
+                    Event::ItemCompleted {
+                        thread_id: created.thread_id.clone(),
+                        turn_id: turn.clone(),
+                        item: Item::Message {
+                            item_id: "item_user_old".into(),
+                            role: MessageRole::User,
+                            text: "half done".into(),
+                            attachments: Vec::new(),
+                        },
+                        at: None,
+                    },
+                    Event::Error {
+                        thread_id: Some(created.thread_id.clone()),
+                        message: "the daemon stopped".into(),
+                        hint: None,
+                        retryable: true,
+                    },
+                ],
+            )
+            .await
+            .expect("journal the old shape");
+
+        let second =
+            open_test_manager_with_journal(FakeHarness::new(), host, Arc::clone(&journal)).await;
+        {
+            let handle = second
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("handle");
+            let record = handle.lock().await;
+            assert_eq!(
+                record.state.phase,
+                h4rn_core::Phase::Completed {
+                    status: TurnStatus::Interrupted
+                },
+                "the finished turn leaves Working"
+            );
+        }
+        let wire = journal
+            .read_wire_since(&created.thread_id, 0)
+            .await
+            .expect("wire rows");
+        assert!(
+            wire.iter().any(|wire| matches!(
+                &wire.event,
+                Event::TurnCompleted { turn_id, status, .. }
+                    if turn_id == &turn && *status == TurnStatus::Interrupted
+            )),
+            "the restart wrote the turn's own completion: {wire:?}"
+        );
+        second
+            .fork_thread(&created.thread_id, &turn)
+            .await
+            .expect("the recovered turn is forkable");
+        second.shutdown().await;
+    }
+
     /// A fork owns its attachment blobs: deleting the source's per-thread copy
     /// leaves the fork's attachment readable.
     #[tokio::test]
@@ -33341,6 +33747,176 @@ mod tests {
                 .iter()
                 .all(|prompt| !prompt.contains("source second")),
             "the fork never sees the source's later message: {fork_prompts:?}"
+        );
+        manager.shutdown().await;
+    }
+
+    /// Claude Code prints nothing until the first user frame arrives, so a
+    /// native fork that waits for `SessionStarted` before writing its prompt
+    /// never copies at all and falls back after the full deadline. The fork's
+    /// prompt goes first, and the report it provokes confirms the copy well
+    /// inside the deadline.
+    #[tokio::test]
+    async fn a_native_fork_that_reports_its_session_only_after_its_prompt_copies() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, prompts) = FakeHarness::new().with_sent_prompts();
+        let (harness, native) = harness.with_native_sessions();
+        let (harness, starts) = harness.with_session_starts();
+        let harness = harness.with_session_started_on_first_send();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        *manager
+            .inner
+            .fork_copy_timeout_override
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Duration::from_millis(200));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the first turn completed"),
+            TurnStatus::Completed
+        );
+
+        let forked = manager
+            .fork_thread(&created.thread_id, &created.turn_id)
+            .await
+            .expect("fork");
+        manager
+            .send_message(&forked.thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("the fork's first send");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the fork's turn completed without waiting out the deadline"),
+            TurnStatus::Completed
+        );
+        let starts = starts.get();
+        assert_eq!(
+            starts.len(),
+            2,
+            "the fork copied natively instead of handing off: {starts:?}"
+        );
+        assert!(starts[1].native_fork, "the native fork started: {starts:?}");
+        assert_eq!(
+            native.forks().len(),
+            1,
+            "the native copy was adopted: {:?}",
+            native.forks()
+        );
+        assert!(
+            prompts
+                .get()
+                .iter()
+                .all(|prompt| !prompt.contains("Earlier conversation history, forked")),
+            "the fork never needed the handoff: {:?}",
+            prompts.get()
+        );
+        manager.shutdown().await;
+    }
+
+    /// The source's next Send is held only while the fork's copy is being
+    /// confirmed. Its deadline runs from the fork's prompt write, so a report
+    /// the provider has not sent yet keeps the source waiting — but never for
+    /// the copy's old whole-start deadline, and never into a handoff when the
+    /// report finally arrives.
+    #[tokio::test]
+    async fn a_source_send_waits_only_until_the_native_copy_is_confirmed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, prompts) = FakeHarness::new().with_sent_prompts();
+        let (harness, native) = harness.with_native_sessions();
+        let (harness, count) = harness.with_session_count();
+        let harness = harness.with_session_started_on_first_send();
+        let (harness, report_gate) = harness.with_session_started_gate_after(1);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        *manager
+            .inner
+            .fork_copy_timeout_override
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Duration::from_millis(300));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the first turn completed"),
+            TurnStatus::Completed
+        );
+
+        let forked = manager
+            .fork_thread(&created.thread_id, &created.turn_id)
+            .await
+            .expect("fork");
+        let fork_turn = manager
+            .send_message(&forked.thread_id, "carry on".into(), Vec::new())
+            .await
+            .expect("the fork's first send");
+        // The native start is up and has opened the source's gate; the fork's
+        // prompt write is still waiting on the report latch.
+        tokio::time::timeout(Duration::from_secs(10), count.wait_for(2))
+            .await
+            .expect("the native start reached the harness");
+        let source_turn = manager
+            .send_message(&created.thread_id, "source second".into(), Vec::new())
+            .await
+            .expect("the source's send is acknowledged at once");
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            manager.inner.fork_copy_waiting.notified(),
+        )
+        .await
+        .expect("the source's dispatch waits for the copy");
+        // Well past the copy's deadline: it has not started counting, because
+        // the fork's prompt has not been written. The source is still held by
+        // the copy and nothing of its message has reached the harness.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            prompts
+                .get()
+                .iter()
+                .all(|prompt| !prompt.contains("source second")),
+            "the source's prompt stayed out of the copy and the fork: {:?}",
+            prompts.get()
+        );
+
+        // The report confirms the copy: the source runs, on its own turn, and
+        // the fork keeps the native conversation.
+        report_gate.release();
+        let mut statuses = HashMap::new();
+        while statuses.len() < 2 {
+            let (turn_id, status) =
+                tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                    .await
+                    .expect("both turns completed once the copy was confirmed");
+            statuses.insert(turn_id, status);
+        }
+        assert_eq!(
+            statuses.get(&fork_turn.turn_id),
+            Some(&TurnStatus::Completed),
+            "the fork's turn completed: {statuses:?}"
+        );
+        assert_eq!(
+            statuses.get(&source_turn.turn_id),
+            Some(&TurnStatus::Completed),
+            "the source's turn completed: {statuses:?}"
+        );
+        assert_eq!(native.forks().len(), 1, "the native copy was adopted");
+        assert!(
+            prompts
+                .get()
+                .iter()
+                .all(|prompt| !prompt.contains("Earlier conversation history, forked")),
+            "the fork never fell back to the handoff: {:?}",
+            prompts.get()
         );
         manager.shutdown().await;
     }

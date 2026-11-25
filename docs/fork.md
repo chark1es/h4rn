@@ -92,14 +92,14 @@ conversation over:
   saved session, the source's next message is accepted at once — it already has
   its turn and its durable row — but it cannot reach the harness until the copy
   is over. The copy is over when
-  the fork reports its session or the startup fails. The deadline covers the
-  whole copy, not just the child starting: a provider returns from its start as
-  soon as the process is up and only then reads the source, so the fork holds
-  the source's gate until that provider reports its new session. A provider
-  still reading the source when the deadline passes has its process shut down,
-  any session it produces later is discarded without being used, and the fork
-  continues on the handoff. Only then is the source released, so a message sent
-  after the deadline can never reach something the fork shows. A queued message
+  the fork reports its session or the startup fails. The fork's first message is
+  written before its copy is waited on, and the deadline runs from that write:
+  Claude Code prints its init frame only after the first user frame, so a fork
+  that waited for the report first would never get one. A provider still reading
+  the source when the deadline passes has its process shut down and fenced, and
+  the source is released there — after the copy is stopped, before the fork's
+  handoff session starts — so a message sent after the deadline can never reach
+  something the fork shows. A queued message
   that becomes active while a copy is pending waits for that gate in the
   background, never while holding the thread's session-switch lock: a Send that
   arrives once the queue has moved on is still answered at once. Only a thread

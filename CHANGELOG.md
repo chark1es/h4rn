@@ -184,7 +184,8 @@ All notable changes to h4rn are recorded here. The format follows
   really started and settled (or was interrupted by a restart). An older
   journal that stored a host loss without the turn's completion is read the
   same way: the stored loss ends the turn it interrupted, so a later settled
-  turn stays forkable. A prompt that
+  turn stays forkable, and a restart writes that turn's missing completion so a
+  thread that was running when an older daemon stopped leaves Working. A prompt that
   never started is not a turn, so it is left out of a later turn's copy and
   cannot itself be forked. The copy owns its attachment blobs and adopts them
   all or nothing: if any file is gone, the fork fails and the retains made so
@@ -200,12 +201,13 @@ All notable changes to h4rn are recorded here. The format follows
   saved conversation, the source's next send is acknowledged at once (it has a
   turn and a durable row) but its dispatch waits, and that wait never holds the
   thread's session-switch lock, so a later send is still answered at once. The
-  copy's deadline covers the whole copy, not just the child starting: a
-  provider returns from its start before it has read the source, so the source
-  stays gated until that provider reports its new session. A provider still
-  reading the source at the deadline has its process shut down, its result is
-  never adopted, and the fork continues on the handoff — only then is the
-  source released, so a message sent afterwards can never reach the fork. A thread that has not started a session of its own
+  fork's first message is written before its copy is waited on, and the deadline
+  runs from that write: Claude Code reports its session only after the first user
+  frame, so a fork that waited for that report first would never copy at all. A
+  provider still reading the source at the deadline has its process shut down and
+  fenced, and the source is released there — after the copy is stopped, before
+  the handoff session starts — so a message sent afterwards can never reach the
+  fork. A thread that has not started a session of its own
   never lends a borrowed session id to another fork. Any other case — a harness
   without native forks, a source that moved on, or a native fork that dies
   before it starts — sends a bounded handoff of the copied history instead,
@@ -716,6 +718,25 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A native fork starts by sending its own prompt.** Claude Code prints nothing
+  for a natively forked session until the first user frame arrives, so waiting
+  for its session report before writing the prompt made every Claude fork wait
+  out the whole copy deadline and fall back to the handoff. The fork's prompt is
+  written first and the deadline runs from that write. A provider that never
+  reports its session still confirms the copy with its first output, and one
+  that stays silent is shut down and fenced; the source is released after the
+  copy is stopped and before the handoff session starts.
+- **A steered message stays in the turn it was written into.** A replay read
+  every extra user row in a running turn as an old daemon's queued prompt, so a
+  fork of a steered turn dropped the steer and the next turn was refused as
+  ambiguous. Steered rows now say what they are, so a fork keeps the steer in
+  order and every later turn stays forkable; a prompt an older journal really
+  filed under a running turn is still recovered the same way.
+- **A thread that was running when an older daemon stopped leaves Working.**
+  The journal's host-loss recovery already ends that turn for forks, but the
+  restart's repair looked only for a turn with no status at all, so its
+  completion and the finished phase were never written. The restart now finds
+  the turn in the wire rows too and finishes it.
 - **A base or commit change keeps the tab its review was started for.** When a
   Branch or Commits list is still loading, changing the base or the commit now
   reopens the tab that list was started for instead of the file from before it,
