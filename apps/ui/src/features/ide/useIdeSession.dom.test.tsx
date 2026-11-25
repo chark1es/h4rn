@@ -186,7 +186,7 @@ function diffFiles(against?: FsDiff["against"]): FsDiffFiles {
 }
 
 function changes(): FsTurnChanges {
-  return { thread_id: "th_1", turn_id: "turn_1", files: [], note: null };
+  return { thread_id: "th_1", turn_id: "turn_1", complete: false, files: [], note: null };
 }
 
 let latest: IdeSession | null = null;

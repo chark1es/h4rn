@@ -272,6 +272,21 @@ pub enum ResponseBody {
         #[ts(type = "number")]
         revision: u64,
     },
+    /// A thread was rewound to before one of its prompts.
+    Rewound {
+        /// The prompt to put back in the composer.
+        prompt: crate::RewoundPrompt,
+    },
+    /// What rewinding one prompt would really do.
+    RewindPlan {
+        /// The planned method and whether file restore is available.
+        plan: crate::RewindPlan,
+    },
+    /// This machine's Labs switches for rewinding.
+    RewindSettings {
+        /// Current settings.
+        settings: crate::RewindSettings,
+    },
     /// A terminal was opened.
     TerminalOpened {
         /// The new terminal, including its effective size.
@@ -1181,6 +1196,42 @@ pub enum Event {
         #[serde(default)]
         #[ts(optional)]
         changes: Option<crate::fs::FsTurnChanges>,
+    },
+    /// An earlier prompt was edited: the named message and everything after it
+    /// are no longer part of the thread.
+    ///
+    /// A client folds this by dropping the user message's cue turn and every
+    /// later turn. The prompt itself comes back only to the device that asked,
+    /// in the `Rewound` answer, so a replay never reopens a composer.
+    ThreadRewound {
+        /// Thread.
+        thread_id: ThreadId,
+        /// The user message the active thread now ends before.
+        before_item_id: String,
+        /// Whether workspace files were put back to the pre-message snapshot.
+        #[serde(default)]
+        files_restored: bool,
+        /// The durable restore record that committed with this cut, when files
+        /// were restored. A restarted daemon uses it to finish or roll back a
+        /// restore that was interrupted before the commit.
+        #[serde(default)]
+        #[ts(optional)]
+        restore_id: Option<String>,
+        /// When the rewind happened.
+        at: DateTime<Utc>,
+    },
+    /// A rewind's native provider boundary was refused, so the next session
+    /// continues from a bounded handoff instead.
+    ///
+    /// The dialog plans the method from what the provider recorded; the
+    /// provider can still refuse the named boundary when the next session
+    /// starts. This event is journaled at that moment so the person is told,
+    /// and every connected client can say the same thing.
+    RewindFellBack {
+        /// Thread whose pending native rewind became a handoff.
+        thread_id: ThreadId,
+        /// When the fallback happened.
+        at: DateTime<Utc>,
     },
     /// The agent state changed; drives the orb or static glyph.
     AgentStateChanged {

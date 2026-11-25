@@ -198,6 +198,15 @@ impl SecureClient {
             daemon.service.public_identity().noise_public,
         );
         engine.psk = psk;
+        // These tests boot the daemon in the same process and tokio runtime as
+        // the client. On a loaded machine the daemon's CPU work on a large
+        // payload (JSON, debug-build Noise on frames up to 512 KiB) can keep the
+        // client's liveness tick from running for a second or two. That is not
+        // a dead path, so a liveness timeout measured in single seconds would
+        // make these framing tests flaky. (The journal itself does not block the
+        // runtime: sqlx runs each SQLite connection on its own thread.) Failover timings have their own tests
+        // in `h4rn-transport`; here the timeout only needs to be out of reach.
+        engine.path_timeout_ms = 60_000;
         let paths = vec![ClientPath::websocket(
             TransportPathKind::Direct,
             format!("ws://{}/secure", daemon.addr),
@@ -307,7 +316,7 @@ impl SecureClient {
     /// Reads the next frame without assuming it is text, for binary paths.
     async fn next_any(&mut self) -> SecureFrame {
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(10), self.client.recv())
+            let event = tokio::time::timeout(SECURE_WAIT, self.client.recv())
                 .await
                 .expect("timed out waiting for a secure frame");
             match event {
@@ -383,7 +392,7 @@ impl SecureClient {
     /// Reads the next raw text frame, without parsing it.
     async fn read_raw_text(&mut self) -> String {
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(10), self.client.recv())
+            let event = tokio::time::timeout(SECURE_WAIT, self.client.recv())
                 .await
                 .expect("timed out waiting for a raw secure frame");
             match event {
@@ -466,11 +475,32 @@ fn device_identity() -> DeviceIdentity {
     DeviceIdentity::generate().expect("identity")
 }
 
+/// How long a test waits for a secure event before calling it lost.
+///
+/// The daemon boots in this process and shares the client's tokio runtime, so
+/// on a loaded machine its CPU work on a large payload can delay the client for
+/// a second or more. Every wait here is on an event; this bound only turns a
+/// real loss into a failure instead of a hang.
+const SECURE_WAIT: Duration = Duration::from_secs(60);
+
+/// Builds the daemon's secure service for these tests.
+///
+/// The daemon shares this process and runtime with the client, so daemon CPU
+/// work on a large payload can pause the transport for longer than the shipping
+/// two-second path deadline. This is belt-and-braces for a shared test runtime,
+/// not cover for a blocking journal: sqlx runs SQLite on its own threads. These tests check framing, replay, pairing and authorisation,
+/// never liveness, so the deadline is pushed out of reach: scheduling noise must
+/// not close a live path. Liveness has its own test below, with its own service.
+fn secure(mut options: SecureOptions) -> SecureService {
+    options.path_timeout = Duration::from_secs(60);
+    SecureService::new(options)
+}
+
 async fn create_thread_over_secure() -> ThreadSummary {
     let client_identity = device_identity();
     let daemon_identity = device_identity();
     let allowed = PairingPolicy::new([client_identity.public().noise_public]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(daemon_identity).with_policy(allowed),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -519,12 +549,14 @@ async fn secure_transport_creates_a_thread() {
 
 /// A queue can be larger than a paired transport's frame, so the summary only
 /// counts it and the contents come in bounded pages.
-#[tokio::test]
+// Client and daemon share this runtime; give the daemon's CPU work on this
+// payload its own workers so the client's transport tasks keep running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_queue_stays_out_of_the_summary_and_comes_in_pages() {
     let client_identity = device_identity();
     let daemon_identity = device_identity();
     let allowed = PairingPolicy::new([client_identity.public().noise_public]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(daemon_identity).with_policy(allowed),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -646,14 +678,14 @@ async fn a_large_queue_stays_out_of_the_summary_and_comes_in_pages() {
     daemon.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
     // The paired transport refuses a frame over 512 KiB. A long prompt must
     // still be accepted, journaled once and replayed in pages whose chunks
     // each fit one frame, with its text unchanged.
     let client_identity = device_identity();
     let allowed = PairingPolicy::new([client_identity.public().noise_public]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(allowed),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -710,33 +742,49 @@ async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
     }
 
     // A message sent while a turn runs is queued and becomes its own transcript
-    // row when it is promoted. Wait for all four here, so what follows tests the
-    // transport rather than how quickly the fake finished its turns.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // row when it is promoted. Wait until every prompt has a row, paging the way
+    // the replay below does, so what follows tests the transport rather than how
+    // quickly the fake finished its turns.
+    let deadline = std::time::Instant::now() + SECURE_WAIT;
     loop {
-        let (_, result) = client
-            .request_frames(ClientRequest::GetThread {
-                thread_id: thread_id.clone(),
-                since_seq: 0,
-            })
-            .await;
+        let mut since = 0;
         let mut seen = 0;
-        if let Ok(ResponseBody::Thread { events, .. }) = result {
-            seen = events
-                .into_iter()
-                .filter(|entry| {
-                    matches!(
-                        &entry.event,
-                        Event::ItemCompleted {
-                            item: h4rn_protocol::Item::Message {
-                                role: MessageRole::User,
-                                ..
-                            },
-                            ..
-                        }
-                    )
+        loop {
+            let (_, result) = client
+                .request_frames(ClientRequest::GetThread {
+                    thread_id: thread_id.clone(),
+                    since_seq: since,
                 })
-                .count();
+                .await;
+            match result {
+                Ok(ResponseBody::Thread {
+                    events,
+                    next_seq,
+                    more,
+                    ..
+                }) => {
+                    seen += events
+                        .into_iter()
+                        .filter(|entry| {
+                            matches!(
+                                &entry.event,
+                                Event::ItemCompleted {
+                                    item: h4rn_protocol::Item::Message {
+                                        role: MessageRole::User,
+                                        ..
+                                    },
+                                    ..
+                                }
+                            )
+                        })
+                        .count();
+                    since = next_seq;
+                    if !more {
+                        break;
+                    }
+                }
+                other => panic!("unexpected GetThread answer: {other:?}"),
+            }
         }
         if seen >= prompts.len() || std::time::Instant::now() >= deadline {
             break;
@@ -807,7 +855,7 @@ async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
     daemon.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_rows_replay_whole_and_in_order_over_the_paired_transport() {
     // Rows written before `at` existed re-serialize with `"at":null`, so a
     // page budgeted by stored bytes can carry more text than the budget says.
@@ -815,7 +863,7 @@ async fn legacy_rows_replay_whole_and_in_order_over_the_paired_transport() {
     // with each frame under its limit: an oversized event travels in chunks.
     let client_identity = device_identity();
     let allowed = PairingPolicy::new([client_identity.public().noise_public]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(allowed),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -964,12 +1012,44 @@ async fn legacy_rows_replay_whole_and_in_order_over_the_paired_transport() {
     daemon.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_session_keeps_its_path_on_probes_alone() {
+    // The daemon closes a path that carries no authenticated packet for its
+    // `path_timeout`. A health probe is an authenticated control record, so an
+    // idle session that keeps probing must keep its path; counting only data
+    // closed every session that paused for a moment.
+    let client_identity = device_identity();
+    let mut options = SecureOptions::new(device_identity())
+        .with_policy(PairingPolicy::new([client_identity.public().noise_public]));
+    options.path_timeout = Duration::from_secs(1);
+    // Deliberately not the test helper: this test is about the daemon's own
+    // path deadline, so it must keep the short one.
+    let service = Arc::new(SecureService::new(options));
+    let daemon = boot(Arc::clone(&service)).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+
+    // Three times the daemon's deadline with nothing to say: the client's own
+    // 250 ms probes are the only traffic on the path. The deadline leaves 750 ms
+    // of scheduling slack over the probe interval.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    client.hello().await;
+    assert_eq!(
+        service.session_count(),
+        1,
+        "a quiet session with live probes must keep its path"
+    );
+    client.close().await;
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn secure_transport_rejects_a_revoked_device() {
     let client_identity = device_identity();
     let client_key = client_identity.public().noise_public;
     let allowed = PairingPolicy::new([client_key]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(allowed),
     ));
     service.revoke(client_key);
@@ -987,7 +1067,7 @@ async fn secure_transport_rejects_a_revoked_device() {
     )];
     let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
 
-    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+    let outcome = tokio::time::timeout(SECURE_WAIT, async {
         loop {
             match client.recv().await {
                 Some(ClientEvent::Closed { reason }) => return reason,
@@ -1010,7 +1090,7 @@ async fn secure_transport_rejects_a_revoked_device() {
 async fn a_resumed_path_reattaches_without_forking_the_session() {
     let client_identity = device_identity();
     let allowed = PairingPolicy::new([client_identity.public().noise_public]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(allowed),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -1052,7 +1132,7 @@ async fn a_resumed_path_reattaches_without_forking_the_session() {
     let mut resumed =
         Client::connect(ClientConfig::new(engine, paths)).expect("start second client");
     let mut resumed_ticket = None;
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(SECURE_WAIT, async {
         loop {
             match resumed.recv().await {
                 Some(ClientEvent::Established(value)) => {
@@ -1088,14 +1168,109 @@ async fn a_resumed_path_reattaches_without_forking_the_session() {
     daemon.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_session_resumes_after_its_path_detaches() {
+    // A device that only probes is alive. Its path can still drop (the LAN
+    // goes away, the relay socket reconnects), so the resume grace must count
+    // from its last authenticated record. Counting only application frames
+    // evicted a long-idle device before its token was even looked up.
+    let client_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let mut options = SecureOptions::new(device_identity()).with_policy(allowed);
+    // The grace is four path timeouts (eight seconds here). Idle well past it
+    // on probes alone, so without the fix the session's last_seen_ms is stale
+    // by the detach, while the resume itself still has the whole grace.
+    options.path_timeout = Duration::from_secs(2);
+    let service = Arc::new(SecureService::new(options));
+    let daemon = boot(Arc::clone(&service)).await;
+
+    let client = SecureClient::connect(&daemon, client_identity.clone(), None).await;
+    let ticket = client.ticket.expect("the daemon issues a resume ticket");
+    // Twelve seconds is 1.5x the eight-second grace; the client's 250 ms
+    // probes are the only traffic and keep the path open the whole time.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        service.session_count(),
+        1,
+        "probes must keep the idle session"
+    );
+    assert_eq!(
+        service.attached_path_count(&ticket.session_id),
+        Some(1),
+        "the idle session still has its path"
+    );
+
+    client.close().await;
+    // Wait until the daemon has seen the socket close. Resuming while the old
+    // path is still attached would keep the session for the wrong reason.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while service.attached_path_count(&ticket.session_id) != Some(0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the daemon detaches a closed path");
+
+    // A new socket presents the same session id and token, the way a device
+    // that lost its LAN path resumes over the relay.
+    let mut engine = EngineConfig::new(
+        ticket.session_id,
+        client_identity,
+        service.public_identity().noise_public,
+    );
+    engine.resume = Some(ticket);
+    // The client's own path deadline stays out of reach, as in the other
+    // tests here; the daemon's short deadline is what this test exercises.
+    engine.path_timeout_ms = 60_000;
+    let paths = vec![ClientPath::websocket(
+        TransportPathKind::Relay,
+        format!("ws://{}/secure", daemon.addr),
+    )];
+    let mut resumed = Client::connect(ClientConfig::new(engine, paths)).expect("start resume");
+    let mut resumed_ticket = None;
+    tokio::time::timeout(SECURE_WAIT, async {
+        loop {
+            match resumed.recv().await {
+                Some(ClientEvent::Established(value)) => {
+                    resumed_ticket = Some(value);
+                    return;
+                }
+                Some(ClientEvent::Closed { reason }) => {
+                    panic!("an idle session was refused on resume: {reason}")
+                }
+                Some(_) => {}
+                None => panic!("the resume client stopped before establishing"),
+            }
+        }
+    })
+    .await
+    .expect("the idle session resumes within its grace");
+
+    // The resume attached to the existing session, and it still answers.
+    assert_eq!(
+        service.session_count(),
+        1,
+        "the resume must not start a second session"
+    );
+    assert_eq!(service.attached_path_count(&ticket.session_id), Some(1));
+    let mut resumed = SecureClient {
+        client: resumed,
+        next_id: 1,
+        pending: VecDeque::new(),
+        ticket: resumed_ticket,
+        chunk: None,
+    };
+    resumed.hello().await;
+    resumed.close().await;
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn secure_transport_psk_pairs_a_new_device() {
     let client_identity = device_identity();
     let daemon_identity = device_identity();
     let psk = [0x5au8; TOKEN_LEN];
-    let service = Arc::new(SecureService::new(
-        SecureOptions::new(daemon_identity).with_psk(psk),
-    ));
+    let service = Arc::new(secure(SecureOptions::new(daemon_identity).with_psk(psk)));
     let daemon = boot(Arc::clone(&service)).await;
 
     let mut client = SecureClient::connect(&daemon, client_identity.clone(), Some(psk)).await;
@@ -1120,9 +1295,7 @@ async fn a_slow_durable_pairing_write_does_not_fail_the_pairing() {
     // that can take longer than the client's 1 s established-path liveness
     // limit; a legitimate pairing must still complete.
     let psk = [0x5cu8; TOKEN_LEN];
-    let service = Arc::new(SecureService::new(
-        SecureOptions::new(device_identity()).with_psk(psk),
-    ));
+    let service = Arc::new(secure(SecureOptions::new(device_identity()).with_psk(psk)));
     let daemon = boot(Arc::clone(&service)).await;
     let registry = Arc::clone(&daemon.devices);
     service.set_pairing_hook(Arc::new(move |key| {
@@ -1147,7 +1320,7 @@ async fn an_allowlisted_device_connects_plainly_while_a_psk_is_armed() {
     let client_identity = device_identity();
     let client_key = client_identity.public().noise_public;
     let psk = [0x7au8; TOKEN_LEN];
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity())
             .with_policy(PairingPolicy::new([client_key]))
             .with_psk(psk),
@@ -1176,7 +1349,7 @@ async fn a_watcher_armed_psk_does_not_lock_out_an_allowlisted_device() {
     // rather than `with_psk`, and the same per-device choice must apply.
     let client_identity = device_identity();
     let client_key = client_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([client_key])),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -1205,7 +1378,7 @@ async fn a_watcher_armed_psk_does_not_lock_out_an_allowlisted_device() {
 async fn a_fresh_device_without_the_psk_is_refused_while_one_is_armed() {
     // M1(c): arming a secret must not turn `NotPaired` into admission for a
     // device that cannot prove possession of it.
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_psk([0x7cu8; TOKEN_LEN]),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -1303,7 +1476,7 @@ async fn a_transport_key_without_a_registry_entry_is_refused() {
     // allowlist) and still have no recorded authorisation. That used to grant
     // unrestricted access; it must be denied.
     let client_identity = device_identity();
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity())
             .with_policy(PairingPolicy::new([client_identity.public().noise_public])),
     ));
@@ -1322,7 +1495,7 @@ async fn a_peer_daemon_key_cannot_issue_client_requests_on_secure() {
     // client route it may not do anything: not even Hello.
     let peer_identity = device_identity();
     let key = peer_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -1349,7 +1522,7 @@ async fn a_peer_daemon_key_cannot_issue_client_requests_on_secure() {
         .send(h4rn_transport::AppFrame::text(text))
         .await
         .is_ok();
-    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+    let outcome = tokio::time::timeout(SECURE_WAIT, async {
         if !sent {
             return None;
         }
@@ -1387,7 +1560,7 @@ async fn a_relay_claim_cannot_replace_the_authenticated_key() {
     // might attach, the daemon resolves the identity from the key.
     let client_identity = device_identity();
     let key = client_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -1414,7 +1587,7 @@ async fn a_relay_claim_cannot_replace_the_authenticated_key() {
 async fn a_view_only_device_cannot_type_into_a_terminal() {
     let client_identity = device_identity();
     let key = client_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -1440,7 +1613,7 @@ async fn a_pending_device_is_admitted_only_after_the_host_confirms() {
     let phone_key = phone_identity.public().noise_public;
     let admin_identity = device_identity();
     let admin_key = admin_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([admin_key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -1495,7 +1668,7 @@ async fn a_view_only_device_cannot_confirm_a_pending_pairing() {
     let phone_key = device_identity().public().noise_public;
     let viewer_identity = device_identity();
     let viewer_key = viewer_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([viewer_key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -1532,7 +1705,7 @@ async fn terminal_ownership_uses_the_verified_device_not_the_hello_claim() {
     // Ownership and the terminal audit must name the key's registry entry.
     let client_identity = device_identity();
     let key = client_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -1592,7 +1765,7 @@ async fn a_view_only_device_cannot_read_a_file_diff() {
     let admin_identity = device_identity();
     let viewer_key = viewer_identity.public().noise_public;
     let admin_key = admin_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity())
             .with_policy(PairingPolicy::new([viewer_key, admin_key])),
     ));
@@ -1656,7 +1829,7 @@ async fn a_direct_pairing_grants_exactly_the_requested_scopes() {
     // file; the daemon arms them, and the device that pairs holds only those.
     // Nothing pre-enables PSK pairing: the watcher's live secret must.
     let client_identity = device_identity();
-    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let service = Arc::new(secure(SecureOptions::new(device_identity())));
     let daemon = boot_with(Arc::clone(&service), Arc::new(DeviceRegistry::in_memory())).await;
     let psk = [0x42u8; TOKEN_LEN];
     h4rn_daemon::remote::pairing::write_direct_pairing(
@@ -1741,7 +1914,7 @@ async fn expect_rejected(daemon: &TestDaemon, identity: DeviceIdentity, psk: [u8
         format!("ws://{}/secure", daemon.addr),
     )];
     let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
-    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+    let outcome = tokio::time::timeout(SECURE_WAIT, async {
         loop {
             match client.recv().await {
                 Some(ClientEvent::Closed { reason }) => return reason,
@@ -1783,7 +1956,7 @@ async fn expect_refused_without_secret(daemon: &TestDaemon, identity: DeviceIden
         format!("ws://{}/secure", daemon.addr),
     )];
     let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
-    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+    let outcome = tokio::time::timeout(SECURE_WAIT, async {
         loop {
             match client.recv().await {
                 Some(ClientEvent::Closed { reason }) => return reason,
@@ -1877,7 +2050,7 @@ async fn a_wrong_psk_is_refused_and_touches_nothing() {
     for armed_via_set_psk in [false, true] {
         let armed = [0x7eu8; TOKEN_LEN];
         let options = SecureOptions::new(device_identity());
-        let service = Arc::new(SecureService::new(if armed_via_set_psk {
+        let service = Arc::new(secure(if armed_via_set_psk {
             options
         } else {
             options.with_psk(armed)
@@ -1928,7 +2101,7 @@ async fn a_paired_device_that_lost_its_ticket_reconnects_plainly() {
     // secret and no ticket; it must not retry IKpsk2 forever.
     let stale = [0x44u8; TOKEN_LEN];
     let identity = device_identity();
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity())
             .with_policy(PairingPolicy::new([identity.public().noise_public])),
     ));
@@ -1945,7 +2118,7 @@ async fn a_secret_armed_by_the_watcher_enables_psk_pairing() {
     // Regression for E1: `SecureOptions::new` with no `with_psk`, then arm
     // through the real file watcher. `set_psk` must open the pairing window.
     let client_identity = device_identity();
-    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let service = Arc::new(secure(SecureOptions::new(device_identity())));
     let devices = Arc::new(DeviceRegistry::in_memory());
     let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
     let psk = [0x5bu8; TOKEN_LEN];
@@ -1994,7 +2167,7 @@ async fn a_consumed_direct_pairing_cannot_be_reused_after_a_restart() {
         vec![PairScope::View, PairScope::Approve],
     );
 
-    let service = Arc::new(SecureService::new(SecureOptions::new(identity.clone())));
+    let service = Arc::new(secure(SecureOptions::new(identity.clone())));
     let devices = Arc::new(DeviceRegistry::in_memory());
     let daemon = boot_at(
         dir.path().to_path_buf(),
@@ -2019,7 +2192,7 @@ async fn a_consumed_direct_pairing_cannot_be_reused_after_a_restart() {
     daemon.stop().await;
 
     // Restart before the original expiry with the same data directory.
-    let service = Arc::new(SecureService::new(SecureOptions::new(identity)));
+    let service = Arc::new(secure(SecureOptions::new(identity)));
     let devices = Arc::new(DeviceRegistry::in_memory());
     let daemon = boot_at(
         dir.path().to_path_buf(),
@@ -2038,7 +2211,7 @@ async fn a_consumed_direct_pairing_cannot_be_reused_after_a_restart() {
 async fn an_expired_direct_pairing_file_is_deleted() {
     // Regression for E3: docs promised removal; the watcher must delete it.
     let dir = tempfile::tempdir().expect("tempdir");
-    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let service = Arc::new(secure(SecureOptions::new(device_identity())));
     let daemon = boot_at(
         dir.path().to_path_buf(),
         Arc::clone(&service),
@@ -2064,7 +2237,7 @@ async fn the_watcher_never_replaces_or_clears_an_operator_secret() {
     // Regression for E3: an operator's H4RN_PAIRING_PSK is not the watcher's
     // to replace, and expiry must not clear it.
     let operator = [0x11u8; TOKEN_LEN];
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_psk(operator),
     ));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2097,9 +2270,7 @@ async fn the_watcher_never_replaces_or_clears_an_operator_secret() {
 #[tokio::test]
 async fn the_pairing_secret_pairs_one_device_even_when_handshakes_race() {
     let psk = [0x33u8; TOKEN_LEN];
-    let service = Arc::new(SecureService::new(
-        SecureOptions::new(device_identity()).with_psk(psk),
-    ));
+    let service = Arc::new(secure(SecureOptions::new(device_identity()).with_psk(psk)));
     let daemon = boot(Arc::clone(&service)).await;
     let mut attempts = Vec::new();
     for index in 0..6u8 {
@@ -2115,7 +2286,7 @@ async fn the_pairing_secret_pairs_one_device_even_when_handshakes_race() {
             )];
             let mut client =
                 Client::connect(ClientConfig::new(engine, paths)).expect("start client");
-            let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            let outcome = tokio::time::timeout(SECURE_WAIT, async {
                 loop {
                     match client.recv().await {
                         Some(ClientEvent::Established(_)) => return true,
@@ -2152,9 +2323,7 @@ async fn a_pairing_whose_registry_write_fails_is_refused_not_admitted() {
     std::fs::create_dir(&path).expect("a directory in place of the registry file");
     let devices = Arc::new(DeviceRegistry::open(&path));
     let psk = [0x7eu8; TOKEN_LEN];
-    let service = Arc::new(SecureService::new(
-        SecureOptions::new(device_identity()).with_psk(psk),
-    ));
+    let service = Arc::new(secure(SecureOptions::new(device_identity()).with_psk(psk)));
     let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
     let identity = device_identity();
     expect_rejected(&daemon, identity.clone(), psk).await;
@@ -2203,7 +2372,7 @@ async fn a_consumed_pairing_that_cannot_be_deleted_is_not_rearmed_on_restart() {
     );
 
     // Restart on the same data directory before the original expiry.
-    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let service = Arc::new(secure(SecureOptions::new(device_identity())));
     let daemon = boot_at(
         dir.path().to_path_buf(),
         Arc::clone(&service),
@@ -2238,7 +2407,7 @@ async fn an_upload_is_owned_by_the_device_that_opened_it() {
     let owner = device_identity();
     let other = device_identity();
     let allowed = PairingPolicy::new([owner.public().noise_public, other.public().noise_public]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(allowed),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -2346,7 +2515,7 @@ async fn a_forged_open_record_over_the_websocket_is_refused_and_touches_nothing(
     use tokio_tungstenite::tungstenite::Message;
 
     let secret = [0x5au8; TOKEN_LEN];
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_psk(secret),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -2407,7 +2576,7 @@ async fn a_direct_pairing_from_the_ui_pairs_a_device_over_the_network_listener()
     // exactly the requested scopes, without h4rn-connect.
     let admin_identity = device_identity();
     let admin_key = admin_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([admin_key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -2512,7 +2681,7 @@ async fn a_direct_pairing_from_the_ui_pairs_a_device_over_the_network_listener()
 async fn network_settings_are_admin_only() {
     let viewer_identity = device_identity();
     let viewer_key = viewer_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([viewer_key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
@@ -2560,7 +2729,7 @@ async fn a_newer_direct_pairing_file_replaces_the_previous_offer() {
     // The CLI and the UI both drive `<data_dir>/direct-pairing.json`. A second
     // offer must replace the first one the watcher applied; only an operator
     // secret (`H4RN_PAIRING_PSK`) keeps precedence.
-    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let service = Arc::new(secure(SecureOptions::new(device_identity())));
     let devices = Arc::new(DeviceRegistry::in_memory());
     let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
     let dir = daemon.dir.as_ref().unwrap().path();
@@ -2594,7 +2763,7 @@ async fn a_large_editor_read_is_omitted_on_a_secure_session() {
     // escaped JSON is over one frame; it must come back typed instead.
     let client_identity = device_identity();
     let allowed = PairingPolicy::new([client_identity.public().noise_public]);
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(allowed),
     ));
     let daemon = boot(Arc::clone(&service)).await;
@@ -2672,7 +2841,7 @@ fn webhook_task(daemon: &TestDaemon) -> ScheduleDraft {
 async fn a_view_only_device_never_sees_a_webhook_path() {
     let client_identity = device_identity();
     let key = client_identity.public().noise_public;
-    let service = Arc::new(SecureService::new(
+    let service = Arc::new(secure(
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());

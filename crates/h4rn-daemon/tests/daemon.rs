@@ -2335,6 +2335,73 @@ async fn worktree_settings_refuse_a_location_that_holds_a_linked_worktrees_main_
     daemon.stop().await;
 }
 
+/// An unreadable worktree registration means a location cannot be checked
+/// against its project. The hint asks the person to repair the git metadata
+/// instead of pointing at the location setting, which was not the problem.
+#[tokio::test]
+async fn worktree_settings_hint_asks_to_repair_an_unreadable_registration() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let repo = git_repo();
+    let root = tempfile::tempdir().expect("root");
+    let linked = root.path().join("linked");
+    git_in(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let admin = std::fs::read_dir(repo.path().join(".git").join("worktrees"))
+        .expect("admin entries")
+        .flatten()
+        .map(|entry| entry.path())
+        .next()
+        .expect("the linked worktree's admin dir");
+    std::fs::remove_file(admin.join("gitdir")).expect("remove gitdir");
+    std::fs::create_dir(admin.join("gitdir")).expect("unreadable gitdir");
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host,
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: repo.path().to_string_lossy().into_owned(),
+            },
+            name: None,
+        })
+        .await
+        .expect("register the project");
+
+    let location = tempfile::tempdir().expect("location");
+    let error = client
+        .request(ClientRequest::SetWorktreeSettings {
+            settings: h4rn_protocol::WorktreeSettings {
+                location: Some(location.path().to_string_lossy().into_owned()),
+                ..h4rn_protocol::WorktreeSettings::default()
+            },
+        })
+        .await
+        .expect_err("the repository's registrations cannot be read");
+    assert_eq!(error.code, ProtoErrorCode::InvalidRequest);
+    assert!(
+        error.message.contains("could not be checked"),
+        "the message names the unreadable check: {error:?}"
+    );
+    assert_eq!(
+        error.hint.as_deref(),
+        Some("Repair the repository's git worktree metadata and try again"),
+        "the hint asks for the repository metadata to be repaired: {error:?}"
+    );
+
+    daemon.stop().await;
+}
+
 /// A project registered at a bare repository's worktree is named after the
 /// repository's git directory, so Location `<root>` holds it. The refusal says
 /// that the destination is the bare repository's git directory and what to do.

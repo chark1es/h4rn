@@ -422,6 +422,10 @@ pub struct FsTurnChanges {
     pub turn_id: TurnId,
     /// Changed files, path-sorted.
     pub files: Vec<FsTurnFile>,
+    /// Whether the turn has a complete pre-turn checkpoint that can restore
+    /// the whole worktree, not only the files a tool call named.
+    #[serde(default)]
+    pub complete: bool,
     /// Why the list may be incomplete, when snapshots were missing.
     pub note: Option<String>,
 }

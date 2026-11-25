@@ -7,6 +7,43 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Edit an earlier prompt to rewind a thread.** Every turn's first sent
+  message has an **Edit from here** action; a message steered into a running
+  turn cannot be edited on its own, because that would also remove the message
+  before it. The message and everything after it leave the
+  active thread and the harness's own history, and the prompt and its
+  attachments return to the composer above any unsent draft. Codex and Claude
+  Code truncate their provider conversation natively (`thread/revert` and
+  `--resume-session-at`); OpenCode, Antigravity and configured ACP agents start
+  a fresh session with a bounded handoff of the kept history, and the dialog
+  says which one the selected message will really use; a refused native
+  boundary falls back to the handoff and says so. A native boundary is the
+  edited prompt's own, recorded in the provider session the thread still
+  resumes; an older prompt with none, or one from an abandoned session, uses
+  the handoff. Claude Code names the last kept chain entry, so a kept turn that
+  wrote no reply (stopped, or failed first) still stays in the provider
+  conversation. **Revert files too** is a
+  Labs feature, off by default (Settings → Labs → **Rewind files with Edit from
+  here**): while it is off the dialog hides it, the thread row reports it
+  unavailable, and the daemon refuses it. When turned on, it puts a thread's own
+  linked worktree back to the checkpoint from before the message; it is offered
+  only there and only when the removed turns have a complete checkpoint (the
+  whole tracked worktree, so a shell command's edits are covered), warns that it
+  also undoes the person's own later edits, and is refused when another thread
+  or agent session shares the directory (finished subagents with nothing queued
+  or pending do not block it). Checkpoints are only captured while the switch
+  is on, so a turn sent while it was off only rewinds its conversation. A
+  rewind is refused while a turn runs, a message is
+  queued or parked, a message's delivery is uncertain (resend or discard it
+  first; an uncertain promoted prompt becomes that visible row as soon as its
+  turn settles), an approval is pending or an automatic resume is armed; a
+  cancelled resume no longer blocks it. Prompts and cuts are read in journal
+  order, a queued message joins the transcript under the turn that runs it, and
+  native boundaries name what Claude Code or Codex really recorded. One durable event
+  records the cut, a durable restore journal ties the files to that commit, and
+  an interrupted restore is finished or rolled back at the next startup; a
+  failed file restore leaves the conversation unchanged. See
+  [docs/rewind.md](docs/rewind.md) and ADR-050.
 - **Android can alert you when an agent finishes, fails, needs approval, asks a question or stops
   at a limit.** Alerts go through Connect and are off by default behind two switches: the machine's
   Settings → Notifications switch, and Device notifications on the phone. The daemon publishes only
@@ -25,7 +62,6 @@ All notable changes to h4rn are recorded here. The format follows
   configure one Firebase service account on Connect and supply `google-services.json` only when
   building the Android app, so the app and CI still build without it and Settings says when alerts
   are unavailable.
-
 - **A new thread can run in its own git worktree.** Choose **Run in a new
   worktree** in the New thread dialog, with an optional branch name. The daemon
   checks out the project's current `HEAD` on a generated `h4rn/<name>` branch
@@ -751,6 +787,33 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A refused prompt survives a crash right after its turn is recorded.** A
+  prompt the daemon refused because its outside grant was revoked could sit in
+  neither the journal's claim nor the queue between the turn's settlement and
+  the write that put it back, so a daemon that stopped in that window lost the
+  person's text. The settlement now carries the refused claim back as a normal
+  known-unsent queue row in its own write, and holds it out of the promotion
+  it just made, so a restart shows the message and never sends it on its own.
+- **Switching harness drops the old provider's rewind point.** A pending
+  native rewind names a message in the conversation the thread is leaving, so
+  the new harness cannot apply it; its first turn used to fail and need a
+  resend. A switch now turns that boundary into the bounded handoff the kept
+  history already needs and journals the same "fell back" notice the adapter
+  refusal path publishes.
+- **A steer that is still being written is never also shown as uncertain.**
+  When its turn settled while the adapter write was in flight, an edit in that
+  window turned the steer's claim into a "may have been delivered" queue row,
+  and the same text then appeared delivered and queued, so Send again delivered
+  it twice. Claims whose write is in flight are now left alone until it
+  returns, and a successful steer clears any queue row that racing edit could
+  have made.
+- **An idle paired device can resume its session after its path drops.** The
+  resume grace was counted from the last application frame, so a device that
+  had been quiet for longer than four path timeouts (8 s by default) — and had
+  only been sending health probes — was evicted before its resume token was
+  checked, and refused as unpaired. The grace now counts from the last
+  authenticated record, probes included, so reconnecting from a dead LAN path
+  to the relay still resumes the same session.
 - **A native fork starts by sending its own prompt.** Claude Code prints nothing
   for a natively forked session until the first user frame arrives, so waiting
   for its session report before writing the prompt made every Claude fork wait
@@ -770,6 +833,30 @@ All notable changes to h4rn are recorded here. The format follows
   restart's repair looked only for a turn with no status at all, so its
   completion and the finished phase were never written. The restart now finds
   the turn in the wire rows too and finishes it.
+- **A linked worktree inside a metadata folder no longer counts as the main
+  checkout.** A workspace sitting inside the folder git calls the main worktree
+  no longer proves that folder is the main checkout on its own: the workspace
+  must be the main worktree itself, or the folder must hold a file the
+  repository tracks. A location inside the real main checkout is now refused
+  even when the thread started in a linked worktree under a metadata folder's
+  parent, while a linked worktree nested in its own main checkout
+  (`repo/.worktrees/one`) still works.
+- **A worktree create interrupted before it registered its checkout no longer
+  stays behind.** When the destination's claim proves the create and there is no
+  admin dir, the next start removes an empty destination folder, deletes the
+  branch h4rn made under the usual guards, and retires the record instead of
+  retrying it forever.
+- **A repository whose `HEAD` tree has no files cannot prove its main checkout
+  from a linked worktree, and this is now documented.** h4rn refuses locations
+  for that project rather than guess, until the repository tracks a file or
+  names its main checkout with `core.worktree`. See
+  [docs/worktrees.md](docs/worktrees.md).
+- **An idle connected device no longer loses its encrypted path.** The daemon
+  closes a path that has carried no packet for two seconds, but it counted only
+  data and acknowledgements. A session with nothing to say sends no data while
+  its client keeps probing every 250 ms, so it was dropped as silent and had to
+  reconnect. Any authenticated packet, a health probe included, now keeps the
+  path open.
 - **A worktree location is refused wherever it would put a checkout in a working
   tree.** Saving the location and creating a thread now find the real main
   checkout even when the repository keeps its git directory elsewhere — a

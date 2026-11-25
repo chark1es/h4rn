@@ -181,7 +181,31 @@ thread_id: ThreadId,
 /**
  * How many messages to skip, for the next page.
  */
-offset: number, } | { "type": "interrupt", 
+offset: number, } | { "type": "rewind_thread", 
+/**
+ * Thread to rewind.
+ */
+thread_id: ThreadId, 
+/**
+ * The sent user message everything is removed from.
+ */
+before_item_id: string, 
+/**
+ * Also restore the workspace to the pre-message snapshot.
+ */
+restore_files: boolean, } | { "type": "rewind_plan", 
+/**
+ * Thread the prompt belongs to.
+ */
+thread_id: ThreadId, 
+/**
+ * The sent user message a rewind would remove from.
+ */
+before_item_id: string, } | { "type": "get_rewind_settings" } | { "type": "set_rewind_settings_enabled", 
+/**
+ * New value.
+ */
+enabled: boolean, } | { "type": "interrupt", 
 /**
  * Thread whose turn should stop.
  */

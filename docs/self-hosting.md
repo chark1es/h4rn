@@ -93,7 +93,7 @@ both, using the snake_case names shown below.
 | `H4RN_CONNECT_RATE_RELAY_CONNECTS_PER_MINUTE` | `120` | Relay upgrades per IP per minute. |
 | `H4RN_CONNECT_RATE_PAIRING_CODE_PER_HOUR` | `10` | Short-code claim attempts per user and per IP per hour. |
 | `H4RN_CONNECT_PAIRING_ATTEMPTS` | `10` | Failed claims before a pairing is burned. |
-| `H4RN_CONNECT_FCM_SERVICE_ACCOUNT` | unset | Firebase service-account JSON, or a path to that file. Unset means Android push is off (ADR-050). |
+| `H4RN_CONNECT_FCM_SERVICE_ACCOUNT` | unset | Firebase service-account JSON, or a path to that file. Unset means Android push is off (ADR-051). |
 | `H4RN_CONNECT_FCM_TOKEN_URL` | `https://oauth2.googleapis.com/token` | OAuth2 token endpoint; tests point it at a mock. |
 | `H4RN_CONNECT_FCM_URL` | `https://fcm.googleapis.com` | FCM v1 base URL; tests point it at a mock. |
 | `H4RN_CONNECT_PUSH_GROUP_WINDOW_MS` | `1000` | Window that groups simultaneous transitions into one alert. |

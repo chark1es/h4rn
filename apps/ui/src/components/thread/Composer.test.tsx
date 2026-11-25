@@ -10,11 +10,22 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageRole, ThreadSummary } from "@/gen";
 import type { StreamTurn, ThreadLog, TurnItem } from "@/lib/store/projection";
 
 const mock = vi.hoisted(() => {
+  const restoredAttachments: {
+    id: string;
+    name: string;
+    mime: string;
+    size: number;
+    local_path: string;
+  }[] = [];
+  const restoreAttachments = vi.fn((attachments: typeof restoredAttachments) => {
+    restoredAttachments.push(...attachments);
+  });
   const state: {
     connection: { status: string };
     hosts: Record<string, { online: boolean; name: string }>;
@@ -25,6 +36,12 @@ const mock = vi.hoisted(() => {
       newThreadOpen: boolean;
       phone: boolean;
       layout: { terminalOpen: boolean; view: "thread" | "ide" };
+      composerRestore: {
+        threadId: string;
+        token: number;
+        prompt: string;
+        attachments: unknown[];
+      } | null;
     };
   } = {
     connection: { status: "online" },
@@ -36,10 +53,12 @@ const mock = vi.hoisted(() => {
       newThreadOpen: false,
       phone: false,
       layout: { terminalOpen: false, view: "thread" },
+      composerRestore: null,
     },
   };
   return {
     state,
+    restoredAttachments,
     sendMessage:
       vi.fn<
         (
@@ -55,9 +74,23 @@ const mock = vi.hoisted(() => {
     toggleView: vi.fn(),
     setPanelTab: vi.fn(),
     openNewThread: vi.fn(),
+    consumeComposerRestore: vi.fn(),
+    restoreAttachments,
     attachments: () => ({
-      attachments: [] as unknown[],
-      tasks: [] as unknown[],
+      attachments: restoredAttachments,
+      tasks: restoredAttachments.map((attachment, index) => ({
+        key: `restored-${index}`,
+        file: { name: attachment.name, size: attachment.size },
+        snapshot: {
+          phase: "done",
+          totalBytes: attachment.size,
+          sentBytes: attachment.size,
+        },
+        failure: null,
+        invalid: null,
+        previewUrl: null,
+        restored: attachment,
+      })),
       uploading: false,
       failed: false,
       blockedReason: null,
@@ -69,6 +102,7 @@ const mock = vi.hoisted(() => {
       remove: () => undefined,
       retry: () => undefined,
       clear: () => undefined,
+      restore: restoreAttachments,
     }),
   };
 });
@@ -84,6 +118,7 @@ vi.mock("@/lib/store/appStore", () => ({
   toggleView: mock.toggleView,
   setPanelTab: mock.setPanelTab,
   openNewThread: mock.openNewThread,
+  consumeComposerRestore: mock.consumeComposerRestore,
   getClient: () => {
     throw new Error("Tests inject a workspace file lister.");
   },
@@ -152,6 +187,8 @@ const summary: ThreadSummary = {
   pending_guest_requests: 0,
   unread: false,
   resume_at: null,
+  rewind: "handoff",
+  file_rewind: false,
   limit: null,
   queued_count: 0,
   queue_revision: 0,
@@ -1397,6 +1434,90 @@ describe("Composer / command menu", () => {
       await Promise.resolve();
     });
     expect(screen.queryByRole("dialog", { name: "Files" })).toBeNull();
+  });
+});
+
+describe("Composer rewind restore", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock.restoredAttachments.length = 0;
+    mock.state.ui.composerRestore = null;
+  });
+
+  it("renders a restored attachment and sends it with the prompt", async () => {
+    const attachment = {
+      id: "a".repeat(64),
+      name: "notes.txt",
+      mime: "text/plain",
+      size: 12,
+      local_path: "/tmp/notes.txt",
+    };
+    mock.state.ui.composerRestore = {
+      threadId: THREAD,
+      token: 11,
+      prompt: "the edited prompt",
+      attachments: [attachment],
+    };
+    mock.sendMessage.mockResolvedValue("sent");
+    renderComposer();
+    runAnimationFrames();
+
+    expect(await screen.findByText("notes.txt")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() =>
+      expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "the edited prompt", [attachment], {
+        steer: false,
+      }),
+    );
+  });
+
+  it("puts the restored prompt below the unsent draft and adopts its attachments", () => {
+    writeThreadDraft(HOST, THREAD, "my unsent draft");
+    mock.state.ui.composerRestore = {
+      threadId: THREAD,
+      token: 9,
+      prompt: "the edited prompt",
+      attachments: [],
+    };
+    renderComposer();
+    runAnimationFrames();
+    expect(textarea().value).toBe("my unsent draft\n\nthe edited prompt");
+    expect(mock.consumeComposerRestore).toHaveBeenCalledWith(9);
+  });
+
+  it("adopts the restored prompt once under StrictMode", () => {
+    mock.state.ui.composerRestore = {
+      threadId: THREAD,
+      token: 12,
+      prompt: "the edited prompt",
+      attachments: [],
+    };
+    render(
+      <StrictMode>
+        <WorkspaceFilesContext.Provider value={fileLister}>
+          <Composer summary={summary} />
+        </WorkspaceFilesContext.Provider>
+      </StrictMode>,
+    );
+    runAnimationFrames();
+    expect(textarea().value).toBe("the edited prompt");
+    expect(mock.restoreAttachments).toHaveBeenCalledTimes(1);
+    mock.state.ui.composerRestore = null;
+  });
+
+  it("keeps the draft alone when the restore belongs to another thread", () => {
+    writeThreadDraft(HOST, THREAD, "my unsent draft");
+    mock.state.ui.composerRestore = {
+      threadId: "other_thread",
+      token: 10,
+      prompt: "elsewhere",
+      attachments: [],
+    };
+    renderComposer();
+    runAnimationFrames();
+    expect(textarea().value).toBe("my unsent draft");
+    expect(mock.consumeComposerRestore).not.toHaveBeenCalled();
+    mock.state.ui.composerRestore = null;
   });
 });
 

@@ -46,6 +46,10 @@ struct Manifest {
     turn_id: String,
     workspace: String,
     captured_at: DateTime<Utc>,
+    /// The git commit whose tree is the complete pre-turn worktree state, when
+    /// one was captured. A rewind needs this to cover files no tool call named.
+    #[serde(default)]
+    checkpoint: Option<String>,
     files: BTreeMap<String, SnapshotEntry>,
 }
 
@@ -87,6 +91,7 @@ impl SnapshotStore {
                 turn_id: turn_id.to_string(),
                 workspace: workspace.display().to_string(),
                 captured_at: Utc::now(),
+                checkpoint: None,
                 files: BTreeMap::new(),
             });
         let mut added = 0;
@@ -189,6 +194,7 @@ impl SnapshotStore {
         turn_id: &TurnId,
     ) -> FsTurnChanges {
         let entries = self.entries(thread_id, turn_id);
+        let complete = self.checkpoint(thread_id, turn_id).is_some();
         let mut files = Vec::new();
         for entry in &entries {
             // Reading the current bytes must not follow a symlink out of the
@@ -227,6 +233,7 @@ impl SnapshotStore {
                     .into()
             }),
             files,
+            complete,
         }
     }
 
@@ -236,6 +243,56 @@ impl SnapshotStore {
             return None;
         }
         fs::read(self.blob_path(address)).ok()
+    }
+
+    /// Stores bytes and returns their content address.
+    ///
+    /// The restore journal keeps the bytes a rewind replaced here, so a crash
+    /// between applying files and committing the cut can put them back.
+    pub fn store_blob(&self, bytes: &[u8]) -> Result<String, FsError> {
+        let address = text::etag(bytes);
+        self.write_blob(&address, bytes)?;
+        Ok(address)
+    }
+
+    /// Records the complete pre-turn git tree for a turn.
+    pub fn record_checkpoint(
+        &self,
+        workspace: &Path,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+        commit: &str,
+    ) -> Result<(), FsError> {
+        let manifest_path = self.manifest_path(thread_id, turn_id)?;
+        let mut manifest = self
+            .load_manifest(&manifest_path)
+            .unwrap_or_else(|| Manifest {
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                workspace: workspace.display().to_string(),
+                captured_at: Utc::now(),
+                checkpoint: None,
+                files: BTreeMap::new(),
+            });
+        manifest.checkpoint = Some(commit.to_owned());
+        if let Some(parent) = manifest_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| FsError::Io(error.to_string()))?;
+        }
+        let json =
+            serde_json::to_vec_pretty(&manifest).map_err(|error| FsError::Io(error.to_string()))?;
+        fs::write(&manifest_path, json).map_err(|error| FsError::Io(error.to_string()))?;
+        Ok(())
+    }
+
+    /// The complete pre-turn git tree recorded for a turn, when there is one.
+    pub fn checkpoint(&self, thread_id: &ThreadId, turn_id: &TurnId) -> Option<String> {
+        let path = self.manifest_path(thread_id, turn_id).ok()?;
+        self.load_manifest(&path)?.checkpoint
+    }
+
+    /// Where restore journals live, beside the blobs.
+    pub fn restores_dir(&self) -> PathBuf {
+        self.root.parent().unwrap_or(&self.root).join("restores")
     }
 
     fn write_blob(&self, address: &str, bytes: &[u8]) -> Result<(), FsError> {

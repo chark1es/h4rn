@@ -126,10 +126,11 @@ async fn validate_for_save(
         )
     })?;
     if let Some(message) = refused {
+        let hint = settings_hint(&message);
         return Err(ProtoError::new(
             ProtoErrorCode::InvalidRequest,
             message,
-            "Choose a folder outside the project checkout",
+            hint,
         ));
     }
     Ok(settings.clone())

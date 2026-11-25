@@ -218,7 +218,37 @@ status: TurnStatus,
  * The stream renders its change-set card from this; older journals
  * simply omit it and the card falls back to the Changes panel.
  */
-changes?: FsTurnChanges, } | { "type": "agent_state_changed", 
+changes?: FsTurnChanges, } | { "type": "thread_rewound", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * The user message the active thread now ends before.
+ */
+before_item_id: string, 
+/**
+ * Whether workspace files were put back to the pre-message snapshot.
+ */
+files_restored: boolean, 
+/**
+ * The durable restore record that committed with this cut, when files
+ * were restored. A restarted daemon uses it to finish or roll back a
+ * restore that was interrupted before the commit.
+ */
+restore_id?: string, 
+/**
+ * When the rewind happened.
+ */
+at: string, } | { "type": "rewind_fell_back", 
+/**
+ * Thread whose pending native rewind became a handoff.
+ */
+thread_id: ThreadId, 
+/**
+ * When the fallback happened.
+ */
+at: string, } | { "type": "agent_state_changed", 
 /**
  * Thread.
  */

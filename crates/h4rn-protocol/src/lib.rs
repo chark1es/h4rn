@@ -46,6 +46,7 @@ pub mod mcp;
 mod notifications;
 pub mod projects;
 mod proxy;
+mod rewind;
 mod schedules;
 mod server;
 pub mod skills;
@@ -116,6 +117,9 @@ pub use mcp::{
 pub use notifications::{AgentActivity, AgentAlertSettings, AgentAlertState};
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;
+pub use rewind::{
+    PendingRewind, RewindMethod, RewindPlan, RewindSettings, RewoundPrompt, SessionRewind,
+};
 pub use schedules::{
     IntervalUnit, MAX_WEBHOOK_BODY_BYTES, MAX_WEBHOOK_PLACEHOLDERS, ScheduleDestination,
     ScheduleDraft, ScheduleEvent, ScheduleRun, ScheduleRunOutcome, ScheduleSpec, ScheduleTask,

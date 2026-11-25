@@ -319,8 +319,16 @@ handshake (fail closed); nothing is ever served in plaintext.
 
 Detached sessions are kept for a grace period of four path timeouts (8 s with
 the default 2 s) so a client that reconnects, or fails over from LAN to relay,
-can resume the same sequence space. A resume with an unknown or wrong token is
-rejected and the client starts a fresh session.
+can resume the same sequence space. The grace runs from the session's last
+authenticated record, and a health probe counts, so a device that was idle for
+longer than the grace can still resume as soon as its path detaches. A resume
+with an unknown or wrong token is rejected and the client starts a fresh
+session.
+
+The daemon closes a path that has carried no authenticated packet for
+`SecureOptions::path_timeout` (2 s). A health probe is an authenticated control
+record, so it counts: a session with no application traffic keeps its path open
+for as long as the client keeps probing every 250 ms.
 
 ## Remote access glue
 
@@ -640,8 +648,9 @@ query string), wraps outgoing binary packets in `RelayFrame` JSON and unwraps
 - The daemon sends on the newest attached path. A client that wants a
   different path must attach it; the daemon does not run its own selection.
 - A resume token is only valid while the daemon keeps the detached session
-  (four path timeouts, 8 s by default). After the grace period the client
-  starts a new session and the application protocol replays its own gap.
+  (four path timeouts, 8 s by default), counted from the last authenticated
+  record, probes included. After the grace period the client starts a new
+  session and the application protocol replays its own gap.
 - `TransportStatus` carries a wall-clock `updated_at`; all policy decisions
   use the injected monotonic clock, so a system clock jump cannot cause
   failover.
@@ -652,7 +661,7 @@ query string), wraps outgoing binary packets in `RelayFrame` JSON and unwraps
 | --- | --- |
 | `h4rn-transport` unit tests | Framing, Noise handshake, pinned key, PSK, revocation, rekey, session acks/retransmit. |
 | `crates/h4rn-transport/tests/multipath.rs` | Reorder/duplication, failover with no loss or duplication in under 2 s, hysteretic switch-back, resume without replay. |
-| `crates/h4rn-daemon/tests/secure.rs` | Real daemon over Noise WebSocket: `CreateThread` with `FakeHarness`, revoked device, PSK pairing. |
+| `crates/h4rn-daemon/tests/secure.rs` | Real daemon over Noise WebSocket: `CreateThread` with `FakeHarness`, revoked device, PSK pairing, a quiet session keeps its path, an idle session resumes after its path detaches. |
 | `crates/h4rn-daemon/tests/remote.rs` | Docker-backed end-to-end remote access: device grant, connect pairing, relay-only `CreateThread`, direct-to-relay failover under 2 s, revocation and audit. Run with `./scripts/test-remote.sh`. |
 | `scripts/wasm-relay-client.mjs` | The wasm core, driven from Node, completes a real Noise session over the connect relay, sends `Hello` and receives the host list. Also run by `./scripts/test-remote.sh`. |
 | `h4rn-transport-wasm` `handshake_smoke` | The same core handshake natively and under `wasm-pack test --node`. |

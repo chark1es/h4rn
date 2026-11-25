@@ -731,7 +731,7 @@ impl RelayDialer {
 
     /// Publishes one agent-activity transition over the shared relay socket.
     ///
-    /// Connect reads only this fixed payload (ADR-050). A socket that is not
+    /// Connect reads only this fixed payload (ADR-051). A socket that is not
     /// attached reports false so no alert is claimed as delivered.
     pub fn publish_activity(&self, activity: h4rn_protocol::AgentActivity) -> bool {
         let Some(state) = self

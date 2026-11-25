@@ -109,7 +109,7 @@ impl DeviceRow {
     }
 }
 
-/// One Android install registered for push alerts (ADR-050).
+/// One Android install registered for push alerts (ADR-051).
 #[derive(Clone, Debug, FromRow)]
 pub struct PushDeviceRow {
     /// Row id.

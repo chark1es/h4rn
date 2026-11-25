@@ -1911,6 +1911,7 @@ mod tests {
             env_overrides: std::collections::BTreeMap::new(),
             attachments: Vec::new(),
             agent_id: Some("test".into()),
+            rewind: None,
         }
     }
 

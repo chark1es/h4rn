@@ -79,6 +79,9 @@ import type { QueuedMessage } from "./QueuedMessage";
 import type { QueuedMessageId } from "./QueuedMessageId";
 import type { Resets } from "./Resets";
 import type { ResumeSchedule } from "./ResumeSchedule";
+import type { RewindPlan } from "./RewindPlan";
+import type { RewindSettings } from "./RewindSettings";
+import type { RewoundPrompt } from "./RewoundPrompt";
 import type { ScheduleRun } from "./ScheduleRun";
 import type { ScheduleTask } from "./ScheduleTask";
 import type { ScheduleTaskId } from "./ScheduleTaskId";
@@ -282,7 +285,19 @@ next_offset: number,
  * The revision this page came from; see
  * [`crate::ThreadSummary::queue_revision`].
  */
-revision: number, } | { "type": "terminal_opened", 
+revision: number, } | { "type": "rewound", 
+/**
+ * The prompt to put back in the composer.
+ */
+prompt: RewoundPrompt, } | { "type": "rewind_plan", 
+/**
+ * The planned method and whether file restore is available.
+ */
+plan: RewindPlan, } | { "type": "rewind_settings", 
+/**
+ * Current settings.
+ */
+settings: RewindSettings, } | { "type": "terminal_opened", 
 /**
  * The new terminal, including its effective size.
  */

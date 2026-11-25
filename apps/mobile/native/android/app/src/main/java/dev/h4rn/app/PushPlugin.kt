@@ -26,7 +26,7 @@ internal class PushEnabledArgs {
 }
 
 /**
- * Android push bridge (ADR-050).
+ * Android push bridge (ADR-051).
  *
  * Firebase is optional at build time: without `google-services.json` the SDK
  * has no app to initialise, [status] reports unavailable, and Settings says

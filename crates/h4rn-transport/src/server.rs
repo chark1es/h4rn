@@ -82,7 +82,7 @@ pub struct SecureOptions {
 }
 
 impl SecureOptions {
-    /// Shipping defaults: pairing closed, a one-second path timeout and a
+    /// Shipping defaults: pairing closed, a two-second path timeout and a
     /// 25 ms tick (matching the client's failover budget).
     pub fn new(identity: DeviceIdentity) -> Self {
         Self {
@@ -608,6 +608,21 @@ impl SecureService {
             .len()
     }
 
+    /// Number of paths currently attached to the logical session `session_id`,
+    /// or `None` when no such session is registered.
+    ///
+    /// Zero means every path has detached and the session is resumable until
+    /// its grace runs out.
+    pub fn attached_path_count(&self, session_id: &SessionId) -> Option<usize> {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions
+            .get(session_id)
+            .map(|endpoint| lock(&endpoint.session).attached.len())
+    }
+
     /// Runs the handshake and the first `Open`/`Welcome` exchange, then either
     /// returns a handle for a new logical session or attaches another path to
     /// an existing one.
@@ -1126,9 +1141,21 @@ impl SecureService {
                 let Ok(record) = Record::decode_plaintext(&plaintext) else {
                     return false;
                 };
+                // A path proves it is alive by authenticating anything, and a
+                // health probe is a control record. An idle session sends no
+                // data but keeps pinging; if only data reset this deadline, the
+                // daemon would close a perfectly live path after
+                // `path_timeout` of quiet.
+                //
+                // The same probe also resets the session's resume grace. A
+                // device that has been idle for longer than that grace is
+                // still alive, so detaching its path must leave it resumable
+                // instead of evicting it before its token is even looked up.
+                let now = self.now_ms();
+                *idle_since = now;
+                lock(session).mark_seen(now);
                 match record.kind {
                     RecordKind::Data | RecordKind::Ack => {
-                        let now = self.now_ms();
                         let deliveries = {
                             let mut guard = lock(session);
                             let incoming = Incoming {
@@ -1156,7 +1183,6 @@ impl SecureService {
                                 return false;
                             }
                         }
-                        *idle_since = now;
                         true
                     }
                     RecordKind::Control => match Control::decode(&record.payload) {

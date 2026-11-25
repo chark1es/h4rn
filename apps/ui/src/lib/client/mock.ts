@@ -229,6 +229,7 @@ function turnChanges(threadId: string, turnId: string): FsTurnChanges {
   return {
     thread_id: threadId,
     turn_id: turnId,
+    complete: false,
     note: null,
     files: [
       {
@@ -538,6 +539,8 @@ function summary(input: {
     pending_guest_requests: 0,
     unread: input.unread ?? false,
     resume_at: input.resumeAtMs === undefined ? null : iso(input.resumeAtMs),
+    rewind: "handoff",
+    file_rewind: false,
     ttft_ms: input.ttftMs ?? 640,
     context_window: input.contextWindow ?? 200_000,
     context_fill_percent: 6,
@@ -1916,6 +1919,8 @@ class MockDaemon {
   private readonly fs = createMockFs();
   private mcpServers: McpServerView[];
   private skillInventory: SkillInventory;
+  /** Settings → Labs → Rewind files with Edit from here, off by default. */
+  private rewindFilesEnabled = false;
   private skillConflicts: SkillConflict[];
   private skillPreview: SkillImportPreview | null = null;
   /** Registered projects and the fake folder tree the add-project browser walks. */
@@ -2348,6 +2353,8 @@ class MockDaemon {
           pending_guest_requests: 0,
           unread: false,
           resume_at: null,
+          rewind: "handoff",
+          file_rewind: false,
           limit: null,
           ttft_ms: 0,
           context_window: 200_000,
@@ -2424,6 +2431,115 @@ class MockDaemon {
         this.later(380, () =>
           this.runTurn(body.thread_id, body.text, turnId, this.attachmentsFor(body.attachments)),
         );
+        return;
+      }
+      case "get_rewind_settings":
+        this.ok(frame.id, {
+          type: "rewind_settings",
+          settings: { files_enabled: this.rewindFilesEnabled },
+        });
+        return;
+      case "set_rewind_settings_enabled":
+        this.rewindFilesEnabled = body.enabled === true;
+        this.ok(frame.id, {
+          type: "rewind_settings",
+          settings: { files_enabled: this.rewindFilesEnabled },
+        });
+        return;
+      case "rewind_plan": {
+        const entry = this.threads.get(body.thread_id);
+        if (!entry) {
+          this.err(
+            frame.id,
+            "not_found",
+            "That thread is no longer open.",
+            "Reload the thread list.",
+          );
+          return;
+        }
+        if (!this.userItemAt(entry, body.before_item_id)) {
+          this.err(
+            frame.id,
+            "invalid_request",
+            "That message is not in the thread's current history.",
+            "Reload the thread and try again.",
+          );
+          return;
+        }
+        // The mock's threads always use the bounded handoff, so the plan never
+        // promises a native truncation the mock cannot do.
+        this.ok(frame.id, {
+          type: "rewind_plan",
+          plan: {
+            method: "handoff",
+            files_enabled: this.rewindFilesEnabled,
+            files_available: false,
+          },
+        });
+        return;
+      }
+      case "rewind_thread": {
+        const entry = this.threads.get(body.thread_id);
+        if (!entry) {
+          this.err(
+            frame.id,
+            "not_found",
+            "That thread is no longer open.",
+            "Reload the thread list.",
+          );
+          return;
+        }
+        const found = this.userItemAt(entry, body.before_item_id);
+        if (!found) {
+          this.err(
+            frame.id,
+            "invalid_request",
+            "That message is not in the thread's current history.",
+            "Reload the thread and try again.",
+          );
+          return;
+        }
+        if (body.restore_files && !this.rewindFilesEnabled) {
+          this.err(
+            frame.id,
+            "conflict",
+            "restoring files is a Labs feature and is turned off on this machine",
+            "Turn on Settings → Labs → Rewind files with Edit from here, or rewind only the conversation",
+          );
+          return;
+        }
+        // Fold the cut: the chosen message and everything after it leave the
+        // thread, and the prompt returns to the composer.
+        const kept = entry.events.slice(0, found.index);
+        const keptEvents = new Set(kept);
+        entry.events = kept;
+        entry.wire = entry.wire.filter((record) => keptEvents.has(record.event));
+        entry.summary = {
+          ...entry.summary,
+          tab: "done",
+          agent_state: "done",
+          unread: true,
+          last_activity: iso(),
+        };
+        this.emit(body.thread_id, {
+          type: "thread_rewound",
+          thread_id: body.thread_id,
+          before_item_id: body.before_item_id,
+          files_restored: false,
+          at: iso(),
+        });
+        this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+        this.ok(frame.id, {
+          type: "rewound",
+          prompt: {
+            thread_id: body.thread_id,
+            before_item_id: body.before_item_id,
+            prompt: found.text,
+            attachments: found.attachments,
+            files_restored: false,
+            method: "handoff",
+          },
+        });
         return;
       }
       case "queue_message": {
@@ -3018,6 +3134,8 @@ class MockDaemon {
           thread.summary = {
             ...thread.summary,
             resume_at: null,
+            rewind: "handoff",
+            file_rewind: false,
             agent_state: "thinking",
             tab: "working",
           };
@@ -3061,6 +3179,8 @@ class MockDaemon {
             ...thread.summary,
             model: body.model ?? "claude-opus-5-5",
             resume_at: null,
+            rewind: "handoff",
+            file_rewind: false,
             agent_state: "thinking",
             tab: "working",
           };
@@ -4562,6 +4682,28 @@ class MockDaemon {
       this.emitSubagent(view, "subagent_updated");
       this.tickSubagent(id, turns);
     });
+  }
+
+  /** The user message a rewind names, with its position in the thread. */
+  private userItemAt(
+    entry: MockThread,
+    itemId: string,
+  ): { index: number; text: string; attachments: Attachment[] } | null {
+    const index = entry.events.findIndex(
+      (event) =>
+        event.type === "item_completed" &&
+        event.item.kind === "message" &&
+        event.item.role === "user" &&
+        event.item.item_id === itemId,
+    );
+    if (index < 0) return null;
+    const event = entry.events[index];
+    if (event?.type !== "item_completed" || event.item.kind !== "message") return null;
+    return {
+      index,
+      text: event.item.text,
+      attachments: event.item.attachments,
+    };
   }
 
   private emit(threadId: string, event: Event): void {

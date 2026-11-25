@@ -1,4 +1,4 @@
-//! Phone-alert settings from the owner (ADR-050).
+//! Phone-alert settings from the owner (ADR-051).
 //!
 //! The switch lives on the daemon because the daemon is what publishes. It is
 //! off by default, and turning it off stops the next observe immediately.

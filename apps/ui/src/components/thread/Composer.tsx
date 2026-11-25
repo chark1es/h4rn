@@ -43,7 +43,14 @@ import {
 import { harnessLabel } from "@/lib/entities";
 import { chordFromEvent, matchCommand } from "@/lib/keybindings";
 import { openPhonePanel } from "@/lib/phonePanels";
-import { editQueuedMessage, getState, sendMessage, setUi, useApp } from "@/lib/store/appStore";
+import {
+  consumeComposerRestore,
+  editQueuedMessage,
+  getState,
+  sendMessage,
+  setUi,
+  useApp,
+} from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { ComposerMenu, type ComposerMenuRow } from "./ComposerMenu";
 import { ThreadControls } from "./ThreadControls";
@@ -291,6 +298,11 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     });
   }, [summary.host, summary.thread_id, editing]);
 
+  const composerRestore = useApp((state) => state.ui.composerRestore);
+  // A restored prompt is adopted exactly once. React StrictMode runs effects
+  // twice in development; without this guard the second run would read the
+  // draft the first one just wrote and append the prompt again.
+  const consumedRestore = useRef<number | null>(null);
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, !newThreadOpen);
 
@@ -301,18 +313,45 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     element.style.height = `${Math.min(element.scrollHeight, 132)}px`;
   };
 
-  const update = (value: string) => {
-    historyIndex.current = -1;
-    historyDraft.current = "";
-    setText(value);
-    // While editing a queued message the box holds that message, not the
-    // thread's draft; the draft stays in storage untouched for Cancel.
-    if (!editing) {
-      revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
-    } else {
-      editRevision.current += 1;
-    }
-  };
+  const update = useCallback(
+    (value: string) => {
+      historyIndex.current = -1;
+      historyDraft.current = "";
+      setText(value);
+      // While editing a queued message the box holds that message, not the
+      // thread's draft; the draft stays in storage untouched for Cancel.
+      if (!editing) {
+        revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
+      } else {
+        editRevision.current += 1;
+      }
+    },
+    [summary.host, summary.thread_id, editing],
+  );
+
+  // A rewind hands back the edited prompt. The draft that was already in the
+  // box stays above it instead of being replaced.
+  useEffect(() => {
+    if (!composerRestore || composerRestore.threadId !== summary.thread_id) return;
+    const token = composerRestore.token;
+    if (consumedRestore.current === token) return;
+    consumedRestore.current = token;
+    const current = readThreadDraft(summary.host, summary.thread_id);
+    const merged = current.trim()
+      ? `${current.trimEnd()}\n\n${composerRestore.prompt}`
+      : composerRestore.prompt;
+    update(merged);
+    attachments.restore(composerRestore.attachments);
+    consumeComposerRestore(token);
+    requestAnimationFrame(() => {
+      const element = ref.current;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(element.value.length, element.value.length);
+      element.style.height = "auto";
+      element.style.height = `${Math.min(element.scrollHeight, 132)}px`;
+    });
+  }, [composerRestore, summary.host, summary.thread_id, attachments.restore, update]);
 
   const recall = (direction: "backward" | "forward"): boolean => {
     const element = ref.current;

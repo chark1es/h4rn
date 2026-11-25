@@ -395,6 +395,15 @@ impl DaemonBuilder {
         ));
         manager.set_worktree_creator(Arc::clone(&worktree_creator));
 
+        // File restore is a Labs feature, off by default. The store owns the
+        // machine-wide choice; the manager enforces it and advertises it in
+        // every thread summary.
+        let rewind_settings = Arc::new(
+            crate::rewind::RewindSettingsStore::open(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open rewind settings: {error}"))?,
+        );
+        manager.set_file_rewind_enabled(rewind_settings.files_enabled());
+
         // Scheduled tasks share the journal so the timer, secrets and run
         // history survive a restart. The runner starts once the worktree
         // tracker exists, so a task that protects a checkout is wired before
@@ -492,6 +501,10 @@ impl DaemonBuilder {
             }
         }
         manager.set_snapshot_store(fs.snapshots());
+        manager
+            .recover_pending_restores()
+            .await
+            .map_err(|error| anyhow::anyhow!("recover an interrupted file restore: {error}"))?;
         let projects = Arc::new(
             crate::projects::ProjectService::open(&self.config.data_dir, hosts.local_id())
                 .map_err(|error| anyhow::anyhow!("open the project list: {error}"))?
@@ -764,6 +777,7 @@ impl DaemonBuilder {
             worktrees,
             worktree_creator,
             worktree_settings,
+            rewind_settings,
             hosts,
             terminals,
             blobs,
@@ -802,6 +816,7 @@ pub struct Daemon {
     /// Waits for a create's rollback when the daemon stops.
     worktree_creator: Arc<crate::worktrees::create::WorktreeCreator>,
     worktree_settings: Arc<crate::worktrees::settings::WorktreeSettingsStore>,
+    rewind_settings: Arc<crate::rewind::RewindSettingsStore>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     blobs: Arc<BlobStore>,
@@ -820,7 +835,7 @@ pub struct Daemon {
     outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Multiplexes peer MCP sessions over the daemon's one relay socket.
     relay_dialer: Arc<crate::remote::RelayDialer>,
-    /// Publishes phone alerts while the setting is on (ADR-050).
+    /// Publishes phone alerts while the setting is on (ADR-051).
     alerts: Arc<crate::alerts::AgentAlertService>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,
@@ -1061,6 +1076,7 @@ impl Daemon {
             subagents: Arc::clone(&self.subagents),
             worktrees: Arc::clone(&self.worktrees),
             worktree_settings: Arc::clone(&self.worktree_settings),
+            rewind_settings: Arc::clone(&self.rewind_settings),
             hosts,
             terminals: Arc::clone(&self.terminals),
             blobs: Arc::clone(&self.blobs),
