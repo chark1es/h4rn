@@ -870,6 +870,23 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
                 }
             }
         }
+        RelayFrameKind::Activity => {
+            // Only the machine's daemon observes a thread, and only a daemon
+            // may wake a phone. A client device's frame is ignored rather than
+            // treated as an alert for an account it may share.
+            if authed.device.kind != "daemon" {
+                return Ok(());
+            }
+            let activity: h4rn_protocol::AgentActivity = serde_json::from_slice(&frame.payload)
+                .map_err(|_| {
+                    AppError::bad_request(
+                        "activity_invalid",
+                        "the activity payload must be AgentActivity JSON",
+                    )
+                })?;
+            state.alerts.ingest(authed.user.id, activity).await;
+            Ok(())
+        }
         RelayFrameKind::GuestHttp => {
             // Only a daemon answers a guest exchange; a client device has no
             // waiting request and its frame is ignored. The waiter is bound to

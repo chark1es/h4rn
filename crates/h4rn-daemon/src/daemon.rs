@@ -639,6 +639,17 @@ impl DaemonBuilder {
             Arc::clone(&manager) as Arc<dyn crate::harness_versions::TurnBusy>,
         ));
 
+        let relay_dialer = Arc::new(crate::remote::RelayDialer::new());
+        let alert_settings = Arc::new(crate::alerts::AgentAlertSettingsStore::open(
+            &self.config.data_dir,
+        ));
+        let publisher = Arc::clone(&relay_dialer) as Arc<dyn crate::alerts::ActivityPublisher>;
+        let alerts = Arc::new(crate::alerts::AgentAlertService::new(
+            alert_settings,
+            Some(Arc::clone(&manager)),
+            publisher,
+        ));
+
         Ok(Daemon {
             config: self.config,
             acp_agents,
@@ -664,7 +675,8 @@ impl DaemonBuilder {
             devices,
             mcp,
             outside,
-            relay_dialer: Arc::new(crate::remote::RelayDialer::new()),
+            relay_dialer,
+            alerts,
             supervisor: self.supervisor,
             proxy,
             meter,
@@ -701,6 +713,8 @@ pub struct Daemon {
     outside: Arc<crate::mcp_server::OutsideAgents>,
     /// Multiplexes peer MCP sessions over the daemon's one relay socket.
     relay_dialer: Arc<crate::remote::RelayDialer>,
+    /// Publishes phone alerts while the setting is on (ADR-049).
+    alerts: Arc<crate::alerts::AgentAlertService>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,
     meter: Arc<h4rn_meter::MeterHub>,
@@ -934,6 +948,7 @@ impl Daemon {
             secure.clone(),
             Arc::clone(&devices),
         );
+        self.alerts.start().await;
         let state = AppState {
             manager: Arc::clone(&self.manager),
             subagents: Arc::clone(&self.subagents),
@@ -964,6 +979,7 @@ impl Daemon {
             import: Arc::clone(&self.import),
             text_generation: Arc::clone(&self.text_generation),
             guest: Arc::clone(&self.guest),
+            alerts: Arc::clone(&self.alerts),
             schedules: Arc::clone(&self.schedules),
         };
 

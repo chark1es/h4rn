@@ -23,6 +23,7 @@
 #![deny(missing_docs)]
 
 pub mod acp_agents;
+pub mod alerts;
 pub mod auth;
 pub mod blobs;
 pub mod cli;

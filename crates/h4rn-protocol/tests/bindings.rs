@@ -14,12 +14,13 @@ use h4rn_protocol::connect::{
     LoginStartResponse, LogoutRequest, MachineHost, MachineHostInput, MachineHostsUpdate,
     MachineSummary, PairingClaimRequest, PairingClaimResponse, PairingCreateRequest,
     PairingCreateResponse, PairingInfo, PairingPayload, PresenceUpdate, ProviderInfo,
-    RefreshRequest, RelayFrame, RelayServerEvent, UsageEvent,
+    PushDeviceRegistration, RefreshRequest, RelayFrame, RelayServerEvent, UsageEvent,
 };
 use h4rn_protocol::skills::{
     SkillSyncAck, SkillSyncConflict, SkillSyncEntry, SkillSyncPull, SkillSyncPullResponse,
     SkillSyncPush, SkillSyncPushResponse, SkillVersionVector,
 };
+use h4rn_protocol::{AgentActivity, AgentAlertSettings, AgentAlertState, ConnectPushStatus};
 use h4rn_protocol::{ClientFrame, ServerFrame};
 use ts_rs::TS;
 
@@ -74,6 +75,11 @@ fn export_typescript_bindings() {
 
     // The connect contract is a second root: it is not referenced by the
     // daemon WebSocket frames, so export every public connect type explicitly.
+    AgentActivity::export_all_to(&dir).expect("export agent activity");
+    AgentAlertSettings::export_all_to(&dir).expect("export agent alert settings");
+    AgentAlertState::export_all_to(&dir).expect("export agent alert state");
+    ConnectPushStatus::export_all_to(&dir).expect("export connect push status");
+    PushDeviceRegistration::export_all_to(&dir).expect("export push device registration");
     AuditEntry::export_all_to(&dir).expect("export audit entry");
     AuditPage::export_all_to(&dir).expect("export audit page");
     ConnectDevice::export_all_to(&dir).expect("export connect device");

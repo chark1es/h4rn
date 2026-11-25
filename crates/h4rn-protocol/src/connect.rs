@@ -65,6 +65,13 @@ pub enum RelayFrameKind {
     /// single WebSocket message approaches the transport's frame limit. The
     /// payload is a JSON [`GuestHttpChunk`].
     GuestHttpChunk,
+    /// One alertable thread transition from a daemon (ADR-049).
+    ///
+    /// Only a daemon may send it, and the payload is the fixed
+    /// [`crate::AgentActivity`] shape: thread id, title, project name, state
+    /// and time. Connect reads it to decide whether a phone should be woken;
+    /// it never carries message text, tool output, paths or credentials.
+    Activity,
     /// Tear the session down. The payload is optional and opaque to the relay.
     Close,
     /// Round-trip probe. The relay echoes it back to the sender.
@@ -1057,6 +1064,30 @@ pub struct UsageEvent {
     pub ts: DateTime<Utc>,
     /// Raw provider usage payload, for reconciliation.
     pub raw: Option<serde_json::Value>,
+}
+
+/// One Android install registering for push alerts (ADR-049).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PushDeviceRegistration {
+    /// The caller's connect device id. A registration is refused for any other.
+    pub device_id: String,
+    /// Firebase Cloud Messaging registration token.
+    pub token: String,
+    /// Android package name, so delivery can be restricted to this app.
+    #[serde(default)]
+    pub package_name: Option<String>,
+    /// App version, for diagnostics only.
+    #[serde(default)]
+    pub app_version: Option<String>,
+}
+
+/// What this relay can do about push, and how many devices this account has.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ConnectPushStatus {
+    /// Whether an operator configured a Firebase service account.
+    pub configured: bool,
+    /// Registered Android installs on this account.
+    pub devices: usize,
 }
 
 #[cfg(test)]

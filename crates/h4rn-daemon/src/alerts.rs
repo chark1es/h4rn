@@ -1,0 +1,478 @@
+//! Daemon-side publishing of agent alerts (ADR-049).
+//!
+//! The switch is off until the person turns it on in Settings → Notifications.
+//! While it is on, and only while the relay socket is attached, this service
+//! observes the thread event stream and publishes a fixed transition for the
+//! four moments a phone should know about: a turn finished, a turn failed, an
+//! approval is waiting, or an agent asked a question.
+//!
+//! Nothing else leaves the machine. The payload has fields for the thread id,
+//! its title, the project name, the state and the time — no prompt text, tool
+//! output, file path or credential can be carried.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use chrono::{DateTime, Utc};
+use h4rn_protocol::{
+    AgentActivity, AgentAlertSettings, AgentAlertState, Event, ThreadId, ThreadSummary, ThreadTab,
+};
+use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::task::JoinHandle;
+
+use crate::journal::WireEvent;
+use crate::threads::ThreadManager;
+
+/// Persisted switch for this machine.
+#[derive(Debug)]
+pub struct AgentAlertSettingsStore {
+    path: PathBuf,
+    value: RwLock<AgentAlertSettings>,
+}
+
+impl AgentAlertSettingsStore {
+    /// Opens `<data_dir>/agent-alerts.json`; a bad file falls back to off.
+    pub fn open(data_dir: &Path) -> Self {
+        let path = data_dir.join("agent-alerts.json");
+        let value = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<AgentAlertSettings>(&bytes).unwrap_or_else(
+                |error| {
+                    tracing::warn!(%error, path = %path.display(), "ignoring unreadable agent alert settings");
+                    AgentAlertSettings::default()
+                },
+            ),
+            Err(_) => AgentAlertSettings::default(),
+        };
+        Self {
+            path,
+            value: RwLock::new(value),
+        }
+    }
+
+    /// An in-memory store for tests.
+    pub fn in_memory() -> Self {
+        Self {
+            path: PathBuf::new(),
+            value: RwLock::new(AgentAlertSettings::default()),
+        }
+    }
+
+    /// The current value.
+    pub async fn get(&self) -> AgentAlertSettings {
+        *self.value.read().await
+    }
+
+    /// Saves and returns the new value.
+    pub async fn set(&self, settings: AgentAlertSettings) -> Result<AgentAlertSettings, String> {
+        if !self.path.as_os_str().is_empty() {
+            let bytes = serde_json::to_vec_pretty(&settings)
+                .map_err(|error| format!("could not serialise alert settings: {error}"))?;
+            std::fs::write(&self.path, bytes)
+                .map_err(|error| format!("could not save alert settings: {error}"))?;
+        }
+        *self.value.write().await = settings;
+        Ok(settings)
+    }
+}
+
+/// The fields an alert needs from one thread, before it becomes a payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityThread {
+    /// Thread id.
+    pub id: ThreadId,
+    /// Human title.
+    pub title: String,
+    /// Project display name.
+    pub project: String,
+}
+
+impl ActivityThread {
+    /// Reads the fields the payload may carry from a summary.
+    ///
+    /// Completions placed by hand are not transitions: the person moved the
+    /// thread themselves and does not need their phone to say so.
+    pub fn from_summary(summary: &ThreadSummary) -> Self {
+        let path = summary
+            .project_path
+            .as_deref()
+            .unwrap_or(&summary.workspace_path);
+        let project = Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self {
+            id: summary.thread_id.clone(),
+            title: summary.title.clone(),
+            project,
+        }
+    }
+}
+
+/// Which alertable state a Done placement is, if any.
+///
+/// A manual move to Done is a placement, not a finished turn, and a subagent's
+/// result is covered by its parent thread. Everything else in Done is a turn
+/// that either completed or failed.
+pub fn completion_state(
+    tab: ThreadTab,
+    agent_state: h4rn_protocol::AgentState,
+    placed_by_user: bool,
+    is_child: bool,
+) -> Option<AgentAlertState> {
+    if tab != ThreadTab::Done || placed_by_user || is_child {
+        return None;
+    }
+    Some(if agent_state == h4rn_protocol::AgentState::Error {
+        AgentAlertState::Failed
+    } else {
+        AgentAlertState::Completed
+    })
+}
+
+/// Which alertable state an approval hand is.
+pub fn approval_state(kind: h4rn_protocol::ApprovalKind) -> AgentAlertState {
+    if kind == h4rn_protocol::ApprovalKind::Question {
+        AgentAlertState::Input
+    } else {
+        AgentAlertState::Approval
+    }
+}
+
+/// How a transition leaves the daemon. Tests replace the relay with a recorder.
+#[async_trait::async_trait]
+pub trait ActivityPublisher: Send + Sync {
+    /// Publishes one activity; false means the relay is not connected.
+    async fn publish(&self, activity: AgentActivity) -> bool;
+}
+
+#[async_trait::async_trait]
+impl ActivityPublisher for crate::remote::RelayDialer {
+    async fn publish(&self, activity: AgentActivity) -> bool {
+        self.publish_activity(activity)
+    }
+}
+
+/// Watches the thread stream and publishes while the switch is on.
+pub struct AgentAlertService {
+    settings: Arc<AgentAlertSettingsStore>,
+    manager: Option<Arc<ThreadManager>>,
+    publisher: Arc<dyn ActivityPublisher>,
+    published: Mutex<HashMap<ThreadId, AgentAlertState>>,
+    closed: AtomicBool,
+    watcher: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for AgentAlertService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentAlertService")
+            .finish_non_exhaustive()
+    }
+}
+
+impl AgentAlertService {
+    /// Builds the service; call [`Self::start`] to observe events.
+    pub fn new(
+        settings: Arc<AgentAlertSettingsStore>,
+        manager: Option<Arc<ThreadManager>>,
+        publisher: Arc<dyn ActivityPublisher>,
+    ) -> Self {
+        Self {
+            settings,
+            manager,
+            publisher,
+            published: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
+            watcher: Mutex::new(None),
+        }
+    }
+
+    /// The current switch.
+    pub async fn settings(&self) -> AgentAlertSettings {
+        self.settings.get().await
+    }
+
+    /// Saves the switch. Turning it off also clears the dedupe memory, so the
+    /// next time it is on, the current state can alert again.
+    pub async fn set_enabled(&self, enabled: bool) -> Result<AgentAlertSettings, String> {
+        let settings = self.settings.set(AgentAlertSettings { enabled }).await?;
+        if !enabled {
+            self.published.lock().await.clear();
+        }
+        Ok(settings)
+    }
+
+    /// Starts the one observation loop. Repeated calls are ignored.
+    pub async fn start(self: &Arc<Self>) {
+        let mut slot = self.watcher.lock().await;
+        if slot.is_some() {
+            return;
+        }
+        let Some(manager) = self.manager.clone() else {
+            return;
+        };
+        let service = Arc::clone(self);
+        *slot = Some(tokio::spawn(async move {
+            let mut events = manager.subscribe();
+            loop {
+                match events.recv().await {
+                    Ok(event) => service.observe(event).await,
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::debug!(missed, "agent alert watcher skipped thread events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+                if service.closed.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Stops observing.
+    pub async fn shutdown(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.watcher.lock().await.take() {
+            handle.abort();
+        }
+    }
+
+    /// Handles one thread event.
+    async fn observe(self: &Arc<Self>, wire: WireEvent) {
+        if !self.settings.get().await.enabled {
+            return;
+        }
+        match wire.event {
+            Event::ThreadUpserted(summary) => {
+                if summary.tab == ThreadTab::Working {
+                    // A new turn resets the last alertable state so its result
+                    // can alert even when it repeats the previous one.
+                    self.published.lock().await.remove(&summary.thread_id);
+                    return;
+                }
+                let Some(state) = completion_state(
+                    summary.tab,
+                    summary.agent_state,
+                    summary.placed_by_user,
+                    summary.parent_thread_id.is_some(),
+                ) else {
+                    return;
+                };
+                let thread = ActivityThread::from_summary(&summary);
+                self.publish(&thread, state, Utc::now()).await;
+            }
+            Event::ApprovalRequested {
+                thread_id, kind, ..
+            } => {
+                let Some(manager) = self.manager.as_ref() else {
+                    return;
+                };
+                let Some(summary) = manager.thread_summary(&thread_id).await else {
+                    return;
+                };
+                if summary.parent_thread_id.is_some() {
+                    return;
+                }
+                let state = approval_state(kind);
+                let thread = ActivityThread::from_summary(&summary);
+                self.publish(&thread, state, Utc::now()).await;
+            }
+            Event::ApprovalResolved { thread_id, .. } => {
+                // Once answered, the same hand can be raised again later in
+                // the same turn and should alert again.
+                self.published.lock().await.remove(&thread_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Publishes one transition if the switch is on and it is new.
+    ///
+    /// Returns whether it was handed to the relay.
+    pub async fn publish(
+        &self,
+        thread: &ActivityThread,
+        state: AgentAlertState,
+        at: DateTime<Utc>,
+    ) -> bool {
+        if !self.settings.get().await.enabled {
+            return false;
+        }
+        {
+            let published = self.published.lock().await;
+            if published.get(&thread.id) == Some(&state) {
+                return false;
+            }
+        }
+        let activity = AgentActivity {
+            thread_id: thread.id.clone(),
+            thread_title: thread.title.clone(),
+            project_name: thread.project.clone(),
+            state,
+            at,
+        };
+        if !self.publisher.publish(activity).await {
+            return false;
+        }
+        self.published.lock().await.insert(thread.id.clone(), state);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder {
+        sent: Mutex<Vec<AgentActivity>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ActivityPublisher for Recorder {
+        async fn publish(&self, activity: AgentActivity) -> bool {
+            self.sent.lock().await.push(activity);
+            true
+        }
+    }
+
+    fn thread() -> ActivityThread {
+        ActivityThread {
+            id: ThreadId::new("th_test"),
+            title: "Fix the thing".into(),
+            project: "h4rn".into(),
+        }
+    }
+
+    /// A service with no manager: these tests drive `publish` directly.
+    fn service(_settings: AgentAlertSettings, recorder: Arc<Recorder>) -> AgentAlertService {
+        let store = Arc::new(AgentAlertSettingsStore::in_memory());
+        AgentAlertService::new(store, None, recorder as Arc<dyn ActivityPublisher>)
+    }
+
+    #[tokio::test]
+    async fn nothing_is_published_while_the_switch_is_off() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service(AgentAlertSettings::default(), Arc::clone(&recorder));
+        assert!(
+            !service
+                .publish(&thread(), AgentAlertState::Completed, Utc::now())
+                .await
+        );
+        assert!(recorder.sent.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_documented_fields_are_the_only_ones_published() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service(AgentAlertSettings::default(), Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+        assert!(
+            service
+                .publish(&thread(), AgentAlertState::Completed, Utc::now())
+                .await
+        );
+        let sent = recorder.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        let json = serde_json::to_value(&sent[0]).expect("json");
+        let object = json.as_object().expect("object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["at", "project_name", "state", "thread_id", "thread_title"]
+        );
+        assert_eq!(object["thread_title"], "Fix the thing");
+    }
+
+    #[tokio::test]
+    async fn the_same_state_is_not_published_twice() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service(AgentAlertSettings::default(), Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+        let thread = thread();
+        assert!(
+            service
+                .publish(&thread, AgentAlertState::Approval, Utc::now())
+                .await
+        );
+        assert!(
+            !service
+                .publish(&thread, AgentAlertState::Approval, Utc::now())
+                .await
+        );
+        assert_eq!(recorder.sent.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_different_state_alerts_again() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service(AgentAlertSettings::default(), Arc::clone(&recorder));
+        service.set_enabled(true).await.expect("enable");
+        let thread = thread();
+        assert!(
+            service
+                .publish(&thread, AgentAlertState::Approval, Utc::now())
+                .await
+        );
+        assert!(
+            service
+                .publish(&thread, AgentAlertState::Failed, Utc::now())
+                .await
+        );
+        assert_eq!(recorder.sent.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn settings_default_to_off() {
+        let store = AgentAlertSettingsStore::in_memory();
+        assert!(!store.get().await.enabled);
+    }
+
+    #[test]
+    fn only_a_real_finished_turn_alerts() {
+        use h4rn_protocol::{AgentState, ThreadTab};
+
+        assert_eq!(
+            completion_state(ThreadTab::Done, AgentState::Done, false, false),
+            Some(AgentAlertState::Completed)
+        );
+        assert_eq!(
+            completion_state(ThreadTab::Done, AgentState::Error, false, false),
+            Some(AgentAlertState::Failed)
+        );
+        // Working, a manual placement and a subagent are all silent.
+        assert_eq!(
+            completion_state(ThreadTab::Working, AgentState::RunningTool, false, false),
+            None
+        );
+        assert_eq!(
+            completion_state(ThreadTab::Done, AgentState::Done, true, false),
+            None
+        );
+        assert_eq!(
+            completion_state(ThreadTab::Done, AgentState::Done, false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_question_is_input_and_a_permission_is_approval() {
+        use h4rn_protocol::ApprovalKind;
+
+        assert_eq!(
+            approval_state(ApprovalKind::Question),
+            AgentAlertState::Input
+        );
+        assert_eq!(
+            approval_state(ApprovalKind::Command),
+            AgentAlertState::Approval
+        );
+        assert_eq!(
+            approval_state(ApprovalKind::Plan),
+            AgentAlertState::Approval
+        );
+    }
+}

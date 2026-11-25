@@ -1453,3 +1453,165 @@ async fn a_relay_guest_link_keeps_its_cookie_and_carries_a_large_upload() {
     server.abort();
     fake.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn push_devices_register_rotate_and_leave_with_the_session() {
+    let state = test_state().await;
+    let phone = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    let other = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    let token_one = random_b64(32);
+    let token_two = random_b64(32);
+
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_one,
+                "package_name": "dev.h4rn.app",
+                "app_version": "1.0.1",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = send(
+        &state,
+        request(Method::GET, "/v1/push/status", Some(&phone), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["configured"], false);
+    assert_eq!(body["devices"], 1);
+
+    // Rotation replaces the old token instead of adding a row.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&phone),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": token_two,
+                "package_name": "dev.h4rn.app",
+                "app_version": "1.0.2",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT token, app_version FROM push_devices WHERE user_id = $1 ORDER BY created_at",
+    )
+    .bind(phone.user.id)
+    .fetch_all(state.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, token_two);
+    assert_eq!(rows[0].1, "1.0.2");
+
+    // A device can only register itself, and only remove itself.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&other),
+            Some(serde_json::json!({
+                "device_id": phone.device.id.to_string(),
+                "token": random_b64(32),
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "push_device_forbidden");
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/push/devices/{}", phone.device.id),
+            Some(&other),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "push_device_forbidden");
+
+    // Signing out removes the registration as well as the session.
+    let (status, _) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/auth/logout",
+            Some(&phone),
+            Some(serde_json::json!({"refresh_token": phone.refresh})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_devices WHERE user_id = $1")
+        .bind(phone.user.id)
+        .fetch_one(state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "sign-out left a deliverable token");
+
+    // The delivered baseline claims each state once and a changed state once.
+    let thread = h4rn_protocol::ThreadId::new_uuid_v7();
+    assert!(
+        state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "completed")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "completed")
+            .await
+            .unwrap(),
+        "the same state was claimed twice"
+    );
+    assert!(
+        state
+            .store
+            .claim_push_thread_state(phone.user.id, thread.as_str(), "failed")
+            .await
+            .unwrap()
+    );
+
+    // Account deletion cascades to every device row.
+    send(
+        &state,
+        request(
+            Method::PUT,
+            "/v1/push/devices",
+            Some(&other),
+            Some(serde_json::json!({
+                "device_id": other.device.id.to_string(),
+                "token": random_b64(32),
+            })),
+        ),
+    )
+    .await;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(other.user.id)
+        .execute(state.store.pool())
+        .await
+        .unwrap();
+    let leftover: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_devices WHERE user_id = $1")
+        .bind(other.user.id)
+        .fetch_one(state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(leftover, 0, "deleting the account left device rows");
+}

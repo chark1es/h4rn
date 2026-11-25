@@ -1967,3 +1967,37 @@ Shift in multiline mode) uses the opposite action. `Cmd/Ctrl+Shift+Enter` steers
 message while a turn is really running, and `Alt/Option+Up` at the start of the composer edits the
 newest one; both are rebindable.
 
+
+## ADR-049: Phone alerts carry a fixed thread transition, never conversation content
+
+**Status:** Accepted
+
+Android alerts are opt-in twice: the daemon switch is off by default, and a
+phone registers only after the person signs in to Connect and turns on **Device
+notifications**. When both are on, the daemon publishes a transition over its
+existing relay socket for four moments: a turn finished, a turn failed, an
+approval is waiting, or an agent asked a question.
+
+The payload is a closed record — thread id, thread title, project name, state,
+timestamp. There is no field for a prompt, a reply, tool output, a diff, a file
+path or a credential, so no future caller can quietly add one without changing
+the protocol and this decision. Connect uses the record to choose an alert and
+to build the FCM data message; it keeps a delivered baseline per (user, thread)
+so a reconnect or replay of the same state cannot alert twice. Alerting is
+skipped for finishing states older than two minutes, and transitions that
+arrive together are grouped into one "N agents need attention" or "N agents
+finished" notification.
+
+This is stricter than ADR-027's wake-signal shape, because it includes a title
+and a project name so the phone can say which thread needs the person without
+opening the app. Those two strings still transit Connect and Google, so they
+are the whole disclosure, not part of a larger payload. The relay never sees
+message content: the activity frame is separate from the Noise-routed session
+and carries only this record.
+
+A phone is tied to the account that registered it. Registration only accepts
+the caller's own Connect device id, a rotated FCM token replaces the old one,
+and signing out or deleting the account removes the rows. An operator who has
+not configured a Firebase service account has push off; Connect reports that
+state and never pretends to send. The Android build compiles and runs without
+`google-services.json`; the feature is then unavailable and Settings says so.

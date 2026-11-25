@@ -7,6 +7,17 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Android can alert you when an agent finishes, fails, needs approval or asks a question.**
+  Alerts go through Connect and are off by default behind two switches: the machine's Settings →
+  Notifications switch, and Device notifications on the phone. The daemon publishes only a thread
+  id, its title, the project name, one of four states and a timestamp, never message text, tool
+  output, file paths or credentials. Connect groups agents that need attention or finish together
+  into one alert, drops a repeated state and ignores completions older than two minutes. Tapping
+  an alert opens its thread; only the thread already on screen stays quiet. Operators configure
+  one Firebase service account on Connect and supply `google-services.json` only when building the
+  Android app, so the app and CI still build without it and Settings says when alerts are
+  unavailable.
+
 - **A new thread can run in its own git worktree.** Choose **Run in a new
   worktree** in the New thread dialog, with an optional branch name. The daemon
   checks out the project's current `HEAD` on a generated `h4rn/<name>` branch

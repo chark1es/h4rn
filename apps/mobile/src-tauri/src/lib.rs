@@ -33,6 +33,37 @@ const MAX_SECRET_VALUE: usize = 64 * 1024;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 struct SecretStore(PluginHandle<tauri::Wry>);
 
+/// Android FCM bridge (ADR-049). The plugin is Android-only; iOS alerts are a
+/// later task, so the commands report the feature unavailable there.
+#[cfg(target_os = "android")]
+struct PushBridge(PluginHandle<tauri::Wry>);
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PushStatusValue {
+    available: bool,
+    permission: String,
+    token: Option<String>,
+    #[allow(dead_code)]
+    channel: bool,
+    /// Filled by the shell from its own crate version.
+    #[serde(default)]
+    app_version: String,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[derive(serde::Serialize)]
+struct PushForegroundArgs<'a> {
+    #[serde(rename = "threadId")]
+    thread_id: Option<&'a str>,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[derive(serde::Deserialize)]
+struct PushTokenValue {
+    token: String,
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(serde::Serialize)]
 struct SecretArgs<'a> {
@@ -146,6 +177,97 @@ fn secret_delete(app: tauri::AppHandle, key: String) -> Result<(), String> {
     }
 }
 
+/// Reports whether this build can push, the OS permission, and a cached token.
+#[tauri::command]
+fn push_status(app: tauri::AppHandle) -> Result<PushStatusValue, String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        let mut status = bridge
+            .0
+            .run_mobile_plugin::<PushStatusValue>("pushStatus", ())
+            .map_err(|error| error.to_string())?;
+        status.app_version = env!("CARGO_PKG_VERSION").to_string();
+        Ok(status)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(PushStatusValue {
+            available: false,
+            permission: "default".into(),
+            token: None,
+            channel: false,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+    }
+}
+
+/// Asks for the Android 13+ notification permission.
+#[tauri::command]
+fn push_request_permission(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<()>("pushRequestPermission", ())
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("device alerts are only implemented on Android".into())
+    }
+}
+
+/// Returns the current FCM registration token.
+#[tauri::command]
+fn push_token(app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<PushTokenValue>("pushToken", ())
+            .map(|value| value.token)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("device alerts are only implemented on Android".into())
+    }
+}
+
+/// Tells the notification service which thread is on screen, so only that
+/// exact thread stays quiet in the foreground.
+#[tauri::command]
+fn push_set_foreground_thread(app: tauri::AppHandle, thread_id: Option<String>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<PushBridge>();
+        bridge
+            .0
+            .run_mobile_plugin::<()>(
+                "pushSetForegroundThread",
+                PushForegroundArgs {
+                    thread_id: thread_id.as_deref(),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, thread_id);
+        Ok(())
+    }
+}
+
 /// Returns the `h4rn://` URLs that launched this process, if any.
 ///
 /// Android delivers a cold-start deep link through the launching intent rather
@@ -208,10 +330,30 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("h4rn-push")
+                .setup(|app, api| {
+                    #[cfg(target_os = "android")]
+                    {
+                        let handle = api.register_android_plugin("dev.h4rn.app", "PushPlugin")?;
+                        app.manage(PushBridge(handle));
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        let _ = (app, api);
+                    }
+                    Ok(())
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             secret_get,
             secret_set,
             secret_delete,
+            push_status,
+            push_request_permission,
+            push_token,
+            push_set_foreground_thread,
             deep_link_current,
             preview::preview_capabilities,
             preview::preview_prepare,

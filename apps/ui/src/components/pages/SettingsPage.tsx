@@ -7,10 +7,22 @@ import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { GuestSettingsForm } from "@/features/guest/GuestSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import {
+  loadAgentAlertSettings,
+  setAgentAlertsEnabled,
+  useAgentAlerts,
+} from "@/features/notifications/agentAlerts";
+import {
   type NotificationPermissionState,
   notificationChannel,
   useBrowserNotificationsUnavailable,
 } from "@/features/notifications/channel";
+import {
+  type DeviceAlertsState,
+  deviceStatusLine,
+  disableDeviceAlerts,
+  enableDeviceAlerts,
+  readDeviceAlerts,
+} from "@/features/notifications/devicePush";
 import {
   displayedNotificationSetting,
   hostOfflineVisibility,
@@ -54,6 +66,7 @@ import {
   useKeybindingsVersion,
 } from "@/lib/keybindings";
 import { desktopShellBridge, type ShellSettings } from "@/lib/platform/desktopShell";
+import { deviceAlertsShell } from "@/lib/platform/push";
 import { secretShell } from "@/lib/platform/secrets";
 import { setTheme, setUi, type Theme, useApp } from "@/lib/store/appStore";
 import { setTerminalMatchesApp, useTerminalMatchesApp } from "@/lib/terminalTheme";
@@ -450,6 +463,29 @@ function NotificationsForm() {
   const pageUnavailable = useBrowserNotificationsUnavailable();
   const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const agentAlerts = useAgentAlerts();
+  const [device, setDevice] = useState<DeviceAlertsState | null>(null);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const alertsShell = deviceAlertsShell();
+
+  useEffect(() => {
+    void loadAgentAlertSettings();
+  }, []);
+
+  useEffect(() => {
+    if (!alertsShell) return;
+    if (!signedIn) {
+      setDevice(null);
+      return;
+    }
+    let cancelled = false;
+    void readDeviceAlerts().then((state) => {
+      if (!cancelled) setDevice(state);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [alertsShell, signedIn]);
 
   useEffect(() => {
     if (!channel) return;
@@ -491,6 +527,21 @@ function NotificationsForm() {
       }
     }
     setNotificationSetting(key, next);
+  };
+
+  const changeAgentAlerts = async (next: boolean) => {
+    if (!signedIn) return;
+    await setAgentAlertsEnabled(next);
+  };
+
+  const changeDeviceAlerts = async (next: boolean) => {
+    if (deviceBusy) return;
+    setDeviceBusy(true);
+    try {
+      setDevice(next ? await enableDeviceAlerts() : await disableDeviceAlerts());
+    } finally {
+      setDeviceBusy(false);
+    }
   };
 
   const rows = relayPresence
@@ -553,6 +604,81 @@ function NotificationsForm() {
           </p>
         </div>
       )}
+      <div className="q-group">
+        <h2>Phone alerts</h2>
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Send agent alerts to my phone through Connect</div>
+            <div className="s">
+              Finished, failed, approval and question alerts for this machine.
+            </div>
+          </div>
+          <div className="ctl">
+            <Toggle
+              checked={agentAlerts.enabled === true}
+              label="Send agent alerts to my phone through Connect"
+              disabled={!signedIn || agentAlerts.enabled === null || agentAlerts.saving}
+              onChange={(next) => void changeAgentAlerts(next)}
+            />
+          </div>
+        </div>
+        <p className="s q-muted">
+          {signedIn
+            ? "Each alert carries the thread id, its title, the project name, the state and the time. Never message text, tool output, file paths or credentials. Delivery goes through Connect, not a direct connection."
+            : "Sign in to Connect to send alerts to a phone."}
+        </p>
+        {agentAlerts.error ? (
+          <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+            {agentAlerts.error}
+          </p>
+        ) : null}
+        {alertsShell ? (
+          <>
+            <div className="q-field">
+              <div className="lab">
+                <div className="t">Device notifications</div>
+                <div className="s">{deviceStatusLine(device, signedIn)}</div>
+              </div>
+              <div className="ctl">
+                <Toggle
+                  checked={device?.enabled === true && device?.permission === "granted"}
+                  label="Device notifications"
+                  disabled={
+                    !signedIn ||
+                    device === null ||
+                    deviceBusy ||
+                    !device.available ||
+                    device.permission === "denied"
+                  }
+                  onChange={(next) => void changeDeviceAlerts(next)}
+                />
+              </div>
+            </div>
+            {device?.permission === "denied" ? (
+              <p className="s q-muted">
+                Blocked in system settings. Allow notifications for h4rn there, then reopen this
+                page.
+              </p>
+            ) : null}
+            {device && !device.available ? (
+              <p className="s q-muted">
+                This build has no Firebase configuration, so it cannot receive alerts.
+              </p>
+            ) : null}
+            {device?.available && device.configured === false ? (
+              <p className="s q-muted">
+                This Connect server has no push sender configured. An operator has to add a Firebase
+                service account before alerts can arrive.
+              </p>
+            ) : null}
+            {device?.error ? (
+              <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+                {device.error}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }

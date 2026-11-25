@@ -201,6 +201,19 @@ pub struct Config {
     pub relay_max_frame_bytes: usize,
     /// Per-connection relay queue depth (backpressure).
     pub relay_queue_depth: usize,
+    /// Firebase service-account JSON, inline or a path to a file
+    /// (`H4RN_CONNECT_FCM_SERVICE_ACCOUNT`). Missing disables push without
+    /// pretending to send.
+    pub fcm_service_account: Option<String>,
+    /// OAuth2 token endpoint used to exchange the service assertion.
+    pub fcm_token_url: String,
+    /// Base URL for the FCM v1 API. Tests point this at a mock server.
+    pub fcm_url: String,
+    /// How long to collect activity transitions before grouping them. Tests
+    /// shorten this; the default is one second.
+    pub push_group_window_ms: u64,
+    /// How old a completed/failed transition may be and still alert.
+    pub push_completion_max_age_secs: i64,
 }
 
 impl Default for Config {
@@ -226,6 +239,11 @@ impl Default for Config {
             trust_forwarded_for: false,
             relay_max_frame_bytes: 8 * 1024 * 1024,
             relay_queue_depth: 64,
+            fcm_service_account: None,
+            fcm_token_url: "https://oauth2.googleapis.com/token".to_string(),
+            fcm_url: "https://fcm.googleapis.com".to_string(),
+            push_group_window_ms: 1_000,
+            push_completion_max_age_secs: 120,
         }
     }
 }
@@ -250,6 +268,12 @@ impl fmt::Debug for Config {
             .field("refresh_ttl_secs", &self.refresh_ttl_secs)
             .field("pairing_ttl_secs", &self.pairing_ttl_secs)
             .field("allow_insecure", &self.allow_insecure)
+            .field(
+                "fcm_service_account",
+                &self.fcm_service_account.as_ref().map(|_| "<redacted>"),
+            )
+            .field("fcm_token_url", &self.fcm_token_url)
+            .field("fcm_url", &self.fcm_url)
             .finish()
     }
 }
@@ -370,6 +394,24 @@ impl Config {
         }
         if let Some(value) = env("H4RN_CONNECT_PAIRING_ATTEMPTS") {
             self.rate_limits.pairing_attempts = parse_u32("H4RN_CONNECT_PAIRING_ATTEMPTS", &value)?;
+        }
+        if let Some(value) = env("H4RN_CONNECT_FCM_SERVICE_ACCOUNT") {
+            self.fcm_service_account = Some(value);
+        }
+        if let Some(value) = env("H4RN_CONNECT_FCM_TOKEN_URL") {
+            self.fcm_token_url = value;
+        }
+        if let Some(value) = env("H4RN_CONNECT_FCM_URL") {
+            self.fcm_url = value;
+        }
+        if let Some(value) = env("H4RN_CONNECT_PUSH_GROUP_WINDOW_MS") {
+            self.push_group_window_ms = value.parse().map_err(|_| {
+                AppError::config(
+                    "invalid_number",
+                    "H4RN_CONNECT_PUSH_GROUP_WINDOW_MS is not a number",
+                    None,
+                )
+            })?;
         }
         Ok(())
     }

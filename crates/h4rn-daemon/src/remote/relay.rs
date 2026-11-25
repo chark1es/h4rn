@@ -569,6 +569,33 @@ impl RelayDialer {
             .is_some()
     }
 
+    /// Publishers one agent-activity transition over the shared relay socket.
+    ///
+    /// Connect reads only this fixed payload (ADR-049). A socket that is not
+    /// attached reports false so no alert is claimed as delivered.
+    pub fn publish_activity(&self, activity: h4rn_protocol::AgentActivity) -> bool {
+        let Some(state) = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        else {
+            return false;
+        };
+        let frame = match serde_json::to_vec(&activity) {
+            Ok(payload) => RelayFrame {
+                conn_id: String::new(),
+                kind: RelayFrameKind::Activity,
+                payload,
+            },
+            Err(error) => {
+                tracing::warn!(%error, "could not serialise an agent activity");
+                return false;
+            }
+        };
+        state.outbound.try_send(frame).is_ok()
+    }
+
     /// Opens one peer MCP session to `machine_id` over the shared socket.
     pub async fn dial(
         &self,
@@ -863,7 +890,10 @@ async fn handle_event(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&frame.conn_id);
             }
-            RelayFrameKind::GuestHttp | RelayFrameKind::GuestHttpChunk | RelayFrameKind::Ping => {
+            RelayFrameKind::GuestHttp
+            | RelayFrameKind::GuestHttpChunk
+            | RelayFrameKind::Activity
+            | RelayFrameKind::Ping => {
                 handle_unblocked_frame(&frame, guests);
             }
         },

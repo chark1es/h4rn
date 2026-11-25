@@ -2,6 +2,7 @@
 import type { AcpAgent } from "./AcpAgent";
 import type { AcpAgentProbe } from "./AcpAgentProbe";
 import type { AcpAgentSpec } from "./AcpAgentSpec";
+import type { AgentAlertSettings } from "./AgentAlertSettings";
 import type { AgentToolSettings } from "./AgentToolSettings";
 import type { BlobDownload } from "./BlobDownload";
 import type { BlobInfo } from "./BlobInfo";
@@ -786,7 +787,11 @@ worktrees: Array<TrackedWorktree>, } | { "type": "worktree_settings",
 /**
  * Current settings, as saved.
  */
-settings: WorktreeSettings, } | { "type": "projects", 
+settings: WorktreeSettings, } | { "type": "agent_alert_settings", 
+/**
+ * Current settings, as saved.
+ */
+settings: AgentAlertSettings, } | { "type": "projects", 
 /**
  * Projects.
  */

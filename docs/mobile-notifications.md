@@ -1,0 +1,111 @@
+# Mobile notifications
+
+Android can alert you when an agent finishes, fails, waits for an approval or
+asks a question. Tap the alert to open that thread. Delivery goes through
+Connect only: a direct or Tailscale pairing is not enough, because the daemon
+does not hold a phone's push token and Google cannot reach a LAN address.
+
+iOS alerts are not part of this feature; Android is first.
+
+## Turning alerts on
+
+1. Sign in to Connect in h4rn and link the host that runs the agents.
+2. On that host, open **Settings → Notifications** and turn on **Send agent
+   alerts to my phone through Connect**. This is a machine setting: it is off
+   until you turn it on, and turning it off stops the next publish.
+3. In the Android app, open **Settings → Notifications → Phone alerts** and
+   turn on **Device notifications**. Android asks for notification permission
+   the first time (Android 13 and newer). The row shows the real state: the OS
+   permission, whether this phone registered with Connect, and whether the
+   Connect server has a push sender configured.
+
+Alerts are quiet only when the app is in the foreground **and** that exact
+thread is on screen. Every other thread still alerts, as does the same thread
+while the app is in the background.
+
+## What leaves the daemon
+
+Each alert carries exactly this record:
+
+| Field | Example | Notes |
+|---|---|---|
+| thread id | `th_0192f0…` | Opens the thread on tap |
+| thread title | `Fix the flaky login test` | As shown in the sidebar |
+| project name | `h4rn` | Folder name, not the full path |
+| state | `completed`, `failed`, `approval`, `input` | One of four transitions |
+| timestamp | RFC 3339 | When the daemon observed it |
+
+There is no field for a prompt, a reply, reasoning, tool output, a diff, a file
+path, a terminal byte or a credential. The record is sent over the daemon's
+existing relay connection and is separate from the Noise-encrypted session.
+
+Connect stores the last state delivered per (user, thread) so publishing the
+same state again never alerts twice, and it drops a completion that is more
+than two minutes old. Transitions that arrive together are grouped: two or more
+agents waiting for a person become one **N agents need attention** alert, and
+two or more finishing become one **N agents finished** alert.
+
+## Operator setup: Connect
+
+Push is off when no Firebase service account is configured. Connect reports
+that state in `/v1/push/status`; it never pretends to send.
+
+1. Create a Firebase project and enable the Firebase Cloud Messaging API.
+2. Register the Android application id `dev.h4rn.app` in that project.
+3. Create a service account with permission to send FCM messages and download
+   its JSON key. Keep it outside the repository and the app bundle.
+4. Give it to the relay, either as the JSON itself or as a path to the file:
+
+   ```sh
+   H4RN_CONNECT_FCM_SERVICE_ACCOUNT=/etc/h4rn/firebase-service-account.json
+   ```
+
+   `H4RN_CONNECT_FCM_TOKEN_URL` and `H4RN_CONNECT_FCM_URL` default to Google's
+   endpoints and exist so tests can point at a mock server.
+5. Restart `h4rn-connect`. The migration creates `push_devices` and
+   `push_thread_states`; no manual SQL is needed.
+
+The sender signs an RS256 JWT-bearer assertion with the service account key,
+caches the OAuth2 access token until shortly before it expires, and posts a
+data message to `https://fcm.googleapis.com/v1/projects/<project>/messages:send`.
+A token that FCM reports as `UNREGISTERED` or `NOT_FOUND` is deleted; 429 and
+5xx responses are retried with backoff.
+
+A device row belongs to the account that registered it. Registration accepts
+only the caller's own Connect device id, rotation replaces the old token,
+signing out removes that phone's registration and account deletion removes all
+of a user's rows.
+
+## Operator setup: the Android build
+
+`google-services.json` is a build secret and is never committed. Provide it at
+build time:
+
+```sh
+H4RN_ANDROID_GOOGLE_SERVICES_FILE=/absolute/path/google-services.json \
+  scripts/mobile-android.sh build
+```
+
+The script copies it into the generated, git-ignored `gen/android/app/` tree,
+where the Google Services plugin reads it. Without that variable nothing is
+copied, the plugin is not applied, and the app still builds: Firebase has no
+project to initialise, so Settings reports alerts as unavailable. CI builds
+the same way and needs no Firebase credentials.
+
+The Firebase SDK is compiled into every build, so a normal release can enable
+alerts without a different native module. The service-account key belongs only
+on the relay, never in the APK or an EAS/build environment for the app.
+
+## Limits
+
+- Android needs Google Play services. A device without them cannot receive FCM.
+- If the app is force-stopped in Android Settings, delivery stops until it is
+  opened again. Android's battery modes can also delay a message.
+- Turning the app switch off removes the registration; turning off the daemon
+  switch stops publishing for every phone at once.
+- A thread moved to Done by hand is a placement, not a finished turn, so it
+  does not alert.
+- Subagent threads are not published separately; their parent thread's
+  approvals are.
+- Connect keeps no conversation history for push, and the notification text is
+  produced from the five fields above.

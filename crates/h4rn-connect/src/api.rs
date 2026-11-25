@@ -25,15 +25,15 @@ use h4rn_protocol::skills::{
     SkillSyncPullResponse, SkillSyncPush, SkillSyncPushResponse, SkillVersionVector,
 };
 use h4rn_protocol::{
-    AuditEntry, AuditIngestRequest, AuditPage, ConnectDevice, ConnectMeResponse,
+    AuditEntry, AuditIngestRequest, AuditPage, ConnectDevice, ConnectMeResponse, ConnectPushStatus,
     ConnectSessionTokens, DeviceGrantPollRequest, DeviceGrantPollResponse, DeviceGrantStartRequest,
     DeviceGrantStartResponse, DeviceGrantStatus, DeviceRegistration, DeviceRenameRequest,
     GuestHttpRequest, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest,
     LoginStartResponse, LogoutRequest, MachineAddressesUpdate, MachineHost, MachineHostsUpdate,
     MachineSummary, PairScope, PairingClaimCodeRequest, PairingClaimRequest, PairingClaimResponse,
-    PairingCreateRequest, PairingCreateResponse, PairingInfo, ProviderInfo, RefreshRequest,
-    RelayFrame, RelayFrameKind, RelayServerEvent, UsageBucket, UsageGroupBy, UsageReport,
-    UsageScope, UsageSyncRequest, UsageSyncResponse,
+    PairingCreateRequest, PairingCreateResponse, PairingInfo, ProviderInfo, PushDeviceRegistration,
+    RefreshRequest, RelayFrame, RelayFrameKind, RelayServerEvent, UsageBucket, UsageGroupBy,
+    UsageReport, UsageScope, UsageSyncRequest, UsageSyncResponse,
 };
 use h4rn_skills::SkillBundle;
 use tower_http::cors::{Any, CorsLayer};
@@ -77,6 +77,10 @@ pub struct AppState {
     pub replay: Arc<ReplayCache>,
     /// Outbound HTTP client for provider revocation.
     pub http: reqwest::Client,
+    /// Firebase Cloud Messaging sender; unconfigured means push is off.
+    pub push: Arc<crate::push::FcmClient>,
+    /// Activity transitions waiting to alert, and their delivery baseline.
+    pub alerts: Arc<crate::alerts::AlertService>,
     /// Process start, for `/readyz`.
     pub started: Instant,
 }
@@ -100,6 +104,13 @@ pub async fn build_state(config: Config) -> Result<AppState> {
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|error| AppError::internal(format!("http client: {error}")))?;
+    let push = Arc::new(crate::push::FcmClient::new(&config, http.clone()));
+    let alerts = Arc::new(crate::alerts::AlertService::new(
+        store.clone(),
+        Arc::clone(&push),
+        Duration::from_millis(config.push_group_window_ms.max(1)),
+        Duration::from_secs(config.push_completion_max_age_secs.max(1) as u64),
+    ));
     Ok(AppState {
         config,
         store,
@@ -110,6 +121,8 @@ pub async fn build_state(config: Config) -> Result<AppState> {
         rate: Arc::new(RateLimiter::new()),
         replay: Arc::new(ReplayCache::default()),
         http,
+        push,
+        alerts,
         started: Instant::now(),
     })
 }
@@ -130,6 +143,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/devices", get(list_devices))
         .route("/v1/devices/{id}", patch(rename_device))
         .route("/v1/devices/{id}", delete(revoke_device))
+        .route("/v1/push/devices", put(register_push_device))
+        .route("/v1/push/devices/{id}", delete(deregister_push_device))
+        .route("/v1/push/status", get(push_status))
         .route("/v1/machines", get(list_machines))
         .route("/v1/machines/{id}/hosts", put(update_hosts))
         .route("/v1/machines/{id}/addresses", put(update_addresses))
@@ -1084,6 +1100,13 @@ async fn logout(
         .store
         .revoke_family(authed.session.family_id, "logout")
         .await?;
+    // Signing out on the phone stops its alerts immediately; it must not keep
+    // receiving pushes that open a thread the person can no longer reach.
+    state
+        .store
+        .deregister_push_device(authed.user.id, &authed.device.id.to_string())
+        .await
+        .ok();
     for provider in &state.config.providers {
         if let Ok(Some(token)) = state
             .store
@@ -1205,6 +1228,105 @@ async fn revoke_device(
         .await
         .ok();
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Push devices
+// ---------------------------------------------------------------------------
+
+/// Registers or rotates this install's FCM token.
+///
+/// A caller may only register its own connect device. The user id always comes
+/// from the authenticated token, never from the body, so a device can never be
+/// attached to another account.
+async fn register_push_device(
+    State(state): State<AppState>,
+    authed: Authed,
+    Json(request): Json<PushDeviceRegistration>,
+) -> Result<StatusCode> {
+    let requested = Uuid::parse_str(request.device_id.trim())
+        .map_err(|_| AppError::bad_request("device_invalid", "device_id is not a UUID"))?;
+    if requested != authed.device.id {
+        return Err(AppError::forbidden(
+            "push_device_forbidden",
+            "a device may only register its own push token",
+        ));
+    }
+    let token = request.token.trim();
+    if token.is_empty() || token.len() > 4096 {
+        return Err(AppError::bad_request(
+            "push_token_invalid",
+            "token must be 1-4096 characters",
+        ));
+    }
+    let package = request
+        .package_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(200).collect::<String>());
+    let version = request
+        .app_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(100).collect::<String>());
+    state
+        .store
+        .register_push_device(
+            authed.user.id,
+            &authed.device.id.to_string(),
+            token,
+            package.as_deref(),
+            version.as_deref(),
+        )
+        .await?;
+    state
+        .store
+        .audit(
+            Some(authed.user.id),
+            Some(authed.device.id),
+            "push.registered",
+            Some("device"),
+            Some(&authed.device.id.to_string()),
+            serde_json::json!({ "package": package }),
+        )
+        .await
+        .ok();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes this install's token. Missing rows still answer 204.
+async fn deregister_push_device(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let requested = Uuid::parse_str(id.trim())
+        .map_err(|_| AppError::bad_request("device_invalid", "device id is not a UUID"))?;
+    if requested != authed.device.id {
+        return Err(AppError::forbidden(
+            "push_device_forbidden",
+            "a device may only remove its own push token",
+        ));
+    }
+    state
+        .store
+        .deregister_push_device(authed.user.id, &authed.device.id.to_string())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether this relay can push, and how many devices the account registered.
+async fn push_status(
+    State(state): State<AppState>,
+    authed: Authed,
+) -> Result<Json<ConnectPushStatus>> {
+    let devices = state.store.push_devices(authed.user.id).await?;
+    Ok(Json(ConnectPushStatus {
+        configured: state.push.configured(),
+        devices: devices.len(),
+    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -43,6 +43,7 @@ mod ids;
 pub mod import;
 pub mod issues;
 pub mod mcp;
+mod notifications;
 pub mod projects;
 mod proxy;
 mod schedules;
@@ -111,6 +112,7 @@ pub use mcp::{
     McpTransportView, OutsideAgentLevel, OutsideAgentSettings, OutsideAgentSignIn,
     OutsideAgentView,
 };
+pub use notifications::{AgentActivity, AgentAlertSettings, AgentAlertState};
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;
 pub use schedules::{
