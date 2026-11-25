@@ -412,20 +412,17 @@ impl ClaudeCodeSession {
 
     async fn write_frame(&mut self, frame: Vec<u8>) -> Result<(), HarnessError> {
         let Some(sender) = &self.stdin_tx else {
-            return Err(HarnessError::Transport {
+            return Err(HarnessError::NotSent {
                 harness: self.kind,
                 message: "claude stdin is closed".into(),
             });
         };
         // stream-json input is newline-delimited; a frame without a newline is
         // buffered by the CLI and the turn appears to hang.
-        sender
-            .send(frame)
-            .await
-            .map_err(|_| HarnessError::Transport {
-                harness: self.kind,
-                message: "claude writer task has exited".into(),
-            })
+        sender.send(frame).await.map_err(|_| HarnessError::NotSent {
+            harness: self.kind,
+            message: "claude writer task has exited".into(),
+        })
     }
 
     fn mark_state(&self, state: AgentState) {
@@ -525,7 +522,7 @@ impl HarnessSession for ClaudeCodeSession {
 
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
-            return Err(HarnessError::Transport {
+            return Err(HarnessError::NotSent {
                 harness: self.kind,
                 message: "session is shut down".into(),
             });
@@ -1424,6 +1421,84 @@ done
             other => panic!("expected Transport, got {other:?}"),
         }
         assert_eq!(control_log(&log).len(), 1, "the switch was really sent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    /// A CLI that has already exited leaves a closed writer. The send is a
+    /// definite pre-write failure, not an uncertain transport loss.
+    fn closed_session() -> ClaudeCodeSession {
+        ClaudeCodeSession {
+            kind: HarnessKind::ClaudeCode,
+            stdin_tx: None,
+            events_rx: None,
+            supervisor: None,
+            writer: None,
+            pid: 0,
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            interrupt_requested: Arc::new(AtomicBool::new(false)),
+            stderr: StderrRing::new(),
+            shared: Arc::new(Mutex::new(SharedState::new())),
+            mcp_config: None,
+            first_attachments: Vec::new(),
+            first_send: false,
+            closed: false,
+            control_seq: 0,
+            fixed_permission_mode: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_writer_is_a_definite_pre_write_failure() {
+        let mut session = closed_session();
+        let error = session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("the writer is gone");
+        assert!(
+            matches!(error, HarnessError::NotSent { .. }),
+            "a frame the writer never accepted is not an uncertain transport failure: {error:?}"
+        );
+        session.shutdown().await.expect("shutdown");
+    }
+
+    /// Claude's stdin is a queue of turns, so a steer written mid-turn cannot be
+    /// attributed to the running turn or to the next one. The adapter refuses it
+    /// instead of letting the daemon settle the wrong turn, and writes nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_refuses_a_steer_instead_of_writing_a_second_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (install, log) = fake_cli(workspace.path(), "      :");
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        let error = session
+            .steer(UserInput {
+                text: "go left".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("claude does not take a mid-turn steer");
+        match error {
+            HarnessError::Unsupported { feature, .. } => {
+                assert!(feature.contains("steering a running turn"), "{feature}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .all(|frame| frame["type"] != "user"),
+            "a refused steer writes no user frame"
+        );
         session.shutdown().await.expect("shutdown");
     }
 

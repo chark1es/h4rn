@@ -38,7 +38,7 @@ describe("keybindings", () => {
     }
   });
 
-  it("refuses chords without Cmd or Ctrl", () => {
+  it("refuses chords without Cmd or Ctrl, except the composer's Option+Up", () => {
     expect(chordFromEvent(press("KeyT", "t", { ctrlKey: false }))).toBeNull();
     expect(parseChord("shift+t")).toBeNull();
     expect(parseChord("t")).toBeNull();
@@ -46,6 +46,25 @@ describe("keybindings", () => {
       ok: false,
       reason: "Shortcuts need Cmd or Ctrl plus a key.",
     });
+    // Option alone is allowed to parse so the composer can offer Alt+Up, but
+    // only the command that opted in may bind it.
+    const bareAlt = parseChord("alt+arrowup");
+    expect(bareAlt && formatChord(bareAlt)).toBe("alt+arrowup");
+    expect(rebind("terminal.toggle", "alt+t")).toEqual({
+      ok: false,
+      reason: "Shortcuts need Cmd or Ctrl plus a key.",
+    });
+    const optionUp = chordFromEvent(press("ArrowUp", "ArrowUp", { ctrlKey: false, altKey: true }));
+    expect(optionUp && matchCommand(optionUp)).toBe("thread.editQueuedMessage");
+  });
+
+  it("binds the queue shortcuts", () => {
+    expect(bindingFor("thread.steerQueuedMessage")).toBe("mod+shift+enter");
+    expect(bindingFor("thread.editQueuedMessage")).toBe("alt+arrowup");
+    const steer = chordFromEvent(press("Enter", "Enter", { shiftKey: true }));
+    expect(steer && matchCommand(steer)).toBe("thread.steerQueuedMessage");
+    expect(rebind("thread.editQueuedMessage", "alt+arrowdown")).toEqual({ ok: true });
+    expect(bindingFor("thread.editQueuedMessage")).toBe("alt+arrowdown");
   });
 
   it("reads the physical key so Shift and Option do not change the match", () => {

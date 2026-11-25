@@ -566,19 +566,16 @@ impl CodexSession {
 
     async fn write_frame(&mut self, frame: Value) -> Result<(), HarnessError> {
         let Some(sender) = &self.stdin_tx else {
-            return Err(HarnessError::Transport {
+            return Err(HarnessError::NotSent {
                 harness: self.kind,
                 message: "codex stdin is closed".into(),
             });
         };
         let bytes = encode_frame(frame)?;
-        sender
-            .send(bytes)
-            .await
-            .map_err(|_| HarnessError::Transport {
-                harness: self.kind,
-                message: "codex writer task has exited".into(),
-            })
+        sender.send(bytes).await.map_err(|_| HarnessError::NotSent {
+            harness: self.kind,
+            message: "codex writer task has exited".into(),
+        })
     }
 
     fn mark_state(&self, state: AgentState) {
@@ -725,7 +722,7 @@ impl HarnessSession for CodexSession {
 
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
         if self.closed || self.shutting_down.load(Ordering::SeqCst) {
-            return Err(HarnessError::Transport {
+            return Err(HarnessError::NotSent {
                 harness: self.kind,
                 message: "session is shut down".into(),
             });
@@ -737,7 +734,7 @@ impl HarnessSession for CodexSession {
             attachments.extend(self.first_attachments.iter().cloned());
         }
 
-        let thread_id = self.session_id().ok_or_else(|| HarnessError::Transport {
+        let thread_id = self.session_id().ok_or_else(|| HarnessError::NotSent {
             harness: self.kind,
             message: "codex session has no thread id".into(),
         })?;
@@ -762,6 +759,31 @@ impl HarnessSession for CodexSession {
         }
         self.interrupt_requested.store(false, Ordering::SeqCst);
         self.mark_state(AgentState::Thinking);
+        Ok(())
+    }
+
+    async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        if self.closed || self.shutting_down.load(Ordering::SeqCst) {
+            return Err(HarnessError::NotSent {
+                harness: self.kind,
+                message: "session is shut down".into(),
+            });
+        }
+        let thread_id = self.session_id().ok_or_else(|| HarnessError::NotSent {
+            harness: self.kind,
+            message: "codex session has no thread id".into(),
+        })?;
+        let expected =
+            lock(&self.shared)
+                .turn_id
+                .clone()
+                .ok_or_else(|| HarnessError::Unsupported {
+                    harness: self.kind,
+                    feature: "steering without a running turn".into(),
+                })?;
+        let (method, params) =
+            steer_request(&thread_id, &expected, &input.text, &input.attachments);
+        self.request(method, params).await?;
         Ok(())
     }
 
@@ -1379,6 +1401,41 @@ fn provider_arguments(env: &BTreeMap<String, String>) -> Vec<String> {
     arguments
 }
 
+/// The `turn/steer` parameters for one message.
+///
+/// Kept separate so the wire shape (thread, expected turn and normalized input)
+/// is testable without a live app-server.
+pub fn steer_params(
+    thread_id: &str,
+    expected_turn_id: &str,
+    text: &str,
+    attachments: &[AttachmentRef],
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "expectedTurnId": expected_turn_id,
+        "input": build_turn_input(text, attachments),
+    })
+}
+
+/// The request method and parameters that deliver one message into the
+/// running turn.
+///
+/// The method is app-server's own name; naming the expected turn is what makes
+/// a steer that loses its race a server-side rejection instead of a message
+/// landing in whatever turn runs next.
+pub fn steer_request(
+    thread_id: &str,
+    expected_turn_id: &str,
+    text: &str,
+    attachments: &[AttachmentRef],
+) -> (&'static str, Value) {
+    (
+        "turn/steer",
+        steer_params(thread_id, expected_turn_id, text, attachments),
+    )
+}
+
 /// Builds the `turn/start` input array from text and attachments.
 ///
 /// Images become `localImage` items (Codex reads the path itself); every other
@@ -1560,6 +1617,58 @@ mod tests {
     use super::*;
     use h4rn_protocol::AttachmentId;
 
+    /// A session whose writer channel is already gone.
+    fn closed_session() -> CodexSession {
+        CodexSession {
+            kind: HarnessKind::Codex,
+            stdin_tx: None,
+            events_rx: None,
+            supervisor: None,
+            writer: None,
+            reader: None,
+            pid: 0,
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            interrupt_requested: Arc::new(AtomicBool::new(false)),
+            stderr: crate::claude_code::process::StderrRing::new(),
+            shared: Arc::new(Mutex::new({
+                let mut shared = SharedState::new();
+                // A live session id and turn so the steer reaches the write.
+                shared.session_id = Some("thread_test".into());
+                shared.turn_id = Some("turn_test".into());
+                shared
+            })),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            approvals: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicU64::new(1),
+            first_attachments: Vec::new(),
+            first_send: false,
+            closed: false,
+            settings: CodexSettings {
+                model: "test".into(),
+                runtime_mode: RuntimeMode::ApprovalRequired,
+                effort: None,
+                fast: false,
+            },
+            catalog: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_writer_is_a_definite_pre_write_failure() {
+        let mut session = closed_session();
+        let error = session
+            .steer(UserInput {
+                text: "go left".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("a closed writer cannot take the steer");
+        assert!(
+            matches!(error, HarnessError::NotSent { .. }),
+            "a frame the writer never accepted is not an uncertain transport failure: {error:?}"
+        );
+    }
+
     #[test]
     fn parses_the_codex_version_banner() {
         assert_eq!(
@@ -1677,6 +1786,21 @@ mod tests {
         assert_eq!(input[2]["type"], "mention");
         assert_eq!(input[2]["name"], "report.csv");
         assert_eq!(input[2]["path"], "/tmp/report.csv");
+    }
+
+    #[test]
+    fn steer_parameters_name_the_expected_turn_and_normalized_input() {
+        let params = steer_params("thread_native", "turn_running", "turn left", &[]);
+        assert_eq!(params["threadId"], "thread_native");
+        assert_eq!(params["expectedTurnId"], "turn_running");
+        assert_eq!(params["input"][0]["type"], "text");
+        assert_eq!(params["input"][0]["text"], "turn left");
+    }
+
+    #[test]
+    fn a_steer_is_the_app_servers_own_turn_steer_method() {
+        let (method, _) = steer_request("thread_native", "turn_running", "turn left", &[]);
+        assert_eq!(method, "turn/steer");
     }
 
     #[test]

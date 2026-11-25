@@ -1,19 +1,153 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { CircleCheckIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ChevronUpIcon,
+  CircleCheckIcon,
+  CornerDownRightIcon,
+  PencilIcon,
+  XIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
-import type { ThreadSummary } from "@/gen";
+import type { QueuedMessage, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { isTurnRunning } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
 import { absoluteTime, cost, duration, tokens } from "@/lib/format";
+import {
+  moveQueuedMessage,
+  removeQueuedMessage,
+  sendQueuedNow,
+  useApp,
+} from "@/lib/store/appStore";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { TurnBlock } from "./TurnBlock";
 
 type Row =
   | { kind: "turn"; turn: StreamTurn; key: string }
-  | { kind: "pending"; message: PendingMessage; key: string };
+  | { kind: "pending"; message: PendingMessage; key: string }
+  | { kind: "queued"; message: QueuedMessage; key: string; index: number };
+
+/**
+ * The copy for what Send now will really do with this row right now.
+ *
+ * The daemon publishes `steerable` per row: a message with its own permission
+ * ceiling, or one that may already have been delivered, is moved to the front
+ * instead. The hint says exactly that instead of promising a steer.
+ */
+export function sendNowHint(summary: ThreadSummary, message: QueuedMessage): string {
+  if (message.delivery_unknown) {
+    return "May have been delivered; sending again adds a second copy";
+  }
+  if (isTurnRunning(summary)) {
+    return message.steerable
+      ? "Send now steers it into this turn"
+      : "Waits for this turn to finish";
+  }
+  return "Send now starts it next";
+}
+
+export function QueuedTurn({
+  threadId,
+  summary,
+  message,
+  index,
+  total,
+  editing,
+}: {
+  threadId: string;
+  summary: ThreadSummary;
+  message: QueuedMessage;
+  index: number;
+  /**
+   * How many messages wait in total.
+   *
+   * The rows are a bounded page, so the last visible row is not necessarily the
+   * queue's last; the caller knows the full count.
+   */
+  total: number;
+  editing: boolean;
+}) {
+  const steers = isTurnRunning(summary) && message.steerable;
+  return (
+    <div className="q-queued" data-editing={editing || undefined}>
+      <div className="q-queued-h">
+        <span className="q-queued-label">
+          {message.delivery_unknown ? "May have been delivered" : "Queued"}
+        </span>
+        <span className="q-faint">{sendNowHint(summary, message)}</span>
+      </div>
+      <div className="q-queued-text">{message.text}</div>
+      {message.attachments.length > 0 ? (
+        <MessageAttachments attachments={message.attachments} align="start" />
+      ) : null}
+      <div className="q-queued-a">
+        <button
+          type="button"
+          className="q-btn ghost"
+          onClick={() => void sendQueuedNow(threadId, message.message_id)}
+          title={
+            message.delivery_unknown
+              ? "Send this message again; it may already be in the turn"
+              : steers
+                ? "Steer this message into the running turn"
+                : "Move this message to the front of the queue"
+          }
+        >
+          <CornerDownRightIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          {message.delivery_unknown ? "Send again" : "Send now"}
+        </button>
+        <button
+          type="button"
+          className="q-btn ghost"
+          onClick={() =>
+            window.dispatchEvent(
+              new CustomEvent("h4rn:edit-queued", {
+                detail: { threadId, message },
+              }),
+            )
+          }
+          title="Edit in the composer"
+        >
+          <PencilIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          Edit
+        </button>
+        <button
+          type="button"
+          className="q-btn ghost"
+          onClick={() => void removeQueuedMessage(threadId, message.message_id)}
+          title={message.delivery_unknown ? "Discard this row" : "Remove from the queue"}
+        >
+          <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+          {message.delivery_unknown ? "Discard" : "Remove"}
+        </button>
+        <span className="grow" />
+        <button
+          type="button"
+          className="q-ibtn"
+          disabled={index === 0}
+          aria-label="Move up"
+          title="Move up"
+          onClick={() => void moveQueuedMessage(threadId, message.message_id, "up")}
+        >
+          <ChevronUpIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        </button>
+        <button
+          type="button"
+          className="q-ibtn"
+          disabled={index === total - 1}
+          aria-label="Move down"
+          title="Move down"
+          onClick={() => void moveQueuedMessage(threadId, message.message_id, "down")}
+        >
+          <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function PendingTurn({ message }: { message: PendingMessage }) {
   return (
@@ -78,6 +212,14 @@ export function ThreadStream({
   const focusTurn = useRef(0);
   const isPhone = useIsPhone();
 
+  const editingId = useApp((state) => state.ui.queuedEdit?.messageId ?? null);
+  const queuedEditThread = useApp((state) => state.ui.queuedEdit?.threadId ?? null);
+  // The queue's rows are fetched separately from the summary, which only counts
+  // them: a full queue can be larger than one transport frame.
+  const queue = useApp((state) => state.queues[threadId]);
+  const queued = queue?.queued;
+  const queuedTotal = queue?.total ?? 0;
+
   const rows = useMemo<Row[]>(() => {
     const next: Row[] = turns.map((turn) => ({
       kind: "turn",
@@ -87,8 +229,16 @@ export function ThreadStream({
     for (const message of pending) {
       next.push({ kind: "pending", message, key: message.id });
     }
+    (queued ?? []).forEach((message, index) => {
+      next.push({
+        kind: "queued",
+        message,
+        key: `queued:${message.message_id}`,
+        index,
+      });
+    });
     return next;
-  }, [turns, pending]);
+  }, [turns, pending, queued]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -112,7 +262,9 @@ export function ThreadStream({
               ? `${lastItem.toolCall.tool_call_id}:${lastItem.toolCall.status}`
               : (lastItem?.itemId ?? "")
         }`
-      : `${lastRow.key}:${lastRow.message.sending}`
+      : lastRow.kind === "pending"
+        ? `${lastRow.key}:${lastRow.message.sending}`
+        : `${lastRow.key}:${lastRow.message.text.length}`
     : "";
 
   // Follow the tail only while the reader is already at the bottom.
@@ -173,8 +325,17 @@ export function ThreadStream({
                   onReply={onReply}
                   staleAt={item.index === rows.length - 1 ? staleAt : null}
                 />
-              ) : (
+              ) : row.kind === "pending" ? (
                 <PendingTurn message={row.message} />
+              ) : (
+                <QueuedTurn
+                  threadId={threadId}
+                  summary={summary}
+                  message={row.message}
+                  index={row.index}
+                  total={queuedTotal}
+                  editing={queuedEditThread === threadId && editingId === row.message.message_id}
+                />
               )}
             </div>
           );
