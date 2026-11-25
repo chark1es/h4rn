@@ -19,6 +19,7 @@ import {
   setThreadTab,
   setUi,
   snoozeThread,
+  steerOldestQueued,
   togglePanel,
   togglePin,
   toggleSidebar,
@@ -172,6 +173,13 @@ export function runCommand(id: CommandId, state: State = getState()): boolean {
       // The focused composer owns its file picker and listens for this event.
       window.dispatchEvent(new CustomEvent("h4rn:attach"));
       return true;
+    case "thread.steerQueuedMessage":
+      if (!openId) return false;
+      return steerOldestQueued(openId);
+    case "thread.editQueuedMessage":
+      // The composer handles this itself, because only it knows whether the
+      // caret is at the start; Option+Up must stay a caret key elsewhere.
+      return false;
     case "sidebar.toggle":
       toggleSidebar();
       return true;

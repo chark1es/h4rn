@@ -1398,6 +1398,71 @@ fieldset.q-seg-fs {
   align-items: flex-end;
   gap: 6px;
 }
+
+/* A message waiting for the turn to finish. Dashed because it is not in the
+   transcript yet; quiet until the person reaches for one of its actions. */
+.q-queued {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--fg);
+}
+.q-queued[data-editing] {
+  border-color: var(--accent);
+}
+.q-queued-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  font-size: 12px;
+}
+.q-queued-label {
+  font-weight: 500;
+  color: var(--fg-2);
+}
+.q-queued-text {
+  font-size: 14px;
+  line-height: 21px;
+  white-space: pre-wrap;
+  /* A pasted URL or a hash has no spaces to break at: wrap it instead of
+     pushing the row past the thread at phone width. */
+  overflow-wrap: anywhere;
+  color: var(--fg-2);
+  max-width: 84%;
+}
+.q-queued-a {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+/* A phone finger needs 44 px on the move buttons, which are icon-only. */
+@media (max-width: 639px) {
+  .q-queued-a .q-ibtn {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+}
+.q-edit-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px 6px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.q-edit-bar .t {
+  font-weight: 500;
+}
+
 .q-bubble {
   background: var(--fill);
   padding: 9px 14px;

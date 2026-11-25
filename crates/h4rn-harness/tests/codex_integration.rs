@@ -126,3 +126,58 @@ async fn real_codex_two_turns_and_resume() {
     );
     resumed.shutdown().await.expect("shutdown resumed session");
 }
+
+#[tokio::test]
+#[ignore = "spawns a real codex process and spends tokens"]
+async fn real_codex_takes_a_steer_mid_turn() {
+    let harness = CodexHarness::new();
+    let install = harness
+        .detect()
+        .expect("codex must be installed for this test");
+    eprintln!("using {} ({})", install.path.display(), install.version);
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let mut session = harness
+        .start_session(spec(workspace.path(), None))
+        .await
+        .expect("start session");
+    let mut events = session.events();
+    session
+        .send(UserInput {
+            text: "Write a short paragraph about tides, then stop.".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("send prompt");
+
+    tokio::time::timeout(Duration::from_secs(180), async {
+        while let Some(event) = events.next().await {
+            if matches!(event, HarnessEvent::TextDelta { .. }) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the turn to start");
+
+    session
+        .steer(UserInput {
+            text: "Now reply with exactly: steered-ok".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("codex app-server accepts a turn/steer");
+
+    let completed = tokio::time::timeout(Duration::from_secs(240), async {
+        while let Some(event) = events.next().await {
+            if let HarnessEvent::TurnCompleted { status, usage } = event {
+                return (status, usage);
+            }
+        }
+        panic!("the event stream ended before the turn completed");
+    })
+    .await
+    .expect("timed out waiting for the turn");
+    assert_eq!(completed.0, TurnStatus::Completed);
+    session.shutdown().await.expect("shutdown");
+}
