@@ -198,6 +198,58 @@ pub enum ResponseBody {
         /// Durable daemon-global sequence of the last event written for it.
         #[ts(type = "number")]
         seq: u64,
+        /// The queued message this send created, when it waits for a turn.
+        ///
+        /// A client removes its optimistic row and shows the durable queue row
+        /// instead; a steered or immediately started message is in the
+        /// transcript and has no queued id.
+        #[serde(default)]
+        #[ts(optional)]
+        queued_message_id: Option<crate::ids::QueuedMessageId>,
+        /// Whether the text reached the turn without its transcript row being
+        /// recorded.
+        ///
+        /// A steer is delivered into the running turn before the daemon can
+        /// record its user row. If that write fails the harness already has the
+        /// text, so the send is reported as delivered: a client shows it and
+        /// does not resend it, because a resend would put the same words into
+        /// the turn twice.
+        #[serde(default)]
+        unrecorded: bool,
+    },
+    /// A thread's queue changed.
+    ///
+    /// `queued` is one bounded page (see [`crate::common::queue_page`]),
+    /// starting at the first message; `total` is the whole queue's length.
+    QueueUpdated {
+        /// Thread whose queue changed.
+        thread_id: ThreadId,
+        /// The queue after the change, oldest first, bounded.
+        queued: Vec<crate::common::QueuedMessage>,
+        /// How many messages wait in total.
+        total: u32,
+        /// The revision this page came from; see
+        /// [`crate::ThreadSummary::queue_revision`].
+        #[ts(type = "number")]
+        revision: u64,
+        /// Durable daemon-global sequence of the summary event.
+        #[ts(type = "number")]
+        seq: u64,
+    },
+    /// One page of a thread's queue.
+    ThreadQueue {
+        /// Thread whose queue was read.
+        thread_id: ThreadId,
+        /// Messages from `offset`, in queue order, bounded by the frame limit.
+        queued: Vec<crate::common::QueuedMessage>,
+        /// How many messages wait in total.
+        total: u32,
+        /// Index of the first message in the next page.
+        next_offset: u32,
+        /// The revision this page came from; see
+        /// [`crate::ThreadSummary::queue_revision`].
+        #[ts(type = "number")]
+        revision: u64,
     },
     /// A thread was rewound to before one of its prompts.
     Rewound {
@@ -951,6 +1003,11 @@ pub enum ProtoErrorCode {
     NotImplemented,
     /// The daemon or an upstream is rate limited.
     RateLimited,
+    /// A write may have reached its destination before the connection failed.
+    ///
+    /// The daemon cannot tell whether a prompt or steer landed, so the client
+    /// must not resend it: the text may already be in the turn.
+    DeliveryUnclear,
     /// An internal failure; retryable at the client's discretion.
     Internal,
 }

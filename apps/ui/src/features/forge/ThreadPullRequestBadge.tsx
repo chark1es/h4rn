@@ -32,9 +32,14 @@ function issueScopeLabel(issue: ThreadIssue): string {
     return `${owner}/${repo}#${issue.issue_id}`;
   }
   const state = issue.state;
-  if (state?.tracker !== "linear") return issue.issue_id;
-  // Name the team the way Linear shows it (`ENG`), not its internal UUID.
-  return `${state.issue.identifier} (${state.issue.team_key})`;
+  if (state?.tracker === "linear") {
+    // Name the team the way Linear shows it (`ENG`), not its internal UUID.
+    return `${state.issue.identifier} (${state.issue.team_key})`;
+  }
+  // A failed refresh empties the state. The identifier stored at link time
+  // still names the issue; a link made before it was stored gets a label
+  // instead of the provider's internal id.
+  return issue.identifier ?? "Linear issue";
 }
 
 /**
@@ -60,7 +65,23 @@ function issueLabel(issue: ThreadIssue): string {
 }
 
 function issueTitle(issue: ThreadIssue): string {
-  return issue.state ? issue.state.issue.title : "Issue unavailable";
+  return issue.state?.issue.title ?? issue.title ?? "Issue unavailable";
+}
+
+/**
+ * A refresh error is the daemon's own words, but an older daemon names the
+ * issue by the provider's internal id. Replace it with the name the person
+ * knows, so the UUID never appears on screen.
+ */
+function issueErrorMessage(issue: ThreadIssue): string {
+  const error = issue.error ?? "";
+  if (issue.scope.tracker !== "linear" || !issue.issue_id) return error;
+  const name = issue.identifier ?? "Linear issue";
+  // An older daemon may have echoed the id in either case.
+  const id = issue.issue_id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return error
+    .replace(new RegExp(`Linear issue ${id}`, "gi"), () => name)
+    .replace(new RegExp(id, "gi"), () => name);
 }
 
 function issueUrl(issue: ThreadIssue): string {
@@ -242,7 +263,9 @@ export function LinkedPullRequestsMenu({
                 <span className="q-pr-link-name">{issueTitle(issue)}</span>
                 <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               </DropdownMenuItem>
-              {issue.error ? <p className="q-pr-note q-danger">{issue.error}</p> : null}
+              {issue.error ? (
+                <p className="q-pr-note q-danger">{issueErrorMessage(issue)}</p>
+              ) : null}
               {onUnlinkIssue ? (
                 <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlinkIssue(issue)}>
                   <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />

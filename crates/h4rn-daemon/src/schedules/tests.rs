@@ -2303,6 +2303,8 @@ fn idle_thread_meta(
         pending_rewind: None,
         worktree_identity: None,
         provider_turns: Default::default(),
+        queued: Vec::new(),
+        claimed: Vec::new(),
         imported: None,
     }
 }

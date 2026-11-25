@@ -16,7 +16,7 @@ use h4rn_daemon::network_access::NetworkAccess;
 use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::schedules::ScheduleService;
 use h4rn_daemon::threads::ThreadManagerOptions;
-use h4rn_harness::FakeHarness;
+use h4rn_harness::{FakeHarness, HarnessEvent};
 use h4rn_protocol::{
     BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, FsOmitted,
     HarnessKind, HostId, MessageRole, PairScope, ProjectSource, ProtoError, ProtoErrorCode,
@@ -81,6 +81,18 @@ async fn boot_at(
     devices: Arc<DeviceRegistry>,
     owned: Option<tempfile::TempDir>,
 ) -> TestDaemon {
+    boot_with_harness(data_dir, service, devices, owned, FakeHarness::new()).await
+}
+
+/// Boots with a harness a test scripted: an event list that never completes a
+/// turn leaves a thread running, so later messages really queue.
+async fn boot_with_harness(
+    data_dir: std::path::PathBuf,
+    service: Arc<SecureService>,
+    devices: Arc<DeviceRegistry>,
+    owned: Option<tempfile::TempDir>,
+    harness: FakeHarness,
+) -> TestDaemon {
     let workspace = data_dir.clone();
     let config = Config {
         data_dir,
@@ -101,7 +113,7 @@ async fn boot_at(
     let daemon = DaemonBuilder::new(config)
         // Titles never spawn the machine's own claude or codex.
         .without_title_agents()
-        .with_harness(Arc::new(FakeHarness::new()))
+        .with_harness(Arc::new(harness))
         .with_lifecycle(options)
         .with_secure(Arc::clone(&service))
         .with_devices(Arc::clone(&devices))
@@ -505,6 +517,135 @@ async fn secure_transport_creates_a_thread() {
     assert!(!summary.thread_id.as_str().is_empty());
 }
 
+/// A queue can be larger than a paired transport's frame, so the summary only
+/// counts it and the contents come in bounded pages.
+#[tokio::test]
+async fn a_large_queue_stays_out_of_the_summary_and_comes_in_pages() {
+    let client_identity = device_identity();
+    let daemon_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(daemon_identity).with_policy(allowed),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    for key in service.allowed_devices() {
+        devices
+            .insert_direct(key, PairScope::ALL.to_vec())
+            .expect("persist");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workspace = dir.path().to_path_buf();
+    // A scripted turn that never completes keeps the thread running, so the
+    // messages really wait in the queue.
+    let harness = FakeHarness::with_events(vec![HarnessEvent::TextDelta {
+        text: "working".into(),
+    }]);
+    let daemon = boot_with_harness(
+        workspace.clone(),
+        Arc::clone(&service),
+        devices,
+        Some(dir),
+        harness,
+    )
+    .await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = host_of(&mut client).await;
+    let created = client
+        .request(create_thread_in(host, &workspace.display().to_string()))
+        .await
+        .expect("create");
+    let thread_id = match created {
+        ResponseBody::ThreadCreated { thread_id, .. } => thread_id,
+        other => panic!("unexpected CreateThread response: {other:?}"),
+    };
+
+    // Six messages of 120 KiB each: more than two whole frames if they were
+    // ever carried together.
+    let piece = "q".repeat(120 * 1024);
+    let mut expected = Vec::new();
+    for index in 0..6 {
+        let text = format!("{index}: {piece}");
+        expected.push(text.clone());
+        client
+            .request(ClientRequest::SendMessage {
+                thread_id: thread_id.clone(),
+                text,
+                attachments: Vec::new(),
+                steer: false,
+                turn_id: None,
+            })
+            .await
+            .expect("queue the message");
+    }
+
+    // The summary that counts them stays small: the rows are not inside it.
+    // (The transport chunks an oversized frame, so the frame size alone would
+    // not catch a summary that carried the queue; this measures the summary.)
+    let counted = loop {
+        let text = client.read_raw_text().await;
+        let frame: ServerFrame = serde_json::from_str(&text).expect("parse ServerFrame");
+        if let ServerFrame::Event {
+            event: Event::ThreadUpserted(summary),
+            ..
+        } = frame
+            && summary.thread_id == thread_id
+        {
+            assert!(
+                text.len() < 16 * 1024,
+                "a summary of {} bytes carries far more than counts",
+                text.len()
+            );
+            break summary;
+        }
+    };
+    assert_eq!(counted.queued_count, 6, "every message is counted");
+
+    // The queue comes back in bounded pages, never all at once.
+    let mut offset = 0;
+    let mut texts = Vec::new();
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        let result = client
+            .request(ClientRequest::GetThreadQueue {
+                thread_id: thread_id.clone(),
+                offset,
+            })
+            .await
+            .expect("queue page");
+        let page = match result {
+            ResponseBody::ThreadQueue {
+                queued,
+                total,
+                next_offset,
+                ..
+            } => {
+                assert_eq!(total, 6);
+                assert!(
+                    queued.len() <= h4rn_protocol::QUEUE_PAGE_MESSAGES,
+                    "a page is bounded by count"
+                );
+                texts.extend(queued.iter().map(|message| message.text.clone()));
+                next_offset
+            }
+            other => panic!("unexpected queue response: {other:?}"),
+        };
+        if page >= 6 {
+            break;
+        }
+        assert!(page > offset, "a page must make progress");
+        offset = page;
+    }
+    assert_eq!(texts, expected, "every page carries a message whole");
+    assert!(
+        pages > 1,
+        "740 KiB of queue does not arrive in one response"
+    );
+    client.close().await;
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
     // The paired transport refuses a frame over 512 KiB. A long prompt must
@@ -558,6 +699,8 @@ async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
                 thread_id: thread_id.clone(),
                 text: text.clone(),
                 attachments: Vec::new(),
+                steer: false,
+                turn_id: None,
             })
             .await;
         assert!(
@@ -625,6 +768,163 @@ async fn a_large_prompt_fits_the_paired_frames_and_is_replayed_whole() {
             "every accepted prompt is replayed whole"
         );
     }
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn legacy_rows_replay_whole_and_in_order_over_the_paired_transport() {
+    // Rows written before `at` existed re-serialize with `"at":null`, so a
+    // page budgeted by stored bytes can carry more text than the budget says.
+    // The paired transport must still deliver every event whole, in order,
+    // with each frame under its limit: an oversized event travels in chunks.
+    let client_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(allowed),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = match client
+        .request(ClientRequest::ListHosts)
+        .await
+        .expect("hosts")
+    {
+        ResponseBody::Hosts { hosts } => hosts[0].host_id.clone(),
+        other => panic!("unexpected host response: {other:?}"),
+    };
+    let thread_id = match client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            agent_id: None,
+            workspace_path: daemon.workspace.display().to_string(),
+            model: "fake-model".into(),
+            prompt: "start".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            reasoning_effort: None,
+            fast: false,
+            worktree: None,
+        })
+        .await
+        .expect("create thread")
+    {
+        ResponseBody::ThreadCreated { thread_id, .. } => thread_id,
+        other => panic!("unexpected CreateThread response: {other:?}"),
+    };
+
+    // The daemon keeps its journal in the test's data directory; a second
+    // connection writes rows the way an older daemon left them.
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(daemon.workspace.join("events.db"))
+                .create_if_missing(true),
+        )
+        .await
+        .expect("journal connection");
+    let cursor: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(seq), 0) FROM daemon_wire_events WHERE thread_id = ?",
+    )
+    .bind(thread_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .expect("last seq");
+
+    // One event larger than the transport's 512 KiB frame limit, alone in its
+    // stored-byte page, then two small ones that follow it.
+    let huge = "l".repeat(700 * 1024);
+    let legacy = |index: usize, text: &str| {
+        serde_json::json!({
+            "type": "item_completed",
+            "thread_id": thread_id.as_str(),
+            "turn_id": "turn_legacy",
+            "item": {
+                "kind": "message",
+                "item_id": format!("legacy-{index}"),
+                "role": "user",
+                "text": text,
+                "attachments": [],
+            },
+        })
+        .to_string()
+    };
+    let mut expected = Vec::new();
+    for (index, text) in [(0, huge.as_str()), (1, "small one"), (2, "small two")] {
+        let seq: i64 = sqlx::query_scalar(
+            "INSERT INTO daemon_wire_events (thread_id, event_json, recorded_at)
+             VALUES (?, ?, '2026-11-20T10:00:00Z') RETURNING seq",
+        )
+        .bind(thread_id.as_str())
+        .bind(legacy(index, text))
+        .fetch_one(&pool)
+        .await
+        .expect("legacy row");
+        expected.push((seq as u64, format!("legacy-{index}"), text.len()));
+    }
+
+    let last_legacy = expected.last().expect("legacy rows").0;
+    let mut since = cursor as u64;
+    let mut seen = Vec::new();
+    let mut chunked_pages = 0;
+    loop {
+        let (frames, result) = client
+            .request_frames(ClientRequest::GetThread {
+                thread_id: thread_id.clone(),
+                since_seq: since,
+            })
+            .await;
+        for frame in &frames {
+            assert!(
+                frame.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+                "a replayed frame is {} bytes, over the transport limit",
+                frame.len()
+            );
+        }
+        if frames.len() > 1 {
+            chunked_pages += 1;
+        }
+        match result {
+            Ok(ResponseBody::Thread {
+                events,
+                next_seq,
+                more,
+                ..
+            }) => {
+                for entry in events {
+                    // The thread's own turn may still write live events; only
+                    // the rows this test wrote are being checked.
+                    if !expected.iter().any(|(seq, _, _)| *seq == entry.seq) {
+                        continue;
+                    }
+                    let Event::ItemCompleted {
+                        item: h4rn_protocol::Item::Message { item_id, text, .. },
+                        ..
+                    } = entry.event
+                    else {
+                        panic!("unexpected replayed legacy event: {:?}", entry.event);
+                    };
+                    seen.push((entry.seq, item_id, text.len()));
+                }
+                since = next_seq;
+                if !more || since >= last_legacy {
+                    break;
+                }
+            }
+            other => panic!("unexpected GetThread answer: {other:?}"),
+        }
+    }
+    assert!(
+        chunked_pages > 0,
+        "the oversized legacy event needed outbound chunks"
+    );
+    assert_eq!(
+        seen, expected,
+        "every legacy event arrives whole, exactly once, in order"
+    );
     client.close().await;
     daemon.stop().await;
 }

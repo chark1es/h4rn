@@ -22,7 +22,8 @@ for files.
 - The message you chose is removed, together with every later turn.
 - Prompts and cuts are read in journal order. A prompt sent after an earlier
   rewind is part of the conversation: editing it removes it and everything
-  after it, and never resurrects the prompt the earlier rewind removed.
+  after it, and never resurrects the prompt the earlier rewind removed. A
+  queued message joins the transcript only when it runs, under its own turn.
 - The kept conversation stays readable and is what the next turn continues
   from. A handoff keeps a turn's prompt and its reply together even when a
   message queued behind that turn reached the journal first.
@@ -54,9 +55,9 @@ provider session — can only use a handoff.
 
 When no provider session exists yet (a thread whose first turn never started a
 session), a rewind is always a handoff: there is no provider history to
-truncate. A queued message is journaled under the turn that finally runs it, so
-its provider boundary is its own, not the turn that happened to be running when
-it arrived.
+truncate. A queued message becomes part of the conversation when it runs, under
+its own turn, so its provider boundary is its own, not the turn that happened to
+be running when it arrived.
 
 The provider boundary is applied at the **next** session start. The old
 session is shut down at rewind time so it can never be sent another prompt.

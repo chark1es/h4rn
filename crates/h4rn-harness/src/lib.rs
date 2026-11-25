@@ -69,7 +69,8 @@ pub use codex::{
 };
 pub use fake::{
     EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, McpInjection, RewindSpecs,
-    SendCount, SessionCount, SessionMcp, SessionModels, SessionSettings, SettingChange, test_spec,
+    SendCount, SessionCount, SessionMcp, SessionModels, SessionSettings, SettingChange, SteerCount,
+    test_spec,
 };
 pub use homes::{HomeError, harness_home, home_variable, resolve_home};
 pub use opencode::{
@@ -376,6 +377,20 @@ pub enum HarnessError {
         /// Underlying failure.
         message: String,
     },
+    /// The frame never reached the transport, so nothing was delivered.
+    ///
+    /// A closed writer, a shut-down session or a channel whose writer task has
+    /// already exited is a definite pre-write failure: unlike [`Self::Transport`]
+    /// it cannot have left the text half-written. The daemon puts a message it
+    /// was steering back in the queue instead of treating the delivery as
+    /// unknown.
+    #[error("{harness:?} did not take the message: {message}")]
+    NotSent {
+        /// Harness involved.
+        harness: HarnessKind,
+        /// What closed before the frame was accepted.
+        message: String,
+    },
     /// The harness refused a prompt because of a provider usage limit.
     ///
     /// Only an adapter that parsed the limit out of its own failure detail
@@ -531,8 +546,22 @@ pub trait HarnessSession: Send {
     /// adapter when a session-level switch is not supported.
     fn kind(&self) -> HarnessKind;
 
-    /// Sends a user message to the harness.
+    /// Sends a user message to the harness, starting the thread's next turn.
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError>;
+
+    /// Delivers a message into the turn that is already running.
+    ///
+    /// Only adapters with a real mid-turn input implement this; the default
+    /// refuses, so the daemon never invents steering for a harness that cannot
+    /// do it. A successful call does not start a new turn and never queues the
+    /// message anywhere else.
+    async fn steer(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        let _ = input;
+        Err(HarnessError::Unsupported {
+            harness: self.kind(),
+            feature: "steering a running turn".into(),
+        })
+    }
 
     /// Interrupts the running turn without killing the session.
     ///
@@ -728,6 +757,43 @@ impl InstanceSnapshot {
     }
 }
 
+/// What one harness adapter can do beyond the common trait.
+///
+/// Advertised per harness so the daemon can offer an action only where the
+/// adapter really implements it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HarnessCapabilities {
+    /// The adapter can take a user message into the turn that is already
+    /// running, without starting a new turn.
+    pub steer: bool,
+}
+
+/// What one harness adapter can do beyond the common trait.
+///
+/// This is a per-harness fact, not a per-thread one: everything h4rn spawns for
+/// a harness has the same mid-turn input. Keeping the matrix here means the
+/// daemon, the capability listing and the UI all answer from one place.
+pub fn capabilities(kind: HarnessKind) -> HarnessCapabilities {
+    HarnessCapabilities {
+        // Only Codex app-server has a request that really lands inside the
+        // running turn (`turn/steer`, which names the expected turn).
+        //
+        // Claude Code's stream-json stdin is a queue of turns, not a mid-turn
+        // channel. Measured against 2.1.330: a frame written while a turn is
+        // running is read between tool calls and folded into that turn's single
+        // `result` (`num_turns` counts it), but a frame that reaches the CLI
+        // after the `result` was emitted becomes a second turn with its own
+        // `result`. Both orders are legal and the stream does not say which one
+        // happened, so the daemon could not tell whether the first `result`
+        // settles the steer or a second one will follow. Guessing would settle a
+        // turn too early (losing the steer's answer) or wait for a `result` that
+        // never comes; h4rn's durable queue already gives Claude the honest
+        // follow-up, so Claude advertises no steer. OpenCode's HTTP prompt
+        // starts a queued message and ACP has one prompt at a time.
+        steer: matches!(kind, HarnessKind::Codex),
+    }
+}
+
 /// A harness adapter.
 #[async_trait]
 pub trait Harness: Send + Sync {
@@ -817,5 +883,22 @@ pub trait Harness: Send + Sync {
         _snapshot: Option<InstanceSnapshot>,
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
         self.start_session(spec).await
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_harness_with_a_real_mid_turn_input_advertises_steer() {
+        assert!(capabilities(HarnessKind::Codex).steer);
+        assert!(
+            !capabilities(HarnessKind::ClaudeCode).steer,
+            "Claude's stdin is a turn queue, so a steer cannot be attributed"
+        );
+        assert!(!capabilities(HarnessKind::Opencode).steer);
+        assert!(!capabilities(HarnessKind::Antigravity).steer);
+        assert!(!capabilities(HarnessKind::Acp).steer);
     }
 }

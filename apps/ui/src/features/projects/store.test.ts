@@ -44,6 +44,9 @@ function thread(
     file_rewind: false,
     limit: null,
     pending_guest_requests: 0,
+    queued_count: 0,
+    queue_revision: 0,
+    steer: true,
   } as ThreadSummary;
   return { ...base, ...overrides } as ThreadSummary;
 }

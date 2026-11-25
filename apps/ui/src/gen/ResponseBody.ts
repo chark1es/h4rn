@@ -73,6 +73,8 @@ import type { ProxyLimits } from "./ProxyLimits";
 import type { ProxyModelCatalog } from "./ProxyModelCatalog";
 import type { ProxyProfile } from "./ProxyProfile";
 import type { ProxyTestReport } from "./ProxyTestReport";
+import type { QueuedMessage } from "./QueuedMessage";
+import type { QueuedMessageId } from "./QueuedMessageId";
 import type { Resets } from "./Resets";
 import type { ResumeSchedule } from "./ResumeSchedule";
 import type { RewindPlan } from "./RewindPlan";
@@ -204,7 +206,68 @@ turn_id: TurnId,
 /**
  * Durable daemon-global sequence of the last event written for it.
  */
-seq: number, } | { "type": "rewound", 
+seq: number, 
+/**
+ * The queued message this send created, when it waits for a turn.
+ *
+ * A client removes its optimistic row and shows the durable queue row
+ * instead; a steered or immediately started message is in the
+ * transcript and has no queued id.
+ */
+queued_message_id?: QueuedMessageId, 
+/**
+ * Whether the text reached the turn without its transcript row being
+ * recorded.
+ *
+ * A steer is delivered into the running turn before the daemon can
+ * record its user row. If that write fails the harness already has the
+ * text, so the send is reported as delivered: a client shows it and
+ * does not resend it, because a resend would put the same words into
+ * the turn twice.
+ */
+unrecorded: boolean, } | { "type": "queue_updated", 
+/**
+ * Thread whose queue changed.
+ */
+thread_id: ThreadId, 
+/**
+ * The queue after the change, oldest first, bounded.
+ */
+queued: Array<QueuedMessage>, 
+/**
+ * How many messages wait in total.
+ */
+total: number, 
+/**
+ * The revision this page came from; see
+ * [`crate::ThreadSummary::queue_revision`].
+ */
+revision: number, 
+/**
+ * Durable daemon-global sequence of the summary event.
+ */
+seq: number, } | { "type": "thread_queue", 
+/**
+ * Thread whose queue was read.
+ */
+thread_id: ThreadId, 
+/**
+ * Messages from `offset`, in queue order, bounded by the frame limit.
+ */
+queued: Array<QueuedMessage>, 
+/**
+ * How many messages wait in total.
+ */
+total: number, 
+/**
+ * Index of the first message in the next page.
+ */
+next_offset: number, 
+/**
+ * The revision this page came from; see
+ * [`crate::ThreadSummary::queue_revision`].
+ */
+revision: number, } | { "type": "rewound", 
 /**
  * The prompt to put back in the composer.
  */

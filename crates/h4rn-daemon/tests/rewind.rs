@@ -937,7 +937,7 @@ async fn a_queued_prompt_rewinds_only_its_own_turn() {
         ))
         .await
         .expect("create");
-    let (a_item, a_turn) = next_user_item(&mut events).await;
+    let _ = next_user_item(&mut events).await;
 
     fixture
         .manager
@@ -948,15 +948,18 @@ async fn a_queued_prompt_rewinds_only_its_own_turn() {
         )
         .await
         .expect("queue B");
-    let (b_item, b_turn) = next_user_item(&mut events).await;
-    assert_ne!(
-        a_turn, b_turn,
-        "a queued message is journaled under its own delivered turn"
-    );
 
     gate.release();
     wait_turn(&mut events).await;
     wait_turn(&mut events).await;
+    // A queued message becomes part of the transcript only when it runs, with
+    // a turn of its own.
+    let b_item = prompt_item(
+        &fixture.manager,
+        &created.thread_id,
+        "B [[write:b.txt]]from B",
+    )
+    .await;
     assert_eq!(
         std::fs::read_to_string(worktree.join("a.txt")).expect("A's file"),
         "from A"
@@ -979,7 +982,6 @@ async fn a_queued_prompt_rewinds_only_its_own_turn() {
         !worktree.join("b.txt").exists(),
         "only B's change is reverted"
     );
-    let _ = a_item;
 }
 
 #[tokio::test]
@@ -1921,69 +1923,4 @@ async fn an_accepted_provider_boundary_is_durable_before_the_turn_settles() {
         .await
         .expect("rewind B after the restart");
     assert_eq!(prompt.method, RewindMethod::Native);
-}
-
-#[tokio::test]
-async fn a_handoff_keeps_the_reply_a_queued_prompt_arrived_before() {
-    let (_base, _repo, worktree) = git_worktree();
-    let (fake, gate) = FakeHarness::new().with_send_gate_after(0);
-    let fixture = make_fixture(fake).await;
-    let mut events = fixture.manager.subscribe();
-    let created = fixture
-        .manager
-        .create_thread(thread_request(&fixture.host, &worktree, "A"))
-        .await
-        .expect("create");
-    let _ = next_user_item(&mut events).await;
-    // B is journaled while A's prompt is still being written, so B's message
-    // reaches the journal before A's reply.
-    fixture
-        .manager
-        .send_message(&created.thread_id, "B".into(), Vec::new())
-        .await
-        .expect("queue B");
-    let (b_item, _) = next_user_item(&mut events).await;
-    gate.release();
-    wait_turn(&mut events).await;
-    wait_turn(&mut events).await;
-
-    // The fake harness only hands off, so the next prompt carries the kept
-    // conversation in one bounded block.
-    let prompt = fixture
-        .manager
-        .rewind_thread(&created.thread_id, &b_item, false)
-        .await
-        .expect("rewind B");
-    assert_eq!(prompt.method, RewindMethod::Handoff);
-
-    drain(&mut events);
-    fixture
-        .manager
-        .send_message(&created.thread_id, "C".into(), Vec::new())
-        .await
-        .expect("send C");
-    let mut text = String::new();
-    tokio::time::timeout(TIMEOUT, async {
-        loop {
-            match events.recv().await {
-                Ok(wire) => match wire.event {
-                    Event::MessageDelta { text: delta, .. } => text.push_str(&delta),
-                    Event::TurnCompleted { .. } => break,
-                    _ => {}
-                },
-                Err(error) => panic!("the handoff turn published no output: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("the handoff turn settled");
-
-    assert!(
-        text.contains("A") && text.contains("echo: A"),
-        "the kept prompt and its reply both reach the fresh session: {text:?}"
-    );
-    assert!(
-        !text.contains("\nB\n") && !text.contains(": B"),
-        "the removed prompt is not in the handoff: {text:?}"
-    );
 }

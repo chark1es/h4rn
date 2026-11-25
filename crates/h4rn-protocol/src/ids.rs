@@ -115,6 +115,11 @@ string_id!(
     ScheduleTaskId,
     "sch_"
 );
+string_id!(
+    /// Identifies one message waiting in a thread's follow-up queue.
+    QueuedMessageId,
+    "qm_"
+);
 
 /// The BLAKE3 content address of an attachment blob (ADR-008).
 ///

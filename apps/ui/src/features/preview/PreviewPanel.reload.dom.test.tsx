@@ -103,6 +103,9 @@ const thread: ThreadSummary = {
   rewind: "handoff",
   file_rewind: false,
   limit: null,
+  queued_count: 0,
+  queue_revision: 0,
+  steer: true,
 };
 
 let roots: Root[] = [];

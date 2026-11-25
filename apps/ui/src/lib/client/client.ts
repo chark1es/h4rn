@@ -348,12 +348,28 @@ type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello"
                                                                                                                                       type: "acp_agent_probe";
                                                                                                                                     }
                                                                                                                                   >
-                                                                                                                                : Extract<
-                                                                                                                                    ResponseBody,
-                                                                                                                                    {
-                                                                                                                                      type: "ack";
-                                                                                                                                    }
-                                                                                                                                  >;
+                                                                                                                                : T extends
+                                                                                                                                      | "queue_message"
+                                                                                                                                      | "get_thread_queue"
+                                                                                                                                  ? T extends "queue_message"
+                                                                                                                                    ? Extract<
+                                                                                                                                        ResponseBody,
+                                                                                                                                        {
+                                                                                                                                          type: "queue_updated";
+                                                                                                                                        }
+                                                                                                                                      >
+                                                                                                                                    : Extract<
+                                                                                                                                        ResponseBody,
+                                                                                                                                        {
+                                                                                                                                          type: "thread_queue";
+                                                                                                                                        }
+                                                                                                                                      >
+                                                                                                                                  : Extract<
+                                                                                                                                      ResponseBody,
+                                                                                                                                      {
+                                                                                                                                        type: "ack";
+                                                                                                                                      }
+                                                                                                                                    >;
 
 export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktrees"
   ? Extract<ResponseBody, { type: "worktrees" }>

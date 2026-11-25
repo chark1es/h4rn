@@ -2670,6 +2670,10 @@ mod tests {
             limit: None,
             rewind: Default::default(),
             file_rewind: false,
+            queued_count: 0,
+            queue_revision: 0,
+            active_turn_id: None,
+            steer: true,
         };
         assert!(guest_event(Event::ThreadUpserted(summary)).is_none());
         assert!(

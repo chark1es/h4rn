@@ -156,7 +156,8 @@ pub struct ImportEvent {
 /// One conversation's source identity, stored so it is imported once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ImportedSource {
-    /// Dedupe key: source plus session id, or the transcript path.
+    /// Dedupe key: `source:session:<id>`, or the transcript path with its size
+    /// and content fingerprint.
     pub key: String,
     /// Thread the conversation became.
     pub thread_id: crate::ids::ThreadId,
@@ -169,9 +170,14 @@ pub struct ImportedSource {
 }
 
 /// Parses the same source key the daemon writes.
+///
+/// The kind of claim is part of the stored identity: a session claim always
+/// says `session:`, a path claim always says `path:`. A session id can spell
+/// anything, including `path:` followed by a size and digest, and it still
+/// stays a session claim because its own kind comes first.
 pub fn source_key(source: ImportSource, session_id: Option<&str>, path: &str) -> String {
     match session_id.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(id) => format!("{}:{id}", source.as_str()),
+        Some(id) => format!("{}:session:{id}", source.as_str()),
         None => format!("{}:path:{path}", source.as_str()),
     }
 }
@@ -184,15 +190,76 @@ pub fn path_source_key(source: ImportSource, path: &str, size: u64, fingerprint:
     format!("{}:path:{path}:{size}:{fingerprint}", source.as_str())
 }
 
+/// Length of the content fingerprint a path key carries: a BLAKE3 digest in
+/// lowercase hex.
+const PATH_KEY_FINGERPRINT_HEX_LEN: usize = 64;
+
+/// The parts a path key pins, when it has the exact shape
+/// [`path_source_key`] writes.
+///
+/// A path key is `source:path:<path>:<size>:<fingerprint>`. The path may itself
+/// contain colons, so the size and fingerprint are read from the right. The
+/// fingerprint is a BLAKE3 digest written in lowercase hex, so a session id
+/// that happens to contain colons and numbers is not mistaken for a path key.
+fn path_key_parts(key: &str) -> Option<(u64, &str)> {
+    let (_, rest) = key.split_once(':')?;
+    let tail = rest.strip_prefix("path:")?;
+    let (path_and_size, fingerprint) = tail.rsplit_once(':')?;
+    let (path, size) = path_and_size.rsplit_once(':')?;
+    if path.is_empty()
+        || fingerprint.len() != PATH_KEY_FINGERPRINT_HEX_LEN
+        || !fingerprint
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    Some((size.parse().ok()?, fingerprint))
+}
+
+/// The identity a claim written before its kind was stored should get.
+///
+/// Older daemons spelled a session claim as `source:<id>` and a path claim as
+/// the full `source:path:<path>:<size>:<fingerprint>`. Classifying such a key
+/// with the rules in force at that time gives its new identity; `None` means
+/// the key was already a path claim.
+///
+/// Only a stored database that has not run the migration should be passed in:
+/// a key that already says `session:` is read as an old session id whose own
+/// spelling begins with `session:`, which is how it would have been classified
+/// before kinds were stored. The migration runs once, marked in the journal, so
+/// no key is classified twice.
+pub fn migrated_claim_key(key: &str) -> Option<String> {
+    let (source, rest) = key.split_once(':')?;
+    if path_key_parts(key).is_some() {
+        return None;
+    }
+    Some(format!("{source}:session:{rest}"))
+}
+
+/// The file size a path key pins, when it has the full path-key shape.
+///
+/// Keys without that exact suffix are not path keys: no daemon ever wrote a
+/// shorter one, and a session id can spell anything.
+pub fn path_keyed_source_size(key: &str) -> Option<u64> {
+    path_key_parts(key).map(|(size, _)| size)
+}
+
+/// The content fingerprint a path key pins, when it has the full path-key shape.
+pub fn path_keyed_source_fingerprint(key: &str) -> Option<&str> {
+    path_key_parts(key).map(|(_, fingerprint)| fingerprint)
+}
+
 /// Whether a stored source key names its transcript by path.
 ///
 /// A path key carries the file's size and content fingerprint, so it pins one
 /// version of the file: a transcript that keeps growing is a new conversation.
 /// A session-id key names the conversation itself, so it still recognises a
-/// transcript whose head read did not reveal the id.
+/// transcript whose head read did not reveal the id. The claim's kind is its
+/// stored `path:` prefix; a session claim always says `session:` first, even
+/// when its id spells the rest of a path key, so no spelling can switch kinds.
 pub fn path_keyed_source_key(key: &str) -> bool {
-    key.split_once(':')
-        .is_some_and(|(_, rest)| rest.starts_with("path:"))
+    path_key_parts(key).is_some()
 }
 
 #[cfg(test)]
@@ -203,7 +270,7 @@ mod tests {
     fn source_keys_prefer_the_session_id() {
         assert_eq!(
             source_key(ImportSource::ClaudeCode, Some("abc"), "/tmp/a.jsonl"),
-            "claude_code:abc"
+            "claude_code:session:abc"
         );
         assert_eq!(
             source_key(ImportSource::Codex, None, "/tmp/a.jsonl"),
@@ -211,18 +278,18 @@ mod tests {
         );
     }
 
+    /// A fingerprint shaped like the BLAKE3 digest a real path key writes.
+    fn fingerprint() -> String {
+        "a".repeat(PATH_KEY_FINGERPRINT_HEX_LEN)
+    }
+
     #[test]
     fn a_path_key_is_told_apart_from_a_session_key() {
-        assert!(path_keyed_source_key(&source_key(
-            ImportSource::Codex,
-            None,
-            "/tmp/a.jsonl"
-        )));
         assert!(path_keyed_source_key(&path_source_key(
             ImportSource::Codex,
             "/tmp/a.jsonl",
             12,
-            "fingerprint"
+            &fingerprint()
         )));
         assert!(!path_keyed_source_key(&source_key(
             ImportSource::ClaudeCode,
@@ -230,6 +297,109 @@ mod tests {
             "/tmp/a.jsonl"
         )));
         assert!(!path_keyed_source_key("codex:path-with-a-colon"));
+    }
+
+    #[test]
+    fn a_path_key_needs_its_size_and_fingerprint_suffix() {
+        // The old unsuffixed path key is not a path key: it cannot be told
+        // apart from a session id that happens to spell `path:`.
+        assert!(!path_keyed_source_key(&source_key(
+            ImportSource::Codex,
+            None,
+            "/tmp/a.jsonl"
+        )));
+        assert_eq!(
+            path_keyed_source_size(&source_key(ImportSource::Codex, None, "/tmp/a.jsonl")),
+            None
+        );
+
+        // A session id that itself begins with `path:` is a session id.
+        let session = source_key(ImportSource::ClaudeCode, Some("path:abc"), "/tmp/a.jsonl");
+        assert!(!path_keyed_source_key(&session));
+        assert_eq!(path_keyed_source_size(&session), None);
+
+        // A path key without both parts is not one either.
+        assert!(!path_keyed_source_key("codex:path:/tmp/a.jsonl:12"));
+        assert!(!path_keyed_source_key("codex:path:/tmp/a.jsonl:abc:def"));
+    }
+
+    #[test]
+    fn a_session_id_shaped_like_a_path_key_is_still_a_session_id() {
+        // `path:vendor:42:nightly` has a `path:` prefix, a number and a final
+        // word, but the word is not the 64-character hex digest a path key
+        // writes. Treating it as a path key would let a late id be offered
+        // again, so only the exact written shape counts.
+        let session = source_key(
+            ImportSource::ClaudeCode,
+            Some("path:vendor:42:nightly"),
+            "/tmp/a.jsonl",
+        );
+        assert!(!path_keyed_source_key(&session));
+        assert_eq!(path_keyed_source_size(&session), None);
+        assert_eq!(path_keyed_source_fingerprint(&session), None);
+
+        // A digest-shaped suffix of the wrong length is not one either.
+        let short = format!("codex:path:/tmp/a.jsonl:42:{}", "f".repeat(32));
+        assert!(!path_keyed_source_key(&short));
+        // Nor is one with characters outside lowercase hex.
+        let not_hex = format!("codex:path:/tmp/a.jsonl:42:{}", "g".repeat(64));
+        assert!(!path_keyed_source_key(&not_hex));
+    }
+
+    #[test]
+    fn a_session_id_spelled_exactly_like_a_path_key_stays_a_session_claim() {
+        // The id is the whole `path:<path>:<size>:<fingerprint>` tail a real
+        // path claim would carry, and the claim is stored with its own kind in
+        // front of it, so it can never be read as a path claim.
+        let path_claim = path_source_key(ImportSource::Codex, "/tmp/a.jsonl", 42, &fingerprint());
+        let id = path_claim
+            .strip_prefix("codex:")
+            .expect("a path key names its source");
+        let session = source_key(ImportSource::Codex, Some(id), "/tmp/a.jsonl");
+        assert_eq!(session, format!("codex:session:{id}"));
+        assert!(!path_keyed_source_key(&session));
+        assert_eq!(path_keyed_source_size(&session), None);
+        assert_ne!(session, path_claim, "one claim cannot stand for the other");
+        assert!(path_keyed_source_key(&path_claim));
+    }
+
+    #[test]
+    fn an_old_claim_gets_the_kind_it_was_written_with() {
+        // A session claim written before the kind was stored.
+        assert_eq!(
+            migrated_claim_key("claude_code:abc").as_deref(),
+            Some("claude_code:session:abc")
+        );
+        // A path claim keeps the spelling every daemon has used for it.
+        let path_claim = path_source_key(ImportSource::Codex, "/tmp/a.jsonl", 42, &fingerprint());
+        assert_eq!(migrated_claim_key(&path_claim), None);
+        // An old unsuffixed path claim was never recognised as path-keyed
+        // under the old rules, so it becomes the session claim it acted as.
+        assert_eq!(
+            migrated_claim_key("claude_code:path:/tmp/a.jsonl").as_deref(),
+            Some("claude_code:session:path:/tmp/a.jsonl")
+        );
+        // A key that already carries its kind was never written this way; an
+        // old session id that happens to begin with `session:` becomes the
+        // session claim it always was. The journal marks the migration so this
+        // runs once.
+        assert_eq!(
+            migrated_claim_key("claude_code:session:abc").as_deref(),
+            Some("claude_code:session:session:abc")
+        );
+        assert_eq!(migrated_claim_key("no-source"), None);
+    }
+
+    #[test]
+    fn a_path_key_reads_its_size_even_when_the_path_has_colons() {
+        let fingerprint = fingerprint();
+        let key = path_source_key(ImportSource::Codex, "/tmp/a:b/c.jsonl", 4096, &fingerprint);
+        assert!(path_keyed_source_key(&key));
+        assert_eq!(path_keyed_source_size(&key), Some(4096));
+        assert_eq!(
+            path_keyed_source_fingerprint(&key),
+            Some(fingerprint.as_str())
+        );
     }
 
     #[test]

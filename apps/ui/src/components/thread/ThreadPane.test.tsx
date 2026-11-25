@@ -39,6 +39,7 @@ const mock = vi.hoisted(() => {
   };
   const state = {
     threads: { thread_ui: summary },
+    queues: {},
     hosts: { host_ui: { online: true, name: "atlas" } },
     logs: {
       thread_ui: { turns: [], pending: [], loaded: true, loading: false, approvals: {} },
@@ -94,6 +95,8 @@ vi.mock("@/lib/store/appStore", () => ({
   })),
   rewindThread: vi.fn(),
   consumeComposerRestore: vi.fn(),
+  editQueuedMessage: async () => true,
+  setUi: () => undefined,
   getClient: () => {
     throw new Error("The test never reads the workspace.");
   },

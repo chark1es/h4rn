@@ -66,11 +66,12 @@ pub use binary::{
     pty_input_reply_ordinal, pty_input_reply_position, pty_input_reply_seq,
 };
 pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, UploadTicket};
-pub use client::{ClientFrame, ClientRequest};
+pub use client::{ClientFrame, ClientRequest, QueueAction, QueueDirection};
 pub use common::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,
-    HostSummary, Item, MatchUnit, MessageRole, PlanStep, RuntimeMode, ThreadFilter, ThreadSummary,
-    ThreadTab, ToolCall, ToolCallStatus, ToolStats, Topic, TurnStatus, Usage, WorktreeRequest,
+    HostSummary, Item, MatchUnit, MessageRole, PlanStep, QUEUE_PAGE_BYTES, QUEUE_PAGE_MESSAGES,
+    QueuedMessage, RuntimeMode, ThreadFilter, ThreadSummary, ThreadTab, ToolCall, ToolCallStatus,
+    ToolStats, Topic, TurnStatus, Usage, WorktreeRequest, queue_page,
 };
 pub use connect::*;
 pub use forge::*;
@@ -94,12 +95,13 @@ pub use harness::{
     HarnessOutputStream, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo,
 };
 pub use ids::{
-    AttachmentId, AttachmentIdError, DeviceId, HostId, ScheduleTaskId, SubagentId, TerminalId,
-    ThreadId, TurnId,
+    AttachmentId, AttachmentIdError, DeviceId, HostId, QueuedMessageId, ScheduleTaskId, SubagentId,
+    TerminalId, ThreadId, TurnId,
 };
 pub use import::{
     ImportEvent, ImportProgress, ImportProject, ImportScan, ImportSource, ImportedSource,
-    path_keyed_source_key, path_source_key, source_key,
+    migrated_claim_key, path_keyed_source_fingerprint, path_keyed_source_key,
+    path_keyed_source_size, path_source_key, source_key,
 };
 pub use issues::*;
 pub use mcp::{
