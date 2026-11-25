@@ -71,7 +71,9 @@ pub enum SessionRewind {
     /// Resume the session but discard the prompt with this harness message id
     /// and everything after it (Claude Code's truncating resume).
     ResumeAtMessage {
-        /// The prompt uuid the harness recorded for the first removed turn.
+        /// The last kept chain entry: the harness message id of the last
+        /// message that stays, an assistant reply or the kept prompt itself
+        /// when that prompt's turn wrote none.
         message: String,
     },
     /// Resume the session, then drop this provider turn and everything after

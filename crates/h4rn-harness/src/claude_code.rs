@@ -346,11 +346,12 @@ pub struct ClaudeCodeSession {
     /// Claude Code records it as the message uuid, which is what a later
     /// truncating resume names.
     prompt_id: Option<String>,
-    /// The last assistant message uuid before the prompt being written.
+    /// The last kept chain entry before the prompt being written.
     ///
-    /// Claude Code's truncating resume keeps the named message and everything
-    /// before it, so the kept boundary is the assistant reply that preceded
-    /// the removed prompt, never the removed prompt itself.
+    /// Claude Code's truncating resume keeps the named entry and everything
+    /// before it, so the boundary is the last chain entry that stays: the
+    /// assistant reply that preceded the removed prompt, or that prompt itself
+    /// when its turn wrote no reply.
     prompt_boundary: Option<String>,
     /// The mode is pinned by an explicit environment override, so the thread
     /// control cannot change it.
@@ -373,9 +374,18 @@ struct SharedState {
     pending_controls: HashMap<String, tokio::sync::oneshot::Sender<ControlReply>>,
     /// The uuid of the most recent assistant message the CLI emitted.
     ///
-    /// Claude Code names every message; the last one before a prompt is the
-    /// boundary a truncating resume keeps.
+    /// Claude Code names every message; the last one before a prompt is one
+    /// kind of boundary a truncating resume keeps.
     last_assistant_uuid: Option<String>,
+    /// The last entry in the provider's conversation chain that h4rn can name.
+    ///
+    /// A truncating resume keeps the named entry and everything before it, so
+    /// this is the boundary the next prompt advances from. It is the tagged
+    /// uuid of the prompt just sent until an assistant message replaces it: a
+    /// kept turn that wrote no reply (stopped, or failed first) is still the
+    /// last chain entry, and an assistant-only boundary would silently drop it
+    /// from the provider while the thread still shows it.
+    last_chain_uuid: Option<String>,
     /// Whether the stdout reader has ended, so no reply can ever arrive.
     ///
     /// Set and read under the same lock as `pending_controls`: a request that
@@ -395,6 +405,7 @@ impl SharedState {
             touched_paths: Vec::new(),
             pending_controls: HashMap::new(),
             last_assistant_uuid: None,
+            last_chain_uuid: None,
             control_closed: false,
         }
     }
@@ -566,10 +577,17 @@ impl ClaudeCodeSession {
         }
 
         let frame = build_user_frame(&input.text, &attachments, prompt_id)?;
-        // The assistant reply that came before this prompt is the last kept
-        // provider message: a truncating resume at it drops this prompt and
-        // everything after without dropping the kept answer.
-        self.prompt_boundary = lock(&self.shared).last_assistant_uuid.clone();
+        // The last kept chain entry is the boundary a truncating resume cuts
+        // at. It is the previous turn's assistant reply, or the previous prompt
+        // itself when that turn wrote none: cutting at an assistant-only
+        // boundary would drop that kept prompt from the provider.
+        {
+            let mut state = lock(&self.shared);
+            self.prompt_boundary = state.last_chain_uuid.clone();
+            if let Some(prompt_id) = prompt_id.filter(|id| !id.trim().is_empty()) {
+                state.last_chain_uuid = Some(prompt_id.to_string());
+            }
+        }
         self.write_frame(frame).await?;
         self.interrupt_requested.store(false, Ordering::SeqCst);
         self.mark_state(AgentState::Thinking);
@@ -804,7 +822,16 @@ fn spawn_stdout_reader(
                 state.state = parser.agent_state();
                 state.touched_paths = parser.touched_paths().to_vec();
                 state.last_turn = parser.last_turn().cloned();
-                state.last_assistant_uuid = parser.last_assistant_uuid().map(str::to_string);
+                let assistant = parser.last_assistant_uuid().map(str::to_string);
+                if assistant != state.last_assistant_uuid {
+                    state.last_assistant_uuid = assistant.clone();
+                    // A new assistant message is the newest chain entry. When
+                    // the parser has none, the prompt just sent stays the
+                    // boundary instead of falling back to an older reply.
+                    if assistant.is_some() {
+                        state.last_chain_uuid = assistant;
+                    }
+                }
             }
 
             let completed = events
@@ -1019,9 +1046,9 @@ fn session_args(spec: &SessionSpec, mcp_config: Option<&Path>) -> Vec<String> {
         args.push("--resume".into());
         args.push(resume_id.to_string());
     }
-    // The CLI's truncating resume needs the message id of the turn it drops.
-    // It is only valid with `--resume`, in print mode (which every h4rn
-    // session runs in).
+    // The CLI's truncating resume names the last kept chain entry, which may be
+    // a prompt whose turn wrote no assistant message. It is only valid with
+    // `--resume`, in print mode (which every h4rn session runs in).
     if let Some(SessionRewind::ResumeAtMessage { message }) = spec.rewind.as_ref()
         && spec.resume_id.as_deref().is_some_and(|id| !id.is_empty())
     {
@@ -1726,6 +1753,81 @@ done
             session.provider_turn().last_message_id.as_deref(),
             Some("reply-1"),
             "B's boundary is A's reply, never the one B produced"
+        );
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_kept_turn_that_wrote_no_reply_is_the_next_boundary() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let path = workspace.path().join("claude");
+        // A's prompt gets an assistant reply; B's prompt fails before writing
+        // any assistant frame; C's prompt gets nothing yet. C's boundary must
+        // be B's tagged prompt itself, not A's reply: cutting at A's reply
+        // would drop B from the provider while the thread still shows it.
+        let script = r#"#!/bin/sh
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      n=$((n + 1))
+      if [ "$n" -eq 1 ]; then
+        printf '{"type":"assistant","uuid":"reply-1","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}]}}\n'
+        printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+      elif [ "$n" -eq 2 ]; then
+        printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"stopped before any reply","duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":0}}\n'
+      fi
+      ;;
+  esac
+done
+"#;
+        crate::test_scripts::write_script(&path, script);
+        let harness = ClaudeCodeHarness::with_install(HarnessInstall {
+            path,
+            version: "2.1.329".into(),
+        });
+        let mut session = harness
+            .start_session(spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send_tagged(
+                UserInput {
+                    text: "A".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-a"),
+            )
+            .await
+            .expect("send A");
+        wait_for_completion(&mut events).await;
+        session
+            .send_tagged(
+                UserInput {
+                    text: "B".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-b"),
+            )
+            .await
+            .expect("send B");
+        wait_for_completion(&mut events).await;
+        session
+            .send_tagged(
+                UserInput {
+                    text: "C".into(),
+                    attachments: Vec::new(),
+                },
+                Some("turn-c"),
+            )
+            .await
+            .expect("send C");
+        assert_eq!(
+            session.provider_turn().last_message_id.as_deref(),
+            Some("turn-b"),
+            "C's boundary must keep B, whose turn wrote no reply"
         );
         session.shutdown().await.expect("shutdown");
     }

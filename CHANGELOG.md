@@ -20,7 +20,9 @@ All notable changes to h4rn are recorded here. The format follows
   boundary falls back to the handoff and says so. A native boundary is the
   edited prompt's own, recorded in the provider session the thread still
   resumes; an older prompt with none, or one from an abandoned session, uses
-  the handoff. **Revert files too** is a
+  the handoff. Claude Code names the last kept chain entry, so a kept turn that
+  wrote no reply (stopped, or failed first) still stays in the provider
+  conversation. **Revert files too** is a
   Labs feature, off by default (Settings → Labs → **Rewind files with Edit from
   here**): while it is off the dialog hides it, the thread row reports it
   unavailable, and the daemon refuses it. When turned on, it puts a thread's own
@@ -33,7 +35,8 @@ All notable changes to h4rn are recorded here. The format follows
   is on, so a turn sent while it was off only rewinds its conversation. A
   rewind is refused while a turn runs, a message is
   queued or parked, a message's delivery is uncertain (resend or discard it
-  first), an approval is pending or an automatic resume is armed; a
+  first; an uncertain promoted prompt becomes that visible row as soon as its
+  turn settles), an approval is pending or an automatic resume is armed; a
   cancelled resume no longer blocks it. Prompts and cuts are read in journal
   order, a queued message joins the transcript under the turn that runs it, and
   native boundaries name what Claude Code or Codex really recorded. One durable event

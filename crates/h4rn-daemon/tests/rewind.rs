@@ -84,7 +84,15 @@ async fn open_manager(
     kind: HarnessKind,
     data: &Path,
 ) -> Arc<ThreadManager> {
-    let catalog = Arc::new(StaticHarnessCatalog::with(Arc::new(fake.with_kind(kind))));
+    open_manager_with_adapter(journal, Arc::new(fake.with_kind(kind)), data).await
+}
+
+async fn open_manager_with_adapter(
+    journal: Arc<dyn Journal>,
+    adapter: Arc<dyn h4rn_harness::Harness>,
+    data: &Path,
+) -> Arc<ThreadManager> {
+    let catalog = Arc::new(StaticHarnessCatalog::with(adapter));
     let manager = ThreadManager::open(
         journal,
         catalog,
@@ -133,6 +141,37 @@ fn thread_request_kind(
     let mut request = thread_request(host, workspace, prompt);
     request.harness = kind;
     request
+}
+
+/// Writes an executable stand-in CLI.
+///
+/// The write happens in a short-lived child process, so this test process never
+/// holds the script open while another test thread forks: `ETXTBSY` needs the
+/// descriptor in the process that forks.
+#[cfg(unix)]
+fn write_cli_script(path: &Path, body: &str) {
+    use std::io::Write as _;
+
+    let staged = path.with_extension("staged");
+    let mut writer = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod +x \"$1\"")
+        .arg("h4rn-test-script")
+        .arg(&staged)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the script writer");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's stdin")
+        .write_all(body.as_bytes())
+        .expect("write the test script body");
+    assert!(
+        writer.wait().expect("the writer exiting").success(),
+        "the test script writer failed"
+    );
+    std::fs::rename(&staged, path).expect("install the test script");
 }
 
 /// Waits for one turn to finish and returns its completion status.
@@ -1397,6 +1436,117 @@ async fn a_claude_boundary_names_the_assistant_reply_before_the_removed_prompt()
         "the next start carries the recorded message boundary: {:?}",
         specs.get()
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_kept_claude_turn_that_wrote_no_reply_survives_the_next_rewind() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = workspace.path().join("claude");
+    // A's prompt gets an assistant reply; B's turn fails before writing any
+    // assistant frame; C follows. C's provider boundary is B's own tagged
+    // prompt, so rewinding C drops only C: B must stay in the provider history
+    // the same way it stays in the thread.
+    let script = r#"#!/bin/sh
+printf '{"type":"system","subtype":"init","session_id":"sess-test","model":"claude-x","tools":[]}\n'
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      n=$((n + 1))
+      if [ "$n" -eq 2 ]; then
+        printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"stopped before any reply","duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":0}}\n'
+      else
+        printf '{"type":"assistant","uuid":"reply-%s","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}]}}\n' "$n"
+        printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+      fi
+      ;;
+  esac
+done
+"#;
+    write_cli_script(&path, script);
+    let journal: Arc<dyn Journal> = Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+    let data = tempfile::tempdir().expect("data");
+    let adapter = Arc::new(h4rn_harness::ClaudeCodeHarness::with_install(
+        h4rn_harness::HarnessInstall {
+            path,
+            version: "2.1.329".into(),
+        },
+    ));
+    let manager = open_manager_with_adapter(Arc::clone(&journal), adapter, data.path()).await;
+    let host = HostId::new("host_rewind");
+    let mut events = manager.subscribe();
+    let created = manager
+        .create_thread(thread_request_kind(
+            &host,
+            workspace.path(),
+            "A",
+            HarnessKind::ClaudeCode,
+        ))
+        .await
+        .expect("create");
+    let mut first = events.resubscribe();
+    wait_turn(&mut first).await;
+    drain(&mut events);
+    manager
+        .send_message(&created.thread_id, "B".into(), Vec::new())
+        .await
+        .expect("send B");
+    let (_, b_turn) = next_user_item(&mut events).await;
+    assert_eq!(
+        wait_turn(&mut events).await,
+        TurnStatus::Failed,
+        "B's turn must fail before writing a reply"
+    );
+    manager
+        .send_message(&created.thread_id, "C".into(), Vec::new())
+        .await
+        .expect("send C");
+    let (c_item, _) = next_user_item(&mut events).await;
+    wait_turn(&mut events).await;
+
+    manager
+        .rewind_thread(&created.thread_id, &c_item, false)
+        .await
+        .expect("rewind C");
+    let meta = manager.thread_meta(&created.thread_id).await.expect("meta");
+    let b_tag = b_turn.as_str().trim_start_matches("turn_").to_owned();
+    assert_eq!(
+        meta.pending_rewind,
+        Some(PendingRewind::Native {
+            session: SessionRewind::ResumeAtMessage { message: b_tag }
+        }),
+        "C must cut at B's own prompt so the kept turn is not dropped"
+    );
+
+    // The cut removed C and only C: B's prompt stays in the thread, and the
+    // boundary above keeps it in the provider conversation too.
+    let snapshot = manager
+        .get_thread(&created.thread_id, 0)
+        .await
+        .expect("thread");
+    assert!(
+        snapshot.events.iter().any(|wire| matches!(
+            &wire.event,
+            Event::ThreadRewound { before_item_id, .. } if before_item_id == &c_item
+        )),
+        "the rewind must cut at C, not at B"
+    );
+    assert!(
+        snapshot.events.iter().any(|wire| matches!(
+            &wire.event,
+            Event::ItemCompleted {
+                item: Item::Message {
+                    role: MessageRole::User,
+                    text,
+                    ..
+                },
+                ..
+            } if text == "B"
+        )),
+        "B's prompt must stay in the thread"
+    );
+    manager.shutdown().await;
 }
 
 #[tokio::test]

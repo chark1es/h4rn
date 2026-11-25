@@ -859,8 +859,8 @@ export function noticeRewindFallback(envelope: EventEnvelope): void {
     variant: "info",
     title: "The rewind fell back to a fresh session",
     description: harness
-      ? `${harnessName(harness)} refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.`
-      : "The harness refused the recorded rewind point. The next turn continues from a handoff of the kept conversation.",
+      ? `${harnessName(harness)} could not use the recorded rewind point. The next turn continues from a handoff of the kept conversation.`
+      : "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
   });
 }
 

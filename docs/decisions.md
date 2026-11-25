@@ -2100,8 +2100,10 @@ UI folds it on replay, and the prompt returns only in the answer to the
 requesting device. Only a turn's first user item, its cue, can be edited: a
 steer is journaled inside the running turn, so cutting at it would also remove
 the cue before it, and the daemon refuses such a target. The provider boundary
-names what the provider really recorded for the edited prompt itself: Claude
-Code's assistant-message uuid before it, Codex's accepted provider turn for it.
+names the last kept chain entry the provider really recorded: Claude Code's
+message uuid for the assistant reply before the edited prompt, or for the kept
+prompt itself when that turn wrote no reply; Codex's accepted provider turn for
+the edited prompt.
 A later prompt's boundary is never borrowed, and a boundary counts only in the
 provider session that recorded it, whose id is stored beside it; a boundary
 from an abandoned session plans a handoff. A harness without a native
@@ -2109,7 +2111,10 @@ truncation, or a boundary the provider refuses, gets a fresh session with a
 bounded handoff of the kept history; a refused boundary is journaled and
 reported on both fallback paths rather than silently applied. A rewind is
 refused while a message's delivery is uncertain, so a row that may already be
-in the provider conversation is resent or discarded first. The dialog asks for
+in the provider conversation is resent or discarded first. A promoted prompt
+whose write failed after the adapter was called becomes that row as soon as its
+turn settles, the same way a restart would recover it, so the dialog and the
+daemon refuse an edit it would hide rather than name. The dialog asks for
 the plan of the selected prompt, because the thread-wide capability cannot name
 what an older prompt, or a first prompt, will really use. File restore is a
 **Labs** feature, off by default while it is still being hardened: the daemon

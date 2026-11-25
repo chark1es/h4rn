@@ -1645,7 +1645,9 @@ impl Journal for SqliteJournal {
         // that the next session starts from a handoff. The generation guard
         // means a fallback that lost its thread to a later switch changes
         // nothing at all.
-        let rewind_json = rewind_fallback.then_some("\"Handoff\"");
+        let rewind_json = rewind_fallback
+            .then(|| serde_json::to_string(&h4rn_protocol::PendingRewind::Handoff))
+            .transpose()?;
         let result = sqlx::query(
             "UPDATE daemon_threads
                 SET resume_id = NULL,
@@ -1658,7 +1660,7 @@ impl Journal for SqliteJournal {
                     END
               WHERE thread_id = ? AND switch_generation = ?",
         )
-        .bind(rewind_json)
+        .bind(rewind_json.as_deref())
         .bind(thread_id.as_str())
         .bind(switch_generation as i64)
         .execute(&self.pool)

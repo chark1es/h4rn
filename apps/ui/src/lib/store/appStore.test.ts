@@ -431,6 +431,9 @@ describe("rewind fallback notice", () => {
     noticeRewindFallback(envelope(false));
     const live = getState().toasts.at(-1);
     expect(live?.title).toBe("The rewind fell back to a fresh session");
+    expect(live?.description).toBe(
+      "The recorded rewind point could not be used. The next turn continues from a handoff of the kept conversation.",
+    );
 
     noticeRewindFallback(envelope(true));
     expect(getState().toasts.at(-1)?.id).toBe(live?.id);

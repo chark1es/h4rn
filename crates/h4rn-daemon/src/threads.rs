@@ -2153,6 +2153,14 @@ struct SummarySignature {
     snoozed_until: Option<DateTime<Utc>>,
     resume_at: Option<DateTime<Utc>>,
     limit: Option<LimitBrief>,
+    /// What the harness can do about history, and whether files can follow it.
+    ///
+    /// Both change without a turn: the Labs switch moves `file_rewind`, and a
+    /// thread's method follows the harness. A signature that left them out
+    /// would keep publishing a thread row whose Edit from here promise is
+    /// stale.
+    rewind: h4rn_protocol::RewindMethod,
+    file_rewind: bool,
 }
 
 impl SummarySignature {
@@ -2167,6 +2175,8 @@ impl SummarySignature {
             snoozed_until: summary.snoozed_until,
             resume_at: summary.resume_at,
             limit: summary.limit.clone(),
+            rewind: summary.rewind,
+            file_rewind: summary.file_rewind,
         }
     }
 }
@@ -2649,18 +2659,65 @@ impl ThreadRecord {
             .retain(|claim| !(claim.promoted && &claim.turn_id == turn_id));
     }
 
-    /// Removes a settled turn's promoted claim when its delivery is known.
+    /// Ends a settled turn's promoted claim.
     ///
-    /// A `sending` claim is the one exception: the adapter was called, so it
-    /// may already hold the text even though the turn ended with an error. It
-    /// stays for recovery to show as **May have been delivered** instead of
-    /// disappearing when the turn settles.
-    fn clear_settled_promoted_claim(&mut self, turn_id: &TurnId) {
-        self.meta.claimed.retain(|claim| {
-            !(claim.promoted
-                && &claim.turn_id == turn_id
-                && claim.state != QueuedClaimState::Sending)
-        });
+    /// A `sending` claim means the adapter was called, so its text may already
+    /// be in the provider conversation even though the turn ended with an
+    /// error. Nothing would ever show it again on this daemon: the turn is
+    /// over, so it becomes the same **May have been delivered** queue row a
+    /// restart would produce, instead of staying hidden until one. The row is
+    /// never sent automatically, and the person can resend or discard it.
+    ///
+    /// Returns whether the queue changed, so the settlement that carries this
+    /// publishes it.
+    fn settle_promoted_claim(&mut self, turn_id: &TurnId) -> bool {
+        let Some(position) = self.promoted_claim_position(turn_id) else {
+            return false;
+        };
+        if self.meta.claimed[position].state != QueuedClaimState::Sending {
+            self.meta.claimed.remove(position);
+            return false;
+        }
+        let mut claim = self.meta.claimed.remove(position);
+        claim.message.message.delivery_unknown = true;
+        let index = (claim.index as usize).min(self.meta.queued.len());
+        self.meta.queued.insert(index, claim.message);
+        self.note_queue_change();
+        true
+    }
+
+    /// Turns every leftover `sending` claim whose turn is over into the visible
+    /// row it would become after a restart.
+    ///
+    /// A claim in `sending` was written before the adapter was called, so its
+    /// text may already be in the provider conversation. Once its turn is no
+    /// longer the active one no delivery path will finish it, and leaving it
+    /// hidden would let the UI offer an edit the daemon then refuses for a row
+    /// the person cannot see. A claim whose turn is still active stays: that
+    /// turn is the one meant to resolve it.
+    ///
+    /// Returns whether the queue changed.
+    fn surface_settled_claims(&mut self) -> bool {
+        let active = self.active.as_ref().map(|active| active.turn_id.clone());
+        let claims = std::mem::take(&mut self.meta.claimed);
+        let mut changed = false;
+        for claim in claims {
+            if claim.state != QueuedClaimState::Sending
+                || active.as_ref().is_some_and(|id| id == &claim.turn_id)
+            {
+                self.meta.claimed.push(claim);
+                continue;
+            }
+            let mut message = claim.message;
+            message.message.delivery_unknown = true;
+            let index = (claim.index as usize).min(self.meta.queued.len());
+            self.meta.queued.insert(index, message);
+            changed = true;
+        }
+        if changed {
+            self.note_queue_change();
+        }
+        changed
     }
 
     /// Records a promoted prompt's delivery state durably, before it changes.
@@ -4629,6 +4686,15 @@ impl ThreadManager {
                 "thread {thread_id} is closed"
             )));
         }
+        // A claim left in `sending` by a turn that is no longer active may
+        // already be in the provider conversation. Surface it as the row a
+        // restart would show before the checks below, so the refusal names a
+        // message the person can actually see and resolve.
+        if record.surface_settled_claims()
+            && let Err(error) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await
+        {
+            tracing::warn!(%error, "a rewind could not publish an uncertain delivery");
+        }
 
         let events = self
             .inner
@@ -4666,17 +4732,21 @@ impl ThreadManager {
         }
         // A message whose delivery is unclear may already be in the provider
         // conversation. Removing its turn would leave text the person can no
-        // longer see, so the row must be resolved first.
+        // longer see, so the row must be resolved first. Only a claim whose
+        // turn is still active reaches this branch: a leftover claim from a
+        // finished turn was surfaced as a queue row above.
+        let active_turn = record.active.as_ref().map(|active| active.turn_id.clone());
         if record
             .meta
             .queued
             .iter()
             .any(|entry| entry.message.delivery_unknown)
-            || record
-                .meta
-                .claimed
-                .iter()
-                .any(|claim| claim.state == QueuedClaimState::Sending)
+            || record.meta.claimed.iter().any(|claim| {
+                claim.state == QueuedClaimState::Sending
+                    && active_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn == &claim.turn_id)
+            })
         {
             return Err(ManagerError::Conflict(
                 "a message may have reached the agent; resend or discard it first".into(),
@@ -9198,9 +9268,11 @@ impl Inner {
             return false;
         }
         // The turn is over, so no known delivery is left to recover. A claim the
-        // adapter may have taken (`sending`) stays for its own recovery row:
-        // settling the turn must not hide text the harness could already hold.
-        record.clear_settled_promoted_claim(turn_id);
+        // adapter may have taken (`sending`) becomes the visible "may have been
+        // delivered" row now, inside this settlement's own append: waiting for
+        // a restart would hide the row while the UI offers an edit the daemon
+        // refuses.
+        record.settle_promoted_claim(turn_id);
 
         let now = self.now();
         let TurnEnd {
@@ -10827,6 +10899,21 @@ impl Inner {
                     self.save_claim_change(&mut record, "a cleared promoted claim")
                         .await;
                 }
+                // The accepted prompt carried the rewind's handoff, so a later
+                // turn resumes the new session instead of sending it again.
+                if matches!(
+                    record.meta.pending_rewind,
+                    Some(h4rn_protocol::PendingRewind::Handoff)
+                ) {
+                    record.meta.pending_rewind = None;
+                    if let Err(error) = self.journal.upsert_thread(&record.meta).await {
+                        tracing::warn!(
+                            %error,
+                            thread = %record.meta.thread_id,
+                            "could not clear a delivered rewind handoff"
+                        );
+                    }
+                }
             }
             Err(error) => {
                 // Only a definite pre-write refusal means the prompt never
@@ -10879,17 +10966,22 @@ impl Inner {
     ) {
         let turn_id = dispatch.turn_id.clone();
         let mut record = handle.lock().await;
+        // The revocation is definite: nothing reached the adapter, so the
+        // prompt is known unsent. Take its claim before the settlement, which
+        // would otherwise surface it as "may have been delivered"; the refused
+        // row is not in the queue, so taking it cannot make the settlement
+        // promote the very message it just refused.
+        let claimed = record.promoted_claim_position(&turn_id).map(|position| {
+            let mut claim = record.meta.claimed.remove(position);
+            claim.message.message.delivery_unknown = false;
+            claim
+        });
         let end = TurnEnd::failed(
             REVOKED_GRANT_MESSAGE.into(),
             Some(REVOKED_GRANT_HINT.into()),
             false,
         );
         let settled = self.settle_turn_locked(&mut record, &turn_id, end).await;
-        let claimed = record.promoted_claim_position(&turn_id).map(|position| {
-            let mut claim = record.meta.claimed.remove(position);
-            claim.message.message.delivery_unknown = false;
-            claim
-        });
         if let Some(claim) = claimed {
             let index = (claim.index as usize).min(record.meta.queued.len());
             record.meta.queued.insert(index, claim.message);
@@ -11605,9 +11697,17 @@ impl Inner {
             match event {
                 HarnessEvent::SessionStarted { session_id } => {
                     record.meta.resume_id = Some(session_id);
-                    // The boundary this start carried has been applied; a
-                    // later start resumes the already-rewound history.
-                    record.meta.pending_rewind = None;
+                    // The native boundary this start carried has been applied;
+                    // a later start resumes the already-rewound history. A
+                    // handoff stays pending until the prompt that carries it is
+                    // accepted: the claim still has to build the preface, and a
+                    // restart before that must not lose it.
+                    if matches!(
+                        record.meta.pending_rewind,
+                        Some(h4rn_protocol::PendingRewind::Native { .. })
+                    ) {
+                        record.meta.pending_rewind = None;
+                    }
                     record.started_generation = Some(generation);
                     // An imported thread has one native resume to spend. Once a
                     // session has started, the thread has a live conversation
@@ -24148,6 +24248,62 @@ mod tests {
         );
     }
 
+    /// The Labs switch is part of a thread's summary signature: toggling it
+    /// republishes the row instead of leaving a stale Edit from here promise
+    /// behind.
+    #[tokio::test]
+    async fn toggling_file_rewind_republishes_the_thread_summary() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_test")).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(HostId::new("host_test"), workspace.path(), "A"))
+            .await
+            .expect("create");
+        let (_, status) = next_turn_completion(&mut events).await;
+        assert_eq!(status, TurnStatus::Completed);
+        while events.try_recv().is_ok() {}
+        // File restore is only offered in a thread's own linked worktree; the
+        // test's tempdir is not one, so mark the record the way such a thread
+        // is created.
+        {
+            let handle = manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("thread handle");
+            handle.lock().await.linked_worktree = true;
+        }
+        assert!(
+            !manager
+                .thread_summary(&created.thread_id)
+                .await
+                .expect("summary")
+                .file_rewind,
+            "the switch starts off in this test"
+        );
+
+        manager.set_file_rewind_enabled(true);
+        manager.inner.tick().await;
+        let published = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::ThreadUpserted(summary) = wire.event
+                    && summary.file_rewind
+                {
+                    return summary;
+                }
+            }
+        })
+        .await
+        .expect("the switch change was never published");
+        assert!(
+            published.file_rewind,
+            "the republished row still hides file restore"
+        );
+        manager.shutdown().await;
+    }
+
     /// A failing ledger read does not rewrite every summary on every tick.
     ///
     /// Each retry used to clear every thread's cached signature, so a ledger
@@ -29982,14 +30138,23 @@ mod tests {
             .into_iter()
             .find(|meta| meta.thread_id == created.thread_id)
             .expect("the thread's metadata");
+        assert!(
+            stored.claimed.is_empty(),
+            "a settled turn kept a claim nothing would ever finish"
+        );
         assert_eq!(
             stored
-                .claimed
+                .queued
                 .iter()
-                .map(|claim| (claim.state, claim.promoted))
+                .map(|message| {
+                    (
+                        message.message.text.as_str(),
+                        message.message.delivery_unknown,
+                    )
+                })
                 .collect::<Vec<_>>(),
-            [(QueuedClaimState::Sending, true)],
-            "an ambiguous promoted write was recorded as known unsent"
+            [("only copy", true)],
+            "an ambiguous promoted write stayed hidden until a restart"
         );
 
         manager.shutdown().await;
@@ -30053,6 +30218,108 @@ mod tests {
             "the unsure row must stay visible for the person"
         );
         restarted.shutdown().await;
+    }
+
+    /// A promoted prompt whose write failed after the adapter was called is
+    /// shown as "may have been delivered" as soon as its turn settles, not only
+    /// after a restart.
+    ///
+    /// Until then the row was invisible while the UI enabled Edit from here,
+    /// and the daemon refused the edit for a row the person could not see. Once
+    /// the row is discarded, editing the earlier prompt works.
+    #[tokio::test]
+    async fn an_ambiguous_promoted_write_is_a_visible_row_before_any_restart() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let harness = harness.with_send_failure_after(1, "transport died");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut events = manager.subscribe();
+        let mut request = new_thread(host.clone(), workspace.path(), "A");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        sends.wait_for(1).await;
+        manager
+            .send_message(&created.thread_id, "B".into(), Vec::new())
+            .await
+            .expect("queue B while A runs");
+        completion.release();
+
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("B's turn settled");
+        assert_eq!(status, TurnStatus::Failed);
+        assert_eq!(sends.get(), 2, "B's prompt was written once");
+
+        // The row is visible on this daemon, with no restart in between.
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("B", true)],
+            "the uncertain promoted prompt stayed hidden until a restart"
+        );
+
+        let snapshot = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("thread");
+        let item = snapshot
+            .events
+            .iter()
+            .find_map(|wire| match &wire.event {
+                Event::ItemCompleted {
+                    item:
+                        Item::Message {
+                            item_id,
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                } if text == "A" => Some(item_id.clone()),
+                _ => None,
+            })
+            .expect("A's item");
+
+        // Both refusals name the row the person can now see.
+        let refused = manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect_err("an uncertain delivery blocks the edit");
+        assert!(
+            refused.to_string().contains("resend or discard it first"),
+            "{refused}"
+        );
+
+        // Discarding the row clears the way.
+        manager
+            .queue_message(
+                &created.thread_id,
+                &queue.queued[0].message_id,
+                QueueAction::Remove,
+            )
+            .await
+            .expect("discard the uncertain row");
+        let rewound = manager
+            .rewind_thread(&created.thread_id, &item, false)
+            .await
+            .expect("after the row is gone, the edit works");
+        assert_eq!(rewound.before_item_id, item);
+        assert_eq!(rewound.prompt, "A");
+        manager.shutdown().await;
     }
 
     /// A promoted prompt the adapter accepted is never sent again after a
@@ -34370,6 +34637,23 @@ mod tests {
                 .contains(&user_item_id(&promoted)),
             "the prompt the provider never took was recorded as delivered"
         );
+
+        // The uncertain prompt is now a visible row, so it must be resolved
+        // before a switch. This test sends it again below, so discard it.
+        let queue = manager
+            .thread_queue(&created.thread_id, 0)
+            .await
+            .expect("queue");
+        assert_eq!(queue.queued.len(), 1, "the uncertain row is visible");
+        assert!(queue.queued[0].delivery_unknown);
+        manager
+            .queue_message(
+                &created.thread_id,
+                &queue.queued[0].message_id,
+                QueueAction::Remove,
+            )
+            .await
+            .expect("discard the uncertain row");
 
         manager
             .switch_thread_harness(&created.thread_id, switch_request(HarnessKind::Codex))

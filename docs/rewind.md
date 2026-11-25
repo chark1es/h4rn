@@ -55,7 +55,7 @@ provider session — can only use a handoff.
 | Harness | Method | What it does |
 |---|---|---|
 | Codex | Native | On the next session start, resumes the thread and calls `thread/revert` before the removed prompt's own recorded provider turn. A later prompt's turn is never borrowed, because reverting before it would keep the edited message. |
-| Claude Code | Native | The next session resumes with `--resume-session-at <message id>`. Every prompt is sent through the tagged frame, and h4rn records the uuid of the assistant reply **before** the removed prompt. That flag is inclusive, so the boundary is the last kept message, never the removed prompt. |
+| Claude Code | Native | The next session resumes with `--resume-session-at <message id>`. Every prompt is sent through the tagged frame, and h4rn records the uuid of the **last kept chain entry**: the assistant reply before the removed prompt, or the kept prompt itself when its turn wrote no reply (stopped, or failed first). That flag is inclusive, so the boundary is the last kept message, never the removed prompt. |
 | OpenCode, Antigravity, configured ACP agents | Handoff | These harnesses cannot truncate a live conversation through the protocol h4rn speaks. h4rn starts a fresh session and gives it a bounded handoff of the kept history, using the same builder as imported threads. |
 
 When no provider session exists yet (a thread whose first turn never started a
@@ -63,6 +63,13 @@ session), a rewind is always a handoff: there is no provider history to
 truncate. A queued message becomes part of the conversation when it runs, under
 its own turn, so its provider boundary is its own, not the turn that happened to
 be running when it arrived.
+
+A message whose delivery is uncertain may already be in the provider
+conversation. When a promoted prompt's write fails after the adapter was called,
+its turn settles without knowing the outcome, so the daemon shows the text as
+**May have been delivered** right away — the same row a restart would recover —
+and both the dialog and the daemon refuse an edit until it is resent or
+discarded. A claim whose turn is still running is not shown: that turn owns it.
 
 A boundary belongs to the provider session that recorded it. h4rn stores that
 session id beside the boundary, and only uses it while the thread still resumes
