@@ -246,7 +246,10 @@ fn push_token(app: tauri::AppHandle) -> Result<String, String> {
 /// Tells the notification service which thread is on screen, so only that
 /// exact thread stays quiet in the foreground.
 #[tauri::command]
-fn push_set_foreground_thread(app: tauri::AppHandle, thread_id: Option<String>) -> Result<(), String> {
+fn push_set_foreground_thread(
+    app: tauri::AppHandle,
+    thread_id: Option<String>,
+) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let bridge = app.state::<PushBridge>();
