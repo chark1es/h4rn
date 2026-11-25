@@ -25,6 +25,14 @@ use crate::{
     TransportCloseKind, TransportHealth, UserInput,
 };
 
+/// How long a fake's failed native fork waits before it answers.
+///
+/// A real CLI answers a prompt only after the daemon has accepted and recorded
+/// it, so the failure belongs to a settled write; reporting it inside `send`
+/// would queue it behind a write the daemon is still recording, and the daemon
+/// would rightly hold the completion.
+const FORK_FAILURE_REPORT_DELAY: Duration = Duration::from_millis(20);
+
 /// The event producer for one fake session.
 ///
 /// Production sessions read their transport into a bounded queue; a test that
@@ -367,6 +375,13 @@ pub struct FakeHarness {
     /// and then dies before it reports a new session, the way a provider that
     /// cannot find the source conversation fails after the spawn.
     native_fork_death: Option<String>,
+    /// A test-only message: a native fork answers its first prompt with an
+    /// error result and then exits, the way `claude --resume <missing>
+    /// --fork-session` prints an `is_error` result after the prompt and exits 1.
+    native_fork_failure_result: Option<String>,
+    /// A native fork that emits its first output without ever reporting
+    /// `SessionStarted`, so only that output can confirm the copy.
+    text_without_session_started: bool,
     /// What this fake advertises for [`Harness::native_fork_scope`].
     ///
     /// A test picks `None` to model a harness with no native fork at all, or
@@ -881,6 +896,8 @@ impl Default for FakeHarness {
             resume_failure: None,
             resume_death: None,
             native_fork_death: None,
+            native_fork_failure_result: None,
+            text_without_session_started: false,
             native_fork_scope: Some(crate::NativeFork::LatestOnly),
             native_sessions: None,
             start_failure_budget: None,
@@ -1186,6 +1203,28 @@ impl FakeHarness {
     /// A fresh startup (no resume, no fork) still succeeds.
     pub fn with_native_fork_death(mut self, message: impl Into<String>) -> Self {
         self.native_fork_death = Some(message.into());
+        self
+    }
+
+    /// Has a native fork answer its first prompt with a failed result and exit.
+    ///
+    /// Models `claude --resume <missing> --fork-session` with stdin open: the
+    /// adapter returns `Ok`, then prints an `is_error` result
+    /// (`error_during_execution`, no init frame) once the prompt is written, and
+    /// exits 1. The fake keeps the real order: the failed completion first,
+    /// then the supervisor's non-retryable exit error, then the end of the
+    /// stream.
+    pub fn with_native_fork_failure_result(mut self, message: impl Into<String>) -> Self {
+        self.native_fork_failure_result = Some(message.into());
+        self
+    }
+
+    /// Has a native fork show its first output without reporting a session.
+    ///
+    /// Models a provider that never sends an init frame: the copy can only be
+    /// confirmed by the first text (or tool call, or plan) it answers with.
+    pub fn with_text_without_session_started(mut self) -> Self {
+        self.text_without_session_started = true;
         self
     }
 
@@ -1687,6 +1726,7 @@ impl Harness for FakeHarness {
                 .is_none_or(|after| starts_seen >= after)
         });
         let mut deferred_fork = None;
+        let mut deferred_fork_failure = None;
         let mut output_gate = None;
         if let Some(message) = &dies_on_start {
             // The adapter returned `Ok` and the agent then exited before it
@@ -1700,6 +1740,16 @@ impl Harness for FakeHarness {
                     reset_at: None,
                 })
                 .await;
+        } else if self.text_without_session_started && spec.native_fork {
+            // The provider never reports its session, so only the first output
+            // can confirm the copy. Nothing is sent at start; the prompt's
+            // echo follows it exactly like any other turn.
+        } else if let Some(message) = &self.native_fork_failure_result
+            && spec.native_fork
+        {
+            // The fork could not load the source: the provider answers the
+            // prompt with an error result and exits, without a session report.
+            deferred_fork_failure = Some(message.clone());
         } else if self.session_started_on_first_send && spec.native_fork {
             // The provider has not read the source yet because it has not
             // received the fork's prompt: Claude Code prints nothing until the
@@ -1788,10 +1838,12 @@ impl Harness for FakeHarness {
             .unwrap_or_default();
         let delay = self.send_delay.unwrap_or(env_delay);
 
+        let names_session = !(self.text_without_session_started && spec.native_fork);
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
             session_id,
+            names_session,
             sender: if dies_on_start.is_some() {
                 None
             } else {
@@ -1843,6 +1895,7 @@ impl Harness for FakeHarness {
             tagged_prompts: self.tagged_prompts.clone(),
             native_sessions: self.native_sessions.clone(),
             deferred_fork,
+            deferred_fork_failure,
             output_gate,
         }))
     }
@@ -1855,6 +1908,10 @@ pub struct FakeSession {
     /// The id this session reported, so the daemon can tag provider boundaries
     /// with the session that recorded them.
     session_id: String,
+    /// Whether the session ever names itself. A native fork in the
+    /// "text without `SessionStarted`" mode models a provider that never
+    /// reports its session, so its accessor answers `None` too.
+    names_session: bool,
     /// The stream's producer. `None` (or dropped) ends the stream after the
     /// events already queued.
     sender: Option<EventSink>,
@@ -1945,6 +2002,9 @@ pub struct FakeSession {
     /// A native fork's copy and session id, reported when the first prompt
     /// arrives, and the latch that holds that report when a test set one.
     deferred_fork: Option<(SessionSpec, String, Option<Gate>)>,
+    /// A native fork's first prompt fails with this message, after which the
+    /// session's stream ends as its process exits.
+    deferred_fork_failure: Option<String>,
     /// Holds a turn's output until the startup's session report goes out.
     ///
     /// A provider that has not reported the session it is preparing cannot show
@@ -1961,7 +2021,7 @@ impl HarnessSession for FakeSession {
     }
 
     fn session_id(&self) -> Option<String> {
-        Some(self.session_id.clone())
+        self.names_session.then(|| self.session_id.clone())
     }
 
     fn controls(&self) -> Option<crate::SessionControls> {
@@ -2051,6 +2111,39 @@ impl HarnessSession for FakeSession {
             if let (Some(sessions), Some(context)) = (&self.native_sessions, context) {
                 sessions.note_fork(&spec, &session_id, context);
             }
+        }
+        if let Some(message) = self.deferred_fork_failure.take() {
+            // The prompt reached a provider that could not open the source:
+            // it answers with an error result and exits 1, without ever
+            // reporting a session. The real order is the result frame's failed
+            // completion, then the supervisor's exit report, then the end of
+            // the stream, and it arrives after the daemon has accepted the
+            // prompt (the CLI answers, it does not answer inside the write).
+            // Emitting it from here would land it behind a write the daemon is
+            // still recording, so the completion would be held and the later
+            // error would carry the death instead. The task below keeps the
+            // stream open until both reports are out.
+            let sender = self.sender.take();
+            self.closed = true;
+            tokio::spawn(async move {
+                tokio::time::sleep(FORK_FAILURE_REPORT_DELAY).await;
+                if let Some(sender) = sender {
+                    sender
+                        .send(HarnessEvent::TurnCompleted {
+                            status: TurnStatus::Failed,
+                            usage: Usage::default(),
+                        })
+                        .await;
+                    sender
+                        .send(HarnessEvent::Error {
+                            message,
+                            retryable: false,
+                        })
+                        .await;
+                }
+                // Dropping the last sender ends the process's stream.
+            });
+            return Ok(());
         }
         self.sends += 1;
         if let Some(sessions) = &self.native_sessions {

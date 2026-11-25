@@ -273,13 +273,18 @@ All notable changes to h4rn are recorded here. The format follows
   saved conversation, the source's next send is acknowledged at once (it has a
   turn and a durable row) but its dispatch waits, and that wait never holds the
   thread's session-switch lock, so a later send is still answered at once. The
-  fork's first message is written before its copy is waited on, and the deadline
-  runs from that write: Claude Code reports its session only after the first user
-  frame, so a fork that waited for that report first would never copy at all. A
+  fork's first message is written before its copy is waited on, within one
+  deadline that starts when the source's copy gate opens: Claude Code reports its
+  session only after the first user frame, so a fork that waited for that report
+  first would never copy at all. A
   provider still reading the source at the deadline has its process shut down and
   fenced, and the source is released there — after the copy is stopped, before
   the handoff session starts — so a message sent afterwards can never reach the
-  fork. A thread that has not started a session of its own
+  fork. A fork whose copy is confirmed only by its first answer keeps using that
+  session without being sent its own history again; the handoff is owed to the
+  next session, whether a restart or that session dying. A Stop that lands
+  before the fork's prompt is written — including while its claim waits — shuts
+  the copy down and releases the source at once. A thread that has not started a session of its own
   never lends a borrowed session id to another fork. Any other case — a harness
   without native forks, a source that moved on, or a native fork that dies
   before it starts — sends a bounded handoff of the copied history instead,
@@ -790,6 +795,37 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A fork whose journal write fails never appears.** The fork's handle became
+  reachable before its summary was durable, so the periodic refresh could
+  publish a thread whose copy then failed to record — a row a client could open
+  and send to that never existed. The fork now starts with the summary's own
+  signature, so only the fork's successful write publishes it.
+- **A fork confirmed by its first output neither re-copies nor re-sends its
+  history.** A provider that reports no session leaves the fork with no id of
+  its own, but the borrowed source id stayed, so the next start after a restart
+  forked the source again and silently dropped the turn the fork had already
+  answered. The attempt is now spent durably at that confirmation, while the
+  session that answered keeps using its copy without the journaled history
+  again; the handoff is owed to the next session, after a restart or that
+  session dying.
+- **A Stop during a fork's native copy releases the source at once.** If the
+  stop landed after the native start returned but before the fork's prompt was
+  written — including while the prompt's claim was still waiting — nothing
+  confirmed or fenced the copy, so it kept the source's copy gate until every
+  later source Send waited out the 70-second backstop. The unused copy is now
+  shut down and the source released immediately.
+- **A native fork whose provider answers with a failed result falls back to the
+  handoff.** A real Claude Code fork of a missing session prints an `is_error`
+  result after the prompt and exits 1; that used to count as the copy finishing,
+  so the turn failed and later sends retried the same dead native fork. A failed
+  completion or an error before the copy reports a session is now the copy
+  dying: the same turn runs on the handoff and later sends keep the fork's own
+  session.
+- **A fork keeps its copied steers marked as steers.** The copy wrote the
+  steered rows without their journal marks, so a fork of that fork read them as
+  an older daemon's queued prompt and dropped them, and one more turn made the
+  fork refuse to fork at all. The marks are now written for the fork in the same
+  append as its copied transcript.
 - **A refused prompt survives a crash right after its turn is recorded.** A
   prompt the daemon refused because its outside grant was revoked could sit in
   neither the journal's claim nor the queue between the turn's settlement and
@@ -821,7 +857,8 @@ All notable changes to h4rn are recorded here. The format follows
   for a natively forked session until the first user frame arrives, so waiting
   for its session report before writing the prompt made every Claude fork wait
   out the whole copy deadline and fall back to the handoff. The fork's prompt is
-  written first and the deadline runs from that write. A provider that never
+  written first, within the single copy deadline that starts when the source's
+  copy gate opens. A provider that never
   reports its session still confirms the copy with its first output, and one
   that stays silent is shut down and fenced; the source is released after the
   copy is stopped and before the handoff session starts.
@@ -844,6 +881,13 @@ All notable changes to h4rn are recorded here. The format follows
   even when the thread started in a linked worktree under a metadata folder's
   parent, while a linked worktree nested in its own main checkout
   (`repo/.worktrees/one`) still works.
+- **A metadata parent no longer passes for the main checkout on a tracked name
+  from inside its own worktree.** With the metadata directory at `meta/.git` and
+  a linked worktree at `meta/docs`, the tracked `docs/README.md` resolved to the
+  worktree's own file and made `meta` look like the main checkout. A tracked
+  name now counts only when it is the folder's own file, not one inside the
+  workspace or another registered worktree, so that location is refused when
+  saved and when a checkout is made.
 - **A worktree create interrupted before it registered its checkout no longer
   stays behind.** When the destination's claim proves the create and there is no
   admin dir, the next start removes an empty destination folder, deletes the
