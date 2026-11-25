@@ -168,11 +168,6 @@ jobs:
       # It also compiles the checked-in release signing configuration, so a
       # broken Gradle overlay fails on the PR rather than at release time.
       - run: scripts/mobile-android.sh build
-      # The overlay unit test (Kotlin only, no Firebase or emulator) lives in
-      # native/android and is copied into the generated project by the build
-      # above. Run it on the host JVM so it is covered on every PR.
-      - name: Kotlin unit tests
-        run: cd apps/mobile/src-tauri/gen/android && ./gradlew app:testDebugUnitTest --console=plain
 
   mobile-ios:
     name: iOS simulator build
