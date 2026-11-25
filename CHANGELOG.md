@@ -751,6 +751,12 @@ All notable changes to h4rn are recorded here. The format follows
   restart's repair looked only for a turn with no status at all, so its
   completion and the finished phase were never written. The restart now finds
   the turn in the wire rows too and finishes it.
+- **An idle connected device no longer loses its encrypted path.** The daemon
+  closes a path that has carried no packet for two seconds, but it counted only
+  data and acknowledgements. A session with nothing to say sends no data while
+  its client keeps probing every 250 ms, so it was dropped as silent and had to
+  reconnect. Any authenticated packet, a health probe included, now keeps the
+  path open.
 - **A worktree location is refused wherever it would put a checkout in a working
   tree.** Saving the location and creating a thread now find the real main
   checkout even when the repository keeps its git directory elsewhere — a

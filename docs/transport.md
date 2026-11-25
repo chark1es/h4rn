@@ -322,6 +322,11 @@ the default 2 s) so a client that reconnects, or fails over from LAN to relay,
 can resume the same sequence space. A resume with an unknown or wrong token is
 rejected and the client starts a fresh session.
 
+The daemon closes a path that has carried no authenticated packet for
+`SecureOptions::path_timeout` (2 s). A health probe is an authenticated control
+record, so it counts: a session with no application traffic keeps its path open
+for as long as the client keeps probing every 250 ms.
+
 ## Remote access glue
 
 `h4rnd` owns the host side of remote access. Connect supplies identity,
