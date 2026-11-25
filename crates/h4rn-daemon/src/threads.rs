@@ -6386,6 +6386,24 @@ impl ThreadManager {
         }))
     }
 
+    /// Whether the thread's journal already carries `request_id`'s answer.
+    ///
+    /// A resolution's marker is written only after its append; a crash between
+    /// the two leaves the marker unset. The journal is what decides whether the
+    /// answer really reached the owner, so recovery and every re-emit ask it
+    /// instead of trusting a flag that may describe a write that never landed.
+    pub async fn guest_resolution_in_thread(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<bool, ManagerError> {
+        self.inner
+            .journal
+            .guest_resolution_exists(thread_id, request_id)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))
+    }
+
     /// [`Self::send_message_with`] with a grant's ceiling and identity.
     async fn send_message_with_work(
         &self,
@@ -7488,8 +7506,14 @@ impl ThreadManager {
         let mut message = record.meta.queued.remove(current);
         // A person choosing Send now or Steer on a row that may already have
         // been delivered is deliberately trying it again, so it starts a fresh
-        // attempt instead of staying marked uncertain.
-        message.message.delivery_unknown = false;
+        // attempt instead of staying marked uncertain. A guest prompt also drops
+        // the item id its first delivery named: this delivery is a second
+        // message of its own, and a client that keys messages by item id would
+        // hide it behind the first.
+        if message.message.delivery_unknown {
+            message.message.delivery_unknown = false;
+            message.item_id = None;
+        }
         record.meta.claimed.push(QueuedClaim {
             message: message.clone(),
             index: current as u32,
@@ -7555,8 +7579,13 @@ impl ThreadManager {
         let previous_revision = record.queue_revision;
         let mut item = record.meta.queued.remove(index);
         // Send now on a row that may already have been delivered is the person's
-        // decision to resend it.
-        item.message.delivery_unknown = false;
+        // decision to resend it. That second delivery is a message of its own,
+        // so it drops the item id the first one named: a client that keys
+        // messages by item id would otherwise hide it behind the first.
+        if item.message.delivery_unknown {
+            item.message.delivery_unknown = false;
+            item.item_id = None;
+        }
         record.meta.queued.insert(0, item);
         record.note_queue_change();
         if turn_is_running {
@@ -9844,9 +9873,20 @@ impl Inner {
     /// decision, made here so no client hears about events the rest of the
     /// system does not yet agree with. A guest card uses it for its row: the
     /// card must not reach the owner while the row still says the request
-    /// cannot be answered. `commit` runs under the emit lock, after the journal
-    /// owns the events and before any broadcast, so a failed commit publishes
-    /// nothing; the caller restores what the failed commit left behind.
+    /// cannot be answered. `commit` runs after the journal owns the events and
+    /// before any broadcast, so a failed commit publishes nothing; the caller
+    /// restores what the failed commit left behind.
+    ///
+    /// The append, `commit` and the broadcast are one step under the
+    /// daemon-wide emit lock, for every thread. Sequence numbers come from one
+    /// journal-wide counter and a client drops any frame at or below the last
+    /// one it applied, so a broadcast that slipped past another thread's
+    /// append would be discarded live even though the event is durable.
+    /// Releasing the lock between the halves would also let a subscribe replay
+    /// read the journal in the gap: it could hand a guest card to a snapshot
+    /// while the row still says the request cannot be answered. `commit` is one
+    /// short statement on the same pool the append just used, so the lock is
+    /// held for that statement and no longer.
     ///
     /// `pending_item`, when set, names a message a provider has not accepted
     /// yet: its row and its "undelivered" marker are one commit, so a failure
@@ -24969,6 +25009,124 @@ mod tests {
         restarted.shutdown().await;
         // The first manager is still holding the adapter's write, which is the
         // crash: release it only now, after every restart was read.
+        gate.release();
+        manager.shutdown().await;
+    }
+
+    /// A resent guest prompt is a second message, not a repeat of the first.
+    ///
+    /// A crash while the adapter had the first copy leaves a "may have been
+    /// delivered" queue row under the request's item id. Sending it again must
+    /// not journal it under that same id: a client keys user messages by item
+    /// id, so it would drop the second row the agent really saw.
+    #[tokio::test]
+    async fn a_resent_guest_prompt_is_journaled_under_a_new_item_id() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+        let (harness, completion) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, gate) = harness.with_send_gate_after(1);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal.clone()).await;
+        let mut request = new_thread(host.clone(), workspace.path(), "guest resend");
+        request.harness = HarnessKind::Codex;
+        let created = manager.create_thread(request).await.expect("create");
+        sends.wait_for(1).await;
+        let thread_id = created.thread_id.clone();
+
+        // A turn is running, so the guest's prompt waits in the queue.
+        manager
+            .send_guest_message(&thread_id, "guest prompt".into(), Vec::new(), "req-resend")
+            .await
+            .expect("queue the guest prompt");
+
+        // The running turn ends and promotes it; the adapter's write is held,
+        // which is the crash image a `sending` claim leaves.
+        completion.release();
+        assert!(
+            wait_until(|| sends.get() == 2).await,
+            "the promoted guest prompt was never written"
+        );
+        let crash_image = persisted_meta(&journal, &thread_id).await;
+        assert_eq!(
+            crash_image
+                .claimed
+                .iter()
+                .map(|claim| claim.state)
+                .collect::<Vec<_>>(),
+            [QueuedClaimState::Sending],
+            "the promotion left no delivery record for the guest prompt"
+        );
+
+        // A restart turns that claim into the visible "may have been delivered"
+        // row the owner can send again.
+        let (fresh, restarted_sends) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_send_count();
+        let restarted = open_test_manager_with_journal(fresh, host.clone(), journal.clone()).await;
+        let queue = restarted
+            .thread_queue(&thread_id, 0)
+            .await
+            .expect("queue after a crash while sending");
+        assert_eq!(
+            queue
+                .queued
+                .iter()
+                .map(|message| (message.text.as_str(), message.delivery_unknown))
+                .collect::<Vec<_>>(),
+            [("guest prompt", true)]
+        );
+        let message_id = queue.queued[0].message_id.clone();
+        restarted
+            .queue_message(
+                &thread_id,
+                &message_id,
+                QueueAction::SendNow { turn_id: None },
+            )
+            .await
+            .expect("send the unsure guest prompt again");
+        assert!(
+            wait_until(|| restarted_sends.get() == 1).await,
+            "the resent guest prompt never reached the adapter"
+        );
+
+        // Both deliveries are transcript rows, under different ids.
+        let item_ids: Vec<String> = restarted
+            .get_thread(&thread_id, 0)
+            .await
+            .expect("the thread's events")
+            .events
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                Event::ItemCompleted {
+                    item: Item::Message { item_id, text, .. },
+                    ..
+                } if text == "guest prompt" => Some(item_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            item_ids.len(),
+            2,
+            "the second delivery is not a separate transcript row: {item_ids:?}"
+        );
+        assert!(
+            item_ids.iter().any(|id| id == "item_guest_req-resend"),
+            "the first delivery lost its request id: {item_ids:?}"
+        );
+        assert!(
+            item_ids.iter().any(|id| id != "item_guest_req-resend"),
+            "the second delivery reused the first delivery's item id: {item_ids:?}"
+        );
+        assert!(
+            item_ids[0] != item_ids[1],
+            "both deliveries share one item id, so a client shows one"
+        );
+
+        restarted.shutdown().await;
         gate.release();
         manager.shutdown().await;
     }
