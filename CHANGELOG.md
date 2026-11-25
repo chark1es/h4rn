@@ -759,7 +759,8 @@ All notable changes to h4rn are recorded here. The format follows
   and tells their partners, and presence updates are written in order per device and checked
   against the connection they belong to, so the replacement's online state is never overwritten.
   The attach control's keyboard focus ring uses the design system's focus
-  colour in both themes.- **An imported conversation is not offered a second time.** When a Claude Code
+  colour in both themes.
+- **An imported conversation is not offered a second time.** When a Claude Code
   transcript names its session id only in a later record, the import claims it
   under that full identity while a scan's head read knows only the file. The scan
   now also checks the identity stored for the transcript, so an already imported
